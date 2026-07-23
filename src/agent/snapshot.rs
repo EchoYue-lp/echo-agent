@@ -341,6 +341,8 @@ pub struct AgentRunSnapshot {
     pub memory_layer_manager: Option<Arc<crate::evolution::MemoryLayerManager>>,
     /// Optional application projection refreshed at the pre-prepare boundary.
     pub pre_model_context_projector: Option<Arc<dyn crate::compression::PreModelContextProjector>>,
+    /// Consumer-supplied skill lifecycle curator used by telemetry writes.
+    pub skill_curator: Option<crate::evolution::Curator>,
 }
 
 impl AgentRunSnapshot {
@@ -466,6 +468,7 @@ impl AgentRunSnapshot {
                 .read()
                 .unwrap_or_else(|error| error.into_inner())
                 .clone(),
+            skill_curator: agent.skill_curator.clone(),
         }
     }
 

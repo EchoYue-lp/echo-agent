@@ -14,6 +14,7 @@
 //! ```
 
 use chrono::Utc;
+use echo_agent::evolution::{Curator, CuratorConfig, SkillLifecycle};
 use echo_agent::improve::*;
 use echo_agent::trace::{Run, RunEvent, RunStatus, RunTimings, TokenUsage};
 
@@ -63,7 +64,7 @@ fn make_run(id: &str, input: &str, events: Vec<RunEvent>, status: RunStatus) -> 
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔══════════════════════════════════════════════════╗");
     println!("║       echo-agent  自进化系统 demo                ║");
     println!("║  （全程无真实 LLM 调用 / 离线分析演示）           ║");
@@ -71,12 +72,13 @@ async fn main() {
 
     demo_analyzer().await;
     demo_critique_aggregation().await;
-    demo_curator().await;
-    demo_trajectory_saver().await;
+    demo_curator().await?;
+    demo_trajectory_saver().await?;
 
     println!("\n╔══════════════════════════════════════════════════╗");
     println!("║  全部 4 个场景通过 ✅                             ║");
     println!("╚══════════════════════════════════════════════════╝");
+    Ok(())
 }
 
 /// 场景 1：Analyzer — 失败模式检测
@@ -265,20 +267,20 @@ async fn demo_critique_aggregation() {
 }
 
 /// 场景 3：Curator — 技能生命周期管理
-async fn demo_curator() {
+async fn demo_curator() -> Result<(), Box<dyn std::error::Error>> {
     section!(3, "Curator — 技能生命周期管理");
 
     let dir = std::env::temp_dir().join(format!("echo_curator_demo_{}", uuid::Uuid::new_v4()));
     let curator = Curator::new(CuratorConfig::default(), dir.join("curator_state.json"));
 
     // 注册技能
-    curator.touch_skill("code-review", true).unwrap();
-    curator.touch_skill("web-search", true).unwrap();
-    curator.touch_skill("bundled-skill", false).unwrap(); // 非 Agent 创建
+    curator.touch_skill("code-review", true)?;
+    curator.touch_skill("web-search", true)?;
+    curator.touch_skill("bundled-skill", false)?; // 非 Agent 创建
     pass!("注册了 3 个技能");
 
     // 固定重要技能
-    curator.pin_skill("code-review").unwrap();
+    curator.pin_skill("code-review")?;
     pass!("固定了 code-review 技能");
 
     // 查看状态
@@ -300,41 +302,51 @@ async fn demo_curator() {
         if let Some(meta) = state.skills.get_mut("web-search") {
             meta.last_used_at = Utc::now() - chrono::Duration::days(31);
         }
-        curator.save_state(&state).unwrap();
+        curator.save_state(&state)?;
     }
 
     // 应用自动转换
-    let transitions = curator.apply_transitions().unwrap();
+    let transitions = curator.apply_transitions()?;
     println!("\n  自动转换:");
     for (name, from, to) in &transitions {
         println!("    {name}: {from:?} → {to:?}");
     }
     assert_eq!(transitions.len(), 1);
-    assert_eq!(transitions[0].0, "web-search");
-    assert_eq!(transitions[0].2, SkillLifecycle::Stale);
+    assert!(transitions.first().is_some_and(|(name, _, lifecycle)| {
+        name == "web-search" && *lifecycle == SkillLifecycle::Stale
+    }));
     pass!("web-search 从 Active 转为 Stale");
 
     // 验证固定技能未被转换
     let state = curator.load_state();
-    let code_review = state.skills.get("code-review").unwrap();
-    assert_eq!(code_review.lifecycle, SkillLifecycle::Active);
+    assert!(
+        state
+            .skills
+            .get("code-review")
+            .is_some_and(|meta| meta.lifecycle == SkillLifecycle::Active)
+    );
     pass!("固定的 code-review 保持 Active");
 
     // 验证非 Agent 创建的技能未被转换
-    let bundled = state.skills.get("bundled-skill").unwrap();
-    assert_eq!(bundled.lifecycle, SkillLifecycle::Active);
+    assert!(
+        state
+            .skills
+            .get("bundled-skill")
+            .is_some_and(|meta| meta.lifecycle == SkillLifecycle::Active)
+    );
     pass!("非 Agent 创建的 bundled-skill 保持 Active");
 
     // 清理
     let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
 }
 
 /// 场景 4：TrajectorySaver — 微调数据生成
-async fn demo_trajectory_saver() {
+async fn demo_trajectory_saver() -> Result<(), Box<dyn std::error::Error>> {
     section!(4, "TrajectorySaver — ShareGPT 格式微调数据");
 
     let dir = std::env::temp_dir().join(format!("echo_traj_demo_{}", uuid::Uuid::new_v4()));
-    let saver = TrajectorySaver::new(&dir).unwrap();
+    let saver = TrajectorySaver::new(&dir)?;
 
     // 构造一个完成的运行
     let run = make_run(
@@ -366,7 +378,7 @@ async fn demo_trajectory_saver() {
     );
 
     // 保存轨迹
-    let saved = saver.save(&run, "demo-model").await.unwrap();
+    let saved = saver.save(&run, "demo-model").await?;
     assert!(saved);
     pass!("轨迹保存成功");
 
@@ -380,14 +392,17 @@ async fn demo_trajectory_saver() {
     pass!("ShareGPT 转换正确");
 
     // 列出保存的轨迹
-    let entries = saver.list(None).await.unwrap();
+    let entries = saver.list(None).await?;
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].id, "run_traj_001");
-    assert!(entries[0].completed);
+    assert!(
+        entries
+            .first()
+            .is_some_and(|entry| entry.id == "run_traj_001" && entry.completed)
+    );
     pass!("轨迹列表查询正确");
 
     // 统计
-    let stats = saver.stats().await.unwrap();
+    let stats = saver.stats().await?;
     println!("\n  轨迹统计:");
     println!("    总数: {}", stats.total);
     println!("    完成: {}", stats.completed);
@@ -401,4 +416,5 @@ async fn demo_trajectory_saver() {
 
     // 清理
     let _ = tokio::fs::remove_dir_all(&dir).await;
+    Ok(())
 }

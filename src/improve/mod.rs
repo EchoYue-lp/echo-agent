@@ -2,9 +2,8 @@
 //!
 //! # Overview
 //!
-//! The base `improve` feature provides explicit trajectory export plus compatibility
-//! re-exports for evolution types. Eval-driven analysis is available only when the
-//! `eval` feature is enabled as well.
+//! The base `improve` feature provides explicit trajectory export. Eval-driven
+//! analysis is available only when the `eval` feature is enabled as well.
 //!
 //! # Safety
 //!
@@ -18,8 +17,6 @@
 //!
 //! - [`TrajectorySaver`] — Optional ShareGPT JSONL export for framework consumers
 //!   that explicitly build fine-tuning datasets.
-//! - [`BackgroundReviewer`] and [`Curator`] — Compatibility re-exports from
-//!   [`evolution`](crate::evolution). Product integrations should use that module directly.
 //! ## Eval-Driven Improvement (`improve` + `eval`)
 //!
 //! - `Analyzer` — Statically analyzes Run traces to detect failure patterns.
@@ -40,7 +37,6 @@
 //! - Background review candidates: returned to the caller; optional user-preference
 //!   persistence uses the configured evolution memory layer
 
-pub mod background_review;
 pub mod trajectory;
 
 #[cfg(feature = "eval")]
@@ -52,13 +48,6 @@ pub mod generator;
 #[cfg(feature = "eval")]
 pub mod r#loop;
 
-// Re-export Curator types from evolution module
-pub use crate::evolution::curator::{
-    Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle,
-};
-pub use background_review::{
-    BackgroundReviewConfig, BackgroundReviewer, ReviewCandidate, ReviewCandidateKind, ReviewOutcome,
-};
 pub use trajectory::{TrajectoryEntry, TrajectorySaver, TrajectoryStats};
 
 #[cfg(feature = "eval")]

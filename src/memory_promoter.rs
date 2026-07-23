@@ -16,10 +16,6 @@
 //! the key is derived from a hash of the fact text. This means the same fact
 //! extracted multiple times will overwrite (upsert) rather than create duplicates.
 //!
-//! # Expiry
-//!
-//! Promoted facts automatically expire after a configurable TTL (default 30 days).
-
 use echo_core::llm::types::{Message, Role};
 use echo_core::memory::Store;
 use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
@@ -51,9 +47,14 @@ impl StoreMemoryPromoter {
     /// Uses FNV-1a hash (deterministic across process restarts) to ensure
     /// the same fact always maps to the same key, enabling cross-session dedup.
     fn content_key(fact: &str) -> String {
-        let hash = echo_core::utils::hash::fnv1a_64(fact.as_bytes());
-        format!("l3_{:016x}", hash)
+        durable_memory_content_key(fact)
     }
+}
+
+/// Stable content-derived key shared by every compression memory writer.
+pub(crate) fn durable_memory_content_key(content: &str) -> String {
+    let hash = echo_core::utils::hash::fnv1a_64(content.trim().as_bytes());
+    format!("l3_{hash:016x}")
 }
 
 impl MemoryPromoter for StoreMemoryPromoter {
@@ -78,6 +79,15 @@ impl MemoryPromoter for StoreMemoryPromoter {
                 };
                 let meta = MemoryMeta::new(memory_type, MemorySource::L3Promotion, "l3_promotion")
                     .with_recall_weight(recall_weight);
+                if typed
+                    .get_typed(ns, &key)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|existing| existing.content.trim() == fact.trim())
+                {
+                    continue;
+                }
                 if let Err(e) = typed.put_typed(ns, &key, &fact, meta).await {
                     tracing::debug!(error = %e, "Failed to write promoted memory item");
                 }
@@ -106,7 +116,7 @@ fn extract_key_facts(messages: &[Message]) -> Vec<(String, &'static str)> {
 
     for msg in messages {
         let text = match msg.content.as_text() {
-            Some(t) if t.len() >= 50 => t,
+            Some(t) if t.chars().count() >= 50 => t,
             _ => continue, // Skip short or empty messages
         };
 
@@ -129,7 +139,8 @@ fn extract_key_facts(messages: &[Message]) -> Vec<(String, &'static str)> {
                 } else {
                     // Take the last paragraph as a potential conclusion
                     if let Some(last_para) = last_paragraph(&text)
-                        && last_para.len() >= 50 {
+                        && last_para.chars().count() >= 50
+                    {
                             facts.push((
                                 truncate_fact(&last_para),
                                 classify_fact_type(&last_para, &msg.role),
@@ -139,7 +150,7 @@ fn extract_key_facts(messages: &[Message]) -> Vec<(String, &'static str)> {
             }
             Role::User
                 // User questions are useful context for recall
-                if text.len() >= 50 && !text.starts_with('[') => {
+                if text.chars().count() >= 50 && !text.starts_with('[') => {
                     facts.push((truncate_fact(&text), classify_fact_type(&text, &msg.role)));
                 }
             _ => {}
@@ -212,7 +223,7 @@ fn tool_digest(text: &str) -> Option<String> {
                 || lower.contains(".js")
                 || lower.contains(".toml")
                 || lower.contains("src/"))
-                && line.len() < 200)
+                && line.chars().count() < 200)
         {
             highlights.push(line.trim());
         }
@@ -262,21 +273,13 @@ fn last_paragraph(text: &str) -> Option<String> {
 /// Truncate a fact to a reasonable length (~300 chars), UTF-8 safe.
 fn truncate_fact(text: &str) -> String {
     let trimmed = text.trim();
-    if trimmed.len() <= 300 {
+    if trimmed.chars().count() <= 300 {
         trimmed.to_string()
     } else {
-        // Find the largest char boundary <= 300 to avoid panic on multi-byte UTF-8.
-        let cut = trimmed
-            .char_indices()
-            .take_while(|(i, _)| *i < 300)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        format!("{}...", &trimmed[..cut])
+        format!("{}...", trimmed.chars().take(300).collect::<String>())
     }
 }
 
-/// Short timestamp for unique key suffix.
 /// FNV-1a hash — deterministic across process restarts.
 #[cfg(test)]
 mod tests {
@@ -312,7 +315,11 @@ mod tests {
         )];
         let facts = extract_key_facts(&messages);
         assert_eq!(facts.len(), 1);
-        assert!(facts[0].0.contains("PostgreSQL"));
+        assert!(
+            facts
+                .first()
+                .is_some_and(|(fact, _)| fact.contains("PostgreSQL"))
+        );
     }
 
     #[test]
@@ -324,7 +331,19 @@ mod tests {
         )];
         let facts = extract_key_facts(&messages);
         assert_eq!(facts.len(), 1);
-        assert!(facts[0].0.contains("authentication"));
+        assert!(
+            facts
+                .first()
+                .is_some_and(|(fact, _)| fact.contains("authentication"))
+        );
+    }
+
+    #[test]
+    fn durable_key_is_shared_for_equivalent_content() {
+        assert_eq!(
+            durable_memory_content_key("user prefers Rust"),
+            durable_memory_content_key("  user prefers Rust\n")
+        );
     }
 
     #[test]
@@ -418,18 +437,17 @@ mod tests {
         // Step 3: Verify facts are recallable via Store search
         let results = store.search(&["agent", "memories"], "PostgreSQL", 5).await;
         assert!(results.is_ok(), "Store search should succeed");
-        let items = results.unwrap();
+        let items = results.unwrap_or_default();
         assert!(
             !items.is_empty(),
             "Should be able to recall the PostgreSQL decision fact from Store"
         );
 
         // Step 4: Verify quality — the recalled item contains meaningful content
-        let recalled = &items[0];
-        let content = recalled
-            .value
-            .get("content")
-            .and_then(|v| v.as_str())
+        let content = items
+            .first()
+            .and_then(|recalled| recalled.value.get("content"))
+            .and_then(|value| value.as_str())
             .unwrap_or("");
         assert!(
             content.contains("PostgreSQL"),

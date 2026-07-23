@@ -747,9 +747,10 @@ impl crate::agent::snapshot::AgentRunSnapshot {
 
         // Parse a JSON array of {content, type, recall_weight}; write each.
         let items: Vec<serde_json::Value> = match (content.find('['), content.rfind(']')) {
-            (Some(s), Some(e)) if e > s => {
-                serde_json::from_str(&content[s..=e]).unwrap_or_default()
-            }
+            (Some(start), Some(end)) if end > start => content
+                .get(start..=end)
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default(),
             _ => Vec::new(),
         };
         for item in items {
@@ -777,13 +778,14 @@ impl crate::agent::snapshot::AgentRunSnapshot {
             };
             let meta = MemoryMeta::new(memory_type, MemorySource::L3Promotion, "compaction_flush")
                 .with_recall_weight(rw as f32);
-            let key = format!(
-                "flush_{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            );
+            let key = crate::memory_promoter::durable_memory_content_key(fact);
+            if layer_manager
+                .locate(&key)
+                .await
+                .is_some_and(|(_, existing)| existing.content.trim() == fact.trim())
+            {
+                continue;
+            }
             if let Err(e) = layer_manager.write_memory(&key, fact, meta).await {
                 tracing::debug!(error = %e, "pre_compaction_flush write_memory failed");
             }

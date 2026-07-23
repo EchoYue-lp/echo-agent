@@ -209,7 +209,10 @@ impl Curator {
         }
     }
 
-    /// Create a curator with the default state path (`~/.echo-agent/curator_state.json`).
+    /// Create a curator under the configured user-data root.
+    ///
+    /// The framework default is `~/.echo-agent/curator_state.json`; products
+    /// may override the root through [`crate::paths::set_user_data_dir`].
     pub fn default_path(config: CuratorConfig) -> Self {
         let path = crate::paths::user_data_path("curator_state.json");
         Self::new(config, path)

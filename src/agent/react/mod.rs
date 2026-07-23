@@ -241,6 +241,13 @@ pub struct ReactAgent {
     /// Optional product-owned authority for file-based skill discovery.
     pub(crate) skill_load_policy: Option<Arc<dyn crate::skills::external::SkillLoadPolicy>>,
 
+    /// Optional consumer-supplied skill lifecycle curator.
+    ///
+    /// Framework consumers that scope skill lifecycle state per project can
+    /// replace the default user-level curator without coupling the framework to
+    /// a specific workspace layout.
+    pub(crate) skill_curator: Option<crate::evolution::Curator>,
+
     /// Shared slot for hook→classifier communication.
     /// Written by prepare phase after UserPromptSubmit hooks resolve
     /// (fire_lifecycle_hook → activate_skill); read by TriggerSupervisor
@@ -537,6 +544,7 @@ impl ReactAgent {
             )),
             memory_trigger_sink: None,
             skill_load_policy: None,
+            skill_curator: None,
             hook_activation_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -610,6 +618,11 @@ impl ReactAgent {
         policy: Option<Arc<dyn crate::skills::external::SkillLoadPolicy>>,
     ) {
         self.skill_load_policy = policy;
+    }
+
+    /// Set or clear the curator used to record skill usage lifecycle data.
+    pub fn set_skill_curator(&mut self, curator: Option<crate::evolution::Curator>) {
+        self.skill_curator = curator;
     }
 
     /// Create an Agent from a configuration file.
@@ -714,8 +727,10 @@ impl ReactAgent {
                     Arc::new(file_store),
                     &config.memory_path,
                 );
-                let agent_name = config.agent_name.clone();
-                let namespace = vec![agent_name, "memories".to_string()];
+                let namespace = crate::evolution::layer::WARM_NAMESPACE
+                    .iter()
+                    .map(|part| (*part).to_string())
+                    .collect::<Vec<_>>();
                 tool_manager.register(Box::new(LegacyStoreRememberTool::new(
                     store.clone(),
                     namespace.clone(),
@@ -1025,7 +1040,10 @@ impl ReactAgent {
     /// # }
     /// ```
     pub fn set_memory_store(&mut self, store: Arc<dyn Store>) {
-        let ns = vec![self.config.agent_name.clone(), "memories".to_string()];
+        let ns = crate::evolution::layer::WARM_NAMESPACE
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect::<Vec<_>>();
         if let Some(layer_manager) = &self.memory_layer_manager {
             self.tools
                 .tool_manager
@@ -1054,10 +1072,10 @@ impl ReactAgent {
             self.tools
                 .tool_manager
                 .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
+            self.tools
+                .tool_manager
+                .register(Box::new(ForgetTool::new(store.clone(), ns)));
         }
-        self.tools
-            .tool_manager
-            .register(Box::new(ForgetTool::new(store.clone(), ns)));
         self.memory.store = Some(store.clone());
 
         // ── L3 Memory Promotion ──
@@ -1085,7 +1103,10 @@ impl ReactAgent {
     /// `try_lock`, so the `MemoryPromoter` and tool registrations always
     /// take effect — no silent fallback.
     pub async fn install_memory_store(&mut self, store: Arc<dyn Store>) {
-        let ns = vec![self.config.agent_name.clone(), "memories".to_string()];
+        let ns = crate::evolution::layer::WARM_NAMESPACE
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect::<Vec<_>>();
         if let Some(layer_manager) = &self.memory_layer_manager {
             self.tools
                 .tool_manager
@@ -1114,10 +1135,10 @@ impl ReactAgent {
             self.tools
                 .tool_manager
                 .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
+            self.tools
+                .tool_manager
+                .register(Box::new(ForgetTool::new(store.clone(), ns)));
         }
-        self.tools
-            .tool_manager
-            .register(Box::new(ForgetTool::new(store.clone(), ns)));
         self.memory.store = Some(store.clone());
 
         let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));

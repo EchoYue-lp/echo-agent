@@ -123,6 +123,11 @@ impl ReactAgent {
         let store = store.clone();
         let tool_name = tool_name.to_string();
         let error_msg = error.map(|e| e.to_string());
+        let curator = self.skill_curator.clone().unwrap_or_else(|| {
+            echo_agent::evolution::Curator::default_path(
+                echo_agent::evolution::CuratorConfig::default(),
+            )
+        });
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -132,9 +137,6 @@ impl ReactAgent {
             // Bridge: refresh curator last_used_at so apply_transitions computes
             // idle time from "last actual use" instead of "since creation".
             // touch_skill is sync + file-locked; errors are non-fatal.
-            let curator = echo_agent::evolution::Curator::default_path(
-                echo_agent::evolution::CuratorConfig::default(),
-            );
             for skill_name in &activated {
                 let record = echo_state::skill_telemetry::SkillExecutionRecord {
                     skill_name: skill_name.clone(),
