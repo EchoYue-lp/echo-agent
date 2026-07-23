@@ -48,6 +48,7 @@ pub mod llm;
 pub mod memory;
 pub mod memory_promoter;
 pub mod notebook;
+pub mod paths;
 pub mod plugin;
 pub mod retry;
 pub mod sandbox;

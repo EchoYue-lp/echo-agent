@@ -78,10 +78,7 @@ impl TrajectorySaver {
 
     /// Create a saver with the default path (`~/.echo-agent/trajectories/`).
     pub fn default_dir() -> Result<Self> {
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        let dir = home.join(".echo-agent").join("trajectories");
+        let dir = crate::paths::user_data_path("trajectories");
         Self::new(dir)
     }
 

@@ -470,7 +470,9 @@ impl Default for AgentYamlConfig {
             enable_tools: true,
             enable_memory: true,
             enable_human_in_loop: true,
-            memory_path: "~/.echo-agent/memory".to_string(),
+            memory_path: crate::paths::user_data_path("store.json")
+                .to_string_lossy()
+                .into_owned(),
             tool_timeout_ms: 120_000,
             max_tool_output_tokens: 0,
             token_limit: 0,
@@ -669,9 +671,7 @@ pub fn config_search_paths() -> Vec<PathBuf> {
         paths.push(PathBuf::from(explicit));
     }
     paths.push(PathBuf::from("echo-agent.yaml"));
-    if let Ok(home) = std::env::var("HOME") {
-        paths.push(PathBuf::from(home).join(".echo-agent").join("config.yaml"));
-    }
+    paths.push(crate::paths::user_data_path("config.yaml"));
     paths
 }
 

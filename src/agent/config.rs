@@ -243,7 +243,9 @@ impl AgentConfig {
             _reasoning_effort: "medium".to_string(),
             tool_execution: ToolExecutionConfig::default(),
             enable_memory: false,
-            memory_path: "~/.echo-agent/store.json".to_string(),
+            memory_path: crate::paths::user_data_path("store.json")
+                .to_string_lossy()
+                .into_owned(),
             session_id: None,
             conversation_id: None,
             response_format: None,

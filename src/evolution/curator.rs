@@ -211,10 +211,7 @@ impl Curator {
 
     /// Create a curator with the default state path (`~/.echo-agent/curator_state.json`).
     pub fn default_path(config: CuratorConfig) -> Self {
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        let path = home.join(".echo-agent").join("curator_state.json");
+        let path = crate::paths::user_data_path("curator_state.json");
         Self::new(config, path)
     }
 
