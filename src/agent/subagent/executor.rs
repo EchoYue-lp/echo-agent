@@ -730,6 +730,7 @@ impl SubagentExecutor {
                 run_id: Some(format!("bg-{}", uuid::Uuid::new_v4().as_simple())),
                 turn_id: None,
                 execution_id: None,
+                isolation_id: None,
                 message_id: None,
                 cancel: None,
                 trace_sink: None,
@@ -1557,14 +1558,16 @@ impl SubagentExecutor {
             isolate_workspace,
             "subagent_fork_start"
         );
-        // Label identifies this dispatch for worktree/workspace naming. run_id
-        // (if available from the runtime context) disambiguates concurrent runs.
+        // Prefer a caller-supplied stable isolation identity so retries of one
+        // logical task can reuse the same worktree/workspace while preserving
+        // their distinct execution ids for events and audit records.
         let worktree_identity = runtime_context
             .as_ref()
             .and_then(|context| {
                 context
-                    .execution_id
+                    .isolation_id
                     .as_deref()
+                    .or(context.execution_id.as_deref())
                     .or(context.run_id.as_deref())
                     .or(context.turn_id.as_deref())
             })
@@ -2148,6 +2151,7 @@ mod tests {
                 run_id: None,
                 turn_id: Some("turn-identity".to_string()),
                 execution_id: Some("agent_tool-identity".to_string()),
+                isolation_id: None,
                 message_id: Some("message-identity".to_string()),
                 cancel: None,
                 trace_sink: None,
@@ -3008,6 +3012,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fork_worktree_prefers_stable_isolation_identity() -> std::result::Result<(), String> {
+        let factory = Arc::new(MockWorktreeFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let factory_for_executor: Arc<dyn WorktreeFactory> = factory.clone();
+        let (registry, executor) = make_executor_with_factory(factory_for_executor);
+        let agent = MockAgent::new("writer").with_response("done");
+        let definition = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_worktree: true,
+            ..super::super::types::SubagentDefinition::new("writer", "Writer")
+        };
+        registry.register(definition, Box::new(agent)).await;
+
+        executor
+            .dispatch(DispatchRequest {
+                agent_name: "writer".to_string(),
+                task: "retry the same logical task".to_string(),
+                mode_override: None,
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: Some(echo_core::tools::ExternalRunContext {
+                    conversation_id: None,
+                    run_id: Some("run-1".to_string()),
+                    turn_id: None,
+                    execution_id: Some("task-1:2".to_string()),
+                    isolation_id: Some("run-1:task-1".to_string()),
+                    message_id: None,
+                    cancel: None,
+                    trace_sink: None,
+                    delegation_policy: None,
+                }),
+                message: None,
+                prompt_payload: None,
+                background: false,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let labels = factory
+            .labels
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone();
+        if labels != vec!["writer-run-1:task-1".to_string()] {
+            return Err(format!("unexpected worktree labels: {labels:?}"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn fork_worktree_observation_precedes_subagent_completion()
     -> std::result::Result<(), String> {
         let factory = Arc::new(MockWorktreeFactory {
@@ -3101,6 +3159,7 @@ mod tests {
                 run_id: Some(run_id.to_string()),
                 turn_id: None,
                 execution_id: Some(format!("execution-{run_id}")),
+                isolation_id: None,
                 message_id: None,
                 cancel: None,
                 trace_sink: None,

@@ -176,6 +176,8 @@ pub struct ReactAgent {
     /// identifier instead of bridge-side temp allocation. Carried as a Mutex
     /// field (same cross-spawn pattern as the other external_* fields).
     pub external_execution_id: std::sync::Mutex<Option<String>>,
+    /// Stable identity for reusable worktree/workspace isolation resources.
+    pub external_isolation_id: std::sync::Mutex<Option<String>>,
     pub external_turn_id: std::sync::Mutex<Option<String>>,
     /// Chat message id that triggered the run, forwarded to
     /// `SubagentEvent::DispatchStarted.message_id` so the frontend can pin a
@@ -523,6 +525,7 @@ impl ReactAgent {
             external_trace_sink: std::sync::Mutex::new(None),
             external_delegation_policy: std::sync::Mutex::new(None),
             external_execution_id: std::sync::Mutex::new(None),
+            external_isolation_id: std::sync::Mutex::new(None),
             external_turn_id: std::sync::Mutex::new(None),
             external_message_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
@@ -2527,6 +2530,11 @@ impl ReactAgent {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
+            isolation_id: self
+                .external_isolation_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             message_id: self
                 .external_message_id
                 .lock()
@@ -2651,6 +2659,10 @@ impl Agent for ReactAgent {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = ctx.execution_id.clone();
         *self
+            .external_isolation_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ctx.isolation_id.clone();
+        *self
             .external_message_id
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = ctx.message_id.clone();
@@ -2679,6 +2691,10 @@ impl Agent for ReactAgent {
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self
             .external_execution_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .external_isolation_id
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self

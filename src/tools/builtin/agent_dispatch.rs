@@ -149,6 +149,7 @@ impl AgentDispatchTool {
             run_id: c.run_id.clone(),
             turn_id: c.turn_id.clone(),
             execution_id: Some(format!("agent_tool-{}", uuid::Uuid::new_v4())),
+            isolation_id: None,
             message_id: c
                 .message_id
                 .clone()

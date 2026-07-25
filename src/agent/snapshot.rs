@@ -1370,6 +1370,7 @@ mod transcript_filter_tests {
                 run_id: Some("run-atomic".to_string()),
                 turn_id: None,
                 execution_id: Some("execution-atomic".to_string()),
+                isolation_id: None,
                 message_id: Some("message-atomic".to_string()),
                 cancel: Some(std::sync::Arc::clone(&cancel)),
                 trace_sink: Some(std::sync::Arc::clone(&trace_sink)),

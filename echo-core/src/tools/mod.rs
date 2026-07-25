@@ -963,6 +963,11 @@ pub struct ExternalRunContext {
     /// `None` 表示只有 run 级上下文。设置后，subagent / tool trace 应使用它
     /// 作为前端可见执行记录的稳定 id，而不是再临时分配一套 dispatch id。
     pub execution_id: Option<String>,
+    /// 隔离资源的稳定标识，可跨同一逻辑任务的多次执行尝试复用。
+    ///
+    /// 与 `execution_id` 不同，此字段不表示一次具体执行，也不用于事件关联。
+    /// Worktree / workspace 等隔离资源可优先使用它来避免重试时重复创建。
+    pub isolation_id: Option<String>,
     /// 触发本次 run 的消息 id（chat 场景下 = message_key，用于把 subagent
     /// 执行流钉到聊天流里对应的消息区块上）。`None` = 非 chat 路径（cron 等）。
     pub message_id: Option<String>,
@@ -1085,6 +1090,7 @@ mod tool_context_tests {
             run_id: Some("run-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             execution_id: None,
+            isolation_id: None,
             message_id: None,
             cancel: None,
             trace_sink: None,
