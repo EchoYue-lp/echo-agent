@@ -1109,6 +1109,8 @@ impl SubagentExecutor {
         let mut usage_stats = super::usage::LlmUsageStats::default();
         let mut pending_verification = HashMap::<String, String>::new();
         let mut pending_file_access = HashMap::<String, (bool, String)>::new();
+        let mut pending_tool_completions =
+            HashMap::<String, (HashMap<String, String>, bool)>::new();
         let mut observed_verification = Vec::new();
         let mut touched_files = SubagentTouchedFiles::default();
         let mut observed_artifacts = Vec::new();
@@ -1221,6 +1223,9 @@ impl SubagentExecutor {
                     name,
                     output,
                 } => {
+                    let (metadata, truncated) = pending_tool_completions
+                        .remove(&call_id)
+                        .unwrap_or_else(|| (HashMap::new(), false));
                     if let Some(check) = pending_verification.remove(&call_id) {
                         observed_verification.push(SubagentVerification {
                             check,
@@ -1246,6 +1251,8 @@ impl SubagentExecutor {
                             result: output,
                             success: true,
                             failure: None,
+                            metadata,
+                            truncated,
                             execution_id: execution_id.clone(),
                             run_id: run_id.clone(),
                         });
@@ -1256,6 +1263,9 @@ impl SubagentExecutor {
                     error,
                     failure,
                 } => {
+                    let (metadata, truncated) = pending_tool_completions
+                        .remove(&call_id)
+                        .unwrap_or_else(|| (HashMap::new(), false));
                     if let Some(check) = pending_verification.remove(&call_id) {
                         observed_verification.push(SubagentVerification {
                             check,
@@ -1275,14 +1285,19 @@ impl SubagentExecutor {
                             result: error,
                             success: false,
                             failure: Some(failure),
+                            metadata,
+                            truncated,
                             execution_id: execution_id.clone(),
                             run_id: run_id.clone(),
                         });
                 }
                 AgentEvent::ToolStream {
+                    call_id,
                     event: echo_core::tools::ToolStreamEvent::Complete(result),
                     ..
                 } => {
+                    pending_tool_completions
+                        .insert(call_id, (result.metadata.clone(), result.truncated));
                     if let Some(artifact) =
                         echo_core::tools::artifact::ToolOutputArtifactRef::from_metadata(
                             &result.metadata,

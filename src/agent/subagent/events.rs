@@ -224,6 +224,10 @@ pub enum SubagentEvent {
         success: bool,
         /// Structured failure facts when `success` is false.
         failure: Option<crate::tools::ToolFailure>,
+        /// Tool-result metadata, including an optional durable artifact reference.
+        metadata: std::collections::HashMap<String, String>,
+        /// Whether the result returned to the agent was truncated.
+        truncated: bool,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).
@@ -395,6 +399,41 @@ impl Default for SubagentEventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn completed_tool_event_serializes_artifact_metadata() -> Result<(), serde_json::Error> {
+        let event = SubagentEvent::DispatchToolCompleted {
+            parent: "root".to_string(),
+            agent: "explorer".to_string(),
+            call_id: "call-1".to_string(),
+            name: "shell".to_string(),
+            result: "preview".to_string(),
+            success: true,
+            failure: None,
+            metadata: HashMap::from([("artifact_path".to_string(), "/tmp/tool.log".to_string())]),
+            truncated: true,
+            execution_id: Some("task-1:1".to_string()),
+            run_id: Some("run-1".to_string()),
+        };
+
+        let value = serde_json::to_value(event)?;
+        let completed = value.get("DispatchToolCompleted");
+        assert_eq!(
+            completed
+                .and_then(|payload| payload.get("truncated"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            completed
+                .and_then(|payload| payload.get("metadata"))
+                .and_then(|metadata| metadata.get("artifact_path"))
+                .and_then(serde_json::Value::as_str),
+            Some("/tmp/tool.log")
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_event_bus_emit() {
