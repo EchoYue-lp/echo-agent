@@ -3,7 +3,10 @@
 //! This module provides validation logic for `PlanSpec` to ensure
 //! plans are well-formed before creating the task DAG.
 
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use crate::planning::plan_spec::{PlanSpec, ValidationReport};
+use crate::tasks::{RuntimeTask, RuntimeTaskSpec};
 
 /// Plan validator configuration
 #[derive(Debug, Clone)]
@@ -19,6 +22,9 @@ pub struct PlanValidator {
 
     /// Whether to require verification for all tasks
     pub require_verification: bool,
+
+    /// Maximum automatic retries declared by one runtime task.
+    pub max_retries: u32,
 }
 
 impl Default for PlanValidator {
@@ -28,6 +34,7 @@ impl Default for PlanValidator {
             max_depth: 10,
             require_acceptance_criteria: true,
             require_verification: true,
+            max_retries: 10,
         }
     }
 }
@@ -231,6 +238,180 @@ impl PlanValidator {
 
         report
     }
+
+    /// Validate one coherent revisioned runtime snapshot.
+    ///
+    /// Runtime validation deliberately does not apply the `PlanSpec`-specific
+    /// acceptance/verification policy flags: applications may make those
+    /// checks optional or enforce them through review policy. Structural DAG
+    /// integrity remains framework-owned.
+    pub fn validate_runtime_snapshot(
+        &self,
+        tasks: &[RuntimeTask],
+    ) -> std::result::Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        for task in tasks {
+            if task.spec.id != task.execution.task_id {
+                errors.push(format!(
+                    "task spec id '{}' does not match execution id '{}'",
+                    task.spec.id, task.execution.task_id
+                ));
+            }
+        }
+        if let Err(spec_errors) = self.validate_runtime_specs(
+            &tasks
+                .iter()
+                .map(|task| task.spec.clone())
+                .collect::<Vec<_>>(),
+        ) {
+            errors.extend(spec_errors);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Validate immutable runtime task specifications and their dependencies.
+    pub fn validate_runtime_specs(
+        &self,
+        tasks: &[RuntimeTaskSpec],
+    ) -> std::result::Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        if tasks.is_empty() {
+            errors.push("plan must contain at least one task".to_string());
+        }
+        if tasks.len() > self.max_tasks {
+            errors.push(format!(
+                "plan contains {} tasks, maximum allowed is {}",
+                tasks.len(),
+                self.max_tasks
+            ));
+        }
+
+        let mut ids = HashSet::new();
+        for task in tasks {
+            let id = task.id.trim();
+            if id.is_empty() {
+                errors.push("task id must not be empty".to_string());
+            } else if !ids.insert(id.to_string()) {
+                errors.push(format!("duplicate task id '{id}'"));
+            }
+            if task.title.trim().is_empty() {
+                errors.push(format!("task '{}' title must not be empty", task.id));
+            }
+            if task.description.trim().is_empty() {
+                errors.push(format!("task '{}' description must not be empty", task.id));
+            }
+            if task.agent_role.trim().is_empty() {
+                errors.push(format!(
+                    "task '{}' Subagent role must not be empty",
+                    task.id
+                ));
+            }
+            if task.max_retries > self.max_retries {
+                errors.push(format!(
+                    "task '{}' max_retries {} exceeds the runtime limit {}",
+                    task.id, task.max_retries, self.max_retries
+                ));
+            }
+            if task
+                .depends_on
+                .iter()
+                .any(|dependency| dependency == &task.id)
+            {
+                errors.push(format!("task '{}' cannot depend on itself", task.id));
+            }
+            for tool in &task.allowed_tools {
+                if tool.trim().is_empty() {
+                    errors.push(format!("task '{}' contains an empty tool name", task.id));
+                }
+            }
+        }
+
+        let known_ids: HashSet<&str> = tasks.iter().map(|task| task.id.as_str()).collect();
+        for task in tasks {
+            for dependency in &task.depends_on {
+                if !known_ids.contains(dependency.as_str()) {
+                    errors.push(format!(
+                        "task '{}' depends on '{}' which does not exist",
+                        task.id, dependency
+                    ));
+                }
+            }
+        }
+
+        let (processed, depths) = runtime_topological_depths(tasks, &known_ids);
+        if processed < known_ids.len() {
+            errors.push("dependency graph contains a cycle".to_string());
+        }
+        for (task_id, depth) in depths {
+            if depth > self.max_depth {
+                errors.push(format!(
+                    "dependency depth {depth} exceeds maximum {} for task '{task_id}'",
+                    self.max_depth
+                ));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+}
+
+fn runtime_topological_depths(
+    tasks: &[RuntimeTaskSpec],
+    known_ids: &HashSet<&str>,
+) -> (usize, HashMap<String, usize>) {
+    let mut indegree: HashMap<String, usize> =
+        tasks.iter().map(|task| (task.id.clone(), 0)).collect();
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+    for task in tasks {
+        for dependency in &task.depends_on {
+            if dependency != &task.id && known_ids.contains(dependency.as_str()) {
+                if let Some(count) = indegree.get_mut(&task.id) {
+                    *count = count.saturating_add(1);
+                }
+                dependents
+                    .entry(dependency.as_str())
+                    .or_default()
+                    .push(task.id.as_str());
+            }
+        }
+    }
+
+    let mut queue: VecDeque<String> = indegree
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(task_id, _)| task_id.clone())
+        .collect();
+    let mut depths: HashMap<String, usize> =
+        queue.iter().map(|task_id| (task_id.clone(), 1)).collect();
+    let mut processed = 0usize;
+    while let Some(task_id) = queue.pop_front() {
+        processed = processed.saturating_add(1);
+        let current_depth = depths.get(&task_id).copied().unwrap_or(1);
+        if let Some(children) = dependents.get(task_id.as_str()) {
+            for child in children {
+                let next_depth = current_depth.saturating_add(1);
+                depths
+                    .entry((*child).to_string())
+                    .and_modify(|depth| *depth = (*depth).max(next_depth))
+                    .or_insert(next_depth);
+                if let Some(count) = indegree.get_mut(*child) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        queue.push_back((*child).to_string());
+                    }
+                }
+            }
+        }
+    }
+    (processed, depths)
 }
 
 #[cfg(test)]
@@ -509,5 +690,75 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("Parallel write tasks"))
         );
+    }
+
+    fn runtime_spec(id: &str, dependencies: &[&str]) -> RuntimeTaskSpec {
+        RuntimeTaskSpec {
+            id: id.to_string(),
+            title: id.to_string(),
+            description: format!("execute {id}"),
+            kind: RuntimeTaskKind::Investigation,
+            agent_role: "explorer".to_string(),
+            depends_on: dependencies
+                .iter()
+                .map(|dependency| dependency.to_string())
+                .collect(),
+            files: Vec::new(),
+            allowed_tools: Vec::new(),
+            required_artifacts: Vec::new(),
+            execution_checks: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            max_retries: 3,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn runtime_validation_accepts_acyclic_specs() {
+        let tasks = vec![runtime_spec("a", &[]), runtime_spec("b", &["a"])];
+        assert!(
+            PlanValidator::default()
+                .validate_runtime_specs(&tasks)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn runtime_validation_rejects_dangling_dependencies_and_cycles() -> Result<(), String> {
+        let dangling = PlanValidator::default()
+            .validate_runtime_specs(&[runtime_spec("a", &["missing"])])
+            .err()
+            .ok_or_else(|| "dangling dependency unexpectedly passed validation".to_string())?;
+        assert!(
+            dangling
+                .iter()
+                .any(|error| error.contains("does not exist"))
+        );
+
+        let cycle = PlanValidator::default()
+            .validate_runtime_specs(&[runtime_spec("a", &["b"]), runtime_spec("b", &["a"])])
+            .err()
+            .ok_or_else(|| "dependency cycle unexpectedly passed validation".to_string())?;
+        assert!(cycle.iter().any(|error| error.contains("cycle")));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_validation_rejects_mismatched_execution_identity() -> Result<(), String> {
+        let task = RuntimeTask {
+            spec: runtime_spec("spec-id", &[]),
+            execution: RuntimeTaskExecution {
+                task_id: "execution-id".to_string(),
+                status: RuntimeTaskStatus::Pending,
+                retry_count: 0,
+                failure_fingerprint: None,
+            },
+        };
+        let errors = PlanValidator::default()
+            .validate_runtime_snapshot(&[task])
+            .err()
+            .ok_or_else(|| "mismatched task identity unexpectedly passed validation".to_string())?;
+        assert!(errors.iter().any(|error| error.contains("does not match")));
+        Ok(())
     }
 }

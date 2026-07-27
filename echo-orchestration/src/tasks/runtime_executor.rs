@@ -19,6 +19,7 @@ use super::runtime::{
     ConcurrencyLimits, DagExecutionState, NestedDelegationPolicy, RuntimeTask, TaskId,
     TaskSubagentContext,
 };
+use crate::planning::PlanValidator;
 
 /// One coherent plan revision loaded from the runtime authority.
 #[derive(Debug, Clone)]
@@ -181,6 +182,13 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             // Every loop boundary is a safe point: all locally-dispatched
             // handles from the previous wave have been joined and resolved.
             let snapshot = self.controller.load_snapshot(run_id).await?;
+            if let Err(errors) = PlanValidator::default().validate_runtime_snapshot(&snapshot.tasks)
+            {
+                return Err(ReactError::Other(format!(
+                    "invalid runtime plan snapshot: {}",
+                    errors.join("; ")
+                )));
+            }
             if active_revision != Some(snapshot.revision) {
                 if let Some(previous) = active_revision {
                     tracing::info!(
@@ -196,9 +204,13 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             let tasks = snapshot.tasks;
             let state = DagExecutionState::from_tasks(&tasks);
 
-            if let Some(failed_task) = tasks.iter().find(|task| state.failed.contains(&task.id)) {
+            if let Some(failed_task) = tasks
+                .iter()
+                .find(|task| state.failed.contains(&task.spec.id))
+            {
                 for blocked_id in state.blocked_by_failures(&tasks) {
-                    if let Some(blocked_task) = tasks.iter().find(|task| task.id == blocked_id) {
+                    if let Some(blocked_task) = tasks.iter().find(|task| task.spec.id == blocked_id)
+                    {
                         self.controller
                             .block_task(run_id, blocked_task, "blocked: upstream task failed")
                             .await?;
@@ -206,8 +218,8 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 }
 
                 let error = failure_errors
-                    .remove(&failed_task.id)
-                    .unwrap_or_else(|| format!("task '{}' failed", failed_task.title));
+                    .remove(&failed_task.spec.id)
+                    .unwrap_or_else(|| format!("task '{}' failed", failed_task.spec.title));
                 let disposition = self
                     .controller
                     .failed_task_disposition(
@@ -216,7 +228,11 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         state.all_unfinished_failed_or_blocked(&tasks),
                     )
                     .await?;
-                return Ok(stop_outcome(disposition, failed_task.id.clone(), error));
+                return Ok(stop_outcome(
+                    disposition,
+                    failed_task.spec.id.clone(),
+                    error,
+                ));
             }
 
             if state.all_completed(&tasks) {
@@ -250,7 +266,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             let selected_set: HashSet<&str> = selected_ids.iter().map(String::as_str).collect();
             let selected_tasks: Vec<RuntimeTask> = tasks
                 .iter()
-                .filter(|task| selected_set.contains(task.id.as_str()))
+                .filter(|task| selected_set.contains(task.spec.id.as_str()))
                 .cloned()
                 .collect();
 
@@ -322,11 +338,11 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     | RuntimeTaskResolution::Pending
                     | RuntimeTaskResolution::Skipped => {}
                     RuntimeTaskResolution::Failed { error } => {
-                        failure_errors.entry(task.id).or_insert(error);
+                        failure_errors.entry(task.spec.id).or_insert(error);
                     }
                     RuntimeTaskResolution::Blocked { error, disposition } => {
                         if pending_outcome.is_none() {
-                            pending_outcome = Some(stop_outcome(disposition, task.id, error));
+                            pending_outcome = Some(stop_outcome(disposition, task.spec.id, error));
                         }
                     }
                     RuntimeTaskResolution::Cancelled => {
@@ -422,7 +438,7 @@ mod tests {
                     snapshot
                         .tasks
                         .iter()
-                        .map(|task| (task.id.clone(), task.status))
+                        .map(|task| (task.spec.id.clone(), task.execution.status))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -449,16 +465,16 @@ mod tests {
             self.order
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(task.id.clone());
+                .push(task.spec.id.clone());
             let failure = self
                 .fail
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(&task.id)
+                .get(&task.spec.id)
                 .cloned();
             match failure {
                 Some(error) => Err(ReactError::Other(error)),
-                None => Ok(task.id),
+                None => Ok(task.spec.id),
             }
         }
 
@@ -482,9 +498,9 @@ mod tests {
             if let Some(current) = snapshot
                 .tasks
                 .iter_mut()
-                .find(|current| current.id == task.id)
+                .find(|current| current.spec.id == task.spec.id)
             {
-                current.status = status;
+                current.execution.status = status;
             }
 
             let insert_after = self
@@ -492,12 +508,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take();
-            if insert_after.as_deref() == Some(task.id.as_str()) {
+            if insert_after.as_deref() == Some(task.spec.id.as_str()) {
                 snapshot.revision = snapshot.revision.saturating_add(1);
                 snapshot.tasks.push(runtime_task(
                     "inserted",
                     RuntimeTaskStatus::Pending,
-                    &[task.id.as_str()],
+                    &[task.spec.id.as_str()],
                 ));
             }
 
@@ -514,11 +530,13 @@ mod tests {
                 .snapshot
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(current) = snapshot
-                .as_mut()
-                .and_then(|snapshot| snapshot.tasks.iter_mut().find(|item| item.id == task.id))
-            {
-                current.status = RuntimeTaskStatus::Blocked;
+            if let Some(current) = snapshot.as_mut().and_then(|snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.spec.id == task.spec.id)
+            }) {
+                current.execution.status = RuntimeTaskStatus::Blocked;
             }
             Ok(())
         }
@@ -526,21 +544,30 @@ mod tests {
 
     fn runtime_task(id: &str, status: RuntimeTaskStatus, dependencies: &[&str]) -> RuntimeTask {
         RuntimeTask {
-            id: id.to_string(),
-            title: id.to_string(),
-            description: String::new(),
-            kind: RuntimeTaskKind::Investigation,
-            agent_role: "explorer".to_string(),
-            depends_on: dependencies
-                .iter()
-                .map(|dependency| dependency.to_string())
-                .collect(),
-            files: Vec::new(),
-            allowed_tools: Vec::new(),
-            verification: Vec::new(),
-            retry_count: 0,
-            max_retries: 1,
-            status,
+            spec: crate::tasks::RuntimeTaskSpec {
+                id: id.to_string(),
+                title: id.to_string(),
+                description: format!("execute {id}"),
+                kind: RuntimeTaskKind::Investigation,
+                agent_role: "explorer".to_string(),
+                depends_on: dependencies
+                    .iter()
+                    .map(|dependency| dependency.to_string())
+                    .collect(),
+                files: Vec::new(),
+                allowed_tools: Vec::new(),
+                required_artifacts: Vec::new(),
+                execution_checks: Vec::new(),
+                acceptance_criteria: Vec::new(),
+                max_retries: 1,
+                metadata: serde_json::Value::Null,
+            },
+            execution: crate::tasks::RuntimeTaskExecution {
+                task_id: id.to_string(),
+                status,
+                retry_count: 0,
+                failure_fingerprint: None,
+            },
         }
     }
 

@@ -21,6 +21,7 @@ pub mod background_task;
 pub mod composite;
 pub mod progress;
 
+pub use crate::planning::PlanValidator;
 pub use background_state::{BackgroundTaskState, CheckpointStore as BackgroundCheckpointStore};
 pub use background_task::{
     AnyBackgroundTask, BackgroundTask, BackgroundTaskStatus, TaskSpawner, TaskSpawnerConfig,
@@ -41,8 +42,8 @@ pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
 pub use replanner::{LlmReplanner, ReplanDecision, ReplanTrigger, Replanner, RuleBasedReplanner};
 pub use runtime::{
     ConcurrencyLimits, DagExecutionState, DagRefresh, NestedDelegationPolicy, RuntimeTask,
-    RuntimeTaskKind, RuntimeTaskStatus, SuggestedTask, TaskExecutionSummary, TaskId, TaskSubagent,
-    TaskSubagentContext,
+    RuntimeTaskExecution, RuntimeTaskKind, RuntimeTaskSpec, RuntimeTaskStatus, SuggestedTask,
+    TaskExecutionSummary, TaskId, TaskSubagent, TaskSubagentContext,
 };
 pub use runtime_executor::{
     RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome,

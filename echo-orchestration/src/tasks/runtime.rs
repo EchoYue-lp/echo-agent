@@ -112,9 +112,9 @@ impl RuntimeTaskStatus {
     }
 }
 
-/// Product-neutral task node view for DAG scheduling.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeTask {
+/// Immutable, product-neutral task specification for runtime DAG scheduling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTaskSpec {
     pub id: TaskId,
     pub title: String,
     pub description: String,
@@ -123,10 +123,40 @@ pub struct RuntimeTask {
     pub depends_on: Vec<TaskId>,
     pub files: Vec<String>,
     pub allowed_tools: Vec<String>,
-    pub verification: Vec<String>,
-    pub retry_count: u32,
+    pub required_artifacts: Vec<String>,
+    pub execution_checks: Vec<String>,
+    pub acceptance_criteria: Vec<String>,
     pub max_retries: u32,
+    /// Product metadata that does not participate in framework scheduling.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+/// Mutable execution state for one runtime task specification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTaskExecution {
+    pub task_id: TaskId,
     pub status: RuntimeTaskStatus,
+    pub retry_count: u32,
+    pub failure_fingerprint: Option<String>,
+}
+
+impl RuntimeTaskExecution {
+    pub fn pending(task_id: impl Into<TaskId>) -> Self {
+        Self {
+            task_id: task_id.into(),
+            status: RuntimeTaskStatus::Pending,
+            retry_count: 0,
+            failure_fingerprint: None,
+        }
+    }
+}
+
+/// One runtime DAG node: immutable specification plus mutable execution state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTask {
+    pub spec: RuntimeTaskSpec,
+    pub execution: RuntimeTaskExecution,
 }
 
 /// Concurrency caps for a generic task runtime.
@@ -260,23 +290,23 @@ impl DagExecutionState {
     pub fn from_tasks(tasks: &[RuntimeTask]) -> Self {
         let completed = tasks
             .iter()
-            .filter(|task| task.status == RuntimeTaskStatus::Completed)
-            .map(|task| task.id.clone())
+            .filter(|task| task.execution.status == RuntimeTaskStatus::Completed)
+            .map(|task| task.spec.id.clone())
             .collect();
         let in_flight = tasks
             .iter()
-            .filter(|task| task.status == RuntimeTaskStatus::Running)
-            .map(|task| task.id.clone())
+            .filter(|task| task.execution.status == RuntimeTaskStatus::Running)
+            .map(|task| task.spec.id.clone())
             .collect();
         let failed = tasks
             .iter()
-            .filter(|task| task.status == RuntimeTaskStatus::Failed)
-            .map(|task| task.id.clone())
+            .filter(|task| task.execution.status == RuntimeTaskStatus::Failed)
+            .map(|task| task.spec.id.clone())
             .collect();
         let skipped = tasks
             .iter()
-            .filter(|task| task.status == RuntimeTaskStatus::Skipped)
-            .map(|task| task.id.clone())
+            .filter(|task| task.execution.status == RuntimeTaskStatus::Skipped)
+            .map(|task| task.spec.id.clone())
             .collect();
 
         Self {
@@ -295,11 +325,11 @@ impl DagExecutionState {
         }
 
         for task_id in self.in_flight.clone() {
-            let Some(task) = tasks.iter().find(|task| task.id == task_id) else {
+            let Some(task) = tasks.iter().find(|task| task.spec.id == task_id) else {
                 continue;
             };
 
-            match task.status {
+            match task.execution.status {
                 RuntimeTaskStatus::Completed => {
                     self.in_flight.remove(&task_id);
                     self.completed.insert(task_id.clone());
@@ -312,7 +342,7 @@ impl DagExecutionState {
                 }
                 RuntimeTaskStatus::Skipped | RuntimeTaskStatus::Cancelled => {
                     self.in_flight.remove(&task_id);
-                    if task.status == RuntimeTaskStatus::Skipped {
+                    if task.execution.status == RuntimeTaskStatus::Skipped {
                         self.skipped.insert(task_id.clone());
                     }
                     refresh.terminal_non_success.push(task_id);
@@ -331,19 +361,20 @@ impl DagExecutionState {
         tasks
             .iter()
             .filter(|task| {
-                !self.completed.contains(&task.id)
-                    && !self.in_flight.contains(&task.id)
-                    && !self.failed.contains(&task.id)
-                    && !self.skipped.contains(&task.id)
+                !self.completed.contains(&task.spec.id)
+                    && !self.in_flight.contains(&task.spec.id)
+                    && !self.failed.contains(&task.spec.id)
+                    && !self.skipped.contains(&task.spec.id)
             })
             .filter(|task| {
-                task.status == RuntimeTaskStatus::Pending
+                task.execution.status == RuntimeTaskStatus::Pending
                     && task
+                        .spec
                         .depends_on
                         .iter()
                         .all(|dep| self.completed.contains(dep))
             })
-            .map(|task| task.id.clone())
+            .map(|task| task.spec.id.clone())
             .collect()
     }
 
@@ -352,12 +383,17 @@ impl DagExecutionState {
         tasks
             .iter()
             .filter(|task| {
-                !self.completed.contains(&task.id)
-                    && !self.failed.contains(&task.id)
-                    && !self.skipped.contains(&task.id)
+                !self.completed.contains(&task.spec.id)
+                    && !self.failed.contains(&task.spec.id)
+                    && !self.skipped.contains(&task.spec.id)
             })
-            .filter(|task| task.depends_on.iter().any(|dep| self.failed.contains(dep)))
-            .map(|task| task.id.clone())
+            .filter(|task| {
+                task.spec
+                    .depends_on
+                    .iter()
+                    .any(|dep| self.failed.contains(dep))
+            })
+            .map(|task| task.spec.id.clone())
             .collect()
     }
 
@@ -370,10 +406,14 @@ impl DagExecutionState {
     /// dependency.
     pub fn all_unfinished_failed_or_blocked(&self, tasks: &[RuntimeTask]) -> bool {
         tasks.iter().all(|task| {
-            self.completed.contains(&task.id)
-                || self.skipped.contains(&task.id)
-                || self.failed.contains(&task.id)
-                || task.depends_on.iter().any(|dep| self.failed.contains(dep))
+            self.completed.contains(&task.spec.id)
+                || self.skipped.contains(&task.spec.id)
+                || self.failed.contains(&task.spec.id)
+                || task
+                    .spec
+                    .depends_on
+                    .iter()
+                    .any(|dep| self.failed.contains(dep))
         })
     }
 }
@@ -389,8 +429,8 @@ pub struct DagRefresh {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConcurrencyLimits, NestedDelegationPolicy, RuntimeTaskKind, RuntimeTaskStatus,
-        TaskSubagentContext,
+        ConcurrencyLimits, NestedDelegationPolicy, RuntimeTaskExecution, RuntimeTaskKind,
+        RuntimeTaskSpec, RuntimeTaskStatus, TaskSubagentContext,
     };
     use crate::tasks::runtime::{DagExecutionState, RuntimeTask};
     use std::str::FromStr;
@@ -461,18 +501,27 @@ mod tests {
 
     fn runtime_task(id: &str, status: RuntimeTaskStatus, deps: &[&str]) -> RuntimeTask {
         RuntimeTask {
-            id: id.to_string(),
-            title: id.to_string(),
-            description: String::new(),
-            kind: RuntimeTaskKind::Investigation,
-            agent_role: "explorer".to_string(),
-            depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
-            files: Vec::new(),
-            allowed_tools: Vec::new(),
-            verification: Vec::new(),
-            retry_count: 0,
-            max_retries: 3,
-            status,
+            spec: RuntimeTaskSpec {
+                id: id.to_string(),
+                title: id.to_string(),
+                description: format!("execute {id}"),
+                kind: RuntimeTaskKind::Investigation,
+                agent_role: "explorer".to_string(),
+                depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
+                files: Vec::new(),
+                allowed_tools: Vec::new(),
+                required_artifacts: Vec::new(),
+                execution_checks: Vec::new(),
+                acceptance_criteria: Vec::new(),
+                max_retries: 3,
+                metadata: serde_json::Value::Null,
+            },
+            execution: RuntimeTaskExecution {
+                task_id: id.to_string(),
+                status,
+                retry_count: 0,
+                failure_fingerprint: None,
+            },
         }
     }
 
