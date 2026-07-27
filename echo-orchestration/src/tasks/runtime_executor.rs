@@ -16,7 +16,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::runtime::{
-    ConcurrencyLimits, DagExecutionState, NestedDelegationPolicy, Task, TaskId, TaskSubagentContext,
+    DagExecutionState, NestedDelegationPolicy, Task, TaskClaim, TaskId, TaskStatus,
+    TaskSubagentContext,
 };
 use crate::planning::PlanValidator;
 
@@ -48,6 +49,17 @@ pub enum RuntimeTaskResolution {
         disposition: RuntimeStopDisposition,
     },
     Cancelled,
+    /// The dispatch completed after its durable claim was replaced or cleared.
+    Superseded,
+}
+
+/// Result of atomically claiming a task from one loaded plan revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeTaskClaimOutcome {
+    Claimed(TaskClaim),
+    /// The revision, status, or specification changed. Reload the snapshot;
+    /// this is optimistic-concurrency control, not a task failure.
+    ReloadSnapshot,
 }
 
 /// Terminal result of driving one dynamic plan snapshot sequence.
@@ -76,6 +88,15 @@ pub trait RuntimeDagController: Send + Sync + 'static {
 
     async fn load_snapshot(&self, run_id: &str) -> Result<RuntimePlanSnapshot>;
 
+    /// Atomically transition one Pending task from `expected_revision` into a
+    /// claimed Running attempt.
+    async fn claim_task(
+        &self,
+        run_id: &str,
+        task: &Task,
+        expected_revision: u64,
+    ) -> Result<RuntimeTaskClaimOutcome>;
+
     /// Select a conflict-free subset of the ready frontier.
     ///
     /// The default dispatches the whole frontier. Applications may defer tasks
@@ -88,12 +109,14 @@ pub trait RuntimeDagController: Send + Sync + 'static {
     async fn dispatch_task(
         &self,
         context: TaskSubagentContext,
+        claim: TaskClaim,
         task: Task,
     ) -> Result<Self::DispatchOutput>;
 
     async fn resolve_dispatch(
         &self,
         run_id: &str,
+        claim: TaskClaim,
         task: Task,
         dispatch: Result<Self::DispatchOutput>,
     ) -> Result<RuntimeTaskResolution>;
@@ -125,7 +148,7 @@ pub trait RuntimeDagController: Send + Sync + 'static {
 /// Configuration for the dynamic runtime DAG executor.
 #[derive(Debug, Clone)]
 pub struct RuntimeDagExecutorConfig {
-    pub concurrency_limits: ConcurrencyLimits,
+    pub max_concurrent_subagents: usize,
     pub external_progress_poll_interval: Duration,
     pub delegation_policy: NestedDelegationPolicy,
 }
@@ -133,7 +156,7 @@ pub struct RuntimeDagExecutorConfig {
 impl Default for RuntimeDagExecutorConfig {
     fn default() -> Self {
         Self {
-            concurrency_limits: ConcurrencyLimits::default(),
+            max_concurrent_subagents: 4,
             external_progress_poll_interval: Duration::from_millis(250),
             delegation_policy: NestedDelegationPolicy {
                 can_spawn_subagents: true,
@@ -171,12 +194,8 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
         run_id: &str,
         cancel: CancellationToken,
     ) -> Result<RuntimeDagOutcome> {
-        let subagent_semaphore = Arc::new(Semaphore::new(
-            self.config
-                .concurrency_limits
-                .max_concurrent_subagents
-                .max(1),
-        ));
+        let subagent_semaphore =
+            Arc::new(Semaphore::new(self.config.max_concurrent_subagents.max(1)));
         let mut active_revision: Option<u64> = None;
         let mut failure_errors: HashMap<TaskId, String> = HashMap::new();
 
@@ -224,6 +243,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
 
                 let error = failure_errors
                     .remove(&failed_task.spec.id)
+                    .or_else(|| persisted_status_error(&failed_task.execution.status))
                     .unwrap_or_else(|| format!("task '{}' failed", failed_task.spec.title));
                 let disposition = self
                     .controller
@@ -258,6 +278,27 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         _ = tokio::time::sleep(self.config.external_progress_poll_interval) => {}
                     }
                     continue;
+                }
+
+                if let Some(blocked_task) = tasks
+                    .iter()
+                    .find(|task| matches!(task.execution.status, TaskStatus::Blocked(_)))
+                {
+                    let error = persisted_status_error(&blocked_task.execution.status)
+                        .unwrap_or_else(|| format!("task '{}' blocked", blocked_task.spec.title));
+                    let disposition = self
+                        .controller
+                        .failed_task_disposition(
+                            run_id,
+                            blocked_task,
+                            state.all_unfinished_failed_or_blocked(&tasks),
+                        )
+                        .await?;
+                    return Ok(stop_outcome(
+                        disposition,
+                        blocked_task.spec.id.clone(),
+                        error,
+                    ));
                 }
 
                 let reason = "DAG stalled with unfinished tasks (cycle or blocked)";
@@ -296,18 +337,27 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 let controller = self.controller.clone();
                 let semaphore = subagent_semaphore.clone();
                 let task_cancel = cancel.clone();
+                let expected_revision = snapshot.revision;
                 let context = TaskSubagentContext::new(run_id.to_string())
                     .with_cancel(task_cancel)
-                    .with_concurrency_limits(self.config.concurrency_limits)
                     .with_delegation_policy(self.config.delegation_policy);
                 join_set.spawn(async move {
-                    let task_for_dispatch = task.clone();
                     let permit = semaphore.acquire_owned().await.map_err(|error| {
                         ReactError::Other(format!("Subagent semaphore closed: {error}"))
                     })?;
-                    let result = controller.dispatch_task(context, task_for_dispatch).await;
+                    let claim = match controller
+                        .claim_task(&context.run_id, &task, expected_revision)
+                        .await?
+                    {
+                        RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+                        RuntimeTaskClaimOutcome::ReloadSnapshot => return Ok(None),
+                    };
+                    let task_for_dispatch = task.clone();
+                    let result = controller
+                        .dispatch_task(context, claim.clone(), task_for_dispatch)
+                        .await;
                     drop(permit);
-                    Ok::<_, ReactError>((task, result))
+                    Ok::<_, ReactError>(Some((task, claim, result)))
                 });
             }
 
@@ -321,7 +371,8 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     }
                     joined = join_set.join_next() => {
                         match joined {
-                            Some(Ok(Ok(result))) => wave_results.push(result),
+                            Some(Ok(Ok(Some(result)))) => wave_results.push(result),
+                            Some(Ok(Ok(None))) => {}
                             Some(Ok(Err(error))) => {
                                 return Err(error);
                             }
@@ -337,15 +388,16 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             }
 
             let mut pending_outcome: Option<RuntimeDagOutcome> = None;
-            for (task, dispatch) in wave_results {
+            for (task, claim, dispatch) in wave_results {
                 let resolution = self
                     .controller
-                    .resolve_dispatch(run_id, task.clone(), dispatch)
+                    .resolve_dispatch(run_id, claim, task.clone(), dispatch)
                     .await?;
                 match resolution {
                     RuntimeTaskResolution::Completed
                     | RuntimeTaskResolution::Pending
-                    | RuntimeTaskResolution::Skipped => {}
+                    | RuntimeTaskResolution::Skipped
+                    | RuntimeTaskResolution::Superseded => {}
                     RuntimeTaskResolution::Failed { error } => {
                         failure_errors.entry(task.spec.id).or_insert(error);
                     }
@@ -368,6 +420,21 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 return Ok(outcome);
             }
         }
+    }
+}
+
+fn persisted_status_error(status: &TaskStatus) -> Option<String> {
+    match status {
+        TaskStatus::Failed(error) | TaskStatus::Blocked(error) | TaskStatus::Paused(error) => {
+            Some(error.clone())
+        }
+        TaskStatus::TimedOut { error } => Some(error.clone()),
+        TaskStatus::Retrying { last_error, .. } => Some(last_error.clone()),
+        TaskStatus::Pending
+        | TaskStatus::Running
+        | TaskStatus::Completed
+        | TaskStatus::Skipped
+        | TaskStatus::Cancelled => None,
     }
 }
 
@@ -428,6 +495,7 @@ mod tests {
         order: Mutex<Vec<TaskId>>,
         fail: Mutex<HashMap<TaskId, String>>,
         insert_after: Mutex<Option<TaskId>>,
+        reload_claim_once: Mutex<bool>,
     }
 
     impl ScriptedController {
@@ -466,9 +534,55 @@ mod tests {
                 .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))
         }
 
+        async fn claim_task(
+            &self,
+            _run_id: &str,
+            task: &Task,
+            expected_revision: u64,
+        ) -> Result<RuntimeTaskClaimOutcome> {
+            let mut reload_claim_once = self
+                .reload_claim_once
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *reload_claim_once {
+                *reload_claim_once = false;
+                return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
+            }
+            drop(reload_claim_once);
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let snapshot = snapshot
+                .as_mut()
+                .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
+            if snapshot.revision != expected_revision {
+                return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
+            }
+            let Some(current) = snapshot
+                .tasks
+                .iter_mut()
+                .find(|current| current.spec.id == task.spec.id)
+            else {
+                return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
+            };
+            if current.spec != task.spec || current.execution.status != TaskStatus::Pending {
+                return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
+            }
+            let claim = TaskClaim {
+                revision: expected_revision,
+                attempt: current.execution.retry_count.saturating_add(1),
+                spec_hash: current.spec.stable_hash().map_err(ReactError::Other)?,
+            };
+            current.execution.status = TaskStatus::Running;
+            current.execution.claim = Some(claim.clone());
+            Ok(RuntimeTaskClaimOutcome::Claimed(claim))
+        }
+
         async fn dispatch_task(
             &self,
             _context: TaskSubagentContext,
+            _claim: TaskClaim,
             task: Task,
         ) -> Result<Self::DispatchOutput> {
             self.order
@@ -490,6 +604,7 @@ mod tests {
         async fn resolve_dispatch(
             &self,
             _run_id: &str,
+            claim: TaskClaim,
             task: Task,
             dispatch: Result<Self::DispatchOutput>,
         ) -> Result<RuntimeTaskResolution> {
@@ -500,16 +615,20 @@ mod tests {
             let snapshot = snapshot
                 .as_mut()
                 .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
-            let status = match &dispatch {
-                Ok(_) => TaskStatus::Completed,
-                Err(error) => TaskStatus::Failed(error.to_string()),
-            };
             if let Some(current) = snapshot
                 .tasks
                 .iter_mut()
                 .find(|current| current.spec.id == task.spec.id)
             {
-                current.execution.status = status;
+                if current.execution.claim.as_ref() != Some(&claim)
+                    || current.execution.status != TaskStatus::Running
+                {
+                    return Ok(RuntimeTaskResolution::Superseded);
+                }
+                current.execution.status = match &dispatch {
+                    Ok(_) => TaskStatus::Completed,
+                    Err(error) => TaskStatus::Failed(error.to_string()),
+                };
             }
 
             let insert_after = self
@@ -576,6 +695,7 @@ mod tests {
                 status,
                 retry_count: 0,
                 failure_fingerprint: None,
+                claim: None,
             },
         }
     }
@@ -645,6 +765,67 @@ mod tests {
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
         assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn claim_conflict_reloads_without_failing_or_dispatching_stale_work() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "claimable",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        *controller
+            .reload_claim_once
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        let executor =
+            RuntimeDagExecutor::new(controller.clone(), RuntimeDagExecutorConfig::default());
+
+        let outcome = executor.execute("run", CancellationToken::new()).await?;
+
+        assert_eq!(outcome, RuntimeDagOutcome::Completed);
+        assert_eq!(
+            controller
+                .order
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["claimable"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn executor_preserves_persisted_terminal_error_details() -> Result<()> {
+        let terminal_statuses = [
+            TaskStatus::Failed("persisted failure".to_string()),
+            TaskStatus::TimedOut {
+                error: "persisted timeout".to_string(),
+            },
+            TaskStatus::Blocked("persisted blocker".to_string()),
+        ];
+
+        for status in terminal_statuses {
+            let expected_error = persisted_status_error(&status)
+                .ok_or_else(|| ReactError::Other("terminal status lost its detail".to_string()))?;
+            let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+                "terminal",
+                status,
+                &[],
+            )]));
+            let executor = RuntimeDagExecutor::new(controller, RuntimeDagExecutorConfig::default());
+
+            let outcome = executor.execute("run", CancellationToken::new()).await?;
+
+            assert_eq!(
+                outcome,
+                RuntimeDagOutcome::Failed {
+                    failed_task_id: "terminal".to_string(),
+                    error: expected_error,
+                }
+            );
+        }
         Ok(())
     }
 

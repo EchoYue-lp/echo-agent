@@ -809,6 +809,7 @@ mod tests {
                 status: TaskStatus::Pending,
                 retry_count: 0,
                 failure_fingerprint: None,
+                claim: None,
             },
         };
         let errors = PlanValidator::default()

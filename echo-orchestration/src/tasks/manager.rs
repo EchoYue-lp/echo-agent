@@ -3,7 +3,7 @@
 use super::events::TaskEventBus;
 use super::hooks::TaskHookContext;
 use super::hooks::TaskHookRegistry;
-use super::runtime::TaskStatus;
+use super::runtime::{TaskSpec, TaskStatus};
 use super::task::ManagedTask;
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -130,6 +130,29 @@ impl TaskManager {
     /// Alias for `update_task`, used by executor
     pub fn update_task_status(&self, id: &str, status: TaskStatus) -> Result<(), String> {
         self.update_task(id, status)
+    }
+
+    /// Atomically claim a Pending task only when its immutable runtime
+    /// specification still matches the executor's loaded snapshot.
+    pub fn claim_pending_task(&self, id: &str, expected_spec: &TaskSpec) -> Result<bool, String> {
+        let Some(mut task) = self.tasks.get_mut(id) else {
+            return Err(format!("Task not found: {id}"));
+        };
+        if task.status != TaskStatus::Pending || task.task_spec() != *expected_spec {
+            return Ok(false);
+        }
+
+        let old_status = task.status.clone();
+        task.status = TaskStatus::Running;
+        task.updated_at = super::time::now_secs();
+        if let Some(ref bus) = self.event_bus {
+            bus.emit(super::events::TaskEvent::Updated {
+                task_id: id.to_string(),
+                old_status,
+                new_status: TaskStatus::Running,
+            });
+        }
+        Ok(true)
     }
 
     /// Set task result

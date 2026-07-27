@@ -41,13 +41,13 @@ pub use manager::TaskManager;
 pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
 pub use replanner::{LlmReplanner, ReplanDecision, ReplanTrigger, Replanner, RuleBasedReplanner};
 pub use runtime::{
-    ConcurrencyLimits, DagExecutionState, DagRefresh, NestedDelegationPolicy, SuggestedTask, Task,
+    DagExecutionState, DagRefresh, NestedDelegationPolicy, SuggestedTask, Task, TaskClaim,
     TaskExecution, TaskExecutionSummary, TaskId, TaskKind, TaskSpec, TaskStatus, TaskSubagent,
     TaskSubagentContext,
 };
 pub use runtime_executor::{
     RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome,
-    RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskResolution,
+    RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
 };
 pub use scheduler::{
     ConflictDetector, FileChangeRecord, ParallelStrategy, SchedulePlan, TaskConflict, TaskScheduler,

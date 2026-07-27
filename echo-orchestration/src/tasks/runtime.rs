@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use echo_core::error::Result;
 pub use echo_core::tools::NestedDelegationPolicy;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::str::FromStr;
 use tokio_util::sync::CancellationToken;
@@ -193,6 +194,35 @@ pub struct TaskSpec {
     pub metadata: serde_json::Value,
 }
 
+impl TaskSpec {
+    /// Stable SHA-256 identity for one immutable task specification.
+    pub fn stable_hash(&self) -> std::result::Result<String, String> {
+        let bytes = serde_json::to_vec(self).map_err(|error| {
+            format!(
+                "failed to serialize task '{}' for hashing: {error}",
+                self.id
+            )
+        })?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+}
+
+/// Durable lease for one concrete task dispatch attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskClaim {
+    pub revision: u64,
+    pub attempt: u32,
+    pub spec_hash: String,
+}
+
+impl TaskClaim {
+    /// Stable execution identity. The plan revision separates changed specs
+    /// even when their retry counters are unchanged.
+    pub fn execution_id(&self, task_id: &str) -> String {
+        format!("{task_id}:{}:{}", self.revision, self.attempt)
+    }
+}
+
 /// Mutable execution state for one runtime task specification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskExecution {
@@ -200,6 +230,8 @@ pub struct TaskExecution {
     pub status: TaskStatus,
     pub retry_count: u32,
     pub failure_fingerprint: Option<String>,
+    #[serde(default)]
+    pub claim: Option<TaskClaim>,
 }
 
 impl TaskExecution {
@@ -209,6 +241,7 @@ impl TaskExecution {
             status: TaskStatus::Pending,
             retry_count: 0,
             failure_fingerprint: None,
+            claim: None,
         }
     }
 }
@@ -220,36 +253,11 @@ pub struct Task {
     pub execution: TaskExecution,
 }
 
-/// Concurrency caps for a generic task runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConcurrencyLimits {
-    /// Max simultaneous Subagents.
-    pub max_concurrent_subagents: usize,
-    /// Max simultaneous mutating tasks.
-    pub max_concurrent_writes: usize,
-    /// Max simultaneous shell/verification tasks.
-    pub max_concurrent_shells: usize,
-    /// Max simultaneous LLM calls across Subagents.
-    pub max_parallel_llm_calls: usize,
-}
-
-impl Default for ConcurrencyLimits {
-    fn default() -> Self {
-        Self {
-            max_concurrent_subagents: 4,
-            max_concurrent_writes: 4,
-            max_concurrent_shells: 1,
-            max_parallel_llm_calls: 4,
-        }
-    }
-}
-
 /// Product-neutral context passed to a task Subagent.
 #[derive(Debug, Clone)]
 pub struct TaskSubagentContext {
     pub run_id: String,
     pub cancel: CancellationToken,
-    pub concurrency_limits: ConcurrencyLimits,
     pub delegation_policy: NestedDelegationPolicy,
 }
 
@@ -258,18 +266,12 @@ impl TaskSubagentContext {
         Self {
             run_id: run_id.into(),
             cancel: CancellationToken::new(),
-            concurrency_limits: ConcurrencyLimits::default(),
             delegation_policy: NestedDelegationPolicy::default(),
         }
     }
 
     pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
-        self
-    }
-
-    pub fn with_concurrency_limits(mut self, limits: ConcurrencyLimits) -> Self {
-        self.concurrency_limits = limits;
         self
     }
 
@@ -284,7 +286,6 @@ impl TaskSubagentContext {
             .map(|delegation_policy| Self {
                 run_id: self.run_id.clone(),
                 cancel: self.cancel.child_token(),
-                concurrency_limits: self.concurrency_limits,
                 delegation_policy,
             })
     }
@@ -510,8 +511,7 @@ pub struct DagRefresh {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConcurrencyLimits, NestedDelegationPolicy, TaskExecution, TaskKind, TaskSpec, TaskStatus,
-        TaskSubagentContext,
+        NestedDelegationPolicy, TaskExecution, TaskKind, TaskSpec, TaskStatus, TaskSubagentContext,
     };
     use crate::tasks::runtime::{DagExecutionState, Task};
     use std::str::FromStr;
@@ -557,14 +557,8 @@ mod tests {
 
     #[test]
     fn task_subagent_context_builds_child_delegation_context() {
-        let context = TaskSubagentContext::new("run-1")
-            .with_concurrency_limits(ConcurrencyLimits {
-                max_concurrent_subagents: 2,
-                max_concurrent_writes: 1,
-                max_concurrent_shells: 1,
-                max_parallel_llm_calls: 2,
-            })
-            .with_delegation_policy(NestedDelegationPolicy {
+        let context =
+            TaskSubagentContext::new("run-1").with_delegation_policy(NestedDelegationPolicy {
                 can_spawn_subagents: true,
                 delegate_depth: 0,
                 max_delegate_depth: 1,
@@ -576,7 +570,6 @@ mod tests {
         let child = child.unwrap_or_else(|| TaskSubagentContext::new("missing"));
         assert_eq!(child.run_id, "run-1");
         assert_eq!(child.delegation_policy.delegate_depth, 1);
-        assert_eq!(child.concurrency_limits.max_concurrent_subagents, 2);
         assert!(!child.delegation_policy.can_delegate());
     }
 
@@ -602,8 +595,20 @@ mod tests {
                 status,
                 retry_count: 0,
                 failure_fingerprint: None,
+                claim: None,
             },
         }
+    }
+
+    #[test]
+    fn task_spec_hash_changes_with_dispatch_contract() -> Result<(), String> {
+        let original = runtime_task("task", TaskStatus::Pending, &[]).spec;
+        let mut changed = original.clone();
+        changed.description = "changed contract".to_string();
+
+        assert_eq!(original.stable_hash()?, original.stable_hash()?);
+        assert_ne!(original.stable_hash()?, changed.stable_hash()?);
+        Ok(())
     }
 
     #[test]

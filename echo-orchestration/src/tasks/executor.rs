@@ -43,10 +43,10 @@ use super::hooks::{RetryDecision, TaskHookRegistry};
 use super::manager::TaskManager;
 use super::replanner::Replanner;
 use super::runtime::TaskStatus;
-use super::runtime::{ConcurrencyLimits, NestedDelegationPolicy, Task, TaskSubagentContext};
+use super::runtime::{NestedDelegationPolicy, Task, TaskClaim, TaskSubagentContext};
 use super::runtime_executor::{
     RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome,
-    RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskResolution,
+    RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
 };
 use super::scheduler::TaskScheduler;
 use super::task::ManagedTask;
@@ -56,6 +56,7 @@ use crate::tasks::BackgroundCheckpointStore;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use echo_core::error::{ReactError, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
@@ -339,6 +340,7 @@ pub struct TaskExecutor {
 struct ManagedTaskDagController {
     executor: TaskExecutor,
     results: Mutex<Vec<TaskExecutionResult>>,
+    claims: Mutex<HashMap<String, TaskClaim>>,
 }
 
 impl ManagedTaskDagController {
@@ -346,6 +348,7 @@ impl ManagedTaskDagController {
         Self {
             executor,
             results: Mutex::new(Vec::new()),
+            claims: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1285,12 +1288,7 @@ impl TaskExecutor {
         let runtime = RuntimeDagExecutor::new(
             controller.clone(),
             RuntimeDagExecutorConfig {
-                concurrency_limits: ConcurrencyLimits {
-                    max_concurrent_subagents: max_concurrent,
-                    max_concurrent_writes: max_concurrent,
-                    max_concurrent_shells: max_concurrent,
-                    max_parallel_llm_calls: max_concurrent,
-                },
+                max_concurrent_subagents: max_concurrent,
                 external_progress_poll_interval: Duration::from_millis(250),
                 delegation_policy: NestedDelegationPolicy {
                     can_spawn_subagents: true,
@@ -1459,6 +1457,33 @@ impl RuntimeDagController for ManagedTaskDagController {
         })
     }
 
+    async fn claim_task(
+        &self,
+        _run_id: &str,
+        task: &Task,
+        expected_revision: u64,
+    ) -> Result<RuntimeTaskClaimOutcome> {
+        if expected_revision != 0
+            || !self
+                .executor
+                .task_manager
+                .claim_pending_task(&task.spec.id, &task.spec)
+                .map_err(ReactError::Other)?
+        {
+            return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
+        }
+        let claim = TaskClaim {
+            revision: expected_revision,
+            attempt: task.execution.retry_count.saturating_add(1),
+            spec_hash: task.spec.stable_hash().map_err(ReactError::Other)?,
+        };
+        self.claims
+            .lock()
+            .await
+            .insert(task.spec.id.clone(), claim.clone());
+        Ok(RuntimeTaskClaimOutcome::Claimed(claim))
+    }
+
     fn select_ready_wave(&self, _tasks: &[Task], ready_task_ids: Vec<String>) -> Vec<String> {
         let mut ready_tasks: Vec<ManagedTask> = ready_task_ids
             .iter()
@@ -1491,6 +1516,7 @@ impl RuntimeDagController for ManagedTaskDagController {
     async fn dispatch_task(
         &self,
         context: TaskSubagentContext,
+        _claim: TaskClaim,
         runtime_task: Task,
     ) -> Result<Self::DispatchOutput> {
         let task = self
@@ -1505,7 +1531,7 @@ impl RuntimeDagController for ManagedTaskDagController {
             })?;
 
         match &task.status {
-            TaskStatus::Pending => Ok(self
+            TaskStatus::Running => Ok(self
                 .executor
                 .execute_selected_task(task, context.cancel)
                 .await),
@@ -1535,8 +1561,8 @@ impl RuntimeDagController for ManagedTaskDagController {
                 duration: Duration::ZERO,
                 attempts: task.retry_count,
             }),
-            TaskStatus::Running | TaskStatus::Retrying { .. } => Err(ReactError::Other(format!(
-                "runtime-selected task '{}' is already running",
+            TaskStatus::Pending | TaskStatus::Retrying { .. } => Err(ReactError::Other(format!(
+                "runtime-selected task '{}' was not claimed for dispatch",
                 task.id
             ))),
         }
@@ -1545,28 +1571,25 @@ impl RuntimeDagController for ManagedTaskDagController {
     async fn resolve_dispatch(
         &self,
         _run_id: &str,
+        claim: TaskClaim,
         runtime_task: Task,
         dispatch: Result<Self::DispatchOutput>,
     ) -> Result<RuntimeTaskResolution> {
+        let current_claim = self.claims.lock().await.get(&runtime_task.spec.id).cloned();
+        if current_claim.as_ref() != Some(&claim) {
+            return Ok(RuntimeTaskResolution::Superseded);
+        }
         let result = match dispatch {
             Ok(result) => result,
             Err(error) => {
                 let error = error.to_string();
-                if let Some(task) = self.executor.task_manager.get_task(&runtime_task.spec.id) {
-                    if matches!(task.status, TaskStatus::Pending) {
-                        self.executor
-                            .task_manager
-                            .update_task_status(&task.id, TaskStatus::Running)
-                            .map_err(ReactError::Other)?;
-                    }
-                    if let Some(current) = self.executor.task_manager.get_task(&task.id)
-                        && matches!(current.status, TaskStatus::Running)
-                    {
-                        self.executor
-                            .task_manager
-                            .update_task_status(&task.id, TaskStatus::Failed(error.clone()))
-                            .map_err(ReactError::Other)?;
-                    }
+                if let Some(task) = self.executor.task_manager.get_task(&runtime_task.spec.id)
+                    && matches!(task.status, TaskStatus::Running)
+                {
+                    self.executor
+                        .task_manager
+                        .update_task_status(&task.id, TaskStatus::Failed(error.clone()))
+                        .map_err(ReactError::Other)?;
                 }
                 TaskExecutionResult::failure(&runtime_task.spec.id, error, Duration::ZERO, 0)
             }
@@ -1593,7 +1616,7 @@ impl RuntimeDagController for ManagedTaskDagController {
             self.persist_task(task).await?;
         }
         let status = current.map(|task| task.status).unwrap_or(result.status);
-        match status {
+        let resolution = match status {
             TaskStatus::Pending => Ok(RuntimeTaskResolution::Pending),
             TaskStatus::Completed => Ok(RuntimeTaskResolution::Completed),
             TaskStatus::Skipped => Ok(RuntimeTaskResolution::Skipped),
@@ -1613,7 +1636,9 @@ impl RuntimeDagController for ManagedTaskDagController {
                 "task '{}' remained running after dispatch resolved",
                 runtime_task.spec.id
             ))),
-        }
+        };
+        self.claims.lock().await.remove(&runtime_task.spec.id);
+        resolution
     }
 
     async fn block_task(&self, _run_id: &str, task: &Task, reason: &str) -> Result<()> {

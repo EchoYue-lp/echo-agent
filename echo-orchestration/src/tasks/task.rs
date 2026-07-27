@@ -677,23 +677,12 @@ impl ManagedTask {
 
     /// Project mutable execution state without translating the shared status.
     pub fn task_execution(&self) -> TaskExecution {
-        let failure_fingerprint = match &self.status {
-            TaskStatus::Failed(error)
-            | TaskStatus::Blocked(error)
-            | TaskStatus::Paused(error)
-            | TaskStatus::TimedOut { error } => Some(error.clone()),
-            TaskStatus::Retrying { last_error, .. } => Some(last_error.clone()),
-            TaskStatus::Pending
-            | TaskStatus::Running
-            | TaskStatus::Completed
-            | TaskStatus::Cancelled
-            | TaskStatus::Skipped => None,
-        };
         TaskExecution {
             task_id: self.id.clone(),
             status: self.status.clone(),
             retry_count: self.retry_count,
-            failure_fingerprint,
+            failure_fingerprint: None,
+            claim: None,
         }
     }
 
@@ -937,7 +926,7 @@ mod tests {
     use super::{ManagedTask, TaskStatus};
 
     #[test]
-    fn managed_task_projection_preserves_shared_status_details() {
+    fn managed_task_projection_keeps_status_detail_out_of_fingerprint() {
         let mut task = ManagedTask::new("task-1", "verify projection");
         task.status = TaskStatus::Blocked("upstream verification failed".to_string());
         task.retry_count = 2;
@@ -949,9 +938,6 @@ mod tests {
             TaskStatus::Blocked("upstream verification failed".to_string())
         );
         assert_eq!(projected.execution.retry_count, 2);
-        assert_eq!(
-            projected.execution.failure_fingerprint.as_deref(),
-            Some("upstream verification failed")
-        );
+        assert_eq!(projected.execution.failure_fingerprint, None);
     }
 }
