@@ -1,10 +1,10 @@
-//! Task verification system
+//! ManagedTask verification system
 //!
 //! This module provides the `Verifier` trait and implementations for
 //! verifying task completion. Tasks cannot be marked as done without
 //! passing verification.
 
-use crate::tasks::{Task, VerificationResult, VerificationType};
+use crate::tasks::{ManagedTask, VerificationResult, VerificationType};
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ pub trait Verifier: Send + Sync {
     /// # Returns
     /// * `Ok(VerificationResult)` - Verification result (passed/failed)
     /// * `Err(String)` - Verification error (e.g., timeout, execution error)
-    async fn verify(&self, task: &Task) -> Result<VerificationResult, String>;
+    async fn verify(&self, task: &ManagedTask) -> Result<VerificationResult, String>;
 
     /// Get verifier name
     fn name(&self) -> &str;
@@ -66,7 +66,7 @@ impl CommandVerifier {
 
 #[async_trait]
 impl Verifier for CommandVerifier {
-    async fn verify(&self, task: &Task) -> Result<VerificationResult, String> {
+    async fn verify(&self, task: &ManagedTask) -> Result<VerificationResult, String> {
         let command = task
             .verification
             .command
@@ -115,7 +115,7 @@ pub struct FileExistsVerifier;
 
 #[async_trait]
 impl Verifier for FileExistsVerifier {
-    async fn verify(&self, task: &Task) -> Result<VerificationResult, String> {
+    async fn verify(&self, task: &ManagedTask) -> Result<VerificationResult, String> {
         let start = std::time::Instant::now();
 
         // Check if expected field contains file paths
@@ -189,7 +189,7 @@ impl DiffCheckVerifier {
 
 #[async_trait]
 impl Verifier for DiffCheckVerifier {
-    async fn verify(&self, task: &Task) -> Result<VerificationResult, String> {
+    async fn verify(&self, task: &ManagedTask) -> Result<VerificationResult, String> {
         let start = std::time::Instant::now();
 
         // Check if expected field contains file paths
@@ -265,7 +265,7 @@ impl TestVerifier {
 
 #[async_trait]
 impl Verifier for TestVerifier {
-    async fn verify(&self, task: &Task) -> Result<VerificationResult, String> {
+    async fn verify(&self, task: &ManagedTask) -> Result<VerificationResult, String> {
         let command = task
             .verification
             .command
@@ -303,7 +303,7 @@ pub struct HumanReviewVerifier;
 
 #[async_trait]
 impl Verifier for HumanReviewVerifier {
-    async fn verify(&self, task: &Task) -> Result<VerificationResult, String> {
+    async fn verify(&self, task: &ManagedTask) -> Result<VerificationResult, String> {
         let start = std::time::Instant::now();
 
         // For human review, we check if the task has been approved
@@ -347,7 +347,7 @@ impl LlmReviewVerifier {
     }
 
     /// Use LLM to review task completion
-    async fn llm_review(&self, task: &Task) -> Result<(bool, String), String> {
+    async fn llm_review(&self, task: &ManagedTask) -> Result<(bool, String), String> {
         // This would typically call an LLM API
         // For now, we'll simulate a basic review
         use tokio::time::{Duration, timeout};
@@ -384,7 +384,7 @@ impl LlmReviewVerifier {
 
 #[async_trait]
 impl Verifier for LlmReviewVerifier {
-    async fn verify(&self, task: &Task) -> Result<VerificationResult, String> {
+    async fn verify(&self, task: &ManagedTask) -> Result<VerificationResult, String> {
         let start = std::time::Instant::now();
         let (passed, output) = self.llm_review(task).await?;
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -430,7 +430,7 @@ pub struct NoopVerifier;
 
 #[async_trait]
 impl Verifier for NoopVerifier {
-    async fn verify(&self, _task: &Task) -> Result<VerificationResult, String> {
+    async fn verify(&self, _task: &ManagedTask) -> Result<VerificationResult, String> {
         Ok(VerificationResult {
             verification_type: VerificationType::None,
             passed: true,
@@ -448,12 +448,12 @@ impl Verifier for NoopVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::{FallbackStrategy, Task, VerificationSpec, VerificationType};
+    use crate::tasks::{FallbackStrategy, ManagedTask, VerificationSpec, VerificationType};
 
     #[tokio::test]
     async fn test_command_verifier_success() {
         let verifier = CommandVerifier::new(10);
-        let mut task = Task::new("test-task", "Test task");
+        let mut task = ManagedTask::new("test-task", "Test task");
         task.verification = VerificationSpec {
             verification_type: VerificationType::Command,
             command: Some("echo 'success'".to_string()),
@@ -473,7 +473,7 @@ mod tests {
     #[tokio::test]
     async fn test_command_verifier_failure() {
         let verifier = CommandVerifier::new(10);
-        let mut task = Task::new("test-task", "Test task");
+        let mut task = ManagedTask::new("test-task", "Test task");
         task.verification = VerificationSpec {
             verification_type: VerificationType::Command,
             command: Some("exit 1".to_string()),
@@ -492,7 +492,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_exists_verifier() {
         let verifier = FileExistsVerifier;
-        let mut task = Task::new("test-task", "Test task");
+        let mut task = ManagedTask::new("test-task", "Test task");
         task.verification = VerificationSpec {
             verification_type: VerificationType::FileExists,
             command: None,
@@ -512,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn test_noop_verifier() {
         let verifier = NoopVerifier;
-        let task = Task::new("test-task", "Test task");
+        let task = ManagedTask::new("test-task", "Test task");
 
         let result = verifier.verify(&task).await;
         assert!(result.is_ok());

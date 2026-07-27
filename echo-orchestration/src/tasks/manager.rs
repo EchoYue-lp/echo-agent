@@ -1,9 +1,10 @@
-//! Task manager
+//! ManagedTask manager
 
 use super::events::TaskEventBus;
 use super::hooks::TaskHookContext;
 use super::hooks::TaskHookRegistry;
-use super::task::{Task, TaskStatus};
+use super::runtime::TaskStatus;
+use super::task::ManagedTask;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use std::sync::Arc;
 /// DAG task collection manager, responsible for task CRUD and dependency scheduling.
 /// Uses `DashMap` for concurrency safety, can be shared across async tasks with `Arc<TaskManager>`.
 pub struct TaskManager {
-    pub(crate) tasks: DashMap<String, Task>,
+    pub(crate) tasks: DashMap<String, ManagedTask>,
     hooks: TaskHookRegistry,
     event_bus: Option<TaskEventBus>,
 }
@@ -66,7 +67,7 @@ impl TaskManager {
 
     // ── CRUD ──────────────────────────────────────────────────────────────
 
-    pub fn add_task(&self, task: Task) {
+    pub fn add_task(&self, task: ManagedTask) {
         if let Some(ref bus) = self.event_bus {
             bus.emit(super::events::TaskEvent::Created { task: task.clone() });
         }
@@ -74,7 +75,7 @@ impl TaskManager {
     }
 
     /// Get a task (clone)
-    pub fn get_task(&self, id: &str) -> Option<Task> {
+    pub fn get_task(&self, id: &str) -> Option<ManagedTask> {
         self.tasks.get(id).map(|r| r.value().clone())
     }
 
@@ -186,11 +187,11 @@ impl TaskManager {
     // ── Queries ──────────────────────────────────────────────────────────────
 
     /// Get all tasks (cloned)
-    pub fn get_all_tasks(&self) -> Vec<Task> {
+    pub fn get_all_tasks(&self) -> Vec<ManagedTask> {
         self.tasks.iter().map(|r| r.value().clone()).collect()
     }
 
-    pub fn get_pending_tasks(&self) -> Vec<Task> {
+    pub fn get_pending_tasks(&self) -> Vec<ManagedTask> {
         self.tasks
             .iter()
             .filter(|r| r.value().status == TaskStatus::Pending)
@@ -198,15 +199,15 @@ impl TaskManager {
             .collect()
     }
 
-    pub fn get_in_progress_tasks(&self) -> Vec<Task> {
+    pub fn get_in_progress_tasks(&self) -> Vec<ManagedTask> {
         self.tasks
             .iter()
-            .filter(|r| r.value().status == TaskStatus::InProgress)
+            .filter(|r| r.value().status == TaskStatus::Running)
             .map(|r| r.value().clone())
             .collect()
     }
 
-    pub fn get_completed_tasks(&self) -> Vec<Task> {
+    pub fn get_completed_tasks(&self) -> Vec<ManagedTask> {
         self.tasks
             .iter()
             .filter(|r| r.value().status == TaskStatus::Completed)
@@ -215,7 +216,7 @@ impl TaskManager {
     }
 
     /// Get all executable tasks (dependencies satisfied), returns clones
-    pub fn get_ready_tasks(&self) -> Vec<Task> {
+    pub fn get_ready_tasks(&self) -> Vec<ManagedTask> {
         self.tasks
             .iter()
             .filter(|entry| {
@@ -244,7 +245,7 @@ impl TaskManager {
     }
 
     /// Get the next task to execute
-    pub fn get_next_task(&self) -> Option<Task> {
+    pub fn get_next_task(&self) -> Option<ManagedTask> {
         let mut ready = self.get_ready_tasks();
         ready.sort_by_key(|task| std::cmp::Reverse(task.priority));
         ready.into_iter().next()
@@ -418,7 +419,7 @@ impl TaskManager {
 
     /// Get all tasks belonging to a specific run.
     /// Tasks without a run_id are excluded.
-    pub fn get_tasks_by_run(&self, run_id: &str) -> Vec<Task> {
+    pub fn get_tasks_by_run(&self, run_id: &str) -> Vec<ManagedTask> {
         self.tasks
             .iter()
             .filter(|r| r.value().run_id.as_deref() == Some(run_id))
@@ -427,7 +428,7 @@ impl TaskManager {
     }
 
     /// Get pending (non-terminal) tasks for a run.
-    pub fn get_run_pending(&self, run_id: &str) -> Vec<Task> {
+    pub fn get_run_pending(&self, run_id: &str) -> Vec<ManagedTask> {
         self.tasks
             .iter()
             .filter(|r| {

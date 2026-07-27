@@ -5,9 +5,8 @@
 //! the task DAG.
 
 use crate::tasks::{
-    CheckpointPolicy, ContextScope, OutputType, RiskLevel, RuntimeTask, RuntimeTaskExecution,
-    RuntimeTaskKind, RuntimeTaskSpec, Task, TaskInput, TaskOutput, TaskType, VerificationSpec,
-    VerificationType,
+    CheckpointPolicy, ContextScope, ManagedTask, OutputType, RiskLevel, Task, TaskExecution,
+    TaskInput, TaskKind, TaskOutput, TaskSpec, TaskType, VerificationSpec, VerificationType,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -25,7 +24,7 @@ pub struct PlanSpec {
     pub assumptions: Vec<String>,
 
     /// List of tasks in the plan
-    pub tasks: Vec<TaskSpec>,
+    pub tasks: Vec<PlanTaskSpec>,
 
     /// Dependency edges (from_task_id -> to_task_id)
     #[serde(default)]
@@ -56,9 +55,9 @@ fn default_context_budget() -> usize {
     100_000
 }
 
-/// Task specification within a plan
+/// Rich authoring specification for one task in an LLM-produced plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskSpec {
+pub struct PlanTaskSpec {
     /// Unique task identifier
     pub id: String,
 
@@ -133,10 +132,10 @@ fn default_priority() -> u8 {
     5
 }
 
-impl TaskSpec {
-    /// Convert TaskSpec to Task
-    pub fn to_task(&self) -> Task {
-        let mut task = Task::new(&self.id, &self.description)
+impl PlanTaskSpec {
+    /// Convert this authoring artifact to a framework-managed task record.
+    pub fn to_managed_task(&self) -> ManagedTask {
+        let mut task = ManagedTask::new(&self.id, &self.description)
             .with_task_type(self.task_type.clone())
             .with_acceptance_criteria(self.acceptance_criteria.clone())
             .with_inputs(self.inputs.clone())
@@ -168,7 +167,7 @@ impl TaskSpec {
     ///
     /// Rich authoring-only policy stays available in `metadata`; the runtime
     /// fields contain only semantics used by the generic DAG executor.
-    pub fn to_runtime_spec(&self, dependencies: Vec<String>) -> Result<RuntimeTaskSpec, String> {
+    pub fn to_task_spec(&self, dependencies: Vec<String>) -> Result<TaskSpec, String> {
         let authoring_metadata = serde_json::to_value(self)
             .map_err(|error| format!("failed to serialize task '{}': {error}", self.id))?;
         let required_artifacts = self
@@ -192,11 +191,11 @@ impl TaskSpec {
             Vec::new()
         };
 
-        Ok(RuntimeTaskSpec {
+        Ok(TaskSpec {
             id: self.id.clone(),
             title: self.description.clone(),
             description: self.description.clone(),
-            kind: runtime_kind_for_authoring_task(self),
+            kind: task_kind_for_plan_task(self),
             agent_role: self
                 .assigned_agent
                 .clone()
@@ -213,15 +212,15 @@ impl TaskSpec {
     }
 }
 
-fn runtime_kind_for_authoring_task(task: &TaskSpec) -> RuntimeTaskKind {
+fn task_kind_for_plan_task(task: &PlanTaskSpec) -> TaskKind {
     match task.task_type {
-        TaskType::Discovery => RuntimeTaskKind::Investigation,
-        TaskType::Implementation => RuntimeTaskKind::Implementation,
-        TaskType::Verification => RuntimeTaskKind::Verification,
+        TaskType::Discovery => TaskKind::Investigation,
+        TaskType::Implementation => TaskKind::Implementation,
+        TaskType::Verification => TaskKind::Verification,
         TaskType::Background | TaskType::Delegation if task.requires_write_access => {
-            RuntimeTaskKind::Implementation
+            TaskKind::Implementation
         }
-        TaskType::Background | TaskType::Delegation => RuntimeTaskKind::Investigation,
+        TaskType::Background | TaskType::Delegation => TaskKind::Investigation,
     }
 }
 
@@ -265,7 +264,7 @@ pub struct Milestone {
     /// Success criteria for this milestone
     pub success_criteria: Vec<String>,
 
-    /// Task IDs associated with this milestone
+    /// ManagedTask IDs associated with this milestone
     pub task_ids: Vec<String>,
 
     /// Checkpoint policy for this milestone
@@ -330,7 +329,7 @@ impl PlanSpec {
     }
 
     /// Add a task to the plan
-    pub fn add_task(&mut self, task: TaskSpec) {
+    pub fn add_task(&mut self, task: PlanTaskSpec) {
         self.tasks.push(task);
     }
 
@@ -357,7 +356,7 @@ impl PlanSpec {
     ///
     /// Only required edges block execution. Preferred and optional edges stay
     /// authoring policy and never create a second hidden ready-frontier rule.
-    pub fn to_runtime_specs(&self) -> Result<Vec<RuntimeTaskSpec>, String> {
+    pub fn to_task_specs(&self) -> Result<Vec<TaskSpec>, String> {
         let task_ids: HashSet<&str> = self.tasks.iter().map(|task| task.id.as_str()).collect();
         let mut dependencies: HashMap<&str, Vec<String>> = HashMap::new();
         for edge in &self.edges {
@@ -388,18 +387,18 @@ impl PlanSpec {
                     dependencies.remove(task.id.as_str()).unwrap_or_default();
                 task_dependencies.sort();
                 task_dependencies.dedup();
-                task.to_runtime_spec(task_dependencies)
+                task.to_task_spec(task_dependencies)
             })
             .collect()
     }
 
     /// Compile a pending runtime snapshot for the generic DAG executor.
-    pub fn to_runtime_tasks(&self) -> Result<Vec<RuntimeTask>, String> {
-        self.to_runtime_specs().map(|specs| {
+    pub fn to_tasks(&self) -> Result<Vec<Task>, String> {
+        self.to_task_specs().map(|specs| {
             specs
                 .into_iter()
-                .map(|spec| RuntimeTask {
-                    execution: RuntimeTaskExecution::pending(spec.id.clone()),
+                .map(|spec| Task {
+                    execution: TaskExecution::pending(spec.id.clone()),
                     spec,
                 })
                 .collect()
@@ -407,9 +406,9 @@ impl PlanSpec {
     }
 
     /// Convert PlanSpec to rich task records with canonical dependencies set.
-    pub fn to_tasks(&self) -> Result<Vec<Task>, String> {
-        let runtime_specs = self.to_runtime_specs()?;
-        let dependencies: HashMap<&str, &[String]> = runtime_specs
+    pub fn to_managed_tasks(&self) -> Result<Vec<ManagedTask>, String> {
+        let task_specs = self.to_task_specs()?;
+        let dependencies: HashMap<&str, &[String]> = task_specs
             .iter()
             .map(|spec| (spec.id.as_str(), spec.depends_on.as_slice()))
             .collect();
@@ -421,15 +420,15 @@ impl PlanSpec {
                     .get(spec.id.as_str())
                     .map(|items| items.to_vec())
                     .unwrap_or_default();
-                spec.to_task().with_dependencies(task_dependencies)
+                spec.to_managed_task().with_dependencies(task_dependencies)
             })
             .collect())
     }
 
     /// Get task IDs in topological order
     pub fn topological_order(&self) -> Result<Vec<String>, String> {
-        let specs = self.to_runtime_specs()?;
-        super::validator::runtime_topological_order(&specs)
+        let specs = self.to_task_specs()?;
+        super::validator::task_topological_order(&specs)
     }
 }
 

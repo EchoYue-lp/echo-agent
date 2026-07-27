@@ -1,9 +1,10 @@
-//! Task persistence layer — stores task state across runs.
+//! ManagedTask persistence layer — stores task state across runs.
 //!
 //! Uses the existing [`Store`] trait internally, so any Store implementation
 //! (in-memory, file, SQLite, etc.) works out of the box.
 
-use super::task::{Task, TaskStatus};
+use super::runtime::TaskStatus;
+use super::task::ManagedTask;
 use echo_core::error::Result;
 use echo_core::memory::store::Store;
 use futures::future::BoxFuture;
@@ -12,19 +13,19 @@ use std::sync::Arc;
 /// Trait for task persistence operations
 pub trait TaskStore: Send + Sync {
     /// Persist a single task
-    fn save_task<'a>(&'a self, task: &'a Task) -> BoxFuture<'a, Result<()>>;
+    fn save_task<'a>(&'a self, task: &'a ManagedTask) -> BoxFuture<'a, Result<()>>;
 
     /// Load a task by ID
-    fn load_task<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<Task>>>;
+    fn load_task<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<ManagedTask>>>;
 
     /// Load all tasks (with automatic pagination — no hard limit)
-    fn load_all<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Task>>>;
+    fn load_all<'a>(&'a self) -> BoxFuture<'a, Result<Vec<ManagedTask>>>;
 
     /// Delete a task by ID
     fn delete_task<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<bool>>;
 
     /// Save all tasks (batch upsert)
-    fn save_all<'a>(&'a self, tasks: &'a [Task]) -> BoxFuture<'a, Result<()>> {
+    fn save_all<'a>(&'a self, tasks: &'a [ManagedTask]) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             for task in tasks {
                 self.save_task(task).await?;
@@ -61,7 +62,7 @@ impl SqliteTaskStore {
 }
 
 impl TaskStore for SqliteTaskStore {
-    fn save_task<'a>(&'a self, task: &'a Task) -> BoxFuture<'a, Result<()>> {
+    fn save_task<'a>(&'a self, task: &'a ManagedTask) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let value = serde_json::to_value(task).map_err(|e| {
                 echo_core::error::ReactError::Other(format!("save_task serialize: {}", e))
@@ -73,7 +74,7 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
-    fn load_task<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<Task>>> {
+    fn load_task<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<ManagedTask>>> {
         Box::pin(async move {
             let item =
                 self.store.get(TASK_NAMESPACE, id).await.map_err(|e| {
@@ -92,7 +93,7 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
-    fn load_all<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Task>>> {
+    fn load_all<'a>(&'a self) -> BoxFuture<'a, Result<Vec<ManagedTask>>> {
         Box::pin(async move {
             let items = self
                 .store
@@ -102,7 +103,7 @@ impl TaskStore for SqliteTaskStore {
 
             let mut tasks = Vec::with_capacity(items.len());
             for item in items {
-                match serde_json::from_value::<Task>(item.value) {
+                match serde_json::from_value::<ManagedTask>(item.value) {
                     Ok(task) => tasks.push(task),
                     Err(e) => {
                         tracing::warn!(error = %e, key = %item.key, "Failed to parse stored task");

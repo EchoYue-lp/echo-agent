@@ -1,15 +1,13 @@
-//! Task definitions
+//! Managed task records and execution evidence.
 
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-use super::runtime::{
-    RuntimeTask, RuntimeTaskExecution, RuntimeTaskKind, RuntimeTaskSpec, RuntimeTaskStatus,
-};
+use super::runtime::{Task, TaskExecution, TaskKind, TaskSpec, TaskStatus};
 
-// ── Enhanced Task Types (Step 1) ──────────────────────────────────────────────
+// ── Managed task types ──────────────────────────────────────────────────────
 
-/// Task type classification
+/// Managed task type classification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -27,7 +25,7 @@ pub enum TaskType {
     Delegation,
 }
 
-/// Task input specification
+/// ManagedTask input specification
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskInput {
     pub name: String,
@@ -46,7 +44,7 @@ pub enum InputType {
     Context,
 }
 
-/// Task output specification
+/// ManagedTask output specification
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskOutput {
     pub name: String,
@@ -168,7 +166,7 @@ pub enum CheckpointPolicy {
     Never,
 }
 
-/// Task execution attempt record
+/// ManagedTask execution attempt record
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskAttempt {
     pub attempt_id: u32,
@@ -272,7 +270,7 @@ pub struct VerificationResult {
     pub retry_count: u32,
 }
 
-/// Task state with execution details
+/// ManagedTask state with execution details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskState {
     pub task_id: String,
@@ -290,110 +288,19 @@ pub struct TaskState {
     pub checkpoint_at: u64,
 }
 
-/// Task status
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum TaskStatus {
-    /// Pending
-    Pending,
-    /// In progress
-    InProgress,
-    /// Completed
-    Completed,
-    /// Cancelled
-    Cancelled,
-    /// Failed
-    Failed(String),
-    /// Blocked
-    Blocked(String),
-    /// Timed out
-    TimedOut { error: String },
-    /// Retrying
-    Retrying { attempt: u32, last_error: String },
-    /// Deliberately skipped because the task is no longer relevant.
-    Skipped,
-    /// Paused by the embedding application pending an external decision.
-    Paused(String),
-}
-
-impl TaskStatus {
-    /// Whether this is a terminal state (will not change further)
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            TaskStatus::Completed
-                | TaskStatus::Cancelled
-                | TaskStatus::Failed(_)
-                | TaskStatus::TimedOut { .. }
-                | TaskStatus::Skipped
-        )
-    }
-
-    /// Whether the state transition is valid
-    pub fn can_transition_to(&self, target: &TaskStatus) -> bool {
-        match self {
-            TaskStatus::Pending => {
-                matches!(
-                    target,
-                    TaskStatus::InProgress
-                        | TaskStatus::Cancelled
-                        | TaskStatus::Blocked(_)
-                        | TaskStatus::Skipped
-                        | TaskStatus::Paused(_)
-                )
-            }
-            TaskStatus::InProgress => matches!(
-                target,
-                TaskStatus::Completed
-                    | TaskStatus::Cancelled
-                    | TaskStatus::Failed(_)
-                    | TaskStatus::TimedOut { .. }
-                    | TaskStatus::Retrying { .. }
-                    | TaskStatus::Blocked(_)
-                    | TaskStatus::Paused(_)
-            ),
-            TaskStatus::Retrying { .. } => matches!(
-                target,
-                TaskStatus::Completed
-                    | TaskStatus::Cancelled
-                    | TaskStatus::Failed(_)
-                    | TaskStatus::TimedOut { .. }
-                    | TaskStatus::Retrying { .. }
-            ),
-            TaskStatus::Blocked(_) => matches!(target, TaskStatus::Pending | TaskStatus::Cancelled),
-            TaskStatus::Paused(_) => {
-                matches!(target, TaskStatus::InProgress | TaskStatus::Cancelled)
-            }
-            _ => false,
-        }
-    }
-
-    /// Execute state transition, return new state after validating legality
-    ///
-    /// If the transition is invalid, return `Err` with detailed error info.
-    pub fn transition_to(&self, target: TaskStatus) -> Result<TaskStatus, String> {
-        if !self.can_transition_to(&target) {
-            return Err(format!(
-                "Invalid task state transition: {:?} → {:?}",
-                self, target
-            ));
-        }
-        Ok(target)
-    }
-}
-
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Task {
-    /// Task ID
+pub struct ManagedTask {
+    /// ManagedTask ID
     pub id: String,
-    /// Task description
+    /// ManagedTask description
     pub description: String,
-    /// Task status
+    /// ManagedTask status
     pub status: TaskStatus,
     /// List of dependent task IDs
     pub dependencies: Vec<String>,
     /// Priority (0-10, 10 is highest)
     pub priority: u8,
-    /// Task result
+    /// ManagedTask result
     pub result: Option<String>,
     /// Execution rationale or notes
     pub reasoning: Option<String>,
@@ -404,7 +311,7 @@ pub struct Task {
     pub parent_id: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
-    /// Task topic/title (for logging and events)
+    /// ManagedTask topic/title (for logging and events)
     pub subject: String,
     /// Timeout in seconds, 0 means no timeout
     pub timeout_secs: u64,
@@ -434,7 +341,7 @@ pub struct Task {
     pub metadata: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 
     // ── Enhanced Fields (Step 1) ────────────────────────────────────────────
-    /// Task type classification (discovery/implementation/verification/background/delegation)
+    /// ManagedTask type classification (discovery/implementation/verification/background/delegation)
     pub task_type: TaskType,
 
     /// Acceptance criteria - conditions that must be met for task completion
@@ -470,10 +377,10 @@ pub struct Task {
     /// Execution attempt history
     pub attempts: Vec<TaskAttempt>,
 
-    /// Task start timestamp
+    /// ManagedTask start timestamp
     pub started_at: Option<u64>,
 
-    /// Task completion timestamp
+    /// ManagedTask completion timestamp
     pub completed_at: Option<u64>,
 
     /// Structured error code (for programmatic error handling)
@@ -504,7 +411,7 @@ pub struct Task {
     /// Context summary for task resumption
     pub context_summary: Option<String>,
 
-    // ── Task metadata fields ────────────────────────────────────────────────
+    // ── ManagedTask metadata fields ────────────────────────────────────────────────
     /// Run ID this task belongs to (run-level isolation).
     /// When Some, this task is scoped to a specific run; when None, it's a
     /// standalone framework-level task.
@@ -521,7 +428,7 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_role: Option<String>,
 
-    /// Task kind classification: "read_only_review" / "investigation" /
+    /// ManagedTask kind classification: "read_only_review" / "investigation" /
     /// "test_plan" / "implementation" / "debugging" / "verification" /
     /// "review" / "summary". Determines read-only vs mutating dispatch path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -537,9 +444,9 @@ pub struct Task {
     pub summary: Option<String>,
 }
 
-impl std::fmt::Debug for Task {
+impl std::fmt::Debug for ManagedTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Task")
+        f.debug_struct("ManagedTask")
             .field("id", &self.id)
             .field("description", &self.description)
             .field("status", &self.status)
@@ -586,7 +493,7 @@ impl std::fmt::Debug for Task {
     }
 }
 
-impl PartialEq for Task {
+impl PartialEq for ManagedTask {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
             && self.description == other.description
@@ -629,7 +536,7 @@ impl PartialEq for Task {
     }
 }
 
-impl Task {
+impl ManagedTask {
     pub fn new(id: impl Into<String>, description: impl Into<String>) -> Self {
         let description = description.into();
         Self {
@@ -699,21 +606,21 @@ impl Task {
     /// Project this rich task record into the canonical immutable runtime spec.
     ///
     /// TaskExecutor-specific attempt, hook, verifier, and persistence details
-    /// stay on `Task`; DAG scheduling consumes only this product-neutral view.
-    pub fn runtime_spec(&self) -> RuntimeTaskSpec {
+    /// stay on `ManagedTask`; DAG scheduling consumes only this product-neutral view.
+    pub fn task_spec(&self) -> TaskSpec {
         let fallback_kind = match self.task_type {
-            TaskType::Discovery => RuntimeTaskKind::Investigation,
-            TaskType::Implementation => RuntimeTaskKind::Implementation,
-            TaskType::Verification => RuntimeTaskKind::Verification,
+            TaskType::Discovery => TaskKind::Investigation,
+            TaskType::Implementation => TaskKind::Implementation,
+            TaskType::Verification => TaskKind::Verification,
             TaskType::Background | TaskType::Delegation if self.requires_write_access => {
-                RuntimeTaskKind::Implementation
+                TaskKind::Implementation
             }
-            TaskType::Background | TaskType::Delegation => RuntimeTaskKind::Investigation,
+            TaskType::Background | TaskType::Delegation => TaskKind::Investigation,
         };
         let kind = self
             .kind
             .as_deref()
-            .and_then(|value| RuntimeTaskKind::from_str(value).ok())
+            .and_then(|value| TaskKind::from_str(value).ok())
             .unwrap_or(fallback_kind);
         let title = self
             .title
@@ -748,7 +655,7 @@ impl Task {
             Vec::new()
         };
 
-        RuntimeTaskSpec {
+        TaskSpec {
             id: self.id.clone(),
             title,
             description: self.description.clone(),
@@ -768,43 +675,33 @@ impl Task {
         }
     }
 
-    /// Project mutable execution state into the canonical runtime state.
-    pub fn runtime_execution(&self) -> RuntimeTaskExecution {
-        let (status, failure_fingerprint) = match &self.status {
-            TaskStatus::Pending => (RuntimeTaskStatus::Pending, None),
-            TaskStatus::InProgress | TaskStatus::Retrying { .. } => {
-                (RuntimeTaskStatus::Running, None)
-            }
-            TaskStatus::Completed => (RuntimeTaskStatus::Completed, None),
-            TaskStatus::Cancelled => (RuntimeTaskStatus::Cancelled, None),
+    /// Project mutable execution state without translating the shared status.
+    pub fn task_execution(&self) -> TaskExecution {
+        let failure_fingerprint = match &self.status {
             TaskStatus::Failed(error)
             | TaskStatus::Blocked(error)
             | TaskStatus::Paused(error)
-            | TaskStatus::TimedOut { error } => {
-                let runtime_status =
-                    if matches!(self.status, TaskStatus::Blocked(_) | TaskStatus::Paused(_)) {
-                        RuntimeTaskStatus::Blocked
-                    } else {
-                        RuntimeTaskStatus::Failed
-                    };
-                (runtime_status, Some(error.clone()))
-            }
-            TaskStatus::Skipped => (RuntimeTaskStatus::Skipped, None),
+            | TaskStatus::TimedOut { error } => Some(error.clone()),
+            TaskStatus::Retrying { last_error, .. } => Some(last_error.clone()),
+            TaskStatus::Pending
+            | TaskStatus::Running
+            | TaskStatus::Completed
+            | TaskStatus::Cancelled
+            | TaskStatus::Skipped => None,
         };
-
-        RuntimeTaskExecution {
+        TaskExecution {
             task_id: self.id.clone(),
-            status,
+            status: self.status.clone(),
             retry_count: self.retry_count,
             failure_fingerprint,
         }
     }
 
-    /// Canonical runtime node used by the framework DAG executor.
-    pub fn to_runtime_task(&self) -> RuntimeTask {
-        RuntimeTask {
-            spec: self.runtime_spec(),
-            execution: self.runtime_execution(),
+    /// Canonical task node used by the framework DAG executor.
+    pub fn to_task(&self) -> Task {
+        Task {
+            spec: self.task_spec(),
+            execution: self.task_execution(),
         }
     }
 
@@ -864,7 +761,7 @@ impl Task {
     /// #[derive(Serialize)]
     /// struct ResearchParams { topic: String, max_papers: u32 }
     ///
-    /// let task = Task::new("r1", "Research task")
+    /// let task = ManagedTask::new("r1", "Research task")
     ///     .with_metadata(ResearchParams { topic: "AI".into(), max_papers: 20 });
     ///
     /// // Later, retrieve typed access:
@@ -975,7 +872,7 @@ impl Task {
     /// Record task start
     pub fn mark_started(&mut self) {
         self.started_at = Some(super::time::now_secs());
-        self.status = TaskStatus::InProgress;
+        self.status = TaskStatus::Running;
         self.updated_at = super::time::now_secs();
     }
 
@@ -1032,5 +929,29 @@ impl Task {
         if let Some(err) = error {
             self.reasoning = Some(format!("Attempt {} failed: {}", attempt, err));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ManagedTask, TaskStatus};
+
+    #[test]
+    fn managed_task_projection_preserves_shared_status_details() {
+        let mut task = ManagedTask::new("task-1", "verify projection");
+        task.status = TaskStatus::Blocked("upstream verification failed".to_string());
+        task.retry_count = 2;
+
+        let projected = task.to_task();
+
+        assert_eq!(
+            projected.execution.status,
+            TaskStatus::Blocked("upstream verification failed".to_string())
+        );
+        assert_eq!(projected.execution.retry_count, 2);
+        assert_eq!(
+            projected.execution.failure_fingerprint.as_deref(),
+            Some("upstream verification failed")
+        );
     }
 }

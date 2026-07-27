@@ -16,8 +16,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::runtime::{
-    ConcurrencyLimits, DagExecutionState, NestedDelegationPolicy, RuntimeTask, TaskId,
-    TaskSubagentContext,
+    ConcurrencyLimits, DagExecutionState, NestedDelegationPolicy, Task, TaskId, TaskSubagentContext,
 };
 use crate::planning::PlanValidator;
 
@@ -25,7 +24,7 @@ use crate::planning::PlanValidator;
 #[derive(Debug, Clone)]
 pub struct RuntimePlanSnapshot {
     pub revision: u64,
-    pub tasks: Vec<RuntimeTask>,
+    pub tasks: Vec<Task>,
 }
 
 /// Product decision when a task cannot proceed automatically.
@@ -82,33 +81,29 @@ pub trait RuntimeDagController: Send + Sync + 'static {
     /// The default dispatches the whole frontier. Applications may defer tasks
     /// for product-specific resource or file-ownership policy, but must return
     /// at least one id when `ready_task_ids` is non-empty.
-    fn select_ready_wave(
-        &self,
-        _tasks: &[RuntimeTask],
-        ready_task_ids: Vec<TaskId>,
-    ) -> Vec<TaskId> {
+    fn select_ready_wave(&self, _tasks: &[Task], ready_task_ids: Vec<TaskId>) -> Vec<TaskId> {
         ready_task_ids
     }
 
     async fn dispatch_task(
         &self,
         context: TaskSubagentContext,
-        task: RuntimeTask,
+        task: Task,
     ) -> Result<Self::DispatchOutput>;
 
     async fn resolve_dispatch(
         &self,
         run_id: &str,
-        task: RuntimeTask,
+        task: Task,
         dispatch: Result<Self::DispatchOutput>,
     ) -> Result<RuntimeTaskResolution>;
 
-    async fn block_task(&self, run_id: &str, task: &RuntimeTask, reason: &str) -> Result<()>;
+    async fn block_task(&self, run_id: &str, task: &Task, reason: &str) -> Result<()>;
 
     async fn failed_task_disposition(
         &self,
         _run_id: &str,
-        _task: &RuntimeTask,
+        _task: &Task,
         all_unfinished_failed_or_blocked: bool,
     ) -> Result<RuntimeStopDisposition> {
         Ok(if all_unfinished_failed_or_blocked {
@@ -193,7 +188,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             // Every loop boundary is a safe point: all locally-dispatched
             // handles from the previous wave have been joined and resolved.
             let snapshot = self.controller.load_snapshot(run_id).await?;
-            if let Err(errors) = self.validator.validate_runtime_snapshot(&snapshot.tasks) {
+            if let Err(errors) = self.validator.validate_task_snapshot(&snapshot.tasks) {
                 return Err(ReactError::Other(format!(
                     "invalid runtime plan snapshot: {}",
                     errors.join("; ")
@@ -278,7 +273,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 .select_ready_wave(&tasks, ready_task_ids.clone());
             let selected_ids = validate_selected_wave(&ready_task_ids, selected_ids)?;
             let selected_set: HashSet<&str> = selected_ids.iter().map(String::as_str).collect();
-            let selected_tasks: Vec<RuntimeTask> = tasks
+            let selected_tasks: Vec<Task> = tasks
                 .iter()
                 .filter(|task| selected_set.contains(task.spec.id.as_str()))
                 .cloned()
@@ -425,7 +420,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::tasks::{RuntimeTaskKind, RuntimeTaskStatus};
+    use crate::tasks::{TaskKind, TaskStatus};
 
     #[derive(Default)]
     struct ScriptedController {
@@ -436,14 +431,14 @@ mod tests {
     }
 
     impl ScriptedController {
-        fn with_tasks(tasks: Vec<RuntimeTask>) -> Self {
+        fn with_tasks(tasks: Vec<Task>) -> Self {
             Self {
                 snapshot: Mutex::new(Some(RuntimePlanSnapshot { revision: 1, tasks })),
                 ..Self::default()
             }
         }
 
-        fn statuses(&self) -> HashMap<TaskId, RuntimeTaskStatus> {
+        fn statuses(&self) -> HashMap<TaskId, TaskStatus> {
             self.snapshot
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -452,7 +447,7 @@ mod tests {
                     snapshot
                         .tasks
                         .iter()
-                        .map(|task| (task.spec.id.clone(), task.execution.status))
+                        .map(|task| (task.spec.id.clone(), task.execution.status.clone()))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -474,7 +469,7 @@ mod tests {
         async fn dispatch_task(
             &self,
             _context: TaskSubagentContext,
-            task: RuntimeTask,
+            task: Task,
         ) -> Result<Self::DispatchOutput> {
             self.order
                 .lock()
@@ -495,7 +490,7 @@ mod tests {
         async fn resolve_dispatch(
             &self,
             _run_id: &str,
-            task: RuntimeTask,
+            task: Task,
             dispatch: Result<Self::DispatchOutput>,
         ) -> Result<RuntimeTaskResolution> {
             let mut snapshot = self
@@ -505,9 +500,9 @@ mod tests {
             let snapshot = snapshot
                 .as_mut()
                 .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
-            let status = match dispatch {
-                Ok(_) => RuntimeTaskStatus::Completed,
-                Err(_) => RuntimeTaskStatus::Failed,
+            let status = match &dispatch {
+                Ok(_) => TaskStatus::Completed,
+                Err(error) => TaskStatus::Failed(error.to_string()),
             };
             if let Some(current) = snapshot
                 .tasks
@@ -526,7 +521,7 @@ mod tests {
                 snapshot.revision = snapshot.revision.saturating_add(1);
                 snapshot.tasks.push(runtime_task(
                     "inserted",
-                    RuntimeTaskStatus::Pending,
+                    TaskStatus::Pending,
                     &[task.spec.id.as_str()],
                 ));
             }
@@ -539,7 +534,7 @@ mod tests {
             })
         }
 
-        async fn block_task(&self, _run_id: &str, task: &RuntimeTask, _reason: &str) -> Result<()> {
+        async fn block_task(&self, _run_id: &str, task: &Task, reason: &str) -> Result<()> {
             let mut snapshot = self
                 .snapshot
                 .lock()
@@ -550,19 +545,19 @@ mod tests {
                     .iter_mut()
                     .find(|item| item.spec.id == task.spec.id)
             }) {
-                current.execution.status = RuntimeTaskStatus::Blocked;
+                current.execution.status = TaskStatus::Blocked(reason.to_string());
             }
             Ok(())
         }
     }
 
-    fn runtime_task(id: &str, status: RuntimeTaskStatus, dependencies: &[&str]) -> RuntimeTask {
-        RuntimeTask {
-            spec: crate::tasks::RuntimeTaskSpec {
+    fn runtime_task(id: &str, status: TaskStatus, dependencies: &[&str]) -> Task {
+        Task {
+            spec: crate::tasks::TaskSpec {
                 id: id.to_string(),
                 title: id.to_string(),
                 description: format!("execute {id}"),
-                kind: RuntimeTaskKind::Investigation,
+                kind: TaskKind::Investigation,
                 agent_role: "explorer".to_string(),
                 depends_on: dependencies
                     .iter()
@@ -576,7 +571,7 @@ mod tests {
                 max_retries: 1,
                 metadata: serde_json::Value::Null,
             },
-            execution: crate::tasks::RuntimeTaskExecution {
+            execution: crate::tasks::TaskExecution {
                 task_id: id.to_string(),
                 status,
                 retry_count: 0,
@@ -588,8 +583,8 @@ mod tests {
     #[tokio::test]
     async fn executor_follows_dependencies_and_safe_point_revision() -> Result<()> {
         let controller = Arc::new(ScriptedController::with_tasks(vec![
-            runtime_task("a", RuntimeTaskStatus::Pending, &[]),
-            runtime_task("b", RuntimeTaskStatus::Pending, &["a"]),
+            runtime_task("a", TaskStatus::Pending, &[]),
+            runtime_task("b", TaskStatus::Pending, &["a"]),
         ]));
         *controller
             .insert_after
@@ -627,7 +622,7 @@ mod tests {
     async fn executor_treats_skipped_tasks_as_resolved() -> Result<()> {
         let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
             "skipped",
-            RuntimeTaskStatus::Skipped,
+            TaskStatus::Skipped,
             &[],
         )]));
         let executor = RuntimeDagExecutor::new(controller, RuntimeDagExecutorConfig::default());
@@ -642,7 +637,7 @@ mod tests {
     async fn executor_treats_cancelled_snapshot_as_interrupted() -> Result<()> {
         let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
             "cancelled",
-            RuntimeTaskStatus::Cancelled,
+            TaskStatus::Cancelled,
             &[],
         )]));
         let executor = RuntimeDagExecutor::new(controller, RuntimeDagExecutorConfig::default());
@@ -656,8 +651,8 @@ mod tests {
     #[tokio::test]
     async fn executor_blocks_downstream_and_fails_exhausted_graph() -> Result<()> {
         let controller = Arc::new(ScriptedController::with_tasks(vec![
-            runtime_task("a", RuntimeTaskStatus::Pending, &[]),
-            runtime_task("b", RuntimeTaskStatus::Pending, &["a"]),
+            runtime_task("a", TaskStatus::Pending, &[]),
+            runtime_task("b", TaskStatus::Pending, &["a"]),
         ]));
         controller
             .fail
@@ -678,7 +673,9 @@ mod tests {
         );
         assert_eq!(
             controller.statuses().get("b"),
-            Some(&RuntimeTaskStatus::Blocked)
+            Some(&TaskStatus::Blocked(
+                "blocked: upstream task failed".to_string()
+            ))
         );
         Ok(())
     }

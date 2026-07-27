@@ -1,4 +1,4 @@
-//! Task executor — parallel execution with timeout, retry, and cancellation support
+//! ManagedTask executor — parallel execution with timeout, retry, and cancellation support
 //!
 //! ## Architecture
 //!
@@ -42,13 +42,14 @@
 use super::hooks::{RetryDecision, TaskHookRegistry};
 use super::manager::TaskManager;
 use super::replanner::Replanner;
-use super::runtime::{ConcurrencyLimits, NestedDelegationPolicy, RuntimeTask, TaskSubagentContext};
+use super::runtime::TaskStatus;
+use super::runtime::{ConcurrencyLimits, NestedDelegationPolicy, Task, TaskSubagentContext};
 use super::runtime_executor::{
     RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome,
     RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskResolution,
 };
 use super::scheduler::TaskScheduler;
-use super::task::{Task, TaskStatus};
+use super::task::ManagedTask;
 use super::verifier::Verifier;
 use crate::planning::PlanValidator;
 use crate::tasks::BackgroundCheckpointStore;
@@ -141,7 +142,7 @@ impl TaskExecutorConfig {
 /// Result of task execution
 #[derive(Debug, Clone)]
 pub struct TaskExecutionResult {
-    /// Task ID
+    /// ManagedTask ID
     pub task_id: String,
     /// Final status
     pub status: TaskStatus,
@@ -209,9 +210,9 @@ impl TaskExecutionResult {
 /// so the executor can make informed decisions.
 #[derive(Debug, Clone)]
 pub struct TaskContext {
-    /// Task ID
+    /// ManagedTask ID
     pub task_id: String,
-    /// Task description
+    /// ManagedTask description
     pub description: String,
     /// Results from completed upstream dependencies (task_id → output)
     pub upstream_results: Vec<(String, String)>,
@@ -352,7 +353,7 @@ impl ManagedTaskDagController {
         std::mem::take(&mut *self.results.lock().await)
     }
 
-    async fn persist_task(&self, task: &Task) -> Result<()> {
+    async fn persist_task(&self, task: &ManagedTask) -> Result<()> {
         if let Some(store) = self.executor.task_store.as_ref() {
             store.save_task(task).await?;
         }
@@ -479,7 +480,7 @@ impl TaskExecutor {
     ///
     /// Returns the number of tasks executed
     pub async fn execute_ready_tasks(&self) -> Result<Vec<TaskExecutionResult>> {
-        let mut ready_tasks: Vec<Task> = self.task_manager.get_ready_tasks();
+        let mut ready_tasks: Vec<ManagedTask> = self.task_manager.get_ready_tasks();
 
         if ready_tasks.is_empty() {
             return Ok(Vec::new());
@@ -513,7 +514,7 @@ impl TaskExecutor {
     /// serial-sequence tasks run one at a time.
     async fn execute_with_scheduler(
         &self,
-        ready_tasks: Vec<Task>,
+        ready_tasks: Vec<ManagedTask>,
         scheduler: &TaskScheduler,
     ) -> Result<Vec<TaskExecutionResult>> {
         let plan = scheduler.schedule(&ready_tasks);
@@ -534,15 +535,15 @@ impl TaskExecutor {
             "Executing ready tasks with scheduler"
         );
 
-        // Build a lookup: task ID → Task for quick access
-        let task_map: std::collections::HashMap<String, Task> =
+        // Build a lookup: task ID → ManagedTask for quick access
+        let task_map: std::collections::HashMap<String, ManagedTask> =
             ready_tasks.into_iter().map(|t| (t.id.clone(), t)).collect();
 
         let mut all_results = Vec::new();
 
         // 1. Execute parallel groups sequentially (group-internal concurrency)
         for group_ids in &plan.parallel_groups {
-            let group_tasks: Vec<Task> = group_ids
+            let group_tasks: Vec<ManagedTask> = group_ids
                 .iter()
                 .filter_map(|id| task_map.get(id).cloned())
                 .collect();
@@ -569,7 +570,10 @@ impl TaskExecutor {
     }
 
     /// Spawn a batch of tasks to run concurrently (subject to semaphore).
-    async fn spawn_parallel_batch(&self, tasks: Vec<Task>) -> Result<Vec<TaskExecutionResult>> {
+    async fn spawn_parallel_batch(
+        &self,
+        tasks: Vec<ManagedTask>,
+    ) -> Result<Vec<TaskExecutionResult>> {
         let mut handles = Vec::with_capacity(tasks.len());
 
         for task in tasks {
@@ -662,7 +666,11 @@ impl TaskExecutor {
     }
 
     /// Execute a single task with semaphore permit, returning its result.
-    async fn spawn_and_run_single(&self, task: Task, _max_concurrent: u32) -> TaskExecutionResult {
+    async fn spawn_and_run_single(
+        &self,
+        task: ManagedTask,
+        _max_concurrent: u32,
+    ) -> TaskExecutionResult {
         let permit = self
             .semaphore
             .clone()
@@ -719,7 +727,7 @@ impl TaskExecutor {
     /// adapter deliberately does not acquire the legacy batch semaphore.
     async fn execute_selected_task(
         &self,
-        task: Task,
+        task: ManagedTask,
         parent_cancel: CancellationToken,
     ) -> TaskExecutionResult {
         let task_id = task.id.clone();
@@ -763,7 +771,7 @@ impl TaskExecutor {
     // separate executor refactor, not part of workspace migration.
     #[allow(clippy::too_many_arguments)]
     async fn run_task_with_retry(
-        task: Task,
+        task: ManagedTask,
         manager: Arc<TaskManager>,
         config: TaskExecutorConfig,
         execute_fn: Option<TaskExecuteFn>,
@@ -783,8 +791,8 @@ impl TaskExecutor {
         let mut current_attempt = task.retry_count + 1;
         let start = Instant::now();
 
-        // Update status to InProgress
-        let _ = manager.update_task_status(&task_id, TaskStatus::InProgress);
+        // Update status to Running
+        let _ = manager.update_task_status(&task_id, TaskStatus::Running);
 
         // Call before_execute hook
         if config.enable_hooks
@@ -1203,7 +1211,7 @@ impl TaskExecutor {
     /// Returns (successful_results, failed_errors).
     /// Only includes tasks that have reached a terminal state.
     fn collect_upstream_results_with_errors(
-        task: &Task,
+        task: &ManagedTask,
         manager: &Arc<TaskManager>,
     ) -> UpstreamResults {
         let mut results = Vec::new();
@@ -1392,7 +1400,7 @@ impl TaskExecutor {
 
     /// Resume incomplete tasks from a persistent task store after a process restart.
     ///
-    /// Tasks that were `InProgress` when the process died are reset to `Pending`
+    /// Tasks that were `Running` when the process died are reset to `Pending`
     /// so the executor can pick them up. The `retry_count` is preserved so
     /// retry logic continues from where it left off.
     ///
@@ -1406,7 +1414,7 @@ impl TaskExecutor {
             .ok_or_else(|| ReactError::Other("No task store configured".into()))?;
 
         let all_tasks = store.load_all().await?;
-        let incomplete: Vec<super::Task> = all_tasks
+        let incomplete: Vec<super::ManagedTask> = all_tasks
             .into_iter()
             .filter(|t| !t.status.is_terminal())
             .collect();
@@ -1424,8 +1432,8 @@ impl TaskExecutor {
 
         // Re-add incomplete tasks to the TaskManager
         for mut task in incomplete {
-            // Reset InProgress → Pending so execute_ready_tasks picks them up
-            if matches!(task.status, TaskStatus::InProgress) {
+            // Reset Running → Pending so execute_ready_tasks picks them up
+            if matches!(task.status, TaskStatus::Running) {
                 task.status = TaskStatus::Pending;
             }
             self.task_manager.add_task(task);
@@ -1447,16 +1455,12 @@ impl RuntimeDagController for ManagedTaskDagController {
             // TaskManager is an in-memory authority without revision commits.
             // The kernel still reloads it at every safe point.
             revision: 0,
-            tasks: tasks.iter().map(Task::to_runtime_task).collect(),
+            tasks: tasks.iter().map(ManagedTask::to_task).collect(),
         })
     }
 
-    fn select_ready_wave(
-        &self,
-        _tasks: &[RuntimeTask],
-        ready_task_ids: Vec<String>,
-    ) -> Vec<String> {
-        let mut ready_tasks: Vec<Task> = ready_task_ids
+    fn select_ready_wave(&self, _tasks: &[Task], ready_task_ids: Vec<String>) -> Vec<String> {
+        let mut ready_tasks: Vec<ManagedTask> = ready_task_ids
             .iter()
             .filter_map(|task_id| self.executor.task_manager.get_task(task_id))
             .collect();
@@ -1487,7 +1491,7 @@ impl RuntimeDagController for ManagedTaskDagController {
     async fn dispatch_task(
         &self,
         context: TaskSubagentContext,
-        runtime_task: RuntimeTask,
+        runtime_task: Task,
     ) -> Result<Self::DispatchOutput> {
         let task = self
             .executor
@@ -1531,16 +1535,17 @@ impl RuntimeDagController for ManagedTaskDagController {
                 duration: Duration::ZERO,
                 attempts: task.retry_count,
             }),
-            TaskStatus::InProgress | TaskStatus::Retrying { .. } => Err(ReactError::Other(
-                format!("runtime-selected task '{}' is already running", task.id),
-            )),
+            TaskStatus::Running | TaskStatus::Retrying { .. } => Err(ReactError::Other(format!(
+                "runtime-selected task '{}' is already running",
+                task.id
+            ))),
         }
     }
 
     async fn resolve_dispatch(
         &self,
         _run_id: &str,
-        runtime_task: RuntimeTask,
+        runtime_task: Task,
         dispatch: Result<Self::DispatchOutput>,
     ) -> Result<RuntimeTaskResolution> {
         let result = match dispatch {
@@ -1551,11 +1556,11 @@ impl RuntimeDagController for ManagedTaskDagController {
                     if matches!(task.status, TaskStatus::Pending) {
                         self.executor
                             .task_manager
-                            .update_task_status(&task.id, TaskStatus::InProgress)
+                            .update_task_status(&task.id, TaskStatus::Running)
                             .map_err(ReactError::Other)?;
                     }
                     if let Some(current) = self.executor.task_manager.get_task(&task.id)
-                        && matches!(current.status, TaskStatus::InProgress)
+                        && matches!(current.status, TaskStatus::Running)
                     {
                         self.executor
                             .task_manager
@@ -1604,20 +1609,18 @@ impl RuntimeDagController for ManagedTaskDagController {
                 error,
                 disposition: RuntimeStopDisposition::Pause,
             }),
-            TaskStatus::InProgress | TaskStatus::Retrying { .. } => {
-                Err(ReactError::Other(format!(
-                    "task '{}' remained running after dispatch resolved",
-                    runtime_task.spec.id
-                )))
-            }
+            TaskStatus::Running | TaskStatus::Retrying { .. } => Err(ReactError::Other(format!(
+                "task '{}' remained running after dispatch resolved",
+                runtime_task.spec.id
+            ))),
         }
     }
 
-    async fn block_task(&self, _run_id: &str, task: &RuntimeTask, reason: &str) -> Result<()> {
+    async fn block_task(&self, _run_id: &str, task: &Task, reason: &str) -> Result<()> {
         let Some(current) = self.executor.task_manager.get_task(&task.spec.id) else {
             return Ok(());
         };
-        if matches!(current.status, TaskStatus::Pending | TaskStatus::InProgress) {
+        if matches!(current.status, TaskStatus::Pending | TaskStatus::Running) {
             self.executor
                 .task_manager
                 .update_task_status(&task.spec.id, TaskStatus::Blocked(reason.to_string()))
@@ -1632,7 +1635,7 @@ impl RuntimeDagController for ManagedTaskDagController {
     async fn failed_task_disposition(
         &self,
         _run_id: &str,
-        _task: &RuntimeTask,
+        _task: &Task,
         _all_unfinished_failed_or_blocked: bool,
     ) -> Result<RuntimeStopDisposition> {
         Ok(RuntimeStopDisposition::Fail)
@@ -1640,7 +1643,7 @@ impl RuntimeDagController for ManagedTaskDagController {
 
     async fn interruption_outcome(&self, _run_id: &str) -> Result<RuntimeDagOutcome> {
         self.executor.cancel_all();
-        let cancelled_tasks: Vec<Task> = self
+        let cancelled_tasks: Vec<ManagedTask> = self
             .executor
             .task_manager
             .get_all_tasks()
@@ -1669,27 +1672,27 @@ mod tests {
         use TaskStatus::*;
 
         // Valid transitions
-        assert!(Pending.can_transition_to(&InProgress));
+        assert!(Pending.can_transition_to(&Running));
         assert!(Pending.can_transition_to(&Cancelled));
-        assert!(InProgress.can_transition_to(&Completed));
-        assert!(InProgress.can_transition_to(&Failed("test".into())));
+        assert!(Running.can_transition_to(&Completed));
+        assert!(Running.can_transition_to(&Failed("test".into())));
 
         // Invalid transitions
-        assert!(!Completed.can_transition_to(&InProgress));
-        assert!(!Failed("test".into()).can_transition_to(&InProgress));
-        assert!(!Pending.can_transition_to(&Completed)); // Must go through InProgress
+        assert!(!Completed.can_transition_to(&Running));
+        assert!(!Failed("test".into()).can_transition_to(&Running));
+        assert!(!Pending.can_transition_to(&Completed)); // Must go through Running
     }
 
     #[test]
     fn test_transition_to_valid() {
         use TaskStatus::*;
 
-        // Valid: Pending → InProgress → Completed
-        let result = Pending.transition_to(InProgress);
+        // Valid: Pending → Running → Completed
+        let result = Pending.transition_to(Running);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), InProgress);
+        assert_eq!(result.unwrap(), Running);
 
-        let result = InProgress.transition_to(Completed);
+        let result = Running.transition_to(Completed);
         assert!(result.is_ok());
     }
 
@@ -1697,11 +1700,11 @@ mod tests {
     fn test_transition_to_invalid() {
         use TaskStatus::*;
 
-        // Invalid: Completed → InProgress
-        let result = Completed.transition_to(InProgress);
+        // Invalid: Completed → Running
+        let result = Completed.transition_to(Running);
         assert!(result.is_err());
 
-        // Invalid: Pending → Completed (must go through InProgress)
+        // Invalid: Pending → Completed (must go through Running)
         let result = Pending.transition_to(Completed);
         assert!(result.is_err());
     }
@@ -1709,19 +1712,19 @@ mod tests {
     #[test]
     fn test_manager_update_task_validates() {
         let manager = TaskManager::new();
-        manager.add_task(Task::new("t1", "Test"));
+        manager.add_task(ManagedTask::new("t1", "Test"));
 
-        // Valid: Pending → InProgress
-        assert!(manager.update_task("t1", TaskStatus::InProgress).is_ok());
+        // Valid: Pending → Running
+        assert!(manager.update_task("t1", TaskStatus::Running).is_ok());
 
-        // Valid: InProgress → Completed
+        // Valid: Running → Completed
         assert!(manager.update_task("t1", TaskStatus::Completed).is_ok());
 
-        // Invalid: Completed → InProgress
-        assert!(manager.update_task("t1", TaskStatus::InProgress).is_err());
+        // Invalid: Completed → Running
+        assert!(manager.update_task("t1", TaskStatus::Running).is_err());
 
         // Non-existent task
-        assert!(manager.update_task("t99", TaskStatus::InProgress).is_err());
+        assert!(manager.update_task("t99", TaskStatus::Running).is_err());
     }
 
     #[test]
@@ -1729,7 +1732,7 @@ mod tests {
         use TaskStatus::*;
 
         assert!(!Pending.is_terminal());
-        assert!(!InProgress.is_terminal());
+        assert!(!Running.is_terminal());
         assert!(Completed.is_terminal());
         assert!(Cancelled.is_terminal());
         assert!(Failed("test".into()).is_terminal());
@@ -1759,9 +1762,9 @@ mod tests {
         let manager = Arc::new(TaskManager::new());
 
         // Add independent tasks
-        manager.add_task(Task::new("t1", "Task 1"));
-        manager.add_task(Task::new("t2", "Task 2"));
-        manager.add_task(Task::new("t3", "Task 3"));
+        manager.add_task(ManagedTask::new("t1", "Task 1"));
+        manager.add_task(ManagedTask::new("t2", "Task 2"));
+        manager.add_task(ManagedTask::new("t3", "Task 3"));
 
         let config = TaskExecutorConfig {
             max_concurrent: 3,
@@ -1786,9 +1789,9 @@ mod tests {
         let manager = Arc::new(TaskManager::new());
 
         // t1 → t2 → t3 (linear chain)
-        manager.add_task(Task::new("t1", "First"));
-        manager.add_task(Task::new("t2", "Second").with_dependencies(vec!["t1".into()]));
-        manager.add_task(Task::new("t3", "Third").with_dependencies(vec!["t2".into()]));
+        manager.add_task(ManagedTask::new("t1", "First"));
+        manager.add_task(ManagedTask::new("t2", "Second").with_dependencies(vec!["t1".into()]));
+        manager.add_task(ManagedTask::new("t3", "Third").with_dependencies(vec!["t2".into()]));
 
         let config = TaskExecutorConfig {
             max_concurrent: 3,
@@ -1824,9 +1827,9 @@ mod tests {
     #[tokio::test]
     async fn execute_all_delegates_dependency_order_to_runtime_kernel() -> Result<()> {
         let manager = Arc::new(TaskManager::new());
-        manager.add_task(Task::new("t1", "First"));
-        manager.add_task(Task::new("t2", "Second").with_dependencies(vec!["t1".into()]));
-        manager.add_task(Task::new("t3", "Third").with_dependencies(vec!["t2".into()]));
+        manager.add_task(ManagedTask::new("t1", "First"));
+        manager.add_task(ManagedTask::new("t2", "Second").with_dependencies(vec!["t1".into()]));
+        manager.add_task(ManagedTask::new("t3", "Third").with_dependencies(vec!["t2".into()]));
         let execution_order = Arc::new(Mutex::new(Vec::new()));
         let order_for_execution = execution_order.clone();
         let executor = TaskExecutor::new(manager, TaskExecutorConfig::default()).with_execute_fn(
@@ -1854,8 +1857,10 @@ mod tests {
     #[tokio::test]
     async fn execute_all_uses_runtime_kernel_failure_propagation() -> Result<()> {
         let manager = Arc::new(TaskManager::new());
-        manager.add_task(Task::new("t1", "Failing task"));
-        manager.add_task(Task::new("t2", "Dependent task").with_dependencies(vec!["t1".into()]));
+        manager.add_task(ManagedTask::new("t1", "Failing task"));
+        manager.add_task(
+            ManagedTask::new("t2", "Dependent task").with_dependencies(vec!["t1".into()]),
+        );
         let executor = TaskExecutor::new(manager.clone(), TaskExecutorConfig::default())
             .with_execute_fn(Arc::new(|context| {
                 Box::pin(async move {
@@ -1883,7 +1888,7 @@ mod tests {
     #[tokio::test]
     async fn test_executor_custom_execute_fn() {
         let manager = Arc::new(TaskManager::new());
-        manager.add_task(Task::new("t1", "Custom task"));
+        manager.add_task(ManagedTask::new("t1", "Custom task"));
 
         let config = TaskExecutorConfig {
             max_concurrent: 1,
@@ -1944,7 +1949,7 @@ mod tests {
     #[tokio::test]
     async fn zero_timeout_disables_task_timeout() -> Result<()> {
         let manager = Arc::new(TaskManager::new());
-        manager.add_task(Task::new("t1", "No timeout"));
+        manager.add_task(ManagedTask::new("t1", "No timeout"));
         let config = TaskExecutorConfig {
             default_timeout_secs: 0,
             enable_hooks: false,
@@ -1972,8 +1977,9 @@ mod tests {
         let manager = Arc::new(TaskManager::new());
 
         // t1 → t2
-        manager.add_task(Task::new("t1", "First task"));
-        manager.add_task(Task::new("t2", "Second task").with_dependencies(vec!["t1".into()]));
+        manager.add_task(ManagedTask::new("t1", "First task"));
+        manager
+            .add_task(ManagedTask::new("t2", "Second task").with_dependencies(vec!["t1".into()]));
 
         let config = TaskExecutorConfig {
             max_concurrent: 2,
@@ -2021,8 +2027,10 @@ mod tests {
     async fn test_run_dag_failure_propagation() {
         use std::sync::Arc;
         let manager = Arc::new(TaskManager::new());
-        manager.add_task(Task::new("t1", "Failing task"));
-        manager.add_task(Task::new("t2", "Dependent task").with_dependencies(vec!["t1".into()]));
+        manager.add_task(ManagedTask::new("t1", "Failing task"));
+        manager.add_task(
+            ManagedTask::new("t2", "Dependent task").with_dependencies(vec!["t1".into()]),
+        );
         let config = TaskExecutorConfig {
             max_concurrent: 2,
             default_timeout_secs: 10,
@@ -2055,7 +2063,7 @@ mod tests {
     async fn test_run_dag_cancel_propagation() {
         use std::sync::Arc;
         let manager = Arc::new(TaskManager::new());
-        manager.add_task(Task::new("t1", "Long task"));
+        manager.add_task(ManagedTask::new("t1", "Long task"));
         let config = TaskExecutorConfig {
             max_concurrent: 1,
             default_timeout_secs: 60,
@@ -2095,9 +2103,9 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         let manager = Arc::new(TaskManager::new());
-        manager.add_task(Task::new("t1", "Long A"));
-        manager.add_task(Task::new("t2", "Long B"));
-        manager.add_task(Task::new("t3", "Long C"));
+        manager.add_task(ManagedTask::new("t1", "Long A"));
+        manager.add_task(ManagedTask::new("t2", "Long B"));
+        manager.add_task(ManagedTask::new("t3", "Long C"));
 
         let finished = Arc::new(AtomicUsize::new(0));
         let config = TaskExecutorConfig {
@@ -2125,7 +2133,7 @@ mod tests {
         let exec_clone = exec.clone();
         let h = tokio::spawn(async move { exec_clone.execute_all().await });
 
-        // Let all 3 tasks enter InProgress.
+        // Let all 3 tasks enter Running.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Cancel ALL (not just root token — the real API).
@@ -2167,16 +2175,16 @@ mod tests {
     async fn test_blocked_task_resumes_after_reset() {
         use std::sync::Arc;
         let manager = Arc::new(TaskManager::new());
-        manager.add_task(Task::new("bt", "Blocked task"));
+        manager.add_task(ManagedTask::new("bt", "Blocked task"));
 
-        // Simulate the real lifecycle: Pending → InProgress → Blocked (which
+        // Simulate the real lifecycle: Pending → Running → Blocked (which
         // is the executor's actual path when an upstream task fails).
         manager
-            .update_task_status("bt", TaskStatus::InProgress)
-            .expect("Pending→InProgress is legal");
+            .update_task_status("bt", TaskStatus::Running)
+            .expect("Pending→Running is legal");
         manager
             .update_task_status("bt", TaskStatus::Blocked("upstream died".into()))
-            .expect("InProgress→Blocked is legal");
+            .expect("Running→Blocked is legal");
         assert!(matches!(
             manager.get_task("bt").unwrap().status,
             TaskStatus::Blocked(_)

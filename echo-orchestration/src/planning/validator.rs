@@ -7,7 +7,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::planning::plan_spec::{PlanSpec, ValidationReport};
-use crate::tasks::{RuntimeTask, RuntimeTaskSpec};
+use crate::tasks::{Task, TaskSpec};
 
 /// Plan validator configuration
 #[derive(Debug, Clone)]
@@ -52,9 +52,9 @@ impl PlanValidator {
 
         // Structural identity, dependency, cycle, depth, and retry checks use
         // the same immutable runtime specs consumed by the DAG executor.
-        match plan.to_runtime_specs() {
+        match plan.to_task_specs() {
             Ok(specs) => {
-                if let Err(errors) = self.validate_runtime_specs(&specs) {
+                if let Err(errors) = self.validate_task_specs(&specs) {
                     for error in errors {
                         report.add_error(error);
                     }
@@ -181,10 +181,7 @@ impl PlanValidator {
     /// acceptance/verification policy flags: applications may make those
     /// checks optional or enforce them through review policy. Structural DAG
     /// integrity remains framework-owned.
-    pub fn validate_runtime_snapshot(
-        &self,
-        tasks: &[RuntimeTask],
-    ) -> std::result::Result<(), Vec<String>> {
+    pub fn validate_task_snapshot(&self, tasks: &[Task]) -> std::result::Result<(), Vec<String>> {
         let mut errors = Vec::new();
         for task in tasks {
             if task.spec.id != task.execution.task_id {
@@ -194,7 +191,7 @@ impl PlanValidator {
                 ));
             }
         }
-        if let Err(spec_errors) = self.validate_runtime_specs(
+        if let Err(spec_errors) = self.validate_task_specs(
             &tasks
                 .iter()
                 .map(|task| task.spec.clone())
@@ -210,10 +207,7 @@ impl PlanValidator {
     }
 
     /// Validate immutable runtime task specifications and their dependencies.
-    pub fn validate_runtime_specs(
-        &self,
-        tasks: &[RuntimeTaskSpec],
-    ) -> std::result::Result<(), Vec<String>> {
+    pub fn validate_task_specs(&self, tasks: &[TaskSpec]) -> std::result::Result<(), Vec<String>> {
         let mut errors = Vec::new();
         if tasks.is_empty() {
             errors.push("plan must contain at least one task".to_string());
@@ -278,7 +272,7 @@ impl PlanValidator {
             }
         }
 
-        let (order, depths) = runtime_topology(tasks, &known_ids);
+        let (order, depths) = task_topology(tasks, &known_ids);
         if order.len() < known_ids.len() {
             errors.push("dependency graph contains a cycle".to_string());
         }
@@ -299,8 +293,8 @@ impl PlanValidator {
     }
 }
 
-fn runtime_topology(
-    tasks: &[RuntimeTaskSpec],
+fn task_topology(
+    tasks: &[TaskSpec],
     known_ids: &HashSet<&str>,
 ) -> (Vec<String>, HashMap<String, usize>) {
     let mut indegree: HashMap<String, usize> =
@@ -350,8 +344,8 @@ fn runtime_topology(
     (order, depths)
 }
 
-pub(crate) fn runtime_topological_order(
-    tasks: &[RuntimeTaskSpec],
+pub(crate) fn task_topological_order(
+    tasks: &[TaskSpec],
 ) -> std::result::Result<Vec<String>, String> {
     let known_ids: HashSet<&str> = tasks.iter().map(|task| task.id.as_str()).collect();
     if tasks.len() != known_ids.len() {
@@ -371,7 +365,7 @@ pub(crate) fn runtime_topological_order(
         }
     }
 
-    let (order, _) = runtime_topology(tasks, &known_ids);
+    let (order, _) = task_topology(tasks, &known_ids);
     if order.len() != tasks.len() {
         Err("Plan contains circular dependencies".to_string())
     } else {
@@ -389,7 +383,7 @@ mod tests {
     fn test_valid_plan() {
         let mut plan = PlanSpec::new("Test goal");
 
-        plan.add_task(TaskSpec {
+        plan.add_task(PlanTaskSpec {
             id: "task1".to_string(),
             task_type: TaskType::Discovery,
             description: "First task".to_string(),
@@ -409,7 +403,7 @@ mod tests {
             estimated_duration_secs: None,
         });
 
-        plan.add_task(TaskSpec {
+        plan.add_task(PlanTaskSpec {
             id: "task2".to_string(),
             task_type: TaskType::Implementation,
             description: "Second task".to_string(),
@@ -460,7 +454,7 @@ mod tests {
     fn test_duplicate_task_ids() {
         let mut plan = PlanSpec::new("Test goal");
 
-        plan.add_task(TaskSpec {
+        plan.add_task(PlanTaskSpec {
             id: "task1".to_string(),
             task_type: TaskType::Discovery,
             description: "First task".to_string(),
@@ -480,7 +474,7 @@ mod tests {
             estimated_duration_secs: None,
         });
 
-        plan.add_task(TaskSpec {
+        plan.add_task(PlanTaskSpec {
             id: "task1".to_string(), // Duplicate ID
             task_type: TaskType::Discovery,
             description: "Duplicate task".to_string(),
@@ -516,7 +510,7 @@ mod tests {
     fn test_missing_acceptance_criteria() {
         let mut plan = PlanSpec::new("Test goal");
 
-        plan.add_task(TaskSpec {
+        plan.add_task(PlanTaskSpec {
             id: "task1".to_string(),
             task_type: TaskType::Discovery,
             description: "First task".to_string(),
@@ -552,7 +546,7 @@ mod tests {
     fn test_circular_dependencies() {
         let mut plan = PlanSpec::new("Test goal");
 
-        plan.add_task(TaskSpec {
+        plan.add_task(PlanTaskSpec {
             id: "task1".to_string(),
             task_type: TaskType::Discovery,
             description: "First task".to_string(),
@@ -572,7 +566,7 @@ mod tests {
             estimated_duration_secs: None,
         });
 
-        plan.add_task(TaskSpec {
+        plan.add_task(PlanTaskSpec {
             id: "task2".to_string(),
             task_type: TaskType::Discovery,
             description: "Second task".to_string(),
@@ -607,7 +601,7 @@ mod tests {
     fn test_parallel_write_conflict() {
         let mut plan = PlanSpec::new("Test goal");
 
-        plan.add_task(TaskSpec {
+        plan.add_task(PlanTaskSpec {
             id: "task1".to_string(),
             task_type: TaskType::Implementation,
             description: "Write task 1".to_string(),
@@ -627,7 +621,7 @@ mod tests {
             estimated_duration_secs: None,
         });
 
-        plan.add_task(TaskSpec {
+        plan.add_task(PlanTaskSpec {
             id: "task2".to_string(),
             task_type: TaskType::Implementation,
             description: "Write task 2".to_string(),
@@ -662,12 +656,12 @@ mod tests {
         );
     }
 
-    fn runtime_spec(id: &str, dependencies: &[&str]) -> RuntimeTaskSpec {
-        RuntimeTaskSpec {
+    fn runtime_spec(id: &str, dependencies: &[&str]) -> TaskSpec {
+        TaskSpec {
             id: id.to_string(),
             title: id.to_string(),
             description: format!("execute {id}"),
-            kind: RuntimeTaskKind::Investigation,
+            kind: TaskKind::Investigation,
             agent_role: "explorer".to_string(),
             depends_on: dependencies
                 .iter()
@@ -683,8 +677,8 @@ mod tests {
         }
     }
 
-    fn authoring_task(id: &str) -> TaskSpec {
-        TaskSpec {
+    fn authoring_task(id: &str) -> PlanTaskSpec {
+        PlanTaskSpec {
             id: id.to_string(),
             task_type: TaskType::Implementation,
             description: format!("execute {id}"),
@@ -727,9 +721,9 @@ mod tests {
         plan.add_dependency("second", "first", DependencyType::Required);
         plan.add_dependency("optional", "first", DependencyType::Optional);
 
-        let specs = plan.to_runtime_specs()?;
+        let specs = plan.to_task_specs()?;
         PlanValidator::default()
-            .validate_runtime_specs(&specs)
+            .validate_task_specs(&specs)
             .map_err(|errors| errors.join("; "))?;
         let first = specs
             .iter()
@@ -783,17 +777,13 @@ mod tests {
     #[test]
     fn runtime_validation_accepts_acyclic_specs() {
         let tasks = vec![runtime_spec("a", &[]), runtime_spec("b", &["a"])];
-        assert!(
-            PlanValidator::default()
-                .validate_runtime_specs(&tasks)
-                .is_ok()
-        );
+        assert!(PlanValidator::default().validate_task_specs(&tasks).is_ok());
     }
 
     #[test]
     fn runtime_validation_rejects_dangling_dependencies_and_cycles() -> Result<(), String> {
         let dangling = PlanValidator::default()
-            .validate_runtime_specs(&[runtime_spec("a", &["missing"])])
+            .validate_task_specs(&[runtime_spec("a", &["missing"])])
             .err()
             .ok_or_else(|| "dangling dependency unexpectedly passed validation".to_string())?;
         assert!(
@@ -803,7 +793,7 @@ mod tests {
         );
 
         let cycle = PlanValidator::default()
-            .validate_runtime_specs(&[runtime_spec("a", &["b"]), runtime_spec("b", &["a"])])
+            .validate_task_specs(&[runtime_spec("a", &["b"]), runtime_spec("b", &["a"])])
             .err()
             .ok_or_else(|| "dependency cycle unexpectedly passed validation".to_string())?;
         assert!(cycle.iter().any(|error| error.contains("cycle")));
@@ -812,17 +802,17 @@ mod tests {
 
     #[test]
     fn runtime_validation_rejects_mismatched_execution_identity() -> Result<(), String> {
-        let task = RuntimeTask {
+        let task = Task {
             spec: runtime_spec("spec-id", &[]),
-            execution: RuntimeTaskExecution {
+            execution: TaskExecution {
                 task_id: "execution-id".to_string(),
-                status: RuntimeTaskStatus::Pending,
+                status: TaskStatus::Pending,
                 retry_count: 0,
                 failure_fingerprint: None,
             },
         };
         let errors = PlanValidator::default()
-            .validate_runtime_snapshot(&[task])
+            .validate_task_snapshot(&[task])
             .err()
             .ok_or_else(|| "mismatched task identity unexpectedly passed validation".to_string())?;
         assert!(errors.iter().any(|error| error.contains("does not match")));

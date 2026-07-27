@@ -56,26 +56,26 @@ use tracing::{debug, info};
 /// Lifecycle status of a background task.
 #[derive(Debug, Clone)]
 pub enum BackgroundTaskStatus {
-    /// Task is queued but not yet started.
+    /// ManagedTask is queued but not yet started.
     Pending,
-    /// Task is currently executing.
+    /// ManagedTask is currently executing.
     Running {
         /// When the task started executing.
         started_at: Instant,
     },
-    /// Task completed successfully.
+    /// ManagedTask completed successfully.
     Completed {
         /// When the task finished.
         finished_at: Instant,
     },
-    /// Task failed with an error.
+    /// ManagedTask failed with an error.
     Failed {
         /// Human-readable error description.
         error: String,
         /// When the failure occurred.
         at: Instant,
     },
-    /// Task was cancelled via its cancellation token.
+    /// ManagedTask was cancelled via its cancellation token.
     Cancelled,
 }
 
@@ -619,14 +619,14 @@ impl TaskSpawner {
     /// Tasks that were `InProgress` or `Pending` when the process died are
     /// re-added to the task manager. The caller must provide the execute
     /// functions separately (they are not serializable).
-    pub async fn resume_from_store(&self) -> Result<Vec<super::Task>> {
+    pub async fn resume_from_store(&self) -> Result<Vec<super::ManagedTask>> {
         let store = self
             .store
             .as_ref()
             .ok_or_else(|| ReactError::Other("No task store configured on spawner".into()))?;
 
         let all_tasks = store.load_all().await?;
-        let incomplete: Vec<super::Task> = all_tasks
+        let incomplete: Vec<super::ManagedTask> = all_tasks
             .into_iter()
             .filter(|t| !t.status.is_terminal())
             .collect();

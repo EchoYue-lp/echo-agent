@@ -6,16 +6,16 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::tasks::{Task, TaskStatus};
+use crate::tasks::{ManagedTask, TaskStatus};
 use echo_core::llm::LlmClient;
 
 /// Replanning trigger condition
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplanTrigger {
-    /// Task failed
+    /// ManagedTask failed
     TaskFailure { task_id: String, error: String },
-    /// Task blocked
+    /// ManagedTask blocked
     TaskBlocked { task_id: String, reason: String },
     /// Plan became stale (e.g., external changes)
     PlanStale { reason: String },
@@ -47,7 +47,7 @@ pub trait Replanner: Send + Sync {
         &self,
         trigger: &ReplanTrigger,
         current_plan: &str,
-        tasks: &[Task],
+        tasks: &[ManagedTask],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>;
 }
 
@@ -136,7 +136,7 @@ impl Replanner for LlmReplanner {
         &self,
         trigger: &ReplanTrigger,
         current_plan: &str,
-        tasks: &[Task],
+        tasks: &[ManagedTask],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> {
         let llm_client = self.llm_client.clone();
         let trigger = trigger.clone();
@@ -156,7 +156,7 @@ impl Replanner for LlmReplanner {
                         t.id,
                         match t.status {
                             TaskStatus::Pending => "pending",
-                            TaskStatus::InProgress => "in_progress",
+                            TaskStatus::Running => "in_progress",
                             TaskStatus::Completed => "completed",
                             TaskStatus::Failed(_) => "failed",
                             TaskStatus::Blocked(_) => "blocked",
@@ -329,7 +329,7 @@ impl Replanner for RuleBasedReplanner {
         &self,
         _trigger: &ReplanTrigger,
         _current_plan: &str,
-        _tasks: &[Task],
+        _tasks: &[ManagedTask],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> {
         let decision = self.should_replan(_trigger);
         let current_plan = _current_plan.to_string();

@@ -67,7 +67,7 @@ impl BackgroundTaskState {
 
     /// Mark task as started
     pub fn mark_started(&mut self) {
-        self.status = TaskStatus::InProgress;
+        self.status = TaskStatus::Running;
         self.started_at = super::time::now_secs();
     }
 
@@ -137,11 +137,6 @@ impl BackgroundTaskState {
 }
 
 /// Checkpoint store trait for persisting task states.
-///
-/// The previous `SqliteCheckpointStore` impl was removed — EKO went
-/// SQLite-free and this was the only always-compiled sqlx usage in
-/// echo-orchestration. Non-SQLite implementations (memory/file) should
-/// implement this trait instead.
 pub trait CheckpointStore: Send + Sync {
     /// Save a task state
     fn save_task_state(
@@ -195,7 +190,7 @@ mod tests {
     fn test_background_task_state_mark_started() {
         let mut state = BackgroundTaskState::new("task1");
         state.mark_started();
-        assert_eq!(state.status, TaskStatus::InProgress);
+        assert_eq!(state.status, TaskStatus::Running);
         assert!(state.started_at > 0);
     }
 

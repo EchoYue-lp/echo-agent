@@ -21,7 +21,7 @@
 
 use echo_agent::memory::SqliteStore;
 use echo_agent::prelude::*;
-use echo_agent::tasks::{Task, TaskManager, TaskStatus};
+use echo_agent::tasks::{ManagedTask, TaskManager, TaskStatus};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -269,9 +269,9 @@ async fn demo_task_management() -> Result<()> {
 
     // 创建任务
     let tasks = vec![
-        Task::new("task-001", "学习 Rust 基础语法"),
-        Task::new("task-002", "完成第一个 Rust 项目"),
-        Task::new("task-003", "阅读 Rust 官方文档"),
+        ManagedTask::new("task-001", "学习 Rust 基础语法"),
+        ManagedTask::new("task-002", "完成第一个 Rust 项目"),
+        ManagedTask::new("task-003", "阅读 Rust 官方文档"),
     ];
 
     for task in &tasks {
@@ -293,7 +293,7 @@ async fn demo_task_management() -> Result<()> {
     for task in &all_tasks {
         let status_icon = match &task.status {
             TaskStatus::Pending => "⏳",
-            TaskStatus::InProgress => "🔄",
+            TaskStatus::Running => "🔄",
             TaskStatus::Completed => "✅",
             TaskStatus::Cancelled => "🚫",
             TaskStatus::Failed(_) => "❌",
@@ -309,13 +309,13 @@ async fn demo_task_management() -> Result<()> {
 
     // 更新任务状态
     manager
-        .update_task_status("task-001", TaskStatus::InProgress)
+        .update_task_status("task-001", TaskStatus::Running)
         .map_err(echo_agent::error::ReactError::Other)?;
     manager
         .update_task_status("task-001", TaskStatus::Completed)
         .map_err(echo_agent::error::ReactError::Other)?;
     manager
-        .update_task_status("task-002", TaskStatus::InProgress)
+        .update_task_status("task-002", TaskStatus::Running)
         .map_err(echo_agent::error::ReactError::Other)?;
 
     println!("  ✓ 更新了任务状态\n");

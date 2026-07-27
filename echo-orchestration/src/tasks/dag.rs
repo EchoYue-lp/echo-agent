@@ -25,9 +25,9 @@ impl TaskManager {
         let specs = self
             .get_all_tasks()
             .iter()
-            .map(super::Task::runtime_spec)
+            .map(super::ManagedTask::task_spec)
             .collect::<Vec<_>>();
-        crate::planning::validator::runtime_topological_order(&specs)
+        crate::planning::validator::task_topological_order(&specs)
     }
 
     /// Generate a visualization of the dependency graph (Mermaid format)

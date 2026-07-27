@@ -1,10 +1,11 @@
-//! Task event system — lifecycle notifications for task state changes
+//! ManagedTask event system — lifecycle notifications for task state changes
 //!
 //! Uses async broadcast channel for non-blocking event distribution.
 //! Listeners can subscribe and receive events in their own async tasks.
 
 use super::progress::TaskProgress;
-use super::task::{Task, TaskStatus};
+use super::runtime::TaskStatus;
+use super::task::ManagedTask;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -18,11 +19,11 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 512;
 
 /// Lifecycle event emitted by the TaskManager
 #[derive(Debug, Clone, Serialize)]
-// Created carries the complete public Task snapshot; boxing would break consumers.
+// Created carries the complete public ManagedTask snapshot; boxing would break consumers.
 #[allow(clippy::large_enum_variant)]
 pub enum TaskEvent {
     Created {
-        task: Task,
+        task: ManagedTask,
     },
     Updated {
         task_id: String,

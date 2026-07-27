@@ -18,7 +18,7 @@ pub type TaskId = String;
 /// Operation class for a runtime task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeTaskKind {
+pub enum TaskKind {
     /// Read-only repository / data exploration or review.
     ReadOnlyReview,
     /// Read-only search, grep, file reads, hypothesis investigation.
@@ -37,7 +37,7 @@ pub enum RuntimeTaskKind {
     Verification,
 }
 
-impl RuntimeTaskKind {
+impl TaskKind {
     /// `true` when the task kind does not mutate workspace state.
     pub fn is_read_only(&self) -> bool {
         matches!(
@@ -65,7 +65,7 @@ impl RuntimeTaskKind {
     }
 }
 
-impl FromStr for RuntimeTaskKind {
+impl FromStr for TaskKind {
     type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
@@ -83,42 +83,103 @@ impl FromStr for RuntimeTaskKind {
     }
 }
 
-/// Generic lifecycle state for a task node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// Generic lifecycle state shared by task specifications and managed records.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeTaskStatus {
+pub enum TaskStatus {
     #[default]
     Pending,
     Running,
-    Blocked,
+    Blocked(String),
     Completed,
-    Failed,
+    Failed(String),
     Skipped,
     Cancelled,
+    TimedOut {
+        error: String,
+    },
+    Retrying {
+        attempt: u32,
+        last_error: String,
+    },
+    Paused(String),
 }
 
-impl RuntimeTaskStatus {
+impl TaskStatus {
     /// Whether this state has no further automatic work.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Skipped | Self::Cancelled
+            Self::Completed
+                | Self::Failed(_)
+                | Self::TimedOut { .. }
+                | Self::Skipped
+                | Self::Cancelled
         )
     }
 
     /// Whether this task is currently occupying execution capacity.
     pub fn is_running(&self) -> bool {
-        matches!(self, Self::Running)
+        matches!(self, Self::Running | Self::Retrying { .. })
+    }
+
+    /// Whether transitioning from this state to `target` is valid.
+    pub fn can_transition_to(&self, target: &Self) -> bool {
+        match self {
+            Self::Pending => matches!(
+                target,
+                Self::Running
+                    | Self::Cancelled
+                    | Self::Blocked(_)
+                    | Self::Skipped
+                    | Self::Paused(_)
+            ),
+            Self::Running => matches!(
+                target,
+                Self::Completed
+                    | Self::Cancelled
+                    | Self::Failed(_)
+                    | Self::TimedOut { .. }
+                    | Self::Retrying { .. }
+                    | Self::Blocked(_)
+                    | Self::Paused(_)
+            ),
+            Self::Retrying { .. } => matches!(
+                target,
+                Self::Completed
+                    | Self::Cancelled
+                    | Self::Failed(_)
+                    | Self::TimedOut { .. }
+                    | Self::Retrying { .. }
+            ),
+            Self::Blocked(_) => matches!(target, Self::Pending | Self::Cancelled),
+            Self::Paused(_) => matches!(target, Self::Running | Self::Cancelled),
+            Self::Completed
+            | Self::Failed(_)
+            | Self::TimedOut { .. }
+            | Self::Skipped
+            | Self::Cancelled => false,
+        }
+    }
+
+    /// Validate and return a requested state transition.
+    pub fn transition_to(&self, target: Self) -> std::result::Result<Self, String> {
+        if !self.can_transition_to(&target) {
+            return Err(format!(
+                "Invalid task state transition: {self:?} -> {target:?}"
+            ));
+        }
+        Ok(target)
     }
 }
 
 /// Immutable, product-neutral task specification for runtime DAG scheduling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeTaskSpec {
+pub struct TaskSpec {
     pub id: TaskId,
     pub title: String,
     pub description: String,
-    pub kind: RuntimeTaskKind,
+    pub kind: TaskKind,
     pub agent_role: String,
     pub depends_on: Vec<TaskId>,
     pub files: Vec<String>,
@@ -134,18 +195,18 @@ pub struct RuntimeTaskSpec {
 
 /// Mutable execution state for one runtime task specification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeTaskExecution {
+pub struct TaskExecution {
     pub task_id: TaskId,
-    pub status: RuntimeTaskStatus,
+    pub status: TaskStatus,
     pub retry_count: u32,
     pub failure_fingerprint: Option<String>,
 }
 
-impl RuntimeTaskExecution {
+impl TaskExecution {
     pub fn pending(task_id: impl Into<TaskId>) -> Self {
         Self {
             task_id: task_id.into(),
-            status: RuntimeTaskStatus::Pending,
+            status: TaskStatus::Pending,
             retry_count: 0,
             failure_fingerprint: None,
         }
@@ -154,9 +215,9 @@ impl RuntimeTaskExecution {
 
 /// One runtime DAG node: immutable specification plus mutable execution state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeTask {
-    pub spec: RuntimeTaskSpec,
-    pub execution: RuntimeTaskExecution,
+pub struct Task {
+    pub spec: TaskSpec,
+    pub execution: TaskExecution,
 }
 
 /// Concurrency caps for a generic task runtime.
@@ -234,7 +295,7 @@ impl TaskSubagentContext {
 pub struct SuggestedTask {
     pub title: String,
     pub description: String,
-    pub kind: RuntimeTaskKind,
+    pub kind: TaskKind,
     pub agent_role: String,
     #[serde(default)]
     pub dependencies: Vec<TaskId>,
@@ -270,7 +331,7 @@ pub trait TaskSubagent: Send + Sync {
     async fn execute(
         &self,
         context: TaskSubagentContext,
-        task: RuntimeTask,
+        task: Task,
         dependency_summaries: Vec<TaskExecutionSummary>,
     ) -> Result<TaskExecutionSummary>;
 }
@@ -288,30 +349,35 @@ pub struct DagExecutionState {
 impl DagExecutionState {
     /// Build state from a snapshot. Already-completed tasks are treated as
     /// resolved; already-running tasks are treated as externally in-flight.
-    pub fn from_tasks(tasks: &[RuntimeTask]) -> Self {
+    pub fn from_tasks(tasks: &[Task]) -> Self {
         let completed = tasks
             .iter()
-            .filter(|task| task.execution.status == RuntimeTaskStatus::Completed)
+            .filter(|task| task.execution.status == TaskStatus::Completed)
             .map(|task| task.spec.id.clone())
             .collect();
         let in_flight = tasks
             .iter()
-            .filter(|task| task.execution.status == RuntimeTaskStatus::Running)
+            .filter(|task| task.execution.status.is_running())
             .map(|task| task.spec.id.clone())
             .collect();
         let failed = tasks
             .iter()
-            .filter(|task| task.execution.status == RuntimeTaskStatus::Failed)
+            .filter(|task| {
+                matches!(
+                    task.execution.status,
+                    TaskStatus::Failed(_) | TaskStatus::TimedOut { .. }
+                )
+            })
             .map(|task| task.spec.id.clone())
             .collect();
         let skipped = tasks
             .iter()
-            .filter(|task| task.execution.status == RuntimeTaskStatus::Skipped)
+            .filter(|task| task.execution.status == TaskStatus::Skipped)
             .map(|task| task.spec.id.clone())
             .collect();
         let cancelled = tasks
             .iter()
-            .filter(|task| task.execution.status == RuntimeTaskStatus::Cancelled)
+            .filter(|task| task.execution.status == TaskStatus::Cancelled)
             .map(|task| task.spec.id.clone())
             .collect();
 
@@ -325,7 +391,7 @@ impl DagExecutionState {
     }
 
     /// Refresh externally in-flight tasks from a newer task snapshot.
-    pub fn refresh_in_flight(&mut self, tasks: &[RuntimeTask]) -> DagRefresh {
+    pub fn refresh_in_flight(&mut self, tasks: &[Task]) -> DagRefresh {
         let mut refresh = DagRefresh::default();
         if self.in_flight.is_empty() {
             return refresh;
@@ -336,29 +402,31 @@ impl DagExecutionState {
                 continue;
             };
 
-            match task.execution.status {
-                RuntimeTaskStatus::Completed => {
+            match &task.execution.status {
+                TaskStatus::Completed => {
                     self.in_flight.remove(&task_id);
                     self.completed.insert(task_id.clone());
                     refresh.completed.push(task_id);
                 }
-                RuntimeTaskStatus::Failed => {
+                TaskStatus::Failed(_) | TaskStatus::TimedOut { .. } => {
                     self.in_flight.remove(&task_id);
                     self.failed.insert(task_id.clone());
                     refresh.failed.push(task_id);
                 }
-                RuntimeTaskStatus::Skipped | RuntimeTaskStatus::Cancelled => {
+                TaskStatus::Skipped | TaskStatus::Cancelled => {
                     self.in_flight.remove(&task_id);
-                    if task.execution.status == RuntimeTaskStatus::Skipped {
+                    if task.execution.status == TaskStatus::Skipped {
                         self.skipped.insert(task_id.clone());
                     } else {
                         self.cancelled.insert(task_id.clone());
                     }
                     refresh.terminal_non_success.push(task_id);
                 }
-                RuntimeTaskStatus::Pending
-                | RuntimeTaskStatus::Running
-                | RuntimeTaskStatus::Blocked => {}
+                TaskStatus::Pending
+                | TaskStatus::Running
+                | TaskStatus::Retrying { .. }
+                | TaskStatus::Blocked(_)
+                | TaskStatus::Paused(_) => {}
             }
         }
 
@@ -366,7 +434,7 @@ impl DagExecutionState {
     }
 
     /// Task ids that are ready to dispatch in the next wave.
-    pub fn ready_task_ids(&self, tasks: &[RuntimeTask]) -> Vec<TaskId> {
+    pub fn ready_task_ids(&self, tasks: &[Task]) -> Vec<TaskId> {
         tasks
             .iter()
             .filter(|task| {
@@ -377,7 +445,7 @@ impl DagExecutionState {
                     && !self.cancelled.contains(&task.spec.id)
             })
             .filter(|task| {
-                task.execution.status == RuntimeTaskStatus::Pending
+                task.execution.status == TaskStatus::Pending
                     && task
                         .spec
                         .depends_on
@@ -389,7 +457,7 @@ impl DagExecutionState {
     }
 
     /// Downstream task ids blocked by failed dependencies.
-    pub fn blocked_by_failures(&self, tasks: &[RuntimeTask]) -> Vec<TaskId> {
+    pub fn blocked_by_failures(&self, tasks: &[Task]) -> Vec<TaskId> {
         tasks
             .iter()
             .filter(|task| {
@@ -409,18 +477,19 @@ impl DagExecutionState {
     }
 
     /// Whether every task has completed or was deliberately skipped.
-    pub fn all_completed(&self, tasks: &[RuntimeTask]) -> bool {
+    pub fn all_completed(&self, tasks: &[Task]) -> bool {
         self.completed.len().saturating_add(self.skipped.len()) == tasks.len()
     }
 
     /// Whether every unfinished task is either failed or blocked by a failed
     /// dependency.
-    pub fn all_unfinished_failed_or_blocked(&self, tasks: &[RuntimeTask]) -> bool {
+    pub fn all_unfinished_failed_or_blocked(&self, tasks: &[Task]) -> bool {
         tasks.iter().all(|task| {
             self.completed.contains(&task.spec.id)
                 || self.skipped.contains(&task.spec.id)
                 || self.cancelled.contains(&task.spec.id)
                 || self.failed.contains(&task.spec.id)
+                || matches!(task.execution.status, TaskStatus::Blocked(_))
                 || task
                     .spec
                     .depends_on
@@ -441,34 +510,34 @@ pub struct DagRefresh {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConcurrencyLimits, NestedDelegationPolicy, RuntimeTaskExecution, RuntimeTaskKind,
-        RuntimeTaskSpec, RuntimeTaskStatus, TaskSubagentContext,
+        ConcurrencyLimits, NestedDelegationPolicy, TaskExecution, TaskKind, TaskSpec, TaskStatus,
+        TaskSubagentContext,
     };
-    use crate::tasks::runtime::{DagExecutionState, RuntimeTask};
+    use crate::tasks::runtime::{DagExecutionState, Task};
     use std::str::FromStr;
 
     #[test]
     fn runtime_task_kind_round_trips_snake_case() {
-        let kind = RuntimeTaskKind::from_str("implementation").unwrap_or(RuntimeTaskKind::Summary);
+        let kind = TaskKind::from_str("implementation").unwrap_or(TaskKind::Summary);
 
-        assert_eq!(kind, RuntimeTaskKind::Implementation);
+        assert_eq!(kind, TaskKind::Implementation);
         assert_eq!(kind.as_str(), "implementation");
-        assert!(RuntimeTaskKind::from_str("not_real").is_err());
+        assert!(TaskKind::from_str("not_real").is_err());
     }
 
     #[test]
     fn read_only_kinds_are_classified() {
-        assert!(RuntimeTaskKind::Investigation.is_read_only());
-        assert!(!RuntimeTaskKind::Implementation.is_read_only());
-        assert!(!RuntimeTaskKind::Verification.is_read_only());
+        assert!(TaskKind::Investigation.is_read_only());
+        assert!(!TaskKind::Implementation.is_read_only());
+        assert!(!TaskKind::Verification.is_read_only());
     }
 
     #[test]
     fn terminal_statuses_are_classified() {
-        assert!(RuntimeTaskStatus::Completed.is_terminal());
-        assert!(RuntimeTaskStatus::Failed.is_terminal());
-        assert!(!RuntimeTaskStatus::Running.is_terminal());
-        assert!(RuntimeTaskStatus::Running.is_running());
+        assert!(TaskStatus::Completed.is_terminal());
+        assert!(TaskStatus::Failed("boom".to_string()).is_terminal());
+        assert!(!TaskStatus::Running.is_terminal());
+        assert!(TaskStatus::Running.is_running());
     }
 
     #[test]
@@ -511,13 +580,13 @@ mod tests {
         assert!(!child.delegation_policy.can_delegate());
     }
 
-    fn runtime_task(id: &str, status: RuntimeTaskStatus, deps: &[&str]) -> RuntimeTask {
-        RuntimeTask {
-            spec: RuntimeTaskSpec {
+    fn runtime_task(id: &str, status: TaskStatus, deps: &[&str]) -> Task {
+        Task {
+            spec: TaskSpec {
                 id: id.to_string(),
                 title: id.to_string(),
                 description: format!("execute {id}"),
-                kind: RuntimeTaskKind::Investigation,
+                kind: TaskKind::Investigation,
                 agent_role: "explorer".to_string(),
                 depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
                 files: Vec::new(),
@@ -528,7 +597,7 @@ mod tests {
                 max_retries: 3,
                 metadata: serde_json::Value::Null,
             },
-            execution: RuntimeTaskExecution {
+            execution: TaskExecution {
                 task_id: id.to_string(),
                 status,
                 retry_count: 0,
@@ -540,9 +609,9 @@ mod tests {
     #[test]
     fn dag_state_initializes_from_snapshot() {
         let tasks = vec![
-            runtime_task("done", RuntimeTaskStatus::Completed, &[]),
-            runtime_task("running", RuntimeTaskStatus::Running, &[]),
-            runtime_task("failed", RuntimeTaskStatus::Failed, &[]),
+            runtime_task("done", TaskStatus::Completed, &[]),
+            runtime_task("running", TaskStatus::Running, &[]),
+            runtime_task("failed", TaskStatus::Failed("boom".to_string()), &[]),
         ];
 
         let state = DagExecutionState::from_tasks(&tasks);
@@ -555,9 +624,9 @@ mod tests {
     #[test]
     fn dag_ready_frontier_requires_completed_dependencies() {
         let tasks = vec![
-            runtime_task("a", RuntimeTaskStatus::Completed, &[]),
-            runtime_task("b", RuntimeTaskStatus::Pending, &["a"]),
-            runtime_task("c", RuntimeTaskStatus::Pending, &["b"]),
+            runtime_task("a", TaskStatus::Completed, &[]),
+            runtime_task("b", TaskStatus::Pending, &["a"]),
+            runtime_task("c", TaskStatus::Pending, &["b"]),
         ];
         let state = DagExecutionState::from_tasks(&tasks);
 
@@ -566,8 +635,8 @@ mod tests {
 
     #[test]
     fn dag_refresh_observes_external_in_flight_completion() {
-        let original = vec![runtime_task("a", RuntimeTaskStatus::Running, &[])];
-        let updated = vec![runtime_task("a", RuntimeTaskStatus::Completed, &[])];
+        let original = vec![runtime_task("a", TaskStatus::Running, &[])];
+        let updated = vec![runtime_task("a", TaskStatus::Completed, &[])];
         let mut state = DagExecutionState::from_tasks(&original);
 
         let refresh = state.refresh_in_flight(&updated);
@@ -580,8 +649,8 @@ mod tests {
     #[test]
     fn dag_detects_failed_downstream_blockers() {
         let tasks = vec![
-            runtime_task("a", RuntimeTaskStatus::Failed, &[]),
-            runtime_task("b", RuntimeTaskStatus::Pending, &["a"]),
+            runtime_task("a", TaskStatus::Failed("boom".to_string()), &[]),
+            runtime_task("b", TaskStatus::Pending, &["a"]),
         ];
         let state = DagExecutionState::from_tasks(&tasks);
 

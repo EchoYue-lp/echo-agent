@@ -1,4 +1,4 @@
-//! Task execution hooks — lifecycle callbacks for task execution
+//! ManagedTask execution hooks — lifecycle callbacks for task execution
 //!
 //! Hooks allow custom behavior to be injected at key points in the task lifecycle:
 //! - `before_execute`: Called before a task starts execution
@@ -35,14 +35,14 @@
 //! let _ = LoggingHooks;
 //! ```
 
-use super::task::Task;
+use super::task::ManagedTask;
 use std::sync::Arc;
 
 /// Context passed to hook callbacks
 #[derive(Debug, Clone)]
 pub struct TaskHookContext {
     /// The task being executed
-    pub task: Task,
+    pub task: ManagedTask,
     /// Current attempt number (1-based)
     pub attempt: u32,
     /// Agent executing the task
@@ -330,7 +330,7 @@ mod tests {
         let mut registry = TaskHookRegistry::new();
         registry.register(hooks.clone());
 
-        let task = Task::new("test", "Test task");
+        let task = ManagedTask::new("test", "Test task");
         let ctx = TaskHookContext {
             task,
             attempt: 1,

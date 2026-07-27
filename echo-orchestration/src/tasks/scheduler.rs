@@ -29,7 +29,7 @@ pub struct FileChangeRecord {
     pub path: String,
     /// Change type
     pub change_type: ChangeType,
-    /// Task ID that made the change
+    /// ManagedTask ID that made the change
     pub task_id: String,
 }
 
@@ -47,12 +47,12 @@ pub struct TaskConflict {
 /// Conflict detector for write operations
 pub struct ConflictDetector {
     /// Write tasks to check for conflicts
-    write_tasks: Vec<crate::tasks::Task>,
+    write_tasks: Vec<crate::tasks::ManagedTask>,
 }
 
 impl ConflictDetector {
     /// Create a new conflict detector
-    pub fn new(write_tasks: Vec<crate::tasks::Task>) -> Self {
+    pub fn new(write_tasks: Vec<crate::tasks::ManagedTask>) -> Self {
         Self { write_tasks }
     }
 
@@ -89,8 +89,8 @@ impl ConflictDetector {
     /// Find overlapping files between two tasks
     fn find_overlapping_files(
         &self,
-        task1: &crate::tasks::Task,
-        task2: &crate::tasks::Task,
+        task1: &crate::tasks::ManagedTask,
+        task2: &crate::tasks::ManagedTask,
     ) -> Vec<String> {
         let mut overlapping = Vec::new();
 
@@ -117,7 +117,7 @@ impl ConflictDetector {
     }
 }
 
-/// Task scheduler based on parallel strategy
+/// ManagedTask scheduler based on parallel strategy
 pub struct TaskScheduler {
     /// Parallel strategy to use
     strategy: ParallelStrategy,
@@ -127,7 +127,7 @@ pub struct TaskScheduler {
 
 impl TaskScheduler {
     /// Create a new task scheduler
-    pub fn new(strategy: ParallelStrategy, write_tasks: Vec<crate::tasks::Task>) -> Self {
+    pub fn new(strategy: ParallelStrategy, write_tasks: Vec<crate::tasks::ManagedTask>) -> Self {
         Self {
             strategy,
             conflict_detector: ConflictDetector::new(write_tasks),
@@ -135,7 +135,7 @@ impl TaskScheduler {
     }
 
     /// Schedule tasks based on strategy
-    pub fn schedule(&self, tasks: &[crate::tasks::Task]) -> SchedulePlan {
+    pub fn schedule(&self, tasks: &[crate::tasks::ManagedTask]) -> SchedulePlan {
         match self.strategy {
             ParallelStrategy::ReadOnlyParallel => self.schedule_read_only_parallel(tasks),
             ParallelStrategy::WriteSerial => self.schedule_write_serial(tasks),
@@ -145,7 +145,7 @@ impl TaskScheduler {
     }
 
     /// Schedule read-only tasks in parallel
-    fn schedule_read_only_parallel(&self, tasks: &[crate::tasks::Task]) -> SchedulePlan {
+    fn schedule_read_only_parallel(&self, tasks: &[crate::tasks::ManagedTask]) -> SchedulePlan {
         // All read-only tasks can run in parallel
         let parallel_groups = vec![tasks.iter().map(|t| t.id.clone()).collect()];
 
@@ -158,7 +158,7 @@ impl TaskScheduler {
     }
 
     /// Schedule write tasks serially
-    fn schedule_write_serial(&self, tasks: &[crate::tasks::Task]) -> SchedulePlan {
+    fn schedule_write_serial(&self, tasks: &[crate::tasks::ManagedTask]) -> SchedulePlan {
         let conflicts = self.conflict_detector.detect_conflicts();
 
         if conflicts.is_empty() {
@@ -183,7 +183,10 @@ impl TaskScheduler {
     }
 
     /// Schedule write tasks with worktree isolation
-    fn schedule_write_worktree_isolated(&self, tasks: &[crate::tasks::Task]) -> SchedulePlan {
+    fn schedule_write_worktree_isolated(
+        &self,
+        tasks: &[crate::tasks::ManagedTask],
+    ) -> SchedulePlan {
         let conflicts = self.conflict_detector.detect_conflicts();
 
         // All tasks can run in parallel with worktree isolation
@@ -198,7 +201,7 @@ impl TaskScheduler {
     }
 
     /// Schedule background tasks separately
-    fn schedule_background_separate(&self, tasks: &[crate::tasks::Task]) -> SchedulePlan {
+    fn schedule_background_separate(&self, tasks: &[crate::tasks::ManagedTask]) -> SchedulePlan {
         // Separate background tasks from regular tasks
         let (background, regular): (Vec<_>, Vec<_>) = tasks
             .iter()
@@ -239,7 +242,7 @@ pub struct SchedulePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::{ChangeType, FileChange, Task, TaskType};
+    use crate::tasks::{ChangeType, FileChange, ManagedTask, TaskType};
 
     #[test]
     fn test_parallel_strategy_default() {
@@ -249,8 +252,8 @@ mod tests {
 
     #[test]
     fn test_conflict_detector_no_conflicts() {
-        let task1 = Task::new("task1", "Task 1");
-        let task2 = Task::new("task2", "Task 2");
+        let task1 = ManagedTask::new("task1", "Task 1");
+        let task2 = ManagedTask::new("task2", "Task 2");
 
         let detector = ConflictDetector::new(vec![task1, task2]);
         let conflicts = detector.detect_conflicts();
@@ -260,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_conflict_detector_with_conflicts() {
-        let mut task1 = Task::new("task1", "Task 1");
+        let mut task1 = ManagedTask::new("task1", "Task 1");
         task1.changed_files = vec![FileChange {
             path: "src/main.rs".to_string(),
             change_type: ChangeType::Modified,
@@ -268,7 +271,7 @@ mod tests {
             checksum: None,
         }];
 
-        let mut task2 = Task::new("task2", "Task 2");
+        let mut task2 = ManagedTask::new("task2", "Task 2");
         task2.changed_files = vec![FileChange {
             path: "src/main.rs".to_string(),
             change_type: ChangeType::Modified,
@@ -287,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_conflict_detector_with_dependency() {
-        let mut task1 = Task::new("task1", "Task 1");
+        let mut task1 = ManagedTask::new("task1", "Task 1");
         task1.changed_files = vec![FileChange {
             path: "src/main.rs".to_string(),
             change_type: ChangeType::Modified,
@@ -295,7 +298,7 @@ mod tests {
             checksum: None,
         }];
 
-        let mut task2 = Task::new("task2", "Task 2");
+        let mut task2 = ManagedTask::new("task2", "Task 2");
         task2.changed_files = vec![FileChange {
             path: "src/main.rs".to_string(),
             change_type: ChangeType::Modified,
@@ -313,8 +316,8 @@ mod tests {
 
     #[test]
     fn test_scheduler_read_only_parallel() {
-        let task1 = Task::new("task1", "Task 1");
-        let task2 = Task::new("task2", "Task 2");
+        let task1 = ManagedTask::new("task1", "Task 1");
+        let task2 = ManagedTask::new("task2", "Task 2");
 
         let scheduler = TaskScheduler::new(ParallelStrategy::ReadOnlyParallel, vec![]);
         let plan = scheduler.schedule(&[task1, task2]);
@@ -326,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_scheduler_write_serial_with_conflicts() {
-        let mut task1 = Task::new("task1", "Task 1");
+        let mut task1 = ManagedTask::new("task1", "Task 1");
         task1.changed_files = vec![FileChange {
             path: "src/main.rs".to_string(),
             change_type: ChangeType::Modified,
@@ -334,7 +337,7 @@ mod tests {
             checksum: None,
         }];
 
-        let mut task2 = Task::new("task2", "Task 2");
+        let mut task2 = ManagedTask::new("task2", "Task 2");
         task2.changed_files = vec![FileChange {
             path: "src/main.rs".to_string(),
             change_type: ChangeType::Modified,
@@ -356,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_scheduler_write_worktree_isolated() {
-        let mut task1 = Task::new("task1", "Task 1");
+        let mut task1 = ManagedTask::new("task1", "Task 1");
         task1.changed_files = vec![FileChange {
             path: "src/main.rs".to_string(),
             change_type: ChangeType::Modified,
@@ -364,7 +367,7 @@ mod tests {
             checksum: None,
         }];
 
-        let mut task2 = Task::new("task2", "Task 2");
+        let mut task2 = ManagedTask::new("task2", "Task 2");
         task2.changed_files = vec![FileChange {
             path: "src/main.rs".to_string(),
             change_type: ChangeType::Modified,
@@ -386,10 +389,10 @@ mod tests {
 
     #[test]
     fn test_scheduler_background_separate() {
-        let mut task1 = Task::new("task1", "Task 1");
+        let mut task1 = ManagedTask::new("task1", "Task 1");
         task1.task_type = TaskType::Implementation;
 
-        let mut task2 = Task::new("task2", "Task 2");
+        let mut task2 = ManagedTask::new("task2", "Task 2");
         task2.task_type = TaskType::Background;
 
         let scheduler = TaskScheduler::new(

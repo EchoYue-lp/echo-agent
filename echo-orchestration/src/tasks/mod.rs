@@ -41,9 +41,9 @@ pub use manager::TaskManager;
 pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
 pub use replanner::{LlmReplanner, ReplanDecision, ReplanTrigger, Replanner, RuleBasedReplanner};
 pub use runtime::{
-    ConcurrencyLimits, DagExecutionState, DagRefresh, NestedDelegationPolicy, RuntimeTask,
-    RuntimeTaskExecution, RuntimeTaskKind, RuntimeTaskSpec, RuntimeTaskStatus, SuggestedTask,
-    TaskExecutionSummary, TaskId, TaskSubagent, TaskSubagentContext,
+    ConcurrencyLimits, DagExecutionState, DagRefresh, NestedDelegationPolicy, SuggestedTask, Task,
+    TaskExecution, TaskExecutionSummary, TaskId, TaskKind, TaskSpec, TaskStatus, TaskSubagent,
+    TaskSubagentContext,
 };
 pub use runtime_executor::{
     RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome,
@@ -55,8 +55,8 @@ pub use scheduler::{
 pub use store::{SqliteTaskStore, TaskStore};
 pub use task::{
     Artifact, ArtifactType, AttemptStatus, ChangeType, CheckpointPolicy, CommandRecord,
-    ContextScope, Evidence, EvidenceType, FallbackStrategy, FileChange, InputType, OutputType,
-    RiskLevel, Task, TaskAttempt, TaskInput, TaskOutput, TaskState, TaskStatus, TaskType,
+    ContextScope, Evidence, EvidenceType, FallbackStrategy, FileChange, InputType, ManagedTask,
+    OutputType, RiskLevel, TaskAttempt, TaskInput, TaskOutput, TaskState, TaskType,
     VerificationResult, VerificationSpec, VerificationType,
 };
 pub use verifier::{
@@ -67,10 +67,10 @@ pub use verifier::{
 #[cfg(test)]
 mod tests {
     use crate::tasks::TaskManager;
-    use crate::tasks::{Task, TaskStatus};
+    use crate::tasks::{ManagedTask, TaskStatus};
 
-    fn create_task(id: &str, description: &str, dependencies: Vec<&str>) -> Task {
-        let mut task = Task::new(id, description)
+    fn create_task(id: &str, description: &str, dependencies: Vec<&str>) -> ManagedTask {
+        let mut task = ManagedTask::new(id, description)
             .with_dependencies(dependencies.into_iter().map(String::from).collect());
         task.created_at = 0;
         task.updated_at = 0;
@@ -300,9 +300,7 @@ mod tests {
         assert_eq!(ready[0].id, "task1", "should be task1");
 
         // Mark task1 as complete
-        manager
-            .update_task("task1", TaskStatus::InProgress)
-            .unwrap();
+        manager.update_task("task1", TaskStatus::Running).unwrap();
         manager.update_task("task1", TaskStatus::Completed).unwrap();
         let ready = manager.get_ready_tasks();
         assert_eq!(ready.len(), 1, "should have only one executable task");
@@ -313,12 +311,12 @@ mod tests {
     fn test_get_next_task_priority() {
         let manager = TaskManager::new();
 
-        let mut task1 = Task::new("task1", "Low priority").with_priority(3);
+        let mut task1 = ManagedTask::new("task1", "Low priority").with_priority(3);
         task1.created_at = 0;
         task1.updated_at = 0;
         manager.add_task(task1);
 
-        let mut task2 = Task::new("task2", "High priority").with_priority(8);
+        let mut task2 = ManagedTask::new("task2", "High priority").with_priority(8);
         task2.created_at = 0;
         task2.updated_at = 0;
         manager.add_task(task2);

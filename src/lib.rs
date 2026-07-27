@@ -322,7 +322,7 @@ pub mod advanced {
 
     #[cfg(feature = "tasks")]
     #[cfg_attr(docsrs, doc(cfg(feature = "tasks")))]
-    pub use crate::tasks::{Task, TaskManager, TaskStatus};
+    pub use crate::tasks::{ManagedTask, Task, TaskExecution, TaskManager, TaskSpec, TaskStatus};
 
     // Critic module — evaluation and feedback tools for agent outputs
     pub use crate::agent::critic::{

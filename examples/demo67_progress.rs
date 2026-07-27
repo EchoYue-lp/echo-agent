@@ -3,12 +3,12 @@
 //! Demonstrates:
 //!   1. `PhasePlan` with weighted phases
 //!   2. `ProgressReporter` broadcasting via `watch` channel
-//!   3. `Task::with_metadata()` / `task.get_metadata::<T>()`
+//!   3. `ManagedTask::with_metadata()` / `task.get_metadata::<T>()`
 //!   4. `TaskEvent::Progress` flowing through a `TaskEventBus`
 //!
 //! Run: cargo run --example demo67_progress
 
-use echo_agent::tasks::{Phase, PhasePlan, ProgressReporter, Task, TaskEvent, TaskEventBus};
+use echo_agent::tasks::{ManagedTask, Phase, PhasePlan, ProgressReporter, TaskEvent, TaskEventBus};
 use serde::Serialize;
 use tokio::time::{Duration, sleep};
 
@@ -23,7 +23,7 @@ struct ResearchParams {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🚀 === demo67: Progress Tracking + Task Metadata ===\n");
+    println!("🚀 === demo67: Progress Tracking + ManagedTask Metadata ===\n");
 
     // ── 1. Build a PhasePlan with 3 weighted phases ────────────────
     let plan = PhasePlan::new(vec![
@@ -126,9 +126,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(bus);
     let _ = bus_printer.await;
 
-    // ── 5. Task metadata: attach a typed struct ────────────────────
-    println!("\n--- Task Metadata ---");
-    let task = Task::new("research-01", "Literature review on RAG systems")
+    // ── 5. ManagedTask metadata: attach a typed struct ────────────────────
+    println!("\n--- ManagedTask Metadata ---");
+    let task = ManagedTask::new("research-01", "Literature review on RAG systems")
         .with_priority(8)
         .with_metadata(ResearchParams {
             topic: "Retrieval-Augmented Generation".into(),
@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             require_peer_review: true,
         });
 
-    println!("🏷️  Task id     : {}", task.id);
+    println!("🏷️  ManagedTask id     : {}", task.id);
     println!("📦 metadata_json: {}", task.metadata_json.as_ref().unwrap());
 
     // ── 6. Retrieve typed metadata ────────────────────────────────
