@@ -414,7 +414,7 @@ impl TaskManager {
         current_chain.pop();
     }
 
-    // ── EKO Run-Level Operations ──────────────────────────────────────────────
+    // ── Run-Level Operations ──────────────────────────────────────────────────
 
     /// Get all tasks belonging to a specific run.
     /// Tasks without a run_id are excluded.
@@ -453,7 +453,7 @@ impl TaskManager {
             .all(|r| r.value().status.is_terminal())
     }
 
-    /// Pause all non-terminal tasks in a run (ComplexRuntime approval gate).
+    /// Pause all non-terminal tasks in a run.
     pub fn pause_run(&self, run_id: &str, reason: &str) {
         let paused = TaskStatus::Paused(reason.to_string());
         for mut entry in self.tasks.iter_mut() {

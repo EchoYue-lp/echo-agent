@@ -304,9 +304,9 @@ pub enum TaskStatus {
     TimedOut { error: String },
     /// Retrying
     Retrying { attempt: u32, last_error: String },
-    /// Skipped (EKO extension — task is no longer relevant, soft-delete)
+    /// Deliberately skipped because the task is no longer relevant.
     Skipped,
-    /// Paused waiting for user approval (EKO extension — ComplexRuntime approval gate)
+    /// Paused by the embedding application pending an external decision.
     Paused(String),
 }
 
@@ -671,7 +671,7 @@ impl Task {
             remaining_risks: Vec::new(),
             next_unblocked_tasks: Vec::new(),
             context_summary: None,
-            // EKO extension fields — all None/empty by default
+            // Optional runtime metadata is unset for a generic task.
             run_id: None,
             title: None,
             agent_role: None,

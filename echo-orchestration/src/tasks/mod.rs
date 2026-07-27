@@ -10,6 +10,7 @@ pub mod hooks;
 mod manager;
 pub mod replanner;
 pub mod runtime;
+pub mod runtime_executor;
 pub mod scheduler;
 pub mod store;
 mod task;
@@ -42,6 +43,10 @@ pub use runtime::{
     ConcurrencyLimits, DagExecutionState, DagRefresh, NestedDelegationPolicy, RuntimeTask,
     RuntimeTaskKind, RuntimeTaskStatus, SuggestedTask, TaskExecutionSummary, TaskId, TaskSubagent,
     TaskSubagentContext,
+};
+pub use runtime_executor::{
+    RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome,
+    RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskResolution,
 };
 pub use scheduler::{
     ConflictDetector, FileChangeRecord, ParallelStrategy, SchedulePlan, TaskConflict, TaskScheduler,

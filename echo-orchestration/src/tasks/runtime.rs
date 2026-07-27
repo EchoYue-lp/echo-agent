@@ -251,6 +251,7 @@ pub struct DagExecutionState {
     pub completed: HashSet<TaskId>,
     pub in_flight: HashSet<TaskId>,
     pub failed: HashSet<TaskId>,
+    pub skipped: HashSet<TaskId>,
 }
 
 impl DagExecutionState {
@@ -272,11 +273,17 @@ impl DagExecutionState {
             .filter(|task| task.status == RuntimeTaskStatus::Failed)
             .map(|task| task.id.clone())
             .collect();
+        let skipped = tasks
+            .iter()
+            .filter(|task| task.status == RuntimeTaskStatus::Skipped)
+            .map(|task| task.id.clone())
+            .collect();
 
         Self {
             completed,
             in_flight,
             failed,
+            skipped,
         }
     }
 
@@ -305,6 +312,9 @@ impl DagExecutionState {
                 }
                 RuntimeTaskStatus::Skipped | RuntimeTaskStatus::Cancelled => {
                     self.in_flight.remove(&task_id);
+                    if task.status == RuntimeTaskStatus::Skipped {
+                        self.skipped.insert(task_id.clone());
+                    }
                     refresh.terminal_non_success.push(task_id);
                 }
                 RuntimeTaskStatus::Pending
@@ -324,6 +334,7 @@ impl DagExecutionState {
                 !self.completed.contains(&task.id)
                     && !self.in_flight.contains(&task.id)
                     && !self.failed.contains(&task.id)
+                    && !self.skipped.contains(&task.id)
             })
             .filter(|task| {
                 task.status == RuntimeTaskStatus::Pending
@@ -340,15 +351,19 @@ impl DagExecutionState {
     pub fn blocked_by_failures(&self, tasks: &[RuntimeTask]) -> Vec<TaskId> {
         tasks
             .iter()
-            .filter(|task| !self.completed.contains(&task.id) && !self.failed.contains(&task.id))
+            .filter(|task| {
+                !self.completed.contains(&task.id)
+                    && !self.failed.contains(&task.id)
+                    && !self.skipped.contains(&task.id)
+            })
             .filter(|task| task.depends_on.iter().any(|dep| self.failed.contains(dep)))
             .map(|task| task.id.clone())
             .collect()
     }
 
-    /// Whether every task has completed successfully.
+    /// Whether every task has completed or was deliberately skipped.
     pub fn all_completed(&self, tasks: &[RuntimeTask]) -> bool {
-        self.completed.len() == tasks.len()
+        self.completed.len().saturating_add(self.skipped.len()) == tasks.len()
     }
 
     /// Whether every unfinished task is either failed or blocked by a failed
@@ -356,6 +371,7 @@ impl DagExecutionState {
     pub fn all_unfinished_failed_or_blocked(&self, tasks: &[RuntimeTask]) -> bool {
         tasks.iter().all(|task| {
             self.completed.contains(&task.id)
+                || self.skipped.contains(&task.id)
                 || self.failed.contains(&task.id)
                 || task.depends_on.iter().any(|dep| self.failed.contains(dep))
         })
