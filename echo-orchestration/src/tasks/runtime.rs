@@ -282,6 +282,7 @@ pub struct DagExecutionState {
     pub in_flight: HashSet<TaskId>,
     pub failed: HashSet<TaskId>,
     pub skipped: HashSet<TaskId>,
+    pub cancelled: HashSet<TaskId>,
 }
 
 impl DagExecutionState {
@@ -308,12 +309,18 @@ impl DagExecutionState {
             .filter(|task| task.execution.status == RuntimeTaskStatus::Skipped)
             .map(|task| task.spec.id.clone())
             .collect();
+        let cancelled = tasks
+            .iter()
+            .filter(|task| task.execution.status == RuntimeTaskStatus::Cancelled)
+            .map(|task| task.spec.id.clone())
+            .collect();
 
         Self {
             completed,
             in_flight,
             failed,
             skipped,
+            cancelled,
         }
     }
 
@@ -344,6 +351,8 @@ impl DagExecutionState {
                     self.in_flight.remove(&task_id);
                     if task.execution.status == RuntimeTaskStatus::Skipped {
                         self.skipped.insert(task_id.clone());
+                    } else {
+                        self.cancelled.insert(task_id.clone());
                     }
                     refresh.terminal_non_success.push(task_id);
                 }
@@ -365,6 +374,7 @@ impl DagExecutionState {
                     && !self.in_flight.contains(&task.spec.id)
                     && !self.failed.contains(&task.spec.id)
                     && !self.skipped.contains(&task.spec.id)
+                    && !self.cancelled.contains(&task.spec.id)
             })
             .filter(|task| {
                 task.execution.status == RuntimeTaskStatus::Pending
@@ -386,6 +396,7 @@ impl DagExecutionState {
                 !self.completed.contains(&task.spec.id)
                     && !self.failed.contains(&task.spec.id)
                     && !self.skipped.contains(&task.spec.id)
+                    && !self.cancelled.contains(&task.spec.id)
             })
             .filter(|task| {
                 task.spec
@@ -408,6 +419,7 @@ impl DagExecutionState {
         tasks.iter().all(|task| {
             self.completed.contains(&task.spec.id)
                 || self.skipped.contains(&task.spec.id)
+                || self.cancelled.contains(&task.spec.id)
                 || self.failed.contains(&task.spec.id)
                 || task
                     .spec

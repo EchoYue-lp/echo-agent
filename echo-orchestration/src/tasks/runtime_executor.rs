@@ -153,11 +153,22 @@ impl Default for RuntimeDagExecutorConfig {
 pub struct RuntimeDagExecutor<C: RuntimeDagController> {
     controller: Arc<C>,
     config: RuntimeDagExecutorConfig,
+    validator: PlanValidator,
 }
 
 impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
     pub fn new(controller: Arc<C>, config: RuntimeDagExecutorConfig) -> Self {
-        Self { controller, config }
+        Self {
+            controller,
+            config,
+            validator: PlanValidator::default(),
+        }
+    }
+
+    /// Override structural limits while retaining the canonical validator.
+    pub fn with_validator(mut self, validator: PlanValidator) -> Self {
+        self.validator = validator;
+        self
     }
 
     pub async fn execute(
@@ -182,8 +193,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             // Every loop boundary is a safe point: all locally-dispatched
             // handles from the previous wave have been joined and resolved.
             let snapshot = self.controller.load_snapshot(run_id).await?;
-            if let Err(errors) = PlanValidator::default().validate_runtime_snapshot(&snapshot.tasks)
-            {
+            if let Err(errors) = self.validator.validate_runtime_snapshot(&snapshot.tasks) {
                 return Err(ReactError::Other(format!(
                     "invalid runtime plan snapshot: {}",
                     errors.join("; ")
@@ -233,6 +243,10 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     failed_task.spec.id.clone(),
                     error,
                 ));
+            }
+
+            if !state.cancelled.is_empty() {
+                return self.controller.interruption_outcome(run_id).await;
             }
 
             if state.all_completed(&tasks) {
@@ -621,6 +635,21 @@ mod tests {
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
         assert_eq!(outcome, RuntimeDagOutcome::Completed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn executor_treats_cancelled_snapshot_as_interrupted() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "cancelled",
+            RuntimeTaskStatus::Cancelled,
+            &[],
+        )]));
+        let executor = RuntimeDagExecutor::new(controller, RuntimeDagExecutorConfig::default());
+
+        let outcome = executor.execute("run", CancellationToken::new()).await?;
+
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
         Ok(())
     }
 

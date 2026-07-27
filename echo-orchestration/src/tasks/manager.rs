@@ -259,7 +259,7 @@ impl TaskManager {
     /// terminal-failure state (Failed / TimedOut / Cancelled).
     ///
     /// Such tasks can never become ready because their upstream will never
-    /// complete successfully. Used for deadlock diagnosis in the executor.
+    /// complete successfully. Useful to embedding applications for diagnostics.
     pub fn has_unresolvable_pending(&self) -> bool {
         self.tasks.iter().any(|r| {
             let task = r.value();

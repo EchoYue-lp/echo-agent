@@ -3,7 +3,8 @@
 //! This module provides validation logic for `PlanSpec` to ensure
 //! plans are well-formed before creating the task DAG.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::planning::plan_spec::{PlanSpec, ValidationReport};
 use crate::tasks::{RuntimeTask, RuntimeTaskSpec};
@@ -49,26 +50,20 @@ impl PlanValidator {
     pub fn validate(&self, plan: &PlanSpec) -> ValidationReport {
         let mut report = ValidationReport::new();
 
-        // 1. Check task count
-        if plan.tasks.len() > self.max_tasks {
-            report.add_error(format!(
-                "Plan contains {} tasks, maximum allowed is {}",
-                plan.tasks.len(),
-                self.max_tasks
-            ));
-        }
-
-        if plan.tasks.is_empty() {
-            report.add_error("Plan contains no tasks");
-        }
-
-        // 2. Check for duplicate task IDs
-        let mut task_ids = std::collections::HashSet::new();
-        for task in &plan.tasks {
-            if !task_ids.insert(&task.id) {
-                report.add_error(format!("Duplicate task ID: {}", task.id));
+        // Structural identity, dependency, cycle, depth, and retry checks use
+        // the same immutable runtime specs consumed by the DAG executor.
+        match plan.to_runtime_specs() {
+            Ok(specs) => {
+                if let Err(errors) = self.validate_runtime_specs(&specs) {
+                    for error in errors {
+                        report.add_error(error);
+                    }
+                }
             }
+            Err(error) => report.add_error(error),
         }
+
+        let task_ids: HashSet<&str> = plan.tasks.iter().map(|task| task.id.as_str()).collect();
 
         // 3. Check all tasks have acceptance criteria (if required)
         if self.require_acceptance_criteria {
@@ -91,28 +86,7 @@ impl PlanValidator {
             }
         }
 
-        // 5. Validate dependencies exist
-        for edge in &plan.edges {
-            if !task_ids.contains(&edge.from) {
-                report.add_error(format!(
-                    "Dependency references non-existent task: {}",
-                    edge.from
-                ));
-            }
-            if !task_ids.contains(&edge.to) {
-                report.add_error(format!(
-                    "Dependency references non-existent task: {}",
-                    edge.to
-                ));
-            }
-        }
-
-        // 6. Check for circular dependencies
-        if let Err(msg) = plan.topological_order() {
-            report.add_error(msg);
-        }
-
-        // 7. Check for parallel write conflicts
+        // Check for parallel write conflicts.
         let write_tasks: Vec<_> = plan
             .tasks
             .iter()
@@ -128,9 +102,12 @@ impl PlanValidator {
                     let task_j = write_tasks[j];
 
                     // Check if they're independent (no dependency between them)
-                    let has_dependency = plan.edges.iter().any(|e| {
-                        (e.from == task_i.id && e.to == task_j.id)
-                            || (e.from == task_j.id && e.to == task_i.id)
+                    let has_dependency = plan.edges.iter().any(|edge| {
+                        matches!(
+                            &edge.dependency_type,
+                            crate::planning::DependencyType::Required
+                        ) && ((edge.from == task_i.id && edge.to == task_j.id)
+                            || (edge.from == task_j.id && edge.to == task_i.id))
                     });
 
                     if !has_dependency {
@@ -151,10 +128,10 @@ impl PlanValidator {
             }
         }
 
-        // 8. Validate milestone task IDs
+        // Validate milestone task IDs.
         for milestone in &plan.milestones {
             for task_id in &milestone.task_ids {
-                if !task_ids.contains(task_id) {
+                if !task_ids.contains(task_id.as_str()) {
                     report.add_error(format!(
                         "Milestone '{}' references non-existent task: {}",
                         milestone.id, task_id
@@ -170,48 +147,7 @@ impl PlanValidator {
             }
         }
 
-        // 9. Check dependency depth
-        if let Ok(order) = plan.topological_order() {
-            let task_map: std::collections::HashMap<String, &crate::planning::TaskSpec> =
-                plan.tasks.iter().map(|t| (t.id.clone(), t)).collect();
-
-            // Build dependency map from edges
-            let mut dep_map: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
-            for edge in &plan.edges {
-                dep_map
-                    .entry(edge.from.clone())
-                    .or_default()
-                    .push(edge.to.clone());
-            }
-
-            let mut depths: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
-
-            for task_id in &order {
-                if let Some(_task) = task_map.get(task_id) {
-                    let deps = dep_map.get(task_id).cloned().unwrap_or_default();
-                    let max_dep_depth = deps
-                        .iter()
-                        .filter_map(|dep_id| depths.get(dep_id))
-                        .copied()
-                        .max()
-                        .unwrap_or(0);
-
-                    let depth = max_dep_depth + 1;
-                    depths.insert(task_id.clone(), depth);
-
-                    if depth > self.max_depth {
-                        report.add_error(format!(
-                            "Dependency depth {} exceeds maximum {} for task '{}'",
-                            depth, self.max_depth, task_id
-                        ));
-                    }
-                }
-            }
-        }
-
-        // 10. Validate task priorities
+        // Validate task priorities.
         for task in &plan.tasks {
             if task.priority > 10 {
                 report.add_warning(format!(
@@ -221,12 +157,12 @@ impl PlanValidator {
             }
         }
 
-        // 11. Check goal is not empty
+        // Check goal is not empty.
         if plan.goal.trim().is_empty() {
             report.add_error("Plan goal is empty");
         }
 
-        // 12. Validate context budget
+        // Validate context budget.
         if plan.context_budget == 0 {
             report.add_warning("Plan context budget is 0, using default");
         } else if plan.context_budget > 1_000_000 {
@@ -342,8 +278,8 @@ impl PlanValidator {
             }
         }
 
-        let (processed, depths) = runtime_topological_depths(tasks, &known_ids);
-        if processed < known_ids.len() {
+        let (order, depths) = runtime_topology(tasks, &known_ids);
+        if order.len() < known_ids.len() {
             errors.push("dependency graph contains a cycle".to_string());
         }
         for (task_id, depth) in depths {
@@ -363,10 +299,10 @@ impl PlanValidator {
     }
 }
 
-fn runtime_topological_depths(
+fn runtime_topology(
     tasks: &[RuntimeTaskSpec],
     known_ids: &HashSet<&str>,
-) -> (usize, HashMap<String, usize>) {
+) -> (Vec<String>, HashMap<String, usize>) {
     let mut indegree: HashMap<String, usize> =
         tasks.iter().map(|task| (task.id.clone(), 0)).collect();
     let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -384,16 +320,16 @@ fn runtime_topological_depths(
         }
     }
 
-    let mut queue: VecDeque<String> = indegree
+    let mut queue: BinaryHeap<Reverse<String>> = indegree
         .iter()
         .filter(|(_, count)| **count == 0)
-        .map(|(task_id, _)| task_id.clone())
+        .map(|(task_id, _)| Reverse(task_id.clone()))
         .collect();
     let mut depths: HashMap<String, usize> =
-        queue.iter().map(|task_id| (task_id.clone(), 1)).collect();
-    let mut processed = 0usize;
-    while let Some(task_id) = queue.pop_front() {
-        processed = processed.saturating_add(1);
+        queue.iter().map(|task_id| (task_id.0.clone(), 1)).collect();
+    let mut order = Vec::with_capacity(tasks.len());
+    while let Some(Reverse(task_id)) = queue.pop() {
+        order.push(task_id.clone());
         let current_depth = depths.get(&task_id).copied().unwrap_or(1);
         if let Some(children) = dependents.get(task_id.as_str()) {
             for child in children {
@@ -405,13 +341,42 @@ fn runtime_topological_depths(
                 if let Some(count) = indegree.get_mut(*child) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
-                        queue.push_back((*child).to_string());
+                        queue.push(Reverse((*child).to_string()));
                     }
                 }
             }
         }
     }
-    (processed, depths)
+    (order, depths)
+}
+
+pub(crate) fn runtime_topological_order(
+    tasks: &[RuntimeTaskSpec],
+) -> std::result::Result<Vec<String>, String> {
+    let known_ids: HashSet<&str> = tasks.iter().map(|task| task.id.as_str()).collect();
+    if tasks.len() != known_ids.len() {
+        return Err("Plan contains duplicate task IDs".to_string());
+    }
+    for task in tasks {
+        for dependency in &task.depends_on {
+            if dependency == &task.id {
+                return Err(format!("Task '{}' cannot depend on itself", task.id));
+            }
+            if !known_ids.contains(dependency.as_str()) {
+                return Err(format!(
+                    "Task '{}' depends on '{}' which does not exist",
+                    task.id, dependency
+                ));
+            }
+        }
+    }
+
+    let (order, _) = runtime_topology(tasks, &known_ids);
+    if order.len() != tasks.len() {
+        Err("Plan contains circular dependencies".to_string())
+    } else {
+        Ok(order)
+    }
 }
 
 #[cfg(test)]
@@ -483,7 +448,12 @@ mod tests {
         let report = validator.validate(&plan);
 
         assert!(!report.is_valid());
-        assert!(report.errors.iter().any(|e| e.contains("no tasks")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("at least one task"))
+        );
     }
 
     #[test]
@@ -538,7 +508,7 @@ mod tests {
             report
                 .errors
                 .iter()
-                .any(|e| e.contains("Duplicate task ID"))
+                .any(|error| error.contains("duplicate task id"))
         );
     }
 
@@ -630,7 +600,7 @@ mod tests {
         let report = validator.validate(&plan);
 
         assert!(!report.is_valid());
-        assert!(report.errors.iter().any(|e| e.contains("circular")));
+        assert!(report.errors.iter().any(|error| error.contains("cycle")));
     }
 
     #[test]
@@ -711,6 +681,103 @@ mod tests {
             max_retries: 3,
             metadata: serde_json::Value::Null,
         }
+    }
+
+    fn authoring_task(id: &str) -> TaskSpec {
+        TaskSpec {
+            id: id.to_string(),
+            task_type: TaskType::Implementation,
+            description: format!("execute {id}"),
+            acceptance_criteria: vec![format!("{id} is complete")],
+            inputs: Vec::new(),
+            expected_outputs: Vec::new(),
+            allowed_tools: None,
+            context_scope: ContextScope::Relevant,
+            risk_level: RiskLevel::Medium,
+            can_parallelize: true,
+            requires_write_access: true,
+            verification: VerificationSpec::default(),
+            checkpoint_policy: CheckpointPolicy::OnFailure,
+            priority: 5,
+            assigned_agent: None,
+            tags: Vec::new(),
+            estimated_duration_secs: None,
+        }
+    }
+
+    #[test]
+    fn authoring_plan_compiles_to_canonical_runtime_specs() -> Result<(), String> {
+        let mut first = authoring_task("first");
+        first.expected_outputs.push(TaskOutput {
+            name: "report".to_string(),
+            output_type: OutputType::File,
+            target: "reports/result.md".to_string(),
+            validation: None,
+        });
+        first.verification = VerificationSpec {
+            verification_type: VerificationType::Command,
+            command: Some("cargo test".to_string()),
+            ..VerificationSpec::default()
+        };
+
+        let mut plan = PlanSpec::new("canonical compilation");
+        plan.add_task(first);
+        plan.add_task(authoring_task("second"));
+        plan.add_task(authoring_task("optional"));
+        plan.add_dependency("second", "first", DependencyType::Required);
+        plan.add_dependency("optional", "first", DependencyType::Optional);
+
+        let specs = plan.to_runtime_specs()?;
+        PlanValidator::default()
+            .validate_runtime_specs(&specs)
+            .map_err(|errors| errors.join("; "))?;
+        let first = specs
+            .iter()
+            .find(|task| task.id == "first")
+            .ok_or_else(|| "compiled first task is missing".to_string())?;
+        let second = specs
+            .iter()
+            .find(|task| task.id == "second")
+            .ok_or_else(|| "compiled second task is missing".to_string())?;
+        let optional = specs
+            .iter()
+            .find(|task| task.id == "optional")
+            .ok_or_else(|| "compiled optional task is missing".to_string())?;
+
+        assert_eq!(second.depends_on, vec!["first"]);
+        assert!(optional.depends_on.is_empty());
+        assert_eq!(first.required_artifacts, vec!["reports/result.md"]);
+        assert_eq!(first.execution_checks, vec!["cargo test"]);
+        assert_eq!(first.acceptance_criteria, vec!["first is complete"]);
+        assert!(first.metadata.get("authoring_task_spec").is_some());
+
+        let order = plan.topological_order()?;
+        let first_position = order
+            .iter()
+            .position(|task_id| task_id == "first")
+            .ok_or_else(|| "first task missing from topological order".to_string())?;
+        let second_position = order
+            .iter()
+            .position(|task_id| task_id == "second")
+            .ok_or_else(|| "second task missing from topological order".to_string())?;
+        assert!(first_position < second_position);
+        Ok(())
+    }
+
+    #[test]
+    fn authoring_plan_rejects_dangling_non_blocking_edges() {
+        let mut plan = PlanSpec::new("dangling optional edge");
+        plan.add_task(authoring_task("task"));
+        plan.add_dependency("task", "missing", DependencyType::Optional);
+
+        let report = PlanValidator::default().validate(&plan);
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("non-existent task: missing"))
+        );
     }
 
     #[test]

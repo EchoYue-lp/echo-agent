@@ -1,6 +1,11 @@
 //! Task definitions
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+
+use super::runtime::{
+    RuntimeTask, RuntimeTaskExecution, RuntimeTaskKind, RuntimeTaskSpec, RuntimeTaskStatus,
+};
 
 // ── Enhanced Task Types (Step 1) ──────────────────────────────────────────────
 
@@ -331,6 +336,7 @@ impl TaskStatus {
                     target,
                     TaskStatus::InProgress
                         | TaskStatus::Cancelled
+                        | TaskStatus::Blocked(_)
                         | TaskStatus::Skipped
                         | TaskStatus::Paused(_)
                 )
@@ -688,6 +694,118 @@ impl Task {
 
     pub fn add_dependency(&mut self, dep: String) {
         self.dependencies.push(dep);
+    }
+
+    /// Project this rich task record into the canonical immutable runtime spec.
+    ///
+    /// TaskExecutor-specific attempt, hook, verifier, and persistence details
+    /// stay on `Task`; DAG scheduling consumes only this product-neutral view.
+    pub fn runtime_spec(&self) -> RuntimeTaskSpec {
+        let fallback_kind = match self.task_type {
+            TaskType::Discovery => RuntimeTaskKind::Investigation,
+            TaskType::Implementation => RuntimeTaskKind::Implementation,
+            TaskType::Verification => RuntimeTaskKind::Verification,
+            TaskType::Background | TaskType::Delegation if self.requires_write_access => {
+                RuntimeTaskKind::Implementation
+            }
+            TaskType::Background | TaskType::Delegation => RuntimeTaskKind::Investigation,
+        };
+        let kind = self
+            .kind
+            .as_deref()
+            .and_then(|value| RuntimeTaskKind::from_str(value).ok())
+            .unwrap_or(fallback_kind);
+        let title = self
+            .title
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| (!self.subject.trim().is_empty()).then(|| self.subject.clone()))
+            .unwrap_or_else(|| self.description.clone());
+        let agent_role = self
+            .agent_role
+            .clone()
+            .or_else(|| self.assigned_agent.clone())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "default".to_string());
+        let required_artifacts = self
+            .expected_outputs
+            .iter()
+            .filter(|output| matches!(output.output_type, OutputType::File | OutputType::Artifact))
+            .map(|output| {
+                if output.target.trim().is_empty() {
+                    output.name.clone()
+                } else {
+                    output.target.clone()
+                }
+            })
+            .collect();
+        let execution_checks = if matches!(
+            self.verification.verification_type,
+            VerificationType::Command | VerificationType::Test
+        ) {
+            self.verification.command.iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
+
+        RuntimeTaskSpec {
+            id: self.id.clone(),
+            title,
+            description: self.description.clone(),
+            kind,
+            agent_role,
+            depends_on: self.dependencies.clone(),
+            files: self.files.clone(),
+            allowed_tools: self.allowed_tools.clone().unwrap_or_default(),
+            required_artifacts,
+            execution_checks,
+            acceptance_criteria: self.acceptance_criteria.clone(),
+            max_retries: self.max_retries,
+            metadata: self
+                .metadata_json
+                .clone()
+                .unwrap_or(serde_json::Value::Null),
+        }
+    }
+
+    /// Project mutable execution state into the canonical runtime state.
+    pub fn runtime_execution(&self) -> RuntimeTaskExecution {
+        let (status, failure_fingerprint) = match &self.status {
+            TaskStatus::Pending => (RuntimeTaskStatus::Pending, None),
+            TaskStatus::InProgress | TaskStatus::Retrying { .. } => {
+                (RuntimeTaskStatus::Running, None)
+            }
+            TaskStatus::Completed => (RuntimeTaskStatus::Completed, None),
+            TaskStatus::Cancelled => (RuntimeTaskStatus::Cancelled, None),
+            TaskStatus::Failed(error)
+            | TaskStatus::Blocked(error)
+            | TaskStatus::Paused(error)
+            | TaskStatus::TimedOut { error } => {
+                let runtime_status =
+                    if matches!(self.status, TaskStatus::Blocked(_) | TaskStatus::Paused(_)) {
+                        RuntimeTaskStatus::Blocked
+                    } else {
+                        RuntimeTaskStatus::Failed
+                    };
+                (runtime_status, Some(error.clone()))
+            }
+            TaskStatus::Skipped => (RuntimeTaskStatus::Skipped, None),
+        };
+
+        RuntimeTaskExecution {
+            task_id: self.id.clone(),
+            status,
+            retry_count: self.retry_count,
+            failure_fingerprint,
+        }
+    }
+
+    /// Canonical runtime node used by the framework DAG executor.
+    pub fn to_runtime_task(&self) -> RuntimeTask {
+        RuntimeTask {
+            spec: self.runtime_spec(),
+            execution: self.runtime_execution(),
+        }
     }
 
     pub fn with_priority(mut self, priority: u8) -> Self {

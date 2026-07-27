@@ -5,10 +5,14 @@
 //! the task DAG.
 
 use crate::tasks::{
-    CheckpointPolicy, ContextScope, RiskLevel, Task, TaskInput, TaskOutput, TaskType,
-    VerificationSpec,
+    CheckpointPolicy, ContextScope, OutputType, RiskLevel, RuntimeTask, RuntimeTaskExecution,
+    RuntimeTaskKind, RuntimeTaskSpec, Task, TaskInput, TaskOutput, TaskType, VerificationSpec,
+    VerificationType,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+
+const DEFAULT_AGENT_ROLE: &str = "default";
 
 /// Complete plan specification output by LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +163,66 @@ impl TaskSpec {
 
         task
     }
+
+    /// Compile this authoring specification into the canonical runtime shape.
+    ///
+    /// Rich authoring-only policy stays available in `metadata`; the runtime
+    /// fields contain only semantics used by the generic DAG executor.
+    pub fn to_runtime_spec(&self, dependencies: Vec<String>) -> Result<RuntimeTaskSpec, String> {
+        let authoring_metadata = serde_json::to_value(self)
+            .map_err(|error| format!("failed to serialize task '{}': {error}", self.id))?;
+        let required_artifacts = self
+            .expected_outputs
+            .iter()
+            .filter(|output| matches!(output.output_type, OutputType::File | OutputType::Artifact))
+            .map(|output| {
+                if output.target.trim().is_empty() {
+                    output.name.clone()
+                } else {
+                    output.target.clone()
+                }
+            })
+            .collect();
+        let execution_checks = if matches!(
+            self.verification.verification_type,
+            VerificationType::Command | VerificationType::Test
+        ) {
+            self.verification.command.iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
+
+        Ok(RuntimeTaskSpec {
+            id: self.id.clone(),
+            title: self.description.clone(),
+            description: self.description.clone(),
+            kind: runtime_kind_for_authoring_task(self),
+            agent_role: self
+                .assigned_agent
+                .clone()
+                .unwrap_or_else(|| DEFAULT_AGENT_ROLE.to_string()),
+            depends_on: dependencies,
+            files: Vec::new(),
+            allowed_tools: self.allowed_tools.clone().unwrap_or_default(),
+            required_artifacts,
+            execution_checks,
+            acceptance_criteria: self.acceptance_criteria.clone(),
+            max_retries: 0,
+            metadata: serde_json::json!({ "authoring_task_spec": authoring_metadata }),
+        })
+    }
+}
+
+fn runtime_kind_for_authoring_task(task: &TaskSpec) -> RuntimeTaskKind {
+    match task.task_type {
+        TaskType::Discovery => RuntimeTaskKind::Investigation,
+        TaskType::Implementation => RuntimeTaskKind::Implementation,
+        TaskType::Verification => RuntimeTaskKind::Verification,
+        TaskType::Background | TaskType::Delegation if task.requires_write_access => {
+            RuntimeTaskKind::Implementation
+        }
+        TaskType::Background | TaskType::Delegation => RuntimeTaskKind::Investigation,
+    }
 }
 
 /// Dependency edge between tasks
@@ -289,66 +353,83 @@ impl PlanSpec {
         self.milestones.push(milestone);
     }
 
-    /// Convert PlanSpec to a list of Tasks with dependencies set
-    pub fn to_tasks(&self) -> Vec<Task> {
-        let mut tasks: Vec<Task> = self.tasks.iter().map(|spec| spec.to_task()).collect();
-
-        // Set dependencies based on edges
+    /// Compile immutable runtime task specifications.
+    ///
+    /// Only required edges block execution. Preferred and optional edges stay
+    /// authoring policy and never create a second hidden ready-frontier rule.
+    pub fn to_runtime_specs(&self) -> Result<Vec<RuntimeTaskSpec>, String> {
+        let task_ids: HashSet<&str> = self.tasks.iter().map(|task| task.id.as_str()).collect();
+        let mut dependencies: HashMap<&str, Vec<String>> = HashMap::new();
         for edge in &self.edges {
-            if let Some(task) = tasks.iter_mut().find(|t| t.id == edge.from) {
-                task.add_dependency(edge.to.clone());
+            if !task_ids.contains(edge.from.as_str()) {
+                return Err(format!(
+                    "Dependency references non-existent task: {}",
+                    edge.from
+                ));
+            }
+            if !task_ids.contains(edge.to.as_str()) {
+                return Err(format!(
+                    "Dependency references non-existent task: {}",
+                    edge.to
+                ));
+            }
+            if matches!(edge.dependency_type, DependencyType::Required) {
+                dependencies
+                    .entry(edge.from.as_str())
+                    .or_default()
+                    .push(edge.to.clone());
             }
         }
 
-        tasks
+        self.tasks
+            .iter()
+            .map(|task| {
+                let mut task_dependencies =
+                    dependencies.remove(task.id.as_str()).unwrap_or_default();
+                task_dependencies.sort();
+                task_dependencies.dedup();
+                task.to_runtime_spec(task_dependencies)
+            })
+            .collect()
+    }
+
+    /// Compile a pending runtime snapshot for the generic DAG executor.
+    pub fn to_runtime_tasks(&self) -> Result<Vec<RuntimeTask>, String> {
+        self.to_runtime_specs().map(|specs| {
+            specs
+                .into_iter()
+                .map(|spec| RuntimeTask {
+                    execution: RuntimeTaskExecution::pending(spec.id.clone()),
+                    spec,
+                })
+                .collect()
+        })
+    }
+
+    /// Convert PlanSpec to rich task records with canonical dependencies set.
+    pub fn to_tasks(&self) -> Result<Vec<Task>, String> {
+        let runtime_specs = self.to_runtime_specs()?;
+        let dependencies: HashMap<&str, &[String]> = runtime_specs
+            .iter()
+            .map(|spec| (spec.id.as_str(), spec.depends_on.as_slice()))
+            .collect();
+        Ok(self
+            .tasks
+            .iter()
+            .map(|spec| {
+                let task_dependencies = dependencies
+                    .get(spec.id.as_str())
+                    .map(|items| items.to_vec())
+                    .unwrap_or_default();
+                spec.to_task().with_dependencies(task_dependencies)
+            })
+            .collect())
     }
 
     /// Get task IDs in topological order
     pub fn topological_order(&self) -> Result<Vec<String>, String> {
-        let tasks = self.to_tasks();
-        let task_map: std::collections::HashMap<String, &Task> =
-            tasks.iter().map(|t| (t.id.clone(), t)).collect();
-
-        // Kahn's algorithm for topological sort
-        let mut in_degree: std::collections::HashMap<String, usize> =
-            tasks.iter().map(|t| (t.id.clone(), 0)).collect();
-
-        for task in &tasks {
-            for dep in &task.dependencies {
-                if let Some(degree) = in_degree.get_mut(dep) {
-                    *degree += 1;
-                }
-            }
-        }
-
-        let mut queue: std::collections::VecDeque<String> = in_degree
-            .iter()
-            .filter(|&(_, &degree)| degree == 0)
-            .map(|(id, _)| id.clone())
-            .collect();
-
-        let mut result = Vec::new();
-
-        while let Some(id) = queue.pop_front() {
-            result.push(id.clone());
-
-            if let Some(task) = task_map.get(&id) {
-                for dep in &task.dependencies {
-                    if let Some(degree) = in_degree.get_mut(dep) {
-                        *degree -= 1;
-                        if *degree == 0 {
-                            queue.push_back(dep.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        if result.len() != tasks.len() {
-            return Err("Plan contains circular dependencies".to_string());
-        }
-
-        Ok(result)
+        let specs = self.to_runtime_specs()?;
+        super::validator::runtime_topological_order(&specs)
     }
 }
 

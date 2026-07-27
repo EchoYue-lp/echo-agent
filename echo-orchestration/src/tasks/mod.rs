@@ -219,7 +219,7 @@ mod tests {
 
         let error_msg = order.unwrap_err();
         assert!(
-            error_msg.contains("Cyclic dependency"),
+            error_msg.contains("circular dependencies"),
             "error message should contain cyclic dependency hint"
         );
     }

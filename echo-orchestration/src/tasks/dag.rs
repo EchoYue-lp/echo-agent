@@ -22,71 +22,12 @@ impl TaskManager {
 
     /// Get topological sort (returns error if cyclic dependencies exist)
     pub fn get_topological_order(&self) -> Result<Vec<String>, String> {
-        let cycles = self.detect_circular_dependencies();
-        if !cycles.is_empty() {
-            let cycle_strs: Vec<String> = cycles
-                .iter()
-                .map(|cycle| format!("[{}]", cycle.join(" -> ")))
-                .collect();
-            return Err(format!(
-                "Cyclic dependency exists, cannot perform topological sort: {}",
-                cycle_strs.join(", ")
-            ));
-        }
-
-        // Kahn's algorithm for topological sort
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        let mut adj_list: HashMap<String, Vec<String>> = HashMap::new();
-
-        let task_ids: Vec<String> = self.tasks.iter().map(|r| r.key().clone()).collect();
-        for task_id in &task_ids {
-            in_degree.insert(task_id.clone(), 0);
-            adj_list.insert(task_id.clone(), Vec::new());
-        }
-
-        for entry in self.tasks.iter() {
-            let task_id = entry.key();
-            let task = entry.value();
-            for dep_id in &task.dependencies {
-                if let Some(adj) = adj_list.get_mut(dep_id) {
-                    adj.push(task_id.clone());
-                }
-                if let Some(degree) = in_degree.get_mut(task_id) {
-                    *degree += 1;
-                }
-            }
-        }
-
-        let mut queue: Vec<String> = in_degree
+        let specs = self
+            .get_all_tasks()
             .iter()
-            .filter(|&(_, &deg)| deg == 0)
-            .map(|(id, _)| id.clone())
-            .collect();
-        queue.sort_by(|a, b| {
-            self.tasks
-                .get(a)
-                .and_then(|t| self.tasks.get(b).map(|u| u.priority.cmp(&t.priority)))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let mut result = Vec::new();
-
-        while let Some(task_id) = queue.pop() {
-            result.push(task_id.clone());
-
-            if let Some(adj) = adj_list.get(&task_id) {
-                for neighbor in adj {
-                    if let Some(degree) = in_degree.get_mut(neighbor) {
-                        *degree -= 1;
-                        if *degree == 0 {
-                            queue.push(neighbor.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(result)
+            .map(super::Task::runtime_spec)
+            .collect::<Vec<_>>();
+        crate::planning::validator::runtime_topological_order(&specs)
     }
 
     /// Generate a visualization of the dependency graph (Mermaid format)

@@ -42,15 +42,22 @@
 use super::hooks::{RetryDecision, TaskHookRegistry};
 use super::manager::TaskManager;
 use super::replanner::Replanner;
+use super::runtime::{ConcurrencyLimits, NestedDelegationPolicy, RuntimeTask, TaskSubagentContext};
+use super::runtime_executor::{
+    RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome,
+    RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskResolution,
+};
 use super::scheduler::TaskScheduler;
 use super::task::{Task, TaskStatus};
 use super::verifier::Verifier;
+use crate::planning::PlanValidator;
 use crate::tasks::BackgroundCheckpointStore;
+use async_trait::async_trait;
 use dashmap::DashMap;
 use echo_core::error::{ReactError, Result};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -74,12 +81,6 @@ pub struct TaskExecutorConfig {
     /// When set, TaskCreated/TaskCompleted events are fired into the
     /// unified HookRegistry alongside the trait-based TaskHooks.
     pub unified_hook_executor: Option<echo_core::hooks::UnifiedHookExecutorFn>,
-    /// Per-round timeout in seconds for `execute_all()`.
-    ///
-    /// If `execute_ready_tasks()` takes longer than this, the loop checks
-    /// whether tasks are legitimately blocked (e.g. waiting for human input)
-    /// or genuinely deadlocked. Default: 3600 (1 hour), 0 = no timeout.
-    pub round_timeout_secs: u64,
 }
 
 impl Clone for TaskExecutorConfig {
@@ -93,7 +94,6 @@ impl Clone for TaskExecutorConfig {
             retry_jitter: self.retry_jitter,
             enable_hooks: self.enable_hooks,
             unified_hook_executor: self.unified_hook_executor.clone(),
-            round_timeout_secs: self.round_timeout_secs,
         }
     }
 }
@@ -112,7 +112,6 @@ impl Default for TaskExecutorConfig {
             retry_jitter: true,
             enable_hooks: true,
             unified_hook_executor: None,
-            round_timeout_secs: 3600, // 1 hour
         }
     }
 }
@@ -278,17 +277,12 @@ impl TaskContext {
 
         let mut parts = vec!["Execution results of upstream dependent tasks:".to_string()];
         for (id, result) in &self.upstream_results {
-            // UTF-8 safe truncation
-            let preview = if result.len() > char_limit {
-                let end = result
-                    .char_indices()
-                    .take_while(|(idx, _)| *idx < char_limit)
-                    .last()
-                    .map(|(idx, c)| idx + c.len_utf8())
-                    .unwrap_or(0);
-                format!("{}...", &result[..end])
+            let truncated = result.chars().count() > char_limit;
+            let preview: String = result.chars().take(char_limit).collect();
+            let preview = if truncated {
+                format!("{preview}...")
             } else {
-                result.clone()
+                preview
             };
             parts.push(format!("  - [{}]: {}", id, preview));
         }
@@ -309,6 +303,7 @@ pub type TaskExecuteFn =
 ///
 /// Works directly with `Arc<TaskManager>` — since `TaskManager` uses `DashMap` internally,
 /// no external `RwLock` is needed for concurrent access.
+#[derive(Clone)]
 pub struct TaskExecutor {
     task_manager: Arc<TaskManager>,
     config: TaskExecutorConfig,
@@ -338,6 +333,31 @@ pub struct TaskExecutor {
     scheduler: Option<Arc<TaskScheduler>>,
     /// Optional background task checkpoint store.
     background_checkpoint_store: Option<Arc<dyn BackgroundCheckpointStore>>,
+}
+
+struct ManagedTaskDagController {
+    executor: TaskExecutor,
+    results: Mutex<Vec<TaskExecutionResult>>,
+}
+
+impl ManagedTaskDagController {
+    fn new(executor: TaskExecutor) -> Self {
+        Self {
+            executor,
+            results: Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn take_results(&self) -> Vec<TaskExecutionResult> {
+        std::mem::take(&mut *self.results.lock().await)
+    }
+
+    async fn persist_task(&self, task: &Task) -> Result<()> {
+        if let Some(store) = self.executor.task_store.as_ref() {
+            store.save_task(task).await?;
+        }
+        Ok(())
+    }
 }
 
 impl TaskExecutor {
@@ -693,6 +713,51 @@ impl TaskExecutor {
         result
     }
 
+    /// Execute one node selected by the canonical DAG kernel.
+    ///
+    /// Global concurrency is already bounded by `RuntimeDagExecutor`, so this
+    /// adapter deliberately does not acquire the legacy batch semaphore.
+    async fn execute_selected_task(
+        &self,
+        task: Task,
+        parent_cancel: CancellationToken,
+    ) -> TaskExecutionResult {
+        let task_id = task.id.clone();
+        if let Some(ref executor) = self.config.unified_hook_executor {
+            let ctx =
+                echo_core::hooks::HookContext::for_task_created(&task.id, &task.subject, "", "");
+            executor(ctx).await;
+        }
+
+        let cancel = parent_cancel.child_token();
+        let cancel_for_execution = cancel.clone();
+        let cancel_wait = cancel_for_execution.clone();
+        self.running_tasks.insert(task_id.clone(), cancel);
+        let result = tokio::select! {
+            biased;
+            _ = cancel_wait.cancelled() => {
+                let _ = self.task_manager.cancel_task(&task_id);
+                TaskExecutionResult::cancelled(&task_id)
+            }
+            result = Self::run_task_with_retry(
+                task,
+                self.task_manager.clone(),
+                self.config.clone(),
+                self.execute_fn.clone(),
+                self.hooks.clone(),
+                cancel_for_execution,
+                self.task_store.clone(),
+                self.verifier.clone(),
+                self.replanner.clone(),
+            ) => result,
+        };
+        if matches!(result.status, TaskStatus::Cancelled) {
+            let _ = self.task_manager.cancel_task(&task_id);
+        }
+        self.running_tasks.remove(&task_id);
+        result
+    }
+
     /// Run a single task with retry logic
     // These values form one internal execution context; grouping them is a
     // separate executor refactor, not part of workspace migration.
@@ -786,41 +851,51 @@ impl TaskExecutor {
                 let cancel_wait = cancel_token.cancelled();
                 tokio::pin!(cancel_wait);
 
-                let timeout_wait = tokio::time::sleep(Duration::from_secs(timeout_secs));
-                tokio::pin!(timeout_wait);
-
-                tokio::select! {
-                    biased;
-                    _ = &mut cancel_wait => {
-                        return TaskExecutionResult::cancelled(&task_id);
-                    }
-                    _ = &mut timeout_wait => {
-                        let result =
-                            TaskExecutionResult::timeout(&task_id, timeout_secs, current_attempt);
-
-                        // Update manager status to TimedOut
-                        let _ = manager.update_task_status(&task_id, TaskStatus::TimedOut {
-                            error: format!("Task timed out after {}s", timeout_secs),
-                        });
-
-                        // Call on_timeout hook
-                        if config.enable_hooks
-                            && let Some(ctx) =
-                                manager.create_hook_context(&task_id, current_attempt, None)
-                        {
-                            hooks.on_timeout(&ctx).await;
+                if timeout_secs == 0 {
+                    tokio::select! {
+                        biased;
+                        _ = &mut cancel_wait => {
+                            return TaskExecutionResult::cancelled(&task_id);
                         }
-
-                        // Immediately persist timed-out task to store
-                        if let Some(ref store) = task_store
-                            && let Some(task_snapshot) = manager.get_task(&task_id)
-                                && let Err(e) = store.save_task(&task_snapshot).await {
-                                    warn!(task_id = %task_id, error = %e, "Failed to persist timed-out task");
-                                }
-
-                        return result;
+                        result = &mut execution => result,
                     }
-                    result = &mut execution => result,
+                } else {
+                    let timeout_wait = tokio::time::sleep(Duration::from_secs(timeout_secs));
+                    tokio::pin!(timeout_wait);
+
+                    tokio::select! {
+                        biased;
+                        _ = &mut cancel_wait => {
+                            return TaskExecutionResult::cancelled(&task_id);
+                        }
+                        _ = &mut timeout_wait => {
+                            let result =
+                                TaskExecutionResult::timeout(&task_id, timeout_secs, current_attempt);
+
+                            // Update manager status to TimedOut
+                            let _ = manager.update_task_status(&task_id, TaskStatus::TimedOut {
+                                error: format!("Task timed out after {}s", timeout_secs),
+                            });
+
+                            // Call on_timeout hook
+                            if config.enable_hooks
+                                && let Some(ctx) =
+                                    manager.create_hook_context(&task_id, current_attempt, None)
+                            {
+                                hooks.on_timeout(&ctx).await;
+                            }
+
+                            // Immediately persist timed-out task to store
+                            if let Some(ref store) = task_store
+                                && let Some(task_snapshot) = manager.get_task(&task_id)
+                                    && let Err(e) = store.save_task(&task_snapshot).await {
+                                        warn!(task_id = %task_id, error = %e, "Failed to persist timed-out task");
+                                    }
+
+                            return result;
+                        }
+                        result = &mut execution => result,
+                    }
                 }
             } else {
                 // No execute_fn provided - return success with description
@@ -972,15 +1047,18 @@ impl TaskExecutor {
                                     None,
                                 );
 
-                                current_attempt += 1;
-                                tokio::select! {
-                                    biased;
-                                    _ = cancel.cancelled() => {
-                                        return TaskExecutionResult::cancelled(&task_id);
+                                if let Some(next_attempt) = current_attempt.checked_add(1) {
+                                    current_attempt = next_attempt;
+                                    tokio::select! {
+                                        biased;
+                                        _ = cancel.cancelled() => {
+                                            return TaskExecutionResult::cancelled(&task_id);
+                                        }
+                                        _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
                                     }
-                                    _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
+                                    continue;
                                 }
-                                continue;
+                                warn!(task_id = %task_id, "Retry counter exhausted");
                             }
                             RetryDecision::Skip => {
                                 // Mark as completed but with warning
@@ -1183,165 +1261,64 @@ impl TaskExecutor {
         self.running_tasks.clear();
     }
 
-    /// Run the full execution loop until all tasks complete or a deadlock is detected.
+    /// Run the full task DAG through the canonical runtime kernel.
     ///
-    /// This method repeatedly calls `execute_ready_tasks` and uses `wake_dependents`
-    /// after each batch to discover newly-ready tasks, eliminating polling.
-    ///
-    /// Each round is protected by a configurable timeout (`round_timeout_secs`).
-    /// If `execute_ready_tasks` exceeds the timeout (e.g. tasks blocked on
-    /// a `HumanLoopProvider` Selection request), the loop inspects task
-    /// statuses to distinguish legitimate blocking from real deadlocks.
-    ///
-    /// Returns all execution results accumulated across batches.
+    /// Hooks, retries, verification, replanning, timeout, and persistence stay
+    /// in this executor's per-task pipeline. Dependency traversal, bounded
+    /// waves, cancellation, failure propagation, and stall detection have one
+    /// authority: [`RuntimeDagExecutor`].
     pub async fn execute_all(&self) -> Result<Vec<TaskExecutionResult>> {
-        let mut all_results = Vec::new();
-        let mut empty_rounds: u32 = 0;
-        let mut batch_count: u64 = 0;
-        let max_empty_rounds: u32 = 3;
-        let round_timeout = Duration::from_secs(if self.config.round_timeout_secs > 0 {
-            self.config.round_timeout_secs
-        } else {
-            3600 // default 1 hour
-        });
-        // Global wall-clock deadline: if the loop runs longer than this,
-        // force-exit with an error instead of livelocking forever (P1-2.2).
-        let global_deadline = tokio::time::Instant::now()
-            + Duration::from_secs(self.config.round_timeout_secs.max(600) * 4);
-
-        loop {
-            // Check executor-level cancellation before each round
-            if self.cancel.is_cancelled() {
-                info!("Executor cancelled, stopping execute_all");
-                break;
-            }
-            // Global wall-clock deadline to prevent infinite livelock (P1-2.2)
-            if tokio::time::Instant::now() > global_deadline {
-                tracing::warn!(
-                    "execute_all global deadline reached after {} batches, force-exiting",
-                    batch_count
-                );
-                break;
-            }
-
-            // Wrap each round in a timeout to prevent indefinite hangs
-            // (e.g. all ready tasks blocked on a HumanLoopProvider Selection request).
-            let batch_result =
-                tokio::time::timeout(round_timeout, self.execute_ready_tasks()).await;
-
-            let results = match batch_result {
-                Ok(Ok(results)) => results,
-                Ok(Err(e)) => return Err(e),
-                Err(_elapsed) => {
-                    // Round timed out — diagnose why
-                    let in_progress_count = self.task_manager.get_in_progress_tasks().len();
-                    let pending_count = self.task_manager.get_pending_tasks().len();
-
-                    if in_progress_count > 0 {
-                        // Tasks are still running (possibly blocked on a Selection request or
-                        // long-running computations) — this is normal, keep waiting.
-                        debug!(
-                            in_progress = in_progress_count,
-                            "Round timed out but {} tasks still in progress, continuing",
-                            in_progress_count
-                        );
-                        continue;
-                    }
-
-                    // No tasks in progress and nothing became ready — treat as empty round
-                    warn!(
-                        pending = pending_count,
-                        "Round timed out with no tasks in progress"
-                    );
-                    Vec::new()
-                }
-            };
-
-            let batch_size = results.len();
-
-            // Wake dependents for each completed task in this batch
-            for r in &results {
-                if matches!(r.status, TaskStatus::Completed) {
-                    let newly_ready = self.task_manager.wake_dependents(&r.task_id);
-                    if !newly_ready.is_empty() {
-                        debug!(
-                            task_id = %r.task_id,
-                            newly_ready = newly_ready.len(),
-                            "Wake dependents: {} new tasks ready",
-                            newly_ready.len()
-                        );
-                    }
-                }
-            }
-
-            all_results.extend(results);
-
-            if batch_size > 0 {
-                batch_count += 1;
-            }
-
-            if self.is_completed() {
-                break;
-            }
-
-            if batch_size == 0 {
-                empty_rounds += 1;
-                if empty_rounds >= max_empty_rounds {
-                    // Enhanced deadlock diagnosis
-                    let in_progress_count = self.task_manager.get_in_progress_tasks().len();
-                    let pending_count = self.task_manager.get_pending_tasks().len();
-
-                    if in_progress_count > 0 {
-                        // Tasks still running — not a deadlock, reset counter
-                        debug!(
-                            in_progress = in_progress_count,
-                            "Empty round but {} tasks in progress, resetting counter",
-                            in_progress_count
-                        );
-                        empty_rounds = 0;
-                        continue;
-                    }
-
-                    let (completed, total) = self.get_progress();
-                    if self.is_completed() {
-                        break;
-                    }
-
-                    let unresolvable = self.task_manager.has_unresolvable_pending();
-                    let detail = if unresolvable {
-                        "unresolvable dependencies (upstream failed/cancelled)"
-                    } else if pending_count > 0 {
-                        "unresolved dependencies"
-                    } else {
-                        "no pending tasks"
-                    };
-                    warn!(
-                        completed,
-                        total,
-                        pending = pending_count,
-                        empty_rounds,
-                        "Deadlock detected: {detail}"
-                    );
-                    return Err(ReactError::Other(format!(
-                        "Task execution deadlock: {completed}/{total} completed, \
-                         {pending_count} pending ({detail}).",
-                    )));
-                }
-            } else {
-                empty_rounds = 0;
-            }
+        if self.task_manager.get_all_tasks().is_empty() {
+            return Ok(Vec::new());
         }
 
-        Ok(all_results)
+        let max_concurrent = self.config.max_concurrent.max(1);
+        let controller = Arc::new(ManagedTaskDagController::new(self.clone()));
+        let runtime = RuntimeDagExecutor::new(
+            controller.clone(),
+            RuntimeDagExecutorConfig {
+                concurrency_limits: ConcurrencyLimits {
+                    max_concurrent_subagents: max_concurrent,
+                    max_concurrent_writes: max_concurrent,
+                    max_concurrent_shells: max_concurrent,
+                    max_parallel_llm_calls: max_concurrent,
+                },
+                external_progress_poll_interval: Duration::from_millis(250),
+                delegation_policy: NestedDelegationPolicy {
+                    can_spawn_subagents: true,
+                    delegate_depth: 0,
+                    max_delegate_depth: 2,
+                },
+            },
+        )
+        .with_validator(PlanValidator {
+            max_tasks: usize::MAX,
+            max_depth: usize::MAX,
+            require_acceptance_criteria: false,
+            require_verification: false,
+            max_retries: u32::MAX,
+        });
+        let outcome = runtime
+            .execute("framework-task-executor", self.cancel.clone())
+            .await?;
+        let results = controller.take_results().await;
+        match outcome {
+            RuntimeDagOutcome::Completed | RuntimeDagOutcome::Cancelled => Ok(results),
+            RuntimeDagOutcome::Failed { error, .. } | RuntimeDagOutcome::Paused { error, .. } => {
+                Err(ReactError::Other(error))
+            }
+        }
     }
 
-    /// Non-blocking variant of `execute_all` that spawns execution as background tasks.
+    /// Spawn the current ready frontier as non-blocking background tasks.
     ///
     /// Returns handles immediately — the caller's ReAct loop is not blocked.
     /// Each returned [`BackgroundTask`] can be polled for status, awaited, or cancelled.
     ///
-    /// DAG dependency waking is handled automatically: when a task completes,
-    /// its dependents are woken and the next batch is spawned.
+    /// This is a one-wave primitive, not a second full DAG executor. Completion
+    /// wakes dependents; callers may invoke this method again for the next
+    /// frontier. Use [`execute_all`](Self::execute_all) for framework-owned
+    /// traversal through [`RuntimeDagExecutor`].
     pub fn execute_all_async(
         &self,
     ) -> Vec<super::background_task::BackgroundTask<TaskExecutionResult>> {
@@ -1459,6 +1436,230 @@ impl TaskExecutor {
     }
 }
 
+#[async_trait]
+impl RuntimeDagController for ManagedTaskDagController {
+    type DispatchOutput = TaskExecutionResult;
+
+    async fn load_snapshot(&self, _run_id: &str) -> Result<RuntimePlanSnapshot> {
+        let mut tasks = self.executor.task_manager.get_all_tasks();
+        tasks.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(RuntimePlanSnapshot {
+            // TaskManager is an in-memory authority without revision commits.
+            // The kernel still reloads it at every safe point.
+            revision: 0,
+            tasks: tasks.iter().map(Task::to_runtime_task).collect(),
+        })
+    }
+
+    fn select_ready_wave(
+        &self,
+        _tasks: &[RuntimeTask],
+        ready_task_ids: Vec<String>,
+    ) -> Vec<String> {
+        let mut ready_tasks: Vec<Task> = ready_task_ids
+            .iter()
+            .filter_map(|task_id| self.executor.task_manager.get_task(task_id))
+            .collect();
+        ready_tasks.sort_by_key(|task| std::cmp::Reverse(task.priority));
+
+        let Some(scheduler) = self.executor.scheduler.as_ref() else {
+            return ready_tasks.into_iter().map(|task| task.id).collect();
+        };
+        let schedule = scheduler.schedule(&ready_tasks);
+        if let Some(group) = schedule
+            .parallel_groups
+            .into_iter()
+            .find(|group| !group.is_empty())
+        {
+            return group;
+        }
+        if let Some(task_id) = schedule.serial_sequence.into_iter().next() {
+            return vec![task_id];
+        }
+
+        ready_tasks
+            .into_iter()
+            .next()
+            .map(|task| vec![task.id])
+            .unwrap_or_default()
+    }
+
+    async fn dispatch_task(
+        &self,
+        context: TaskSubagentContext,
+        runtime_task: RuntimeTask,
+    ) -> Result<Self::DispatchOutput> {
+        let task = self
+            .executor
+            .task_manager
+            .get_task(&runtime_task.spec.id)
+            .ok_or_else(|| {
+                ReactError::Other(format!(
+                    "runtime-selected task '{}' no longer exists",
+                    runtime_task.spec.id
+                ))
+            })?;
+
+        match &task.status {
+            TaskStatus::Pending => Ok(self
+                .executor
+                .execute_selected_task(task, context.cancel)
+                .await),
+            TaskStatus::Completed => Ok(TaskExecutionResult::success(
+                &task.id,
+                task.result.clone().unwrap_or_default(),
+                Duration::ZERO,
+                task.retry_count.saturating_add(1),
+            )),
+            TaskStatus::Cancelled => Ok(TaskExecutionResult::cancelled(&task.id)),
+            TaskStatus::Skipped => Ok(TaskExecutionResult {
+                task_id: task.id,
+                status: TaskStatus::Skipped,
+                output: task.result,
+                error: None,
+                duration: Duration::ZERO,
+                attempts: task.retry_count,
+            }),
+            TaskStatus::Failed(error)
+            | TaskStatus::Blocked(error)
+            | TaskStatus::Paused(error)
+            | TaskStatus::TimedOut { error } => Ok(TaskExecutionResult {
+                task_id: task.id,
+                status: task.status.clone(),
+                output: task.result,
+                error: Some(error.clone()),
+                duration: Duration::ZERO,
+                attempts: task.retry_count,
+            }),
+            TaskStatus::InProgress | TaskStatus::Retrying { .. } => Err(ReactError::Other(
+                format!("runtime-selected task '{}' is already running", task.id),
+            )),
+        }
+    }
+
+    async fn resolve_dispatch(
+        &self,
+        _run_id: &str,
+        runtime_task: RuntimeTask,
+        dispatch: Result<Self::DispatchOutput>,
+    ) -> Result<RuntimeTaskResolution> {
+        let result = match dispatch {
+            Ok(result) => result,
+            Err(error) => {
+                let error = error.to_string();
+                if let Some(task) = self.executor.task_manager.get_task(&runtime_task.spec.id) {
+                    if matches!(task.status, TaskStatus::Pending) {
+                        self.executor
+                            .task_manager
+                            .update_task_status(&task.id, TaskStatus::InProgress)
+                            .map_err(ReactError::Other)?;
+                    }
+                    if let Some(current) = self.executor.task_manager.get_task(&task.id)
+                        && matches!(current.status, TaskStatus::InProgress)
+                    {
+                        self.executor
+                            .task_manager
+                            .update_task_status(&task.id, TaskStatus::Failed(error.clone()))
+                            .map_err(ReactError::Other)?;
+                    }
+                }
+                TaskExecutionResult::failure(&runtime_task.spec.id, error, Duration::ZERO, 0)
+            }
+        };
+
+        if matches!(result.status, TaskStatus::Cancelled) {
+            let _ = self
+                .executor
+                .task_manager
+                .cancel_task(&runtime_task.spec.id);
+        }
+        self.results.lock().await.push(result.clone());
+
+        let current = self.executor.task_manager.get_task(&runtime_task.spec.id);
+        if let Some(task) = current.as_ref()
+            && matches!(
+                task.status,
+                TaskStatus::Cancelled
+                    | TaskStatus::Blocked(_)
+                    | TaskStatus::Paused(_)
+                    | TaskStatus::Skipped
+            )
+        {
+            self.persist_task(task).await?;
+        }
+        let status = current.map(|task| task.status).unwrap_or(result.status);
+        match status {
+            TaskStatus::Pending => Ok(RuntimeTaskResolution::Pending),
+            TaskStatus::Completed => Ok(RuntimeTaskResolution::Completed),
+            TaskStatus::Skipped => Ok(RuntimeTaskResolution::Skipped),
+            TaskStatus::Cancelled => Ok(RuntimeTaskResolution::Cancelled),
+            TaskStatus::Failed(error) | TaskStatus::TimedOut { error } => {
+                Ok(RuntimeTaskResolution::Failed { error })
+            }
+            TaskStatus::Blocked(error) => Ok(RuntimeTaskResolution::Blocked {
+                error,
+                disposition: RuntimeStopDisposition::Fail,
+            }),
+            TaskStatus::Paused(error) => Ok(RuntimeTaskResolution::Blocked {
+                error,
+                disposition: RuntimeStopDisposition::Pause,
+            }),
+            TaskStatus::InProgress | TaskStatus::Retrying { .. } => {
+                Err(ReactError::Other(format!(
+                    "task '{}' remained running after dispatch resolved",
+                    runtime_task.spec.id
+                )))
+            }
+        }
+    }
+
+    async fn block_task(&self, _run_id: &str, task: &RuntimeTask, reason: &str) -> Result<()> {
+        let Some(current) = self.executor.task_manager.get_task(&task.spec.id) else {
+            return Ok(());
+        };
+        if matches!(current.status, TaskStatus::Pending | TaskStatus::InProgress) {
+            self.executor
+                .task_manager
+                .update_task_status(&task.spec.id, TaskStatus::Blocked(reason.to_string()))
+                .map_err(ReactError::Other)?;
+            if let Some(blocked) = self.executor.task_manager.get_task(&task.spec.id) {
+                self.persist_task(&blocked).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn failed_task_disposition(
+        &self,
+        _run_id: &str,
+        _task: &RuntimeTask,
+        _all_unfinished_failed_or_blocked: bool,
+    ) -> Result<RuntimeStopDisposition> {
+        Ok(RuntimeStopDisposition::Fail)
+    }
+
+    async fn interruption_outcome(&self, _run_id: &str) -> Result<RuntimeDagOutcome> {
+        self.executor.cancel_all();
+        let cancelled_tasks: Vec<Task> = self
+            .executor
+            .task_manager
+            .get_all_tasks()
+            .into_iter()
+            .filter(|task| matches!(task.status, TaskStatus::Cancelled))
+            .collect();
+        for task in &cancelled_tasks {
+            self.persist_task(task).await?;
+        }
+        let mut results = self.results.lock().await;
+        for task in cancelled_tasks {
+            if !results.iter().any(|result| result.task_id == task.id) {
+                results.push(TaskExecutionResult::cancelled(&task.id));
+            }
+        }
+        Ok(RuntimeDagOutcome::Cancelled)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1571,7 +1772,6 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             unified_hook_executor: None,
-            round_timeout_secs: 3600,
         };
 
         let executor = TaskExecutor::new(manager.clone(), config);
@@ -1599,7 +1799,6 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             unified_hook_executor: None,
-            round_timeout_secs: 3600,
         };
 
         let executor = TaskExecutor::new(manager.clone(), config);
@@ -1623,6 +1822,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_all_delegates_dependency_order_to_runtime_kernel() -> Result<()> {
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(Task::new("t1", "First"));
+        manager.add_task(Task::new("t2", "Second").with_dependencies(vec!["t1".into()]));
+        manager.add_task(Task::new("t3", "Third").with_dependencies(vec!["t2".into()]));
+        let execution_order = Arc::new(Mutex::new(Vec::new()));
+        let order_for_execution = execution_order.clone();
+        let executor = TaskExecutor::new(manager, TaskExecutorConfig::default()).with_execute_fn(
+            Arc::new(move |context| {
+                let order = order_for_execution.clone();
+                Box::pin(async move {
+                    order.lock().await.push(context.task_id.clone());
+                    Ok(format!("{} complete", context.task_id))
+                })
+            }),
+        );
+
+        let results = executor.execute_all().await?;
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t1", "t2", "t3"]
+        );
+        assert_eq!(execution_order.lock().await.as_slice(), ["t1", "t2", "t3"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execute_all_uses_runtime_kernel_failure_propagation() -> Result<()> {
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(Task::new("t1", "Failing task"));
+        manager.add_task(Task::new("t2", "Dependent task").with_dependencies(vec!["t1".into()]));
+        let executor = TaskExecutor::new(manager.clone(), TaskExecutorConfig::default())
+            .with_execute_fn(Arc::new(|context| {
+                Box::pin(async move {
+                    if context.task_id == "t1" {
+                        Err(ReactError::Other("planned failure".to_string()))
+                    } else {
+                        Ok("dependent should not run".to_string())
+                    }
+                })
+            }));
+
+        let outcome = executor.execute_all().await;
+        assert!(outcome.is_err());
+        let failed = manager
+            .get_task("t1")
+            .ok_or_else(|| ReactError::Other("failed task is missing".to_string()))?;
+        let blocked = manager
+            .get_task("t2")
+            .ok_or_else(|| ReactError::Other("blocked task is missing".to_string()))?;
+        assert!(matches!(failed.status, TaskStatus::Failed(_)));
+        assert!(matches!(blocked.status, TaskStatus::Blocked(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_executor_custom_execute_fn() {
         let manager = Arc::new(TaskManager::new());
         manager.add_task(Task::new("t1", "Custom task"));
@@ -1636,7 +1894,6 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             unified_hook_executor: None,
-            round_timeout_secs: 3600,
         };
 
         let executor =
@@ -1671,6 +1928,45 @@ mod tests {
         assert!(ctx.format_upstream_context().is_empty());
     }
 
+    #[test]
+    fn task_context_limit_counts_unicode_characters() {
+        let ctx = TaskContext::with_upstream(
+            "t2",
+            "Second task",
+            vec![("t1".to_string(), "你好世界".to_string())],
+        );
+        assert!(
+            ctx.format_upstream_context_with_limit(2)
+                .contains("你好...")
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_timeout_disables_task_timeout() -> Result<()> {
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(Task::new("t1", "No timeout"));
+        let config = TaskExecutorConfig {
+            default_timeout_secs: 0,
+            enable_hooks: false,
+            retry_jitter: false,
+            ..TaskExecutorConfig::default()
+        };
+        let executor = TaskExecutor::new(manager, config).with_execute_fn(Arc::new(|_| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                Ok("completed".to_string())
+            })
+        }));
+
+        let results = executor.execute_all().await?;
+        assert_eq!(results.len(), 1);
+        let result = results
+            .first()
+            .ok_or_else(|| ReactError::Other("missing task result".to_string()))?;
+        assert!(matches!(result.status, TaskStatus::Completed));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_executor_upstream_context_passed() {
         let manager = Arc::new(TaskManager::new());
@@ -1688,7 +1984,6 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             unified_hook_executor: None,
-            round_timeout_secs: 3600,
         };
 
         let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(
@@ -1737,7 +2032,6 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             unified_hook_executor: None,
-            round_timeout_secs: 3600,
         };
         let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(
             |ctx: TaskContext| {
@@ -1771,7 +2065,6 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             unified_hook_executor: None,
-            round_timeout_secs: 3600,
         };
         let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(
             |_ctx: TaskContext| {
@@ -1816,7 +2109,6 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             unified_hook_executor: None,
-            round_timeout_secs: 3600,
         };
         let finished_clone = finished.clone();
         let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(
