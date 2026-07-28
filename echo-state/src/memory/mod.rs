@@ -18,6 +18,7 @@
 pub mod conversation;
 pub mod embedder;
 pub mod embedding_store;
+pub mod file_conversation;
 pub mod snapshot;
 #[cfg(feature = "sqlite")]
 pub mod sqlite_conversation;
@@ -38,9 +39,10 @@ pub use echo_core::memory::types::{
 };
 
 // Re-export concrete implementations from sub-modules
-pub use conversation::{project_message, project_messages};
+pub use conversation::{project_message, project_messages, restore_message, restore_messages};
 pub use embedder::HttpEmbedder;
 pub use embedding_store::EmbeddingStore;
+pub use file_conversation::FileConversationStore;
 pub use snapshot::{SnapshotManager, SnapshotPolicy, StateSnapshot};
 #[cfg(feature = "sqlite")]
 pub use sqlite_conversation::SqliteConversationStore;

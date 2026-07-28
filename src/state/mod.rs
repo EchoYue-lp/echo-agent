@@ -282,11 +282,16 @@ pub trait RuntimeStateStore: Send + Sync {
     ) -> futures::future::BoxFuture<'a, crate::error::Result<()>>;
 }
 
-// ── Re-export SQLite implementation ────────────────────────────────────
+// ── Re-export implementations ─────────────────────────────────────────
 
+/// File-backed runtime state store (default, no SQLite dependency).
+pub mod file;
+
+/// SQLite-backed runtime state store (`sqlite` feature).
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
+pub use file::FileRuntimeStateStore;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteRuntimeStateStore;
 
