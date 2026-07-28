@@ -272,10 +272,11 @@ impl PlanValidator {
             }
         }
 
-        let (order, depths) = task_topology(tasks, &known_ids);
-        if order.len() < known_ids.len() {
+        let cycles = task_dependency_cycles(tasks);
+        if !cycles.is_empty() {
             errors.push("dependency graph contains a cycle".to_string());
         }
+        let (_, depths) = task_topology(tasks, &known_ids);
         for (task_id, depth) in depths {
             if depth > self.max_depth {
                 errors.push(format!(
@@ -344,6 +345,67 @@ fn task_topology(
     (order, depths)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CycleVisitState {
+    Visiting,
+    Visited,
+}
+
+pub(crate) fn task_dependency_cycles(tasks: &[TaskSpec]) -> Vec<Vec<String>> {
+    let known_ids: HashSet<&str> = tasks.iter().map(|task| task.id.as_str()).collect();
+    let mut task_ids: Vec<&str> = known_ids.iter().copied().collect();
+    task_ids.sort_unstable();
+
+    let mut states: HashMap<String, CycleVisitState> = HashMap::new();
+    let mut path = Vec::new();
+    let mut cycles = Vec::new();
+    for task_id in task_ids {
+        if states.get(task_id) != Some(&CycleVisitState::Visited) {
+            visit_task_cycles(
+                task_id,
+                tasks,
+                &known_ids,
+                &mut states,
+                &mut path,
+                &mut cycles,
+            );
+        }
+    }
+    cycles
+}
+
+fn visit_task_cycles(
+    task_id: &str,
+    tasks: &[TaskSpec],
+    known_ids: &HashSet<&str>,
+    states: &mut HashMap<String, CycleVisitState>,
+    path: &mut Vec<String>,
+    cycles: &mut Vec<Vec<String>>,
+) {
+    states.insert(task_id.to_string(), CycleVisitState::Visiting);
+    path.push(task_id.to_string());
+
+    if let Some(task) = tasks.iter().find(|task| task.id == task_id) {
+        for dependency in &task.depends_on {
+            if !known_ids.contains(dependency.as_str()) {
+                continue;
+            }
+            match states.get(dependency).copied() {
+                Some(CycleVisitState::Visiting) => {
+                    if let Some(cycle_start) = path.iter().position(|id| id == dependency) {
+                        cycles.push(path.iter().skip(cycle_start).cloned().collect());
+                    }
+                }
+                Some(CycleVisitState::Visited) => {}
+                None => visit_task_cycles(dependency, tasks, known_ids, states, path, cycles),
+            }
+        }
+    }
+
+    path.pop();
+    states.insert(task_id.to_string(), CycleVisitState::Visited);
+}
+
 pub(crate) fn task_topological_order(
     tasks: &[TaskSpec],
 ) -> std::result::Result<Vec<String>, String> {
@@ -365,12 +427,12 @@ pub(crate) fn task_topological_order(
         }
     }
 
-    let (order, _) = task_topology(tasks, &known_ids);
-    if order.len() != tasks.len() {
-        Err("Plan contains circular dependencies".to_string())
-    } else {
-        Ok(order)
+    if !task_dependency_cycles(tasks).is_empty() {
+        return Err("Plan contains circular dependencies".to_string());
     }
+
+    let (order, _) = task_topology(tasks, &known_ids);
+    Ok(order)
 }
 
 #[cfg(test)]

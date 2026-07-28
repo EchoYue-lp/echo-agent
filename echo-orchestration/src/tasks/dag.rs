@@ -1,23 +1,16 @@
 //! DAG dependency analysis (cycle detection, topological sort, dependency chain query, Mermaid visualization)
 
 use super::manager::TaskManager;
-use std::collections::HashMap;
 
 impl TaskManager {
-    /// Detect cyclic dependencies, return all cycle paths
+    /// Detect cyclic dependencies through the canonical plan validator.
     pub fn detect_circular_dependencies(&self) -> Vec<Vec<String>> {
-        let mut cycles = Vec::new();
-        let mut visited: HashMap<String, super::manager::VisitState> = HashMap::new();
-        let mut path: Vec<String> = Vec::new();
-
-        let task_ids: Vec<String> = self.tasks.iter().map(|r| r.key().clone()).collect();
-        for task_id in task_ids {
-            if visited.get(&task_id) != Some(&super::manager::VisitState::Visited) {
-                self.dfs_detect_cycle(&task_id, &mut visited, &mut path, &mut cycles);
-            }
-        }
-
-        cycles
+        let specs = self
+            .get_all_tasks()
+            .iter()
+            .map(super::ManagedTask::task_spec)
+            .collect::<Vec<_>>();
+        crate::planning::validator::task_dependency_cycles(&specs)
     }
 
     /// Get topological sort (returns error if cyclic dependencies exist)

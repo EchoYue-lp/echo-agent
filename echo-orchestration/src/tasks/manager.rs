@@ -6,7 +6,6 @@ use super::hooks::TaskHookRegistry;
 use super::runtime::{TaskSpec, TaskStatus};
 use super::task::ManagedTask;
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// DAG task collection manager, responsible for task CRUD and dependency scheduling.
@@ -377,41 +376,6 @@ impl TaskManager {
         })
     }
 
-    // ── DAG Analysis (internal) ──────────────────────────────────────────────
-
-    /// Depth-first search to detect cycles
-    pub(crate) fn dfs_detect_cycle(
-        &self,
-        task_id: &str,
-        visited: &mut HashMap<String, VisitState>,
-        path: &mut Vec<String>,
-        cycles: &mut Vec<Vec<String>>,
-    ) {
-        visited.insert(task_id.to_string(), VisitState::Visiting);
-        path.push(task_id.to_string());
-
-        if let Some(task) = self.tasks.get(task_id) {
-            for dep_id in &task.dependencies {
-                if self.tasks.contains_key(dep_id) {
-                    match visited.get(dep_id).copied() {
-                        Some(VisitState::Visiting) => {
-                            if let Some(cycle_start) = path.iter().position(|id| id == dep_id) {
-                                cycles.push(path[cycle_start..].to_vec());
-                            }
-                        }
-                        Some(VisitState::Visited) => {}
-                        None => {
-                            self.dfs_detect_cycle(dep_id, visited, path, cycles);
-                        }
-                    }
-                }
-            }
-        }
-
-        path.pop();
-        visited.insert(task_id.to_string(), VisitState::Visited);
-    }
-
     /// Check if cyclic dependencies exist
     pub fn has_circular_dependencies(&self) -> bool {
         !self.detect_circular_dependencies().is_empty()
@@ -522,12 +486,6 @@ impl TaskManager {
         let tasks = self.get_all_tasks();
         store.save_all(&tasks).await
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum VisitState {
-    Visiting,
-    Visited,
 }
 
 impl Default for TaskManager {
