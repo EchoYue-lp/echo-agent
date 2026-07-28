@@ -31,6 +31,7 @@ pub struct ReactAgentBuilder {
     llm_client: Option<Arc<dyn LlmClient>>,
     llm_config: Option<LlmConfig>,
     tools: Vec<Box<dyn Tool>>,
+    task_revision_service: Option<Arc<crate::tasks::TaskRevisionService>>,
     enable_builtin_tools: bool,
     readonly_tools: bool,
     enable_memory: bool,
@@ -119,6 +120,7 @@ impl ReactAgentBuilder {
             llm_client: None,
             llm_config: None,
             tools: Vec::new(),
+            task_revision_service: None,
             enable_builtin_tools: false,
             readonly_tools: false,
             enable_memory: false,
@@ -300,6 +302,16 @@ impl ReactAgentBuilder {
     /// Batch register tools
     pub fn tools(mut self, tools: Vec<Box<dyn Tool>>) -> Self {
         self.tools.extend(tools);
+        self
+    }
+
+    /// Replace the default in-memory task tools with a revision service backed
+    /// by an application persistence and policy adapter.
+    pub fn task_revision_service(
+        mut self,
+        service: Arc<crate::tasks::TaskRevisionService>,
+    ) -> Self {
+        self.task_revision_service = Some(service);
         self
     }
 
@@ -920,6 +932,10 @@ impl ReactAgentBuilder {
 
         let mut agent = crate::agent::react::ReactAgent::new(config);
 
+        if let Some(service) = self.task_revision_service {
+            crate::tasks::register_task_tools(&mut agent, service);
+        }
+
         if let Some(llm_client) = self.llm_client {
             agent.set_llm_client(llm_client);
         }
@@ -1122,6 +1138,21 @@ mod tests {
             .enable_tools();
 
         assert!(builder.enable_builtin_tools);
+    }
+
+    #[test]
+    fn default_agent_uses_one_task_relation_api() -> std::result::Result<(), String> {
+        let agent = ReactAgentBuilder::new()
+            .model("test-model")
+            .system_prompt("Test")
+            .build()
+            .map_err(|error| error.to_string())?;
+        let names = agent.tool_names();
+        for expected in ["task_create", "task_update", "task_list"] {
+            assert!(names.iter().any(|name| name == expected));
+        }
+        assert!(!names.iter().any(|name| name == "todo_write"));
+        Ok(())
     }
 
     #[test]

@@ -11,3 +11,13 @@ pub mod orchestration {
 }
 
 pub use echo_orchestration::tasks::*;
+
+/// Replace the Agent's task relation tools with tools backed by `service`.
+/// Tool registration is name-based, so this atomically selects the supplied
+/// store/policy adapter without exposing a second task API.
+pub fn register_task_tools(
+    agent: &mut crate::agent::ReactAgent,
+    service: std::sync::Arc<TaskRevisionService>,
+) {
+    agent.add_tools(build_task_tools(service));
+}

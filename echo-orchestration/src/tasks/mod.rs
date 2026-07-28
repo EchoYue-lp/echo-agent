@@ -9,11 +9,13 @@ pub mod executor;
 pub mod hooks;
 mod manager;
 pub mod replanner;
+pub mod revisioned;
 pub mod runtime;
 pub mod runtime_executor;
 pub mod scheduler;
 pub mod store;
 mod task;
+pub mod task_tools;
 mod time;
 pub mod verifier;
 
@@ -40,6 +42,14 @@ pub use hooks::{
 pub use manager::TaskManager;
 pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
 pub use replanner::{LlmReplanner, ReplanDecision, ReplanTrigger, Replanner, RuleBasedReplanner};
+pub use revisioned::{
+    DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, PreparedTaskPolicy, RevisionedTaskGraph,
+    RevisionedTaskStore, RevisionedTaskStoreError, TaskCreateInput, TaskCreateOutcome, TaskDraft,
+    TaskGraphCommit, TaskGraphContext, TaskGraphExecutionMode, TaskPatchApplication,
+    TaskPatchEffects, TaskPatchEngine, TaskPlanPatch, TaskPlanPatchInputOp, TaskPlanPatchOp,
+    TaskPolicyError, TaskRevisionError, TaskRevisionService, TaskSpecPatch, TaskToolPolicy,
+    TaskUpdateInput,
+};
 pub use runtime::{
     DagExecutionState, DagRefresh, NestedDelegationPolicy, SuggestedTask, Task, TaskClaim,
     TaskExecution, TaskExecutionSummary, TaskId, TaskKind, TaskSpec, TaskStatus, TaskSubagent,
@@ -58,6 +68,10 @@ pub use task::{
     ContextScope, Evidence, EvidenceType, FallbackStrategy, FileChange, InputType, ManagedTask,
     OutputType, RiskLevel, TaskAttempt, TaskInput, TaskOutput, TaskState, TaskType,
     VerificationResult, VerificationSpec, VerificationType,
+};
+pub use task_tools::{
+    TaskCreateTool, TaskListTool, TaskUpdateTool, build_task_create_tool, build_task_list_tool,
+    build_task_tools, build_task_update_tool,
 };
 pub use verifier::{
     CommandVerifier, DiffCheckVerifier, FileExistsVerifier, HumanReviewVerifier, LlmReviewVerifier,

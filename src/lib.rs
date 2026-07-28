@@ -93,8 +93,6 @@ pub mod mcp;
 #[cfg_attr(docsrs, doc(cfg(feature = "lsp")))]
 pub mod lsp;
 
-#[cfg(feature = "tasks")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tasks")))]
 pub mod tasks;
 
 #[cfg(feature = "telemetry")]
@@ -320,9 +318,10 @@ pub mod advanced {
         TopologyTracker,
     };
 
-    #[cfg(feature = "tasks")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "tasks")))]
-    pub use crate::tasks::{ManagedTask, Task, TaskExecution, TaskManager, TaskSpec, TaskStatus};
+    pub use crate::tasks::{
+        ManagedTask, Task, TaskCreateTool, TaskExecution, TaskListTool, TaskManager,
+        TaskRevisionService, TaskSpec, TaskStatus, TaskUpdateTool,
+    };
 
     // Critic module — evaluation and feedback tools for agent outputs
     pub use crate::agent::critic::{

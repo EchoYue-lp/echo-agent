@@ -369,7 +369,13 @@ impl ReactAgent {
 
         // ── Core tools ─────────────────────────────────────────────
         tool_manager.register(Box::new(FinalAnswerTool));
-        tool_manager.register(Box::new(crate::tools::builtin::todo::TodoWriteTool));
+        let task_revision_service = Arc::new(echo_orchestration::tasks::TaskRevisionService::new(
+            Arc::new(echo_orchestration::tasks::InMemoryRevisionedTaskStore::new()),
+            Arc::new(echo_orchestration::tasks::DefaultTaskToolPolicy::default()),
+        ));
+        tool_manager.register_tools(echo_orchestration::tasks::build_task_tools(
+            task_revision_service,
+        ));
 
         // ── Subsystem initialization ──────────────────────────────
         #[cfg(feature = "tasks")]
