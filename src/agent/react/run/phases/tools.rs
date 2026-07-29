@@ -15,8 +15,11 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{Instrument, info_span};
+
+const TOOL_CANCELLATION_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 /// Tool-call branch of one iteration. Emits the `ToolBatchStart` /
 /// `ToolCall` events, pushes the assistant-with-tools message, splits the
@@ -170,22 +173,22 @@ pub(crate) async fn run_tools(
         };
         tokio::pin!(cancel);
         tokio::pin!(timeout);
+        let cancellation_grace = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(cancellation_grace);
+        let mut cancellation_observed = false;
 
         let mut stream_open = true;
         while !futs.is_empty() || stream_open {
             tokio::select! {
                 biased;
-                event = stream_rx.recv(), if stream_open => {
-                    match event {
-                        Some((call_id, name, event)) => {
-                            yield_final_event_or!(
-                                tx,
-                                AgentEvent::ToolStream { call_id, name, event },
-                                IterOutcome::Abandoned
-                            );
-                        }
-                        None => stream_open = false,
-                    }
+                _ = &mut cancellation_grace, if cancellation_observed => {
+                    tracing::warn!(
+                        grace_ms = TOOL_CANCELLATION_GRACE_PERIOD.as_millis(),
+                        "tool batch cancellation grace period elapsed"
+                    );
+                    snap.save_runtime_checkpoint(context, Some("Tool batch cancelled".to_string())).await;
+                    yield_final_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
+                    return Ok(IterOutcome::Abandoned);
                 }
                 Some((id, fname, result)) = futs.next(), if !futs.is_empty() => {
                     while let Ok((call_id, name, event)) = stream_rx.try_recv() {
@@ -246,8 +249,25 @@ pub(crate) async fn run_tools(
                         }
                     }
                 },
-                _ = &mut cancel => return Ok(IterOutcome::Abandoned),
-                _ = &mut timeout => {
+                event = stream_rx.recv(), if stream_open => {
+                    match event {
+                        Some((call_id, name, event)) => {
+                            yield_final_event_or!(
+                                tx,
+                                AgentEvent::ToolStream { call_id, name, event },
+                                IterOutcome::Abandoned
+                            );
+                        }
+                        None => stream_open = false,
+                    }
+                }
+                _ = &mut cancel, if !cancellation_observed => {
+                    cancellation_observed = true;
+                    cancellation_grace.as_mut().reset(
+                        tokio::time::Instant::now() + TOOL_CANCELLATION_GRACE_PERIOD,
+                    );
+                },
+                _ = &mut timeout, if !cancellation_observed => {
                     try_send_or!(
                         tx,
                         Err(ReactError::from(crate::error::ToolError::Timeout(
@@ -258,9 +278,25 @@ pub(crate) async fn run_tools(
                 }
             }
         }
+        if cancellation_observed {
+            snap.save_runtime_checkpoint(context, Some("Tool batch cancelled".to_string()))
+                .await;
+            yield_final_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
+            return Ok(IterOutcome::Abandoned);
+        }
     }
 
     for (id, fname, args) in appr {
+        if snap
+            .cancel_token
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            snap.save_runtime_checkpoint(context, Some("Tool batch cancelled".to_string()))
+                .await;
+            yield_final_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
+            return Ok(IterOutcome::Abandoned);
+        }
         let params = if let Value::Object(m) = &args {
             m.clone().into_iter().collect()
         } else {
@@ -270,9 +306,23 @@ pub(crate) async fn run_tools(
         let execution =
             snap.execute_tool_with_policy(id.clone(), &fname, &params, &args, Some(stream_tx));
         tokio::pin!(execution);
+        let cancellation_grace = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(cancellation_grace);
+        let mut cancellation_observed = false;
         let result = loop {
             tokio::select! {
                 biased;
+                result = &mut execution => break result,
+                _ = &mut cancellation_grace, if cancellation_observed => {
+                    tracing::warn!(
+                        tool = %fname,
+                        grace_ms = TOOL_CANCELLATION_GRACE_PERIOD.as_millis(),
+                        "tool cancellation grace period elapsed"
+                    );
+                    snap.save_runtime_checkpoint(context, Some(format!("Tool cancelled: {fname}"))).await;
+                    yield_final_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
+                    return Ok(IterOutcome::Abandoned);
+                }
                 Some((call_id, name, event)) = stream_rx.recv() => {
                     yield_final_event_or!(
                         tx,
@@ -280,13 +330,17 @@ pub(crate) async fn run_tools(
                         IterOutcome::Abandoned
                     );
                 }
-                result = &mut execution => break result,
                 _ = async {
                     match snap.cancel_token.as_ref() {
                         Some(token) => token.cancelled().await,
                         None => std::future::pending().await,
                     }
-                } => return Ok(IterOutcome::Abandoned),
+                }, if !cancellation_observed => {
+                    cancellation_observed = true;
+                    cancellation_grace.as_mut().reset(
+                        tokio::time::Instant::now() + TOOL_CANCELLATION_GRACE_PERIOD,
+                    );
+                },
             }
         };
         while let Some((call_id, name, event)) = stream_rx.recv().await {
@@ -346,6 +400,12 @@ pub(crate) async fn run_tools(
                 snap.save_runtime_checkpoint(context, Some(format!("Tool error: {fname}")))
                     .await;
             }
+        }
+        if cancellation_observed {
+            snap.save_runtime_checkpoint(context, Some("Tool batch cancelled".to_string()))
+                .await;
+            yield_final_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
+            return Ok(IterOutcome::Abandoned);
         }
     }
 

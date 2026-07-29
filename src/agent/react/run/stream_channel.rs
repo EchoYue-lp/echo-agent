@@ -941,6 +941,38 @@ mod tests {
     use crate::state::RuntimeStateStore;
     use crate::testing::{MockLlmClient, MockTool};
 
+    struct DelayedTerminalTool {
+        finished: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::tools::Tool for DelayedTerminalTool {
+        fn name(&self) -> &str {
+            "delayed_terminal"
+        }
+
+        fn description(&self) -> &str {
+            "Finishes a durable terminal write shortly after parent cancellation"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+
+        fn execute(
+            &self,
+            _params: crate::tools::ToolParameters,
+        ) -> futures::future::BoxFuture<'_, Result<crate::tools::ToolResult>> {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+                self.finished
+                    .store(true, std::sync::atomic::Ordering::Release);
+                Ok(crate::tools::ToolResult::success(
+                    "terminal state persisted",
+                ))
+            })
+        }
+    }
+
     #[derive(Default)]
     struct RecordingRuntimeStateStore {
         checkpoint: std::sync::Mutex<Option<crate::state::AgentCheckpoint>>,
@@ -1844,6 +1876,54 @@ mod tests {
             agent.steer_input(None, Message::user("late steer".to_string())),
             Err(crate::agent::TurnSteerError::NoActiveTurn)
         ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_drains_running_tool_before_abandoning_turn() -> Result<()> {
+        use futures::StreamExt;
+
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let llm = MockLlmClient::new()
+            .then_tool_call("call-1", "delayed_terminal", "{}")
+            .with_response("unused");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("Run the requested tool.")
+            .tool(Box::new(DelayedTerminalTool {
+                finished: finished.clone(),
+            }))
+            .build()?;
+        let cancel = crate::agent::CancellationToken::new();
+        let mut stream = agent
+            .execute_stream_with_cancel("persist terminal state", cancel.clone())
+            .await?;
+
+        let saw_tool_call = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event?, AgentEvent::ToolCall { .. }) {
+                    return Ok::<bool, crate::error::ReactError>(true);
+                }
+            }
+            Ok(false)
+        })
+        .await
+        .map_err(|_| crate::error::ReactError::Other("tool call was not emitted".to_string()))??;
+        assert!(saw_tool_call);
+        cancel.cancel();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(event) = stream.next().await {
+                event?;
+            }
+            Ok::<(), crate::error::ReactError>(())
+        })
+        .await
+        .map_err(|_| {
+            crate::error::ReactError::Other("cancelled tool drain timed out".to_string())
+        })??;
+
+        assert!(finished.load(std::sync::atomic::Ordering::Acquire));
+        Ok(())
     }
 
     #[tokio::test]

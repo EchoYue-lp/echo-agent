@@ -672,7 +672,7 @@ impl PipelineStage for TruncationStage {
             existing_artifact,
         );
         if let Some(result) = ctx.result.as_mut() {
-            result.truncated = processed.truncated;
+            result.truncated = result.truncated || processed.truncated;
             result.metadata.extend(processed.metadata);
         }
         ctx.output = Some(processed.output);
@@ -1208,7 +1208,11 @@ mod tests {
             .ok_or_else(|| ReactError::Other("spill metadata lacks artifact_path".to_string()))?;
         assert!(std::path::Path::new(artifact_path).starts_with(working_dir.path()));
         assert!(ctx.output.as_deref().is_some_and(|output| {
-            output.contains("Full output artifact") && output.contains(artifact_path)
+            output.contains("Tool output preview only")
+                && output.contains("not a summary")
+                && output.contains("Full output artifact")
+                && output.contains("Use read_file with this exact path")
+                && output.contains(artifact_path)
         }));
 
         let read_tool = crate::tools::files::files::ReadFileTool::new();
@@ -1237,6 +1241,54 @@ mod tests {
         assert_eq!(trace_artifact.path.as_str(), artifact_path.as_str());
         assert_eq!(trace_artifact.sha256.len(), 64);
         assert_eq!(trace_artifact.retention, "test");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn spill_projection_does_not_promise_read_access_outside_working_dir() -> Result<()> {
+        let working_dir =
+            tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let artifact_dir =
+            tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .working_dir(working_dir.path())
+            .tool_output_artifacts(
+                echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                    artifact_dir.path(),
+                    "test",
+                )
+                .threshold_bytes(8),
+            )
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context("large complete output".to_string());
+
+        TruncationStage.run(&mut ctx, &snapshot).await?;
+
+        let output = ctx
+            .output
+            .as_deref()
+            .ok_or_else(|| ReactError::Other("truncation stage produced no output".to_string()))?;
+        assert!(output.contains("outside the session working directory"));
+        assert!(!output.contains("Use read_file with this exact path"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn truncation_stage_preserves_tool_level_truncation() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context("partial page".to_string());
+        if let Some(result) = ctx.result.as_mut() {
+            result.truncated = true;
+        }
+
+        TruncationStage.run(&mut ctx, &snapshot).await?;
+
+        assert!(ctx.result.as_ref().is_some_and(|result| result.truncated));
         Ok(())
     }
 

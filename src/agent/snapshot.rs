@@ -890,8 +890,14 @@ impl AgentRunSnapshot {
 
         if let Some(artifact) = artifact {
             let preview: String = output.chars().take(TOOL_OUTPUT_PREVIEW_CHARS).collect();
+            let read_hint = match self.config.working_dir.as_deref() {
+                Some(working_dir) if !artifact.path.starts_with(working_dir) => {
+                    "This artifact is outside the session working directory, so do not assume read_file can access it."
+                }
+                _ => "Use read_file with this exact path when more detail is needed.",
+            };
             let model_output = format!(
-                "{preview}\n\n[Full output artifact: {} ({:.1} MiB, sha256 {}). Use read_file with this exact path when more detail is needed.]",
+                "{preview}\n\n[Tool output preview only: the text above is not a summary and is not the complete result. Full output artifact: {} ({:.1} MiB, sha256 {}). {read_hint}]",
                 artifact.path.display(),
                 artifact.payload_bytes as f64 / 1_048_576.0,
                 artifact.sha256.chars().take(12).collect::<String>(),

@@ -1,5 +1,6 @@
 use super::resolve_path;
 use echo_core::error::ToolError;
+use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
     Tool, ToolFailure, ToolFailureCategory, ToolParameters, ToolResult, ToolRiskLevel,
@@ -8,14 +9,69 @@ use echo_core::tools::{
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
-// Re-export encoding_rs for encoding detection
+// Used for the existing UTF-8-first, GBK-fallback decoding behavior.
 use encoding_rs;
+
+const DEFAULT_READ_MAX_LINES: usize = 500;
+const MAX_READ_OUTPUT_TOKENS: usize = 4_000;
+const READ_NOTICE_TOKEN_RESERVE: usize = 128;
+const MAX_READ_CONTENT_TOKENS: usize = MAX_READ_OUTPUT_TOKENS - READ_NOTICE_TOKEN_RESERVE;
 
 fn content_hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn positive_usize_parameter(
+    parameters: &ToolParameters,
+    name: &str,
+    default: usize,
+) -> Result<usize, String> {
+    let Some(value) = parameters.get(name) else {
+        return Ok(default);
+    };
+    let raw = value
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("'{name}' must be a positive integer"))?;
+    usize::try_from(raw).map_err(|_| format!("'{name}' is too large"))
+}
+
+fn with_read_file_metadata(
+    mut result: ToolResult,
+    path: &Path,
+    hash: &str,
+    encoding: &str,
+    total_lines: usize,
+    start_line: usize,
+    end_line: usize,
+) -> ToolResult {
+    result
+        .metadata
+        .insert("path".to_string(), path.display().to_string());
+    result
+        .metadata
+        .insert("content_hash".to_string(), hash.to_string());
+    result
+        .metadata
+        .insert("encoding".to_string(), encoding.to_string());
+    result
+        .metadata
+        .insert("total_lines".to_string(), total_lines.to_string());
+    result
+        .metadata
+        .insert("start_line".to_string(), start_line.to_string());
+    result
+        .metadata
+        .insert("end_line".to_string(), end_line.to_string());
+    result.metadata.insert(
+        "remaining_lines".to_string(),
+        total_lines.saturating_sub(end_line).to_string(),
+    );
+    result
 }
 
 fn file_idempotency_key(
@@ -254,10 +310,7 @@ impl Tool for DeleteFileTool {
 }
 
 // ── ReadFileTool ──────────────────────────────────────────────────────────────
-/// Read file content with auto-encoding detection and structured output
-///
-/// Unified file reading tool with auto-encoding detection and structured JSON output.
-/// Supports offset/limit for pagination and automatic GBK fallback encoding.
+/// Read text with compact line numbers, bounded pagination, and encoding detection.
 pub struct ReadFileTool {
     base_dir: Option<PathBuf>,
 }
@@ -286,8 +339,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read file content with auto-encoding detection. Supports offset/limit for reading specific sections. \
-         Returns structured JSON with line numbers. Auto-detects UTF-8/GBK encoding."
+        "Read compact line-numbered text with bounded output. Use offset/limit to paginate; prefer grep for known text."
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {
@@ -303,34 +355,21 @@ impl Tool for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path to read (relative or absolute path). Also accepts 'file_path' for backward compatibility."
-                },
-                "file_path": {
-                    "type": "string",
-                    "description": "Alias for 'path' (backward compatibility)"
+                    "description": "Relative or absolute file path"
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "Line number to start reading from (1-based, default: 1). Also accepts 'start_line'."
-                },
-                "start_line": {
-                    "type": "integer",
-                    "description": "Alias for 'offset' (backward compatibility)"
+                    "minimum": 1,
+                    "description": "First line to read, 1-based (default: 1)"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to read (default: all lines, -1 means preview limit). Also accepts 'line_count'."
-                },
-                "line_count": {
-                    "type": "integer",
-                    "description": "Alias for 'limit' (backward compatibility)"
-                },
-                "encoding": {
-                    "type": "string",
-                    "description": "File encoding (e.g. 'utf-8', 'gbk'), default auto-detect"
+                    "minimum": 1,
+                    "description": "Maximum lines to read (default: 500)"
                 }
             },
-            "required": ["path"]
+            "required": ["path"],
+            "additionalProperties": false
         })
     }
 
@@ -340,27 +379,47 @@ impl Tool for ReadFileTool {
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
-            // Support both 'path' and 'file_path' parameters
+            let allowed_parameters = ["path", "offset", "limit"];
+            let mut unknown_parameters = parameters
+                .keys()
+                .filter(|key| !allowed_parameters.contains(&key.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            unknown_parameters.sort();
+            if !unknown_parameters.is_empty() {
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!(
+                        "Unknown read_file parameter(s): {}",
+                        unknown_parameters.join(", ")
+                    ),
+                ));
+            }
+
             let path_str = parameters
                 .get("path")
-                .or_else(|| parameters.get("file_path"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
-
-            // Support both 'offset' and 'start_line' parameters
-            let offset = parameters
-                .get("offset")
-                .or_else(|| parameters.get("start_line"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1) as usize;
-
-            // Support both 'limit' and 'line_count' parameters
-            let limit = parameters
-                .get("limit")
-                .or_else(|| parameters.get("line_count"))
-                .and_then(|v| v.as_i64());
-
-            let _encoding = parameters.get("encoding").and_then(|v| v.as_str());
+            let offset = match positive_usize_parameter(&parameters, "offset", 1) {
+                Ok(offset) => offset,
+                Err(message) => {
+                    return Ok(ToolResult::failure(
+                        ToolFailureCategory::InvalidArguments,
+                        message,
+                    ));
+                }
+            };
+            let explicit_limit = parameters.contains_key("limit");
+            let limit = match positive_usize_parameter(&parameters, "limit", DEFAULT_READ_MAX_LINES)
+            {
+                Ok(limit) => limit,
+                Err(message) => {
+                    return Ok(ToolResult::failure(
+                        ToolFailureCategory::InvalidArguments,
+                        message,
+                    ));
+                }
+            };
 
             let path = resolve_path(
                 "read_file",
@@ -382,7 +441,6 @@ impl Tool for ReadFileTool {
                 ));
             }
 
-            // Read file bytes
             let bytes = tokio::fs::read(&path)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
@@ -390,23 +448,27 @@ impl Tool for ReadFileTool {
                     message: format!("Failed to read: {}", e),
                 })?;
 
-            // Auto-detect encoding (prefer UTF-8, fall back to GBK)
-            let content = String::from_utf8(bytes.clone())
-                .unwrap_or_else(|_| encoding_rs::GBK.decode(&bytes).0.into_owned());
             let hash = content_hash(&bytes);
+            let (content, detected_encoding): (Cow<'_, str>, &str) =
+                match std::str::from_utf8(&bytes) {
+                    Ok(content) => (Cow::Borrowed(content), "utf-8"),
+                    Err(_) => (encoding_rs::GBK.decode(&bytes).0, "gbk"),
+                };
+            let total_lines = content.lines().count();
 
-            let lines: Vec<&str> = content.lines().collect();
-            let total_lines = lines.len();
+            if total_lines == 0 {
+                return Ok(with_read_file_metadata(
+                    ToolResult::success("File is empty."),
+                    &path,
+                    &hash,
+                    detected_encoding,
+                    0,
+                    0,
+                    0,
+                ));
+            }
 
-            // Calculate read range
-            let start = if offset > 0 { offset - 1 } else { 0 };
-            let effective_limit = if let Some(l) = limit {
-                if l < 0 { 100 } else { l as usize } // -1 means preview limit (100 lines)
-            } else {
-                total_lines // Read all lines
-            };
-
-            let end = (start + effective_limit).min(total_lines);
+            let start = offset.saturating_sub(1);
 
             if start >= total_lines {
                 return Ok(ToolResult::failure(
@@ -415,32 +477,79 @@ impl Tool for ReadFileTool {
                 ));
             }
 
-            // Build structured output
-            let preview_lines: Vec<Value> = lines
-                .get(start..end)
-                .unwrap_or_default()
-                .iter()
-                .enumerate()
-                .map(|(idx, line)| {
-                    serde_json::json!({
-                        "line_number": start + idx + 1,
-                        "content": line,
-                    })
+            let tokenizer = HeuristicTokenizer;
+            let mut output = String::new();
+            let mut output_tokens = 0_usize;
+            let mut returned_lines = 0_usize;
+            let mut token_limited = false;
+
+            for (index, line) in content.lines().skip(start).take(limit).enumerate() {
+                let line_number = offset.saturating_add(index);
+                let fragment = format!("{line_number}|{line}\n");
+                let fragment_tokens = tokenizer.count_tokens(&fragment);
+
+                if fragment_tokens > MAX_READ_CONTENT_TOKENS {
+                    return Ok(ToolResult::failure(
+                        ToolFailureCategory::InvalidArguments,
+                        format!(
+                            "Line {line_number} exceeds the read_file token budget by itself. Use grep to locate specific content instead."
+                        ),
+                    ));
+                }
+
+                if output_tokens.saturating_add(fragment_tokens) > MAX_READ_CONTENT_TOKENS {
+                    if explicit_limit {
+                        let suggested_limit = returned_lines.max(1);
+                        return Ok(ToolResult::failure(
+                            ToolFailureCategory::InvalidArguments,
+                            format!(
+                                "Requested range exceeds the {MAX_READ_OUTPUT_TOKENS}-token read_file budget. Retry with limit={suggested_limit} or use grep for specific content."
+                            ),
+                        ));
+                    }
+                    token_limited = true;
+                    break;
+                }
+
+                output.push_str(&fragment);
+                output_tokens = output_tokens.saturating_add(fragment_tokens);
+                returned_lines = returned_lines.saturating_add(1);
+            }
+
+            let end_line = offset.saturating_add(returned_lines.saturating_sub(1));
+            let has_more = end_line < total_lines;
+            let truncation_reason = if has_more {
+                Some(if token_limited {
+                    "token_budget"
+                } else {
+                    "line_limit"
                 })
-                .collect();
+            } else {
+                None
+            };
 
-            let result = serde_json::json!({
-                "file": path_str,
-                "content_hash": hash,
-                "total_lines": total_lines,
-                "start_line": start + 1,
-                "end_line": end,
-                "truncated": end < total_lines,
-                "remaining_lines": total_lines.saturating_sub(end),
-                "lines": preview_lines,
-            });
+            if has_more {
+                let next_offset = end_line.saturating_add(1);
+                output.push_str(&format!(
+                    "[Partial: lines {offset}-{end_line} of {total_lines}; continue with offset={next_offset}.]"
+                ));
+            }
 
-            Ok(ToolResult::success_json(result))
+            let mut result = with_read_file_metadata(
+                ToolResult::success(output).with_truncated(has_more),
+                &path,
+                &hash,
+                detected_encoding,
+                total_lines,
+                offset,
+                end_line,
+            );
+            if let Some(reason) = truncation_reason {
+                result
+                    .metadata
+                    .insert("truncation_reason".to_string(), reason.to_string());
+            }
+            Ok(result)
         })
     }
 }
@@ -1237,10 +1346,8 @@ mod worktree_cwd_tests {
             .await
             .map_err(|error| error.to_string())?;
         let old_hash = read
-            .data
-            .as_ref()
-            .and_then(|data| data.get("content_hash"))
-            .and_then(Value::as_str)
+            .metadata
+            .get("content_hash")
             .ok_or_else(|| "read_file did not return content_hash".to_string())?
             .to_string();
         std::fs::write(&path, "external change").map_err(|error| error.to_string())?;
@@ -1266,6 +1373,226 @@ mod worktree_cwd_tests {
             std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
             "external change"
         );
+        let _ = std::fs::remove_dir_all(&wt);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_file_default_page_is_compact_and_bounded() -> Result<(), String> {
+        let wt = unique_dir("echo-files-read-page");
+        let content = (1..=600)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(wt.join("large.txt"), content).map_err(|error| error.to_string())?;
+        let context = ToolContext {
+            working_dir: Some(wt.clone()),
+            ..Default::default()
+        };
+
+        let result = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("large.txt"))]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert!(result.success);
+        assert!(result.truncated);
+        assert!(result.output.starts_with("1|line-1\n"));
+        assert!(result.output.contains("500|line-500\n"));
+        assert!(result.output.contains("continue with offset=501"));
+        assert!(!result.output.contains("line_number"));
+        assert!(!result.output.contains("content_hash"));
+        assert!(result.output.len() < 32 * 1024);
+        assert_eq!(
+            result.metadata.get("end_line").map(String::as_str),
+            Some("500")
+        );
+        assert_eq!(
+            result.metadata.get("truncation_reason").map(String::as_str),
+            Some("line_limit")
+        );
+        assert_eq!(
+            result.metadata.get("content_hash").map(String::len),
+            Some(64)
+        );
+
+        let _ = std::fs::remove_dir_all(&wt);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_file_explicit_range_has_precise_continuation() -> Result<(), String> {
+        let wt = unique_dir("echo-files-read-range");
+        std::fs::write(wt.join("range.txt"), "alpha\nbeta\ngamma\ndelta")
+            .map_err(|error| error.to_string())?;
+        let context = ToolContext {
+            working_dir: Some(wt.clone()),
+            ..Default::default()
+        };
+        let result = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("path".to_string(), json!("range.txt")),
+                    ("offset".to_string(), json!(2)),
+                    ("limit".to_string(), json!(2)),
+                ]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert!(result.success);
+        assert_eq!(
+            result.output,
+            "2|beta\n3|gamma\n[Partial: lines 2-3 of 4; continue with offset=4.]"
+        );
+        let _ = std::fs::remove_dir_all(&wt);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_file_is_utf8_safe_and_rejects_oversized_single_lines() -> Result<(), String> {
+        let wt = unique_dir("echo-files-read-utf8");
+        std::fs::write(wt.join("utf8.txt"), "中文🙂\n第二行🚀")
+            .map_err(|error| error.to_string())?;
+        std::fs::write(wt.join("long.txt"), "界".repeat(9_000))
+            .map_err(|error| error.to_string())?;
+        let context = ToolContext {
+            working_dir: Some(wt.clone()),
+            ..Default::default()
+        };
+
+        let utf8 = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("utf8.txt"))]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(utf8.success);
+        assert_eq!(utf8.output, "1|中文🙂\n2|第二行🚀\n");
+
+        let oversized = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("long.txt"))]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(!oversized.success);
+        assert!(
+            oversized
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Line 1") && error.contains("grep"))
+        );
+
+        let _ = std::fs::remove_dir_all(&wt);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_unknown_and_invalid_parameters() -> Result<(), String> {
+        let wt = unique_dir("echo-files-read-params");
+        std::fs::write(wt.join("params.txt"), "content").map_err(|error| error.to_string())?;
+        let context = ToolContext {
+            working_dir: Some(wt.clone()),
+            ..Default::default()
+        };
+
+        let unknown = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("path".to_string(), json!("params.txt")),
+                    ("start_line".to_string(), json!(1)),
+                ]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(!unknown.success);
+        assert!(
+            unknown
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("start_line"))
+        );
+
+        let invalid = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("path".to_string(), json!("params.txt")),
+                    ("limit".to_string(), json!(0)),
+                ]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(!invalid.success);
+        assert!(
+            invalid
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("positive integer"))
+        );
+
+        let _ = std::fs::remove_dir_all(&wt);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_file_default_token_limit_pages_but_explicit_overflow_fails() -> Result<(), String>
+    {
+        let wt = unique_dir("echo-files-read-budget");
+        let content = (1..=500)
+            .map(|line| format!("{line}-{}", "x".repeat(100)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(wt.join("budget.txt"), content).map_err(|error| error.to_string())?;
+        let context = ToolContext {
+            working_dir: Some(wt.clone()),
+            ..Default::default()
+        };
+
+        let default_page = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("budget.txt"))]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(default_page.success);
+        assert!(default_page.truncated);
+        assert_eq!(
+            default_page
+                .metadata
+                .get("truncation_reason")
+                .map(String::as_str),
+            Some("token_budget")
+        );
+        assert!(default_page.output.len() < 32 * 1024);
+
+        let explicit_range = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("path".to_string(), json!("budget.txt")),
+                    ("limit".to_string(), json!(500)),
+                ]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(!explicit_range.success);
+        assert!(
+            explicit_range
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Retry with limit="))
+        );
+
         let _ = std::fs::remove_dir_all(&wt);
         Ok(())
     }

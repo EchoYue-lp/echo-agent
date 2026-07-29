@@ -1290,6 +1290,7 @@ impl TaskExecutor {
             RuntimeDagExecutorConfig {
                 max_concurrent_subagents: max_concurrent,
                 external_progress_poll_interval: Duration::from_millis(250),
+                cancellation_grace_period: Duration::from_secs(5),
                 delegation_policy: NestedDelegationPolicy {
                     can_spawn_subagents: true,
                     delegate_depth: 0,

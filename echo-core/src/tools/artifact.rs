@@ -6,13 +6,24 @@
 
 use super::{ToolContext, ToolOutputChannel};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, SystemTime};
 
 pub const DEFAULT_TOOL_OUTPUT_ARTIFACT_THRESHOLD_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_TEMP_ARTIFACT_MAX_AGE_SECS: u64 = 60 * 60;
+
+#[derive(Default)]
+struct ArtifactScopeRegistry {
+    active_scopes: HashMap<PathBuf, usize>,
+    pending_cleanup_roots: HashSet<PathBuf>,
+}
+
+static ARTIFACT_SCOPE_REGISTRY: LazyLock<Mutex<ArtifactScopeRegistry>> =
+    LazyLock::new(|| Mutex::new(ArtifactScopeRegistry::default()));
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolOutputArtifactConfig {
@@ -133,6 +144,7 @@ impl ToolOutputArtifactRef {
 
 pub struct ToolOutputArtifactWriter {
     config: ToolOutputArtifactConfig,
+    scope_dir: PathBuf,
     final_path: PathBuf,
     partial_path: PathBuf,
     buffered: Vec<u8>,
@@ -161,8 +173,10 @@ impl ToolOutputArtifactWriter {
         let filename = format!("{call}-{tool}-{nonce}.log");
         let final_path = directory.join(filename);
         let partial_path = final_path.with_extension("log.partial");
+        register_artifact_scope(&directory);
         Self {
             config,
+            scope_dir: directory,
             final_path,
             partial_path,
             buffered: Vec::new(),
@@ -248,11 +262,18 @@ impl ToolOutputArtifactWriter {
                 "tool artifact path has no parent directory",
             ));
         };
-        fs::create_dir_all(directory)?;
+        // Cleanup and file creation share the scope registry lock. Explicit
+        // conversation cleanup is deferred while any writer in that scope is
+        // alive, including writers that have not crossed the spill threshold.
+        let create_guard = ARTIFACT_SCOPE_REGISTRY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(max_age_secs) = self.config.max_age_secs {
             cleanup_artifacts_older_than(&self.config.root_dir, Duration::from_secs(max_age_secs));
         }
+        fs::create_dir_all(directory)?;
         let mut file = File::create(&self.partial_path)?;
+        drop(create_guard);
         if !self.buffered.is_empty() {
             file.write_all(&self.buffered)?;
             self.buffered.clear();
@@ -267,6 +288,7 @@ impl Drop for ToolOutputArtifactWriter {
         if !self.completed && self.partial_path.exists() {
             let _ = fs::remove_file(&self.partial_path);
         }
+        unregister_artifact_scope(&self.scope_dir);
     }
 }
 
@@ -291,6 +313,67 @@ pub fn cleanup_tool_output_scope(
     if let Some(run_id) = run_id {
         path = path.join(artifact_scope_component(run_id));
     }
+    let mut registry = ARTIFACT_SCOPE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if registry
+        .active_scopes
+        .keys()
+        .any(|active_scope| active_scope.starts_with(&path))
+    {
+        registry.pending_cleanup_roots.insert(path);
+        return Ok(());
+    }
+    remove_artifact_scope(&path)
+}
+
+fn register_artifact_scope(scope_dir: &Path) {
+    let mut registry = ARTIFACT_SCOPE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let count = registry
+        .active_scopes
+        .entry(scope_dir.to_path_buf())
+        .or_insert(0);
+    *count = count.saturating_add(1);
+}
+
+fn unregister_artifact_scope(scope_dir: &Path) {
+    let mut registry = ARTIFACT_SCOPE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match registry.active_scopes.get_mut(scope_dir) {
+        Some(count) if *count > 1 => *count = count.saturating_sub(1),
+        Some(_) => {
+            registry.active_scopes.remove(scope_dir);
+        }
+        None => {}
+    }
+
+    let ready: Vec<PathBuf> = registry
+        .pending_cleanup_roots
+        .iter()
+        .filter(|cleanup_root| {
+            !registry
+                .active_scopes
+                .keys()
+                .any(|active_scope| active_scope.starts_with(cleanup_root.as_path()))
+        })
+        .cloned()
+        .collect();
+    for cleanup_root in ready {
+        registry.pending_cleanup_roots.remove(&cleanup_root);
+        if let Err(error) = remove_artifact_scope(&cleanup_root) {
+            tracing::warn!(
+                path = %cleanup_root.display(),
+                %error,
+                "deferred tool artifact cleanup failed"
+            );
+        }
+    }
+}
+
+fn remove_artifact_scope(path: &Path) -> io::Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -334,16 +417,36 @@ fn cleanup_directory(directory: &Path, cutoff: SystemTime) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            let is_expired = fs::symlink_metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .is_some_and(|modified| modified < cutoff);
+            if is_expired {
+                let _ = fs::remove_file(path);
+            }
+            continue;
+        }
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
-        if metadata.is_dir() {
+        if file_type.is_dir() {
             cleanup_directory(&path, cutoff);
-            let _ = fs::remove_dir(&path);
-        } else if metadata
-            .modified()
-            .ok()
-            .is_some_and(|modified| modified < cutoff)
+            let is_expired = metadata
+                .modified()
+                .ok()
+                .is_some_and(|modified| modified < cutoff);
+            if is_expired {
+                let _ = fs::remove_dir(&path);
+            }
+        } else if file_type.is_file()
+            && metadata
+                .modified()
+                .ok()
+                .is_some_and(|modified| modified < cutoff)
         {
             let _ = fs::remove_file(path);
         }
@@ -385,7 +488,9 @@ mod tests {
     #[test]
     fn writer_spills_complete_multichannel_output() -> io::Result<()> {
         let root = test_root("multichannel");
-        let config = ToolOutputArtifactConfig::new(&root, "conversation").threshold_bytes(8);
+        let config = ToolOutputArtifactConfig::new(&root, "conversation")
+            .threshold_bytes(8)
+            .max_age_secs(Some(DEFAULT_TEMP_ARTIFACT_MAX_AGE_SECS));
         let identity = ToolOutputArtifactIdentity {
             conversation_id: Some("conv/unsafe".to_string()),
             run_id: Some("run-1".to_string()),
@@ -406,6 +511,94 @@ mod tests {
         cleanup_tool_output_scope(&config, "conv/unsafe", None)?;
         assert!(!artifact.path.exists());
         let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_spills_do_not_remove_active_scope_directories() -> io::Result<()> {
+        let root = test_root("concurrent");
+        let config = ToolOutputArtifactConfig::new(&root, "temporary")
+            .threshold_bytes(4)
+            .max_age_secs(Some(DEFAULT_TEMP_ARTIFACT_MAX_AGE_SECS));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+
+        for index in 0..8 {
+            let config = config.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || -> io::Result<PathBuf> {
+                barrier.wait();
+                let identity = ToolOutputArtifactIdentity {
+                    conversation_id: Some("shared-conversation".to_string()),
+                    run_id: Some("shared-run".to_string()),
+                    call_id: format!("call-{index}"),
+                    tool_name: "shell".to_string(),
+                };
+                persist_tool_output(config, identity, "complete output")?
+                    .map(|artifact| artifact.path)
+                    .ok_or_else(|| io::Error::other("expected spilled artifact"))
+            }));
+        }
+
+        for handle in handles {
+            let path = handle
+                .join()
+                .map_err(|_| io::Error::other("artifact writer thread panicked"))??;
+            assert!(path.exists(), "artifact should remain available: {path:?}");
+        }
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_cleanup_waits_for_active_writer() -> io::Result<()> {
+        let root = test_root("deferred-cleanup");
+        let config = ToolOutputArtifactConfig::new(&root, "conversation").threshold_bytes(4);
+        let identity = ToolOutputArtifactIdentity {
+            conversation_id: Some("conv-active".to_string()),
+            run_id: Some("run-active".to_string()),
+            call_id: "call-active".to_string(),
+            tool_name: "shell".to_string(),
+        };
+        let mut writer = ToolOutputArtifactWriter::new(config.clone(), identity);
+        writer.push_raw("complete output")?;
+        let partial_path = writer.partial_path.clone();
+        assert!(partial_path.exists());
+
+        cleanup_tool_output_scope(&config, "conv-active", None)?;
+        assert!(
+            partial_path.exists(),
+            "active partial output must not be deleted"
+        );
+
+        let artifact = writer
+            .finish()?
+            .ok_or_else(|| io::Error::other("expected spilled artifact"))?;
+        assert!(
+            !artifact.path.exists(),
+            "deferred conversation cleanup must run after the writer finishes"
+        );
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn age_cleanup_does_not_follow_symlinks_outside_artifact_root() -> io::Result<()> {
+        let root = test_root("symlink-cleanup");
+        let outside = test_root("symlink-outside");
+        fs::create_dir_all(&root)?;
+        fs::create_dir_all(&outside)?;
+        let outside_file = outside.join("keep.txt");
+        fs::write(&outside_file, "must remain")?;
+        std::os::unix::fs::symlink(&outside, root.join("external-link"))?;
+
+        cleanup_artifacts_older_than(&root, Duration::ZERO);
+
+        assert!(outside_file.exists(), "cleanup must not traverse symlinks");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
         Ok(())
     }
 }

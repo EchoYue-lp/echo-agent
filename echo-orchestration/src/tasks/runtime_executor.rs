@@ -150,6 +150,9 @@ pub trait RuntimeDagController: Send + Sync + 'static {
 pub struct RuntimeDagExecutorConfig {
     pub max_concurrent_subagents: usize,
     pub external_progress_poll_interval: Duration,
+    /// Maximum time to let cancellation-aware Subagents finish their durable
+    /// terminal writes before remaining non-cooperative dispatches are aborted.
+    pub cancellation_grace_period: Duration,
     pub delegation_policy: NestedDelegationPolicy,
 }
 
@@ -158,6 +161,7 @@ impl Default for RuntimeDagExecutorConfig {
         Self {
             max_concurrent_subagents: 4,
             external_progress_poll_interval: Duration::from_millis(250),
+            cancellation_grace_period: Duration::from_secs(5),
             delegation_policy: NestedDelegationPolicy {
                 can_spawn_subagents: true,
                 delegate_depth: 0,
@@ -362,13 +366,12 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             }
 
             let mut wave_results = Vec::new();
+            let mut cancellation_observed = false;
+            let cancellation_grace = tokio::time::sleep(Duration::ZERO);
+            tokio::pin!(cancellation_grace);
             while !join_set.is_empty() {
                 tokio::select! {
-                    _ = cancel.cancelled() => {
-                        join_set.abort_all();
-                        while join_set.join_next().await.is_some() {}
-                        return self.controller.interruption_outcome(run_id).await;
-                    }
+                    biased;
                     joined = join_set.join_next() => {
                         match joined {
                             Some(Ok(Ok(Some(result)))) => wave_results.push(result),
@@ -384,10 +387,33 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                             None => {}
                         }
                     }
+                    _ = cancel.cancelled(), if !cancellation_observed => {
+                        cancellation_observed = true;
+                        cancellation_grace.as_mut().reset(
+                            tokio::time::Instant::now() + self.config.cancellation_grace_period,
+                        );
+                    }
+                    _ = &mut cancellation_grace, if cancellation_observed => {
+                        join_set.abort_all();
+                        while let Some(joined) = join_set.join_next().await {
+                            match joined {
+                                Ok(Ok(Some(result))) => wave_results.push(result),
+                                Ok(Ok(None)) => {}
+                                Ok(Err(error)) => return Err(error),
+                                Err(error) if error.is_cancelled() => {}
+                                Err(error) => {
+                                    return Err(ReactError::Other(format!(
+                                        "Subagent dispatch task failed to join: {error}"
+                                    )));
+                                }
+                            }
+                        }
+                        break;
+                    }
                 }
             }
 
-            let mut pending_outcome: Option<RuntimeDagOutcome> = None;
+            let mut pending_outcome = cancellation_observed.then_some(RuntimeDagOutcome::Cancelled);
             for (task, claim, dispatch) in wave_results {
                 let resolution = self
                     .controller
@@ -494,6 +520,8 @@ mod tests {
         snapshot: Mutex<Option<RuntimePlanSnapshot>>,
         order: Mutex<Vec<TaskId>>,
         fail: Mutex<HashMap<TaskId, String>>,
+        dispatch_delay: Mutex<HashMap<TaskId, Duration>>,
+        wait_for_cancel: Mutex<HashSet<TaskId>>,
         insert_after: Mutex<Option<TaskId>>,
         reload_claim_once: Mutex<bool>,
     }
@@ -581,7 +609,7 @@ mod tests {
 
         async fn dispatch_task(
             &self,
-            _context: TaskSubagentContext,
+            context: TaskSubagentContext,
             _claim: TaskClaim,
             task: Task,
         ) -> Result<Self::DispatchOutput> {
@@ -589,6 +617,24 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(task.spec.id.clone());
+            let wait_for_cancel = self
+                .wait_for_cancel
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&task.spec.id);
+            if wait_for_cancel {
+                context.cancel.cancelled().await;
+                return Err(ReactError::Other("cancelled by test".to_string()));
+            }
+            let delay = self
+                .dispatch_delay
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&task.spec.id)
+                .copied();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let failure = self
                 .fail
                 .lock()
@@ -627,6 +673,7 @@ mod tests {
                 }
                 current.execution.status = match &dispatch {
                     Ok(_) => TaskStatus::Completed,
+                    Err(error) if error.to_string().contains("cancelled") => TaskStatus::Cancelled,
                     Err(error) => TaskStatus::Failed(error.to_string()),
                 };
             }
@@ -647,6 +694,9 @@ mod tests {
 
             Ok(match dispatch {
                 Ok(_) => RuntimeTaskResolution::Completed,
+                Err(error) if error.to_string().contains("cancelled") => {
+                    RuntimeTaskResolution::Cancelled
+                }
                 Err(error) => RuntimeTaskResolution::Failed {
                     error: error.to_string(),
                 },
@@ -765,6 +815,65 @@ mod tests {
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
         assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_drains_wave_and_preserves_completed_siblings() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("fast", TaskStatus::Pending, &[]),
+            runtime_task("slow", TaskStatus::Pending, &[]),
+        ]));
+        controller
+            .dispatch_delay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("fast".to_string(), Duration::from_millis(10));
+        controller
+            .wait_for_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("slow".to_string());
+        let executor = RuntimeDagExecutor::new(
+            controller.clone(),
+            RuntimeDagExecutorConfig {
+                cancellation_grace_period: Duration::from_millis(200),
+                ..RuntimeDagExecutorConfig::default()
+            },
+        );
+        let cancel = CancellationToken::new();
+        let run_cancel = cancel.clone();
+        let run = tokio::spawn(async move { executor.execute("run", run_cancel).await });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let dispatched = controller
+                    .order
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .len();
+                if dispatched == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("tasks were not dispatched".to_string()))?;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        cancel.cancel();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), run)
+            .await
+            .map_err(|_| ReactError::Other("executor cancellation timed out".to_string()))?
+            .map_err(|error| {
+                ReactError::Other(format!("executor task failed to join: {error}"))
+            })??;
+
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        let statuses = controller.statuses();
+        assert_eq!(statuses.get("fast"), Some(&TaskStatus::Completed));
+        assert_eq!(statuses.get("slow"), Some(&TaskStatus::Cancelled));
         Ok(())
     }
 
