@@ -915,7 +915,10 @@ impl AgentConfig {
         self
     }
 
-    /// Set maximum token count for a single tool output; automatically truncated when exceeded
+    /// Set the inline token budget for one tool output.
+    ///
+    /// Oversized output is persisted as an artifact when artifact storage is
+    /// configured, and falls back to UTF-8-safe truncation when it is disabled.
     pub fn max_tool_output_tokens(mut self, max: usize) -> Self {
         self.max_tool_output_tokens = Some(max);
         self

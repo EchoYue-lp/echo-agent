@@ -30,7 +30,6 @@ use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
 #[cfg(feature = "tasks")]
 use crate::tasks::TaskSpawner;
-use crate::tools::ToolManager;
 #[cfg(feature = "subagent")]
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
 use crate::tools::builtin::answer::FinalAnswerTool;
@@ -44,6 +43,7 @@ use crate::tools::builtin::memory::{
 };
 #[cfg(feature = "tasks")]
 use crate::tools::builtin::spawn_task::SpawnBackgroundTaskTool;
+use crate::tools::{ToolManager, ToolSearchTool};
 use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -435,6 +435,7 @@ impl ReactAgent {
 
         // Wrap tool_manager in Arc for sharing with subsystems and context factory
         let tool_manager = Arc::new(tool_manager);
+        tool_manager.register(Box::new(ToolSearchTool::new(Arc::downgrade(&tool_manager))));
 
         // ── AgentDispatch tool (after all other tools + store are ready) ──
         // Context inheritance factory needs the final tool_manager Arc and store.

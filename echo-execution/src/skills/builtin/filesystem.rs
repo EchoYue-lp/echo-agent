@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use echo_core::tools::Tool;
 use echo_core::tools::skill::Skill;
+use echo_tools::files::artifact::ReadArtifactTool;
 use echo_tools::files::diff::DiffTool;
 use echo_tools::files::edit::EditFileTool;
 use echo_tools::files::files::{
@@ -80,6 +81,7 @@ impl Skill for FileSystemSkill {
                 Some(b) => ReadFileTool::with_base_dir(b),
                 None => ReadFileTool::new(),
             }),
+            Box::new(ReadArtifactTool),
             Box::new(match &base {
                 Some(b) => WriteFileTool::with_base_dir(b),
                 None => WriteFileTool::new(),
@@ -141,6 +143,7 @@ impl Skill for FileSystemSkill {
              - `delete_file(path)`: Delete a file, suitable for removing unwanted old files such as configs, logs, code, etc.\n\
              - `move_file(old_path, new_path)`: Move a file path, for relocating files\n\
              - `read_file(path)`: Read file content, suitable for viewing configs, logs, code, etc.\n\
+             - `read_artifact(path, cursor?, max_tokens?, expected_sha256?)`: Read complete spilled tool output in bounded pages.\n\
              - `write_file(path, content)`: Overwrite file content, clears existing content\n\
              - `edit_file(path, old_content, new_content, replace_all?, dry_run?)`: Edit file content — replace old_content with new_content (exact match). Returns unified diff. Use replace_all=true for multiple occurrences, dry_run=true to preview.\n\
              - `update_file(path, old_content, new_content)`: Modify file content, replace old content with new content (exact match, first occurrence)\n\

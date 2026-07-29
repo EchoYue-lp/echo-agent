@@ -16,7 +16,23 @@ use tokio::sync::RwLock;
 
 use crate::skills::registry::SkillRegistry;
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult};
+
+fn activate_allowed_tools(ctx: &ToolContext, allowed_tools: &[String]) -> Vec<String> {
+    let Some(visibility) = ctx.tool_visibility.as_ref() else {
+        return Vec::new();
+    };
+    let matches = visibility
+        .available_names()
+        .into_iter()
+        .filter(|tool_name| {
+            allowed_tools
+                .iter()
+                .any(|matcher| super::types::tool_matcher(matcher, tool_name))
+        })
+        .collect::<Vec<_>>();
+    visibility.extend_eligibility_and_activate(matches)
+}
 
 /// Tool for model-driven skill activation.
 ///
@@ -77,7 +93,11 @@ impl Tool for ActivateSkillTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let name = parameters
                 .get("name")
@@ -122,12 +142,22 @@ impl Tool for ActivateSkillTool {
                 }
             }
 
+            let allowed_tools = registry
+                .get_descriptor(&name)
+                .map(|descriptor| descriptor.allowed_tools.clone())
+                .unwrap_or_default();
+
             if registry.is_activated(&name) {
-                return Ok(ToolResult::success(format!(
+                let activated_tools = activate_allowed_tools(ctx, &allowed_tools);
+                let mut result = ToolResult::success(format!(
                     "Skill '{}' is already activated in this session. \
                      Its instructions are already in context.",
                     name
-                )));
+                ));
+                result
+                    .metadata
+                    .insert("activated_tools".to_string(), activated_tools.join(","));
+                return Ok(result);
             }
 
             match registry
@@ -140,7 +170,12 @@ impl Tool for ActivateSkillTool {
             {
                 Ok(content) => {
                     let block = content.to_prompt_block();
-                    Ok(ToolResult::success(block))
+                    let activated_tools = activate_allowed_tools(ctx, &allowed_tools);
+                    let mut result = ToolResult::success(block);
+                    result
+                        .metadata
+                        .insert("activated_tools".to_string(), activated_tools.join(","));
+                    Ok(result)
                 }
                 Err(e) => Ok(ToolResult::error(format!(
                     "Failed to activate skill '{}': {}",
@@ -148,5 +183,66 @@ impl Tool for ActivateSkillTool {
                 ))),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::external::SkillLoader;
+
+    #[tokio::test]
+    async fn activation_promotes_matching_tool_schemas() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "echo-skill-activation-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let skill_dir = root.join("git-skill");
+        std::fs::create_dir_all(&skill_dir)?;
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: git-skill\ndescription: Inspect git state\nallowed-tools: [git_*]\n---\nUse git tools.\n",
+        )?;
+        let mut loader = SkillLoader::new();
+        let descriptors = loader.discover_from_dir(&root).await?;
+        let mut registry = SkillRegistry::new();
+        for descriptor in descriptors {
+            registry.register_descriptor(descriptor);
+        }
+        let registry = Arc::new(RwLock::new(registry));
+        let tool = ActivateSkillTool::new(registry, vec!["git-skill".to_string()]);
+        let visibility = Arc::new(echo_core::tools::ToolVisibilityState::with_available(
+            ["activate_skill", "git_status", "shell"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ["activate_skill"].into_iter().map(str::to_string).collect(),
+            ["activate_skill"].into_iter().map(str::to_string).collect(),
+        ));
+        let ctx = ToolContext {
+            tool_visibility: Some(Arc::clone(&visibility)),
+            ..Default::default()
+        };
+
+        let result = tool
+            .execute_with_context(
+                ToolParameters::from([(
+                    "name".to_string(),
+                    serde_json::Value::String("git-skill".to_string()),
+                )]),
+                &ctx,
+            )
+            .await?;
+
+        assert!(result.success);
+        assert!(visibility.is_visible("git_status"));
+        assert!(!visibility.is_visible("shell"));
+        assert_eq!(
+            result.metadata.get("activated_tools").map(String::as_str),
+            Some("git_status")
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

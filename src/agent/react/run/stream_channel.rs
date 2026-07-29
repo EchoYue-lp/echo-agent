@@ -1092,6 +1092,7 @@ mod tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-a")),
             cancel: None,
             disabled_tools: None,
+            visible_tools: None,
             run_budget: None,
             history: None,
         };
@@ -1130,6 +1131,7 @@ mod tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-b")),
             cancel: None,
             disabled_tools: None,
+            visible_tools: None,
             run_budget: None,
             history: None,
         };
@@ -1183,6 +1185,7 @@ mod tests {
             working_dir: None,
             cancel: None,
             disabled_tools: None,
+            visible_tools: None,
             run_budget: None,
             history: None,
         };
@@ -1241,6 +1244,7 @@ mod tests {
             working_dir: None,
             cancel: None,
             disabled_tools: None,
+            visible_tools: None,
             run_budget: None,
             history: None,
         };
@@ -1956,6 +1960,7 @@ mod tests {
             working_dir: None,
             cancel: None,
             disabled_tools: None,
+            visible_tools: None,
             run_budget: None,
             history: None,
         };

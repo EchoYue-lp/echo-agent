@@ -12,5 +12,5 @@ pub use resource_tool::ReadSkillResourceTool;
 pub use run_script_tool::RunSkillScriptTool;
 pub use types::{
     LegacyResourceRef, SkillContent, SkillDescriptor, SkillResourceEntry, SkillResourceKind,
-    SkillSandboxPolicy,
+    SkillSandboxPolicy, is_skill_control_tool, skill_allows_tool, tool_matcher,
 };

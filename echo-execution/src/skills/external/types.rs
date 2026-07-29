@@ -279,10 +279,33 @@ impl SkillDescriptor {
             return true;
         }
 
-        self.allowed_tools
-            .iter()
-            .any(|matcher| tool_matcher(matcher, tool_name))
+        skill_allows_tool(&self.allowed_tools, tool_name)
     }
+}
+
+/// Framework control tools remain available while a skill narrows its domain
+/// tool surface. Without these, a restricted skill could hide finalization,
+/// further discovery, resource loading, or an explicit user question.
+pub fn is_skill_control_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "final_answer"
+            | "tool_search"
+            | "activate_skill"
+            | "read_skill_resource"
+            | "run_skill_script"
+            | "human_in_loop"
+    )
+}
+
+pub fn skill_allows_tool<'a, I>(allowed_tools: I, tool_name: &str) -> bool
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    is_skill_control_tool(tool_name)
+        || allowed_tools
+            .into_iter()
+            .any(|matcher| tool_matcher(matcher, tool_name))
 }
 
 /// Match a tool name against a matcher pattern.
@@ -301,9 +324,7 @@ pub fn tool_matcher(matcher: &str, tool_name: &str) -> bool {
     {
         return true;
     }
-    tool_name.starts_with(matcher)
-        && tool_name.len() > matcher.len()
-        && tool_name.as_bytes()[matcher.len()] == b'('
+    tool_name.starts_with(matcher) && tool_name.as_bytes().get(matcher.len()).copied() == Some(b'(')
 }
 
 // -- Tier 2: SkillContent (full instructions, loaded on activation) --
@@ -802,6 +823,8 @@ mod tests {
         d.allowed_tools = vec!["read_skill_resource".into(), "Bash(*)".into()];
         assert!(d.permits_tool("read_skill_resource"));
         assert!(d.permits_tool("Bash(git:status)"));
-        assert!(!d.permits_tool("run_skill_script"));
+        assert!(d.permits_tool("run_skill_script"));
+        assert!(d.permits_tool("final_answer"));
+        assert!(!d.permits_tool("write_file"));
     }
 }

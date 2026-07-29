@@ -507,8 +507,8 @@ impl ReactAgentBuilder {
 
     /// Set maximum token count for a single tool output
     ///
-    /// Tool output exceeding this limit is automatically truncated, with `[Output truncated, N tokens total]` appended.
-    /// Prevents a single tool call from overflowing the context window.
+    /// Oversized output is persisted as an artifact when artifact storage is
+    /// configured, and falls back to UTF-8-safe truncation when it is disabled.
     pub fn max_tool_output_tokens(mut self, max: usize) -> Self {
         self.max_tool_output_tokens = Some(max);
         self

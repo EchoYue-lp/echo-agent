@@ -104,7 +104,8 @@ pub mod execution {
 
 pub use echo_execution::tools::{
     Tool, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolManager, ToolOutputChannel,
-    ToolParameters, ToolRecoveryAction, ToolResult, ToolRiskLevel, ToolSideEffect, ToolStreamEvent,
+    ToolParameters, ToolRecoveryAction, ToolResult, ToolRiskLevel, ToolSchemaStats, ToolSearchTool,
+    ToolSideEffect, ToolStreamEvent,
 };
 
 // ── Common file tool classification ──────────────────────────────────────────
@@ -121,7 +122,7 @@ pub const WRITE_TOOLS: &[&str] = &[
 ];
 
 /// Tools that read file content.
-pub const READ_TOOLS: &[&str] = &["read_file"];
+pub const READ_TOOLS: &[&str] = &["read_file", "read_artifact"];
 
 /// Check if a tool name is a write tool.
 pub fn is_write_tool(name: &str) -> bool {

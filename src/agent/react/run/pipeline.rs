@@ -184,6 +184,18 @@ impl PipelineStage for ToolVisibilityStage {
                 ctx.tool_name
             ));
             ctx.output = ctx.block_reason.clone();
+        } else if snapshot
+            .tools
+            .visibility
+            .as_ref()
+            .is_some_and(|visibility| !visibility.is_visible(&ctx.tool_name))
+        {
+            ctx.blocked = true;
+            ctx.block_reason = Some(format!(
+                "Tool '{}' is not activated in this invocation; use tool_search first",
+                ctx.tool_name
+            ));
+            ctx.output = ctx.block_reason.clone();
         }
         Ok(())
     }
@@ -343,19 +355,12 @@ impl PipelineStage for SkillPermissionStage {
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
         // Check if a skill is activated and has tool restrictions
-        if let Some(allowed_tools) = snapshot.tools.skill_allowed_tools.as_ref() {
-            // Check if the tool is in the whitelist
-            let permitted = allowed_tools.iter().any(|pattern| {
-                echo_execution::skills::external::types::tool_matcher(pattern, &ctx.tool_name)
-            });
-
-            if !permitted {
-                ctx.blocked = true;
-                ctx.block_reason = Some(format!(
-                    "Tool '{}' is not permitted by the activated skill's allowed_tools whitelist",
-                    ctx.tool_name
-                ));
-            }
+        if !snapshot.tools.is_skill_tool_allowed(&ctx.tool_name) {
+            ctx.blocked = true;
+            ctx.block_reason = Some(format!(
+                "Tool '{}' is not permitted by the activated skill's allowed_tools whitelist",
+                ctx.tool_name
+            ));
         }
         Ok(())
     }
@@ -441,6 +446,7 @@ impl PipelineStage for ExecuteStage {
             execution_id: snapshot.current_execution_id.clone(),
             call_id: Some(ctx.call_id.clone()),
             output_artifacts: snapshot.config.tool_output_artifacts.clone(),
+            tool_visibility: snapshot.tools.visibility.clone(),
             cancel: snapshot.external_cancel.clone(),
             trace_sink: snapshot.external_trace_sink.clone(),
             delegation_policy: snapshot.external_delegation_policy,
@@ -1176,19 +1182,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn truncation_stage_spills_without_token_limit_and_read_file_can_recover() -> Result<()> {
+    async fn truncation_stage_spills_without_token_limit_and_read_artifact_can_recover()
+    -> Result<()> {
         let working_dir =
             tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let agent = crate::agent::ReactAgentBuilder::new()
             .model("test-model")
             .working_dir(working_dir.path())
-            .tool_output_artifacts(echo_core::tools::artifact::ToolOutputArtifactConfig::new(
-                working_dir.path(),
-                "test",
-            ))
+            .tool_output_artifacts(
+                echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                    working_dir.path(),
+                    "test",
+                )
+                .threshold_bytes(8),
+            )
             .build()?;
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
-        let original = format!("{}END", "中文🙂\n".repeat(300_000));
+        let original = format!("{}END", "中文🙂\n".repeat(3_000));
         let mut ctx = completed_context(original.clone());
 
         TruncationStage.run(&mut ctx, &snapshot).await?;
@@ -1211,27 +1221,40 @@ mod tests {
             output.contains("Tool output preview only")
                 && output.contains("not a summary")
                 && output.contains("Full output artifact")
-                && output.contains("Use read_file with this exact path")
+                && output.contains("Use read_artifact with this exact path")
                 && output.contains(artifact_path)
         }));
 
-        let read_tool = crate::tools::files::files::ReadFileTool::new();
-        let params = [
-            ("path".to_string(), Value::String(artifact_path.clone())),
-            ("offset".to_string(), Value::from(300_001_u64)),
-            ("limit".to_string(), Value::from(1_u64)),
-        ]
-        .into_iter()
-        .collect();
+        let read_tool = crate::tools::files::artifact::ReadArtifactTool;
         let tool_context = ToolContext {
             working_dir: Some(working_dir.path().to_path_buf()),
+            output_artifacts: agent.tool_output_artifacts(),
             ..ToolContext::default()
         };
-        let recovered = read_tool
-            .execute_with_context(params, &tool_context)
-            .await?;
-        assert!(recovered.success);
-        assert!(recovered.output.contains("END"));
+        let mut cursor = None;
+        let mut recovered = String::new();
+        loop {
+            let mut params = ToolParameters::from([
+                ("path".to_string(), Value::String(artifact_path.clone())),
+                ("max_tokens".to_string(), Value::from(500_u64)),
+            ]);
+            if let Some(value) = cursor.clone() {
+                params.insert("cursor".to_string(), Value::String(value));
+            }
+            let page = read_tool
+                .execute_with_context(params, &tool_context)
+                .await?;
+            assert!(page.success);
+            let (content, _) = page.output.split_once("\n\n[Artifact ").ok_or_else(|| {
+                ReactError::Other("read_artifact page omitted its cursor notice".to_string())
+            })?;
+            recovered.push_str(content);
+            cursor = page.metadata.get("next_cursor").cloned();
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(recovered, original);
         assert_eq!(
             std::fs::read_to_string(artifact_path).ok().as_deref(),
             Some(original.as_str())
@@ -1245,7 +1268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spill_projection_does_not_promise_read_access_outside_working_dir() -> Result<()> {
+    async fn spill_projection_uses_artifact_reader_outside_working_dir() -> Result<()> {
         let working_dir =
             tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let artifact_dir =
@@ -1270,8 +1293,40 @@ mod tests {
             .output
             .as_deref()
             .ok_or_else(|| ReactError::Other("truncation stage produced no output".to_string()))?;
-        assert!(output.contains("outside the session working directory"));
+        assert!(output.contains("Use read_artifact with this exact path"));
         assert!(!output.contains("Use read_file with this exact path"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_budget_spills_even_below_byte_threshold() -> Result<()> {
+        let artifact_dir =
+            tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .max_tool_output_tokens(20)
+            .tool_output_artifacts(
+                echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                    artifact_dir.path(),
+                    "test",
+                )
+                .threshold_bytes(1024 * 1024),
+            )
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context("small but token-heavy 中文🙂".repeat(100));
+
+        TruncationStage.run(&mut ctx, &snapshot).await?;
+
+        let result = ctx
+            .result
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("truncation stage lost tool result".to_string()))?;
+        assert_eq!(
+            result.metadata.get("output_handling").map(String::as_str),
+            Some("spilled")
+        );
+        assert!(result.metadata.contains_key("artifact_path"));
         Ok(())
     }
 
@@ -1294,10 +1349,10 @@ mod tests {
 
     #[tokio::test]
     async fn truncation_stage_is_utf8_safe() -> Result<()> {
-        let agent = crate::agent::ReactAgentBuilder::new()
-            .model("test-model")
+        let config = crate::agent::AgentConfig::new("test-model", "test-agent", "test")
             .max_tool_output_tokens(20)
-            .build()?;
+            .tool_output_artifacts(None);
+        let agent = crate::agent::ReactAgent::new(config);
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
         let mut ctx = completed_context("中文🙂abc".repeat(500));
 

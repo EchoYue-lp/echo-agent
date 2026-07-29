@@ -224,7 +224,7 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn read_skill_resource_enforces_allowed_tools() {
+    async fn read_skill_resource_remains_available_to_restricted_skill() {
         let root =
             std::env::temp_dir().join(format!("echo-skill-resource-test-{}", std::process::id()));
         let skill_dir = root.join("locked-skill");
@@ -268,13 +268,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(
-            result
-                .error
-                .unwrap_or_default()
-                .contains("does not permit tool 'read_skill_resource'")
-        );
+        assert!(result.success);
+        assert!(result.output.contains("hello"));
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }

@@ -177,6 +177,8 @@ pub struct ToolRuntime {
     pub plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Effective disabled tools captured for this invocation.
     pub disabled_tools: std::collections::HashSet<String>,
+    /// Mutable schema visibility for deferred tools in this invocation.
+    pub visibility: Option<std::sync::Arc<echo_core::tools::ToolVisibilityState>>,
     /// Whether the invocation uses plan mode's read-only tool surface.
     pub plan_mode: bool,
 }
@@ -185,6 +187,7 @@ impl ToolRuntime {
     pub fn from_agent(
         agent: &super::ReactAgent,
         invocation_disabled_tools: Option<&std::collections::HashSet<String>>,
+        invocation_visible_tools: Option<&std::collections::HashSet<String>>,
     ) -> Self {
         let mut disabled_tools = agent
             .tools
@@ -199,15 +202,66 @@ impl ToolRuntime {
         if let Some(invocation_disabled_tools) = invocation_disabled_tools {
             disabled_tools.extend(invocation_disabled_tools.iter().cloned());
         }
+        let tool_manager = Arc::clone(&agent.tools.tool_manager);
+        let mut skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
+        let mut active_skill_names = agent.tools.skill_registry.activated_names();
+        if let Some(progressive) = agent
+            .tools
+            .progressive_skill_registry
+            .as_ref()
+            .and_then(|registry| registry.try_read().ok())
+        {
+            if let Some(progressive_allowed) = progressive.active_skill_allowed_tools() {
+                skill_allowed_tools
+                    .get_or_insert_with(std::collections::HashSet::new)
+                    .extend(progressive_allowed);
+            }
+            active_skill_names.extend(progressive.activated_names());
+        }
+        active_skill_names.sort();
+        active_skill_names.dedup();
+        let plan_mode = agent.config.plan_mode;
+        let visibility = invocation_visible_tools.map(|initial| {
+            let available = tool_manager
+                .get_openai_tools()
+                .into_iter()
+                .filter(|tool| !disabled_tools.contains(&tool.function.name))
+                .filter(|tool| {
+                    !plan_mode
+                        || (!crate::tools::is_write_tool(&tool.function.name)
+                            && tool.function.name != "shell"
+                            && tool.function.name != "delete_file")
+                })
+                .map(|tool| tool.function.name)
+                .collect::<std::collections::HashSet<_>>();
+            let eligible = available
+                .iter()
+                .filter(|name| {
+                    skill_allowed_tools.as_ref().is_none_or(|allowed_tools| {
+                        echo_execution::skills::external::types::skill_allows_tool(
+                            allowed_tools,
+                            name,
+                        )
+                    })
+                })
+                .cloned()
+                .collect();
+            let mut initial = initial.clone();
+            initial.insert("tool_search".to_string());
+            std::sync::Arc::new(echo_core::tools::ToolVisibilityState::with_available(
+                available, eligible, initial,
+            ))
+        });
         Self {
-            tool_manager: Arc::clone(&agent.tools.tool_manager),
+            tool_manager,
             hook_registry: agent.tools.hook_registry.clone(),
             intervention_callbacks: agent.tools.intervention_callbacks.clone(),
-            skill_allowed_tools: agent.tools.skill_registry.active_skill_allowed_tools(),
-            active_skill_names: agent.tools.skill_registry.activated_names(),
+            skill_allowed_tools,
+            active_skill_names,
             plan_state: Arc::clone(&agent.plan_state),
             disabled_tools,
-            plan_mode: agent.config.plan_mode,
+            visibility,
+            plan_mode,
         }
     }
 
@@ -217,18 +271,13 @@ impl ToolRuntime {
             .get_openai_tools()
             .into_iter()
             .filter(|tool| !self.disabled_tools.contains(&tool.function.name))
+            .filter(|tool| self.visibility.is_some() || tool.function.name != "tool_search")
             .filter(|tool| {
-                self.skill_allowed_tools
+                self.visibility
                     .as_ref()
-                    .is_none_or(|allowed_tools| {
-                        allowed_tools.iter().any(|pattern| {
-                            echo_execution::skills::external::types::tool_matcher(
-                                pattern,
-                                &tool.function.name,
-                            )
-                        })
-                    })
+                    .is_none_or(|visibility| visibility.is_visible(&tool.function.name))
             })
+            .filter(|tool| self.is_skill_tool_allowed(&tool.function.name))
             .filter(|tool| {
                 !self.plan_mode
                     || (!crate::tools::is_write_tool(&tool.function.name)
@@ -236,6 +285,17 @@ impl ToolRuntime {
                         && tool.function.name != "delete_file")
             })
             .collect()
+    }
+
+    pub(crate) fn is_skill_tool_allowed(&self, tool_name: &str) -> bool {
+        if let Some(visibility) = self.visibility.as_ref() {
+            return visibility.is_eligible(tool_name);
+        }
+        self.skill_allowed_tools
+            .as_ref()
+            .is_none_or(|allowed_tools| {
+                echo_execution::skills::external::types::skill_allows_tool(allowed_tools, tool_name)
+            })
     }
 }
 
@@ -379,6 +439,7 @@ impl AgentRunSnapshot {
             tools: Arc::new(ToolRuntime::from_agent(
                 agent,
                 invocation.and_then(|context| context.disabled_tools.as_ref()),
+                invocation.and_then(|context| context.visible_tools.as_ref()),
             )),
             guard: Arc::new(GuardRuntime::from_agent(agent)),
             snapshot_manager: agent.memory.snapshot_manager.clone(),
@@ -863,11 +924,19 @@ impl AgentRunSnapshot {
         existing_artifact: Option<echo_core::tools::artifact::ToolOutputArtifactRef>,
     ) -> ProcessedToolOutput {
         let inline_bytes = output.len();
+        let estimated_tokens = echo_core::tokenizer::HeuristicTokenizer.count_tokens(&output);
         let mut spill_error = None;
         let artifact = existing_artifact.or_else(|| {
-            let config = self.config.tool_output_artifacts.clone()?;
-            if inline_bytes < config.threshold_bytes {
+            let mut config = self.config.tool_output_artifacts.clone()?;
+            let exceeds_token_budget = self
+                .config
+                .max_tool_output_tokens
+                .is_some_and(|max_tokens| estimated_tokens > max_tokens);
+            if inline_bytes < config.threshold_bytes && !exceeds_token_budget {
                 return None;
+            }
+            if exceeds_token_budget {
+                config.threshold_bytes = 1;
             }
             let identity = echo_core::tools::artifact::ToolOutputArtifactIdentity {
                 conversation_id: self.config.conversation_id.clone(),
@@ -890,17 +959,11 @@ impl AgentRunSnapshot {
 
         if let Some(artifact) = artifact {
             let preview: String = output.chars().take(TOOL_OUTPUT_PREVIEW_CHARS).collect();
-            let read_hint = match self.config.working_dir.as_deref() {
-                Some(working_dir) if !artifact.path.starts_with(working_dir) => {
-                    "This artifact is outside the session working directory, so do not assume read_file can access it."
-                }
-                _ => "Use read_file with this exact path when more detail is needed.",
-            };
             let model_output = format!(
-                "{preview}\n\n[Tool output preview only: the text above is not a summary and is not the complete result. Full output artifact: {} ({:.1} MiB, sha256 {}). {read_hint}]",
+                "{preview}\n\n[Tool output preview only: the text above is not a summary and is not the complete result. Full output artifact: {} ({:.1} MiB, sha256 {}). Use read_artifact with this exact path and expected_sha256 to retrieve bounded pages until complete.]",
                 artifact.path.display(),
                 artifact.payload_bytes as f64 / 1_048_576.0,
-                artifact.sha256.chars().take(12).collect::<String>(),
+                artifact.sha256,
             );
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("output_handling".to_string(), "spilled".to_string());
@@ -909,12 +972,7 @@ impl AgentRunSnapshot {
                 artifact.payload_bytes.to_string(),
             );
             metadata.insert("returned_bytes".to_string(), model_output.len().to_string());
-            metadata.insert(
-                "estimated_tokens".to_string(),
-                echo_core::tokenizer::HeuristicTokenizer
-                    .count_tokens(&output)
-                    .to_string(),
-            );
+            metadata.insert("estimated_tokens".to_string(), estimated_tokens.to_string());
             artifact.extend_metadata(&mut metadata);
             return ProcessedToolOutput {
                 output: model_output,
@@ -1389,6 +1447,7 @@ mod transcript_filter_tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-atomic")),
             cancel: None,
             disabled_tools: None,
+            visible_tools: None,
             run_budget: None,
             history: None,
         };
@@ -1555,6 +1614,7 @@ mod transcript_filter_tests {
             active_skill_names: Vec::new(),
             plan_state: Arc::new(tokio::sync::RwLock::new(None)),
             disabled_tools: HashSet::from(["final_answer".to_string()]),
+            visibility: None,
             plan_mode: true,
         };
 
@@ -1565,5 +1625,45 @@ mod transcript_filter_tests {
             .collect();
 
         assert_eq!(visible, vec!["read_file"]);
+    }
+
+    #[test]
+    fn invocation_visibility_expands_without_mutating_registry() -> Result<()> {
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .build()?;
+        agent.add_tool(Box::new(NamedTool("custom")));
+        let invocation = echo_core::agent::AgentInvocationContext {
+            visible_tools: Some(HashSet::from([
+                "final_answer".to_string(),
+                "tool_search".to_string(),
+            ])),
+            ..Default::default()
+        };
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        assert!(!tool_names(&snapshot).contains(&"custom".to_string()));
+
+        let activated = snapshot
+            .tools
+            .visibility
+            .as_ref()
+            .map(|visibility| visibility.activate(["custom".to_string()]))
+            .unwrap_or_default();
+        assert_eq!(activated, vec!["custom"]);
+        assert!(tool_names(&snapshot).contains(&"custom".to_string()));
+        assert!(agent.tool_names().contains(&"custom".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn tool_search_is_hidden_when_deferred_visibility_is_disabled() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+
+        assert!(!tool_names(&snapshot).contains(&"tool_search".to_string()));
+        assert!(agent.tool_names().contains(&"tool_search".to_string()));
+        Ok(())
     }
 }

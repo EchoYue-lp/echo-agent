@@ -671,7 +671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_skill_script_enforces_allowed_tools() {
+    async fn run_skill_script_remains_available_to_restricted_skill() {
         let root =
             std::env::temp_dir().join(format!("echo-skill-script-test-{}", std::process::id()));
         let skill_dir = root.join("locked-skill");
@@ -715,9 +715,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
         assert!(
-            result
+            !result
                 .error
                 .unwrap_or_default()
                 .contains("does not permit tool 'run_skill_script'")

@@ -72,6 +72,9 @@ pub struct AgentInvocationContext {
     /// These exclusions are combined with agent-level defaults when the run
     /// snapshot is created. They never mutate the shared tool registry.
     pub disabled_tools: Option<std::collections::HashSet<String>>,
+    /// Initial tool names whose schemas are visible to the model.
+    /// `None` keeps the complete eligible tool surface visible.
+    pub visible_tools: Option<std::collections::HashSet<String>>,
     /// Per-invocation budget policy. `None` uses the agent default.
     pub run_budget: Option<RunBudgetPolicy>,
     /// Structured conversation turns inserted after the system prompt and
@@ -113,6 +116,13 @@ impl std::fmt::Debug for AgentInvocationContext {
                 "disabled_tools",
                 &self
                     .disabled_tools
+                    .as_ref()
+                    .map(std::collections::HashSet::len),
+            )
+            .field(
+                "visible_tools",
+                &self
+                    .visible_tools
                     .as_ref()
                     .map(std::collections::HashSet::len),
             )

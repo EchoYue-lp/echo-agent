@@ -8,7 +8,9 @@ use dashmap::DashMap;
 use echo_core::error::{Result, ToolError};
 use echo_core::llm::types::ToolDefinition;
 use echo_core::sandbox::SandboxExecutor;
+use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use parking_lot::RwLock;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,6 +71,169 @@ pub struct ToolManager {
     result_cache: RwLock<HashMap<(String, String), (ToolResult, std::time::Instant)>>,
 }
 
+/// Deterministic size accounting for the tool definitions sent to an LLM.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolSchemaStats {
+    pub tool_count: usize,
+    pub schema_bytes: usize,
+    pub estimated_tokens: usize,
+}
+
+/// Catalog search that activates full schemas inside one invocation.
+pub struct ToolSearchTool {
+    manager: std::sync::Weak<ToolManager>,
+}
+
+impl ToolSearchTool {
+    pub fn new(manager: std::sync::Weak<ToolManager>) -> Self {
+        Self { manager }
+    }
+}
+
+impl Tool for ToolSearchTool {
+    fn name(&self) -> &str {
+        "tool_search"
+    }
+
+    fn description(&self) -> &str {
+        "Find and activate additional tools by capability or exact name. Matching tool schemas become available on the next model turn."
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        // Activation mutates invocation-local visibility, so this must bypass
+        // the read-only result cache even though it has no external side effect.
+        ToolRiskLevel::Standard
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Capability or exact tool name to find"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Maximum tools to activate (default: 5)"
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        })
+    }
+
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+    ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let query = parameters
+                .get("query")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
+            let limit = parameters
+                .get("limit")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(5)
+                .clamp(1, 10);
+            let Some(manager) = self.manager.upgrade() else {
+                return Ok(ToolResult::error("Tool catalog is no longer available"));
+            };
+            let query_lower = query.to_lowercase();
+            let query_terms = query_lower.split_whitespace().collect::<Vec<_>>();
+            let mut matches = manager
+                .get_openai_tools()
+                .into_iter()
+                .filter(|definition| definition.function.name != self.name())
+                .filter(|definition| {
+                    ctx.tool_visibility
+                        .as_ref()
+                        .is_none_or(|visibility| visibility.is_eligible(&definition.function.name))
+                })
+                .filter_map(|definition| {
+                    let name_lower = definition.function.name.to_lowercase();
+                    let description_lower = definition.function.description.to_lowercase();
+                    let score = if name_lower == query_lower {
+                        Some(0_u8)
+                    } else if name_lower.starts_with(&query_lower) {
+                        Some(1)
+                    } else if name_lower.contains(&query_lower) {
+                        Some(2)
+                    } else if query_terms
+                        .iter()
+                        .all(|term| name_lower.contains(term) || description_lower.contains(term))
+                    {
+                        Some(3)
+                    } else {
+                        None
+                    }?;
+                    Some((score, definition))
+                })
+                .collect::<Vec<_>>();
+            matches.sort_by(|left, right| {
+                left.0
+                    .cmp(&right.0)
+                    .then_with(|| left.1.function.name.cmp(&right.1.function.name))
+            });
+            let total_matches = matches.len();
+            matches.truncate(limit);
+            let names = matches
+                .iter()
+                .map(|(_, definition)| definition.function.name.clone())
+                .collect::<Vec<_>>();
+            let activated = ctx
+                .tool_visibility
+                .as_ref()
+                .map(|visibility| visibility.activate(names.clone()))
+                .unwrap_or_default();
+
+            if matches.is_empty() {
+                return Ok(ToolResult::success(format!(
+                    "No eligible tools matched '{query}'. Try a concrete capability or tool name."
+                )));
+            }
+
+            let lines = matches
+                .iter()
+                .map(|(_, definition)| {
+                    let preview = definition
+                        .function
+                        .description
+                        .chars()
+                        .take(160)
+                        .collect::<String>();
+                    format!("- {}: {preview}", definition.function.name)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut result = ToolResult::success(format!(
+                "Activated tool schemas for the next turn:\n{lines}"
+            ))
+            .with_truncated(total_matches > limit);
+            result
+                .metadata
+                .insert("matched_tools".to_string(), names.join(","));
+            result
+                .metadata
+                .insert("activated_tools".to_string(), activated.join(","));
+            result
+                .metadata
+                .insert("total_known".to_string(), "true".to_string());
+            result
+                .metadata
+                .insert("total_matches".to_string(), total_matches.to_string());
+            Ok(result)
+        })
+    }
+}
+
 impl ToolManager {
     pub fn get_openai_tools(&self) -> Vec<ToolDefinition> {
         let current_version = self.definitions_version.load(Ordering::Acquire);
@@ -90,6 +255,25 @@ impl ToolManager {
         definitions.sort_by(|a, b| a.function.name.cmp(&b.function.name));
         *self.cached_definitions.write() = Some((current_version, definitions.clone()));
         definitions
+    }
+
+    /// Measure the complete registered tool schema using the framework tokenizer.
+    pub fn schema_stats(&self) -> std::result::Result<ToolSchemaStats, serde_json::Error> {
+        Self::schema_stats_for(&self.get_openai_tools())
+    }
+
+    /// Measure an invocation-filtered subset without creating another registry.
+    pub fn schema_stats_for(
+        definitions: &[ToolDefinition],
+    ) -> std::result::Result<ToolSchemaStats, serde_json::Error> {
+        let mut definitions = definitions.to_vec();
+        definitions.sort_by(|left, right| left.function.name.cmp(&right.function.name));
+        let serialized = serde_json::to_string(&definitions)?;
+        Ok(ToolSchemaStats {
+            tool_count: definitions.len(),
+            schema_bytes: serialized.len(),
+            estimated_tokens: HeuristicTokenizer.count_tokens(&serialized),
+        })
     }
 
     fn invalidate_cache(&self) {
@@ -1030,6 +1214,53 @@ mod execute_with_context_tests {
             .map(|definition| definition.function.name)
             .collect();
         assert_eq!(openai_names, vec!["alpha", "middle", "zeta"]);
+
+        let stats = tm.schema_stats().unwrap_or(ToolSchemaStats {
+            tool_count: 0,
+            schema_bytes: 0,
+            estimated_tokens: 0,
+        });
+        assert_eq!(stats.tool_count, 3);
+        assert!(stats.schema_bytes > 0);
+        assert!(stats.estimated_tokens > 0);
+
+        let mut reversed = tm.get_openai_tools();
+        reversed.reverse();
+        assert_eq!(ToolManager::schema_stats_for(&reversed).ok(), Some(stats));
+    }
+
+    #[tokio::test]
+    async fn tool_search_activates_only_eligible_matches() -> echo_core::error::Result<()> {
+        let manager = Arc::new(ToolManager::new());
+        manager.register(Box::new(NamedTool { name: "git_status" }));
+        manager.register(Box::new(NamedTool { name: "git_commit" }));
+        manager.register(Box::new(ToolSearchTool::new(Arc::downgrade(&manager))));
+        let visibility = Arc::new(echo_core::tools::ToolVisibilityState::new(
+            ["git_status".to_string(), "tool_search".to_string()]
+                .into_iter()
+                .collect(),
+            ["tool_search".to_string()].into_iter().collect(),
+        ));
+        let context = ToolContext {
+            tool_visibility: Some(Arc::clone(&visibility)),
+            ..ToolContext::default()
+        };
+
+        let result = manager
+            .execute_tool_with_context(
+                "tool_search",
+                ToolParameters::from([(
+                    "query".to_string(),
+                    serde_json::Value::String("git".to_string()),
+                )]),
+                &context,
+            )
+            .await?;
+
+        assert!(result.success);
+        assert!(visibility.is_visible("git_status"));
+        assert!(!visibility.is_visible("git_commit"));
+        Ok(())
     }
 
     #[tokio::test]

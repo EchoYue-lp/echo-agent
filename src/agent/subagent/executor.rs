@@ -1671,6 +1671,7 @@ impl SubagentExecutor {
                     .or_else(|| workspace_handle.as_ref().map(|handle| handle.path.clone())),
                 cancel: None,
                 disabled_tools,
+                visible_tools: None,
                 run_budget: None,
                 history: (!invocation_history.is_empty()).then_some(invocation_history.clone()),
             };

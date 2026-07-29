@@ -1009,6 +1009,8 @@ pub struct ToolContext {
     /// tool-output artifacts. Streaming tools should use this instead of
     /// retaining unbounded output in memory.
     pub output_artifacts: Option<artifact::ToolOutputArtifactConfig>,
+    /// Invocation-scoped schema visibility shared with `tool_search`.
+    pub tool_visibility: Option<std::sync::Arc<ToolVisibilityState>>,
     /// 跨 spawn 安全的取消令牌（值传递，非 task_local）。
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// 跨 spawn 安全的 trace 回传（值传递）。
@@ -1029,12 +1031,132 @@ impl std::fmt::Debug for ToolContext {
             .field("call_id", &self.call_id)
             .field("output_artifacts", &self.output_artifacts)
             .field(
+                "visible_tool_count",
+                &self
+                    .tool_visibility
+                    .as_ref()
+                    .map(|visibility| visibility.visible_names().len()),
+            )
+            .field(
                 "cancel",
                 &self.cancel.as_ref().map(|_| "<CancellationToken>"),
             )
             .field("trace_sink", &self.trace_sink.as_ref().map(|_| "<sink>"))
             .field("delegation_policy", &self.delegation_policy)
             .finish()
+    }
+}
+
+/// Mutable per-invocation tool visibility without duplicating the tool registry.
+#[derive(Debug)]
+pub struct ToolVisibilityState {
+    available: std::collections::HashSet<String>,
+    eligible: std::sync::RwLock<std::collections::HashSet<String>>,
+    visible: std::sync::RwLock<std::collections::HashSet<String>>,
+}
+
+impl ToolVisibilityState {
+    pub fn new(
+        eligible: std::collections::HashSet<String>,
+        initial: std::collections::HashSet<String>,
+    ) -> Self {
+        Self::with_available(eligible.clone(), eligible, initial)
+    }
+
+    /// Build visibility with a wider activation catalog than the currently
+    /// eligible policy surface. Product policy and skills may later promote
+    /// names from `available` through [`Self::extend_eligibility_and_activate`].
+    pub fn with_available(
+        available: std::collections::HashSet<String>,
+        eligible: std::collections::HashSet<String>,
+        initial: std::collections::HashSet<String>,
+    ) -> Self {
+        let eligible = eligible
+            .into_iter()
+            .filter(|name| available.contains(name))
+            .collect();
+        let state = Self {
+            available,
+            eligible: std::sync::RwLock::new(eligible),
+            visible: std::sync::RwLock::new(std::collections::HashSet::new()),
+        };
+        state.activate(initial);
+        state
+    }
+
+    pub fn is_eligible(&self, name: &str) -> bool {
+        self.eligible
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(name)
+    }
+
+    pub fn is_visible(&self, name: &str) -> bool {
+        self.visible
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(name)
+    }
+
+    pub fn activate<I>(&self, names: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let eligible = self
+            .eligible
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut visible = self
+            .visible
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut activated = Vec::new();
+        for name in names {
+            if eligible.contains(&name) && visible.insert(name.clone()) {
+                activated.push(name);
+            }
+        }
+        activated.sort();
+        activated
+    }
+
+    /// Extend the invocation policy and expose the promoted schemas together.
+    pub fn extend_eligibility_and_activate<I>(&self, names: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let promoted = {
+            let mut eligible = self
+                .eligible
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            names
+                .into_iter()
+                .filter(|name| self.available.contains(name))
+                .inspect(|name| {
+                    eligible.insert(name.clone());
+                })
+                .collect::<Vec<_>>()
+        };
+        self.activate(promoted)
+    }
+
+    pub fn available_names(&self) -> Vec<String> {
+        let mut names = self.available.iter().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    pub fn visible_names(&self) -> Vec<String> {
+        let mut names = self
+            .visible
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        names.sort();
+        names
     }
 }
 
@@ -1110,6 +1232,7 @@ mod tool_context_tests {
             execution_id: None,
             call_id: None,
             output_artifacts: None,
+            tool_visibility: None,
             cancel: None,
             trace_sink: None,
             delegation_policy: None,
@@ -1161,6 +1284,33 @@ mod tool_context_tests {
         let ctx = ToolContext::default();
         let resolved = ctx.resolve_path(std::path::Path::new("a/b"));
         assert_eq!(resolved.as_ref(), std::path::Path::new("a/b"));
+    }
+
+    #[test]
+    fn visibility_can_promote_available_policy_names() {
+        let state = ToolVisibilityState::with_available(
+            ["tool_search", "git_status", "git_commit"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ["tool_search", "git_status"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ["tool_search", "git_commit"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+
+        assert!(state.is_visible("tool_search"));
+        assert!(!state.is_visible("git_commit"));
+        assert_eq!(
+            state.extend_eligibility_and_activate(["git_commit".to_string()]),
+            vec!["git_commit"]
+        );
+        assert!(state.is_eligible("git_commit"));
+        assert!(state.is_visible("git_commit"));
     }
 }
 

@@ -1525,7 +1525,9 @@ async fn truncate_tool_output_within_limit() {
 
 #[tokio::test]
 async fn truncate_tool_output_exceeds_limit() {
-    let config = AgentConfig::new("model", "agent", "prompt").max_tool_output_tokens(10);
+    let config = AgentConfig::new("model", "agent", "prompt")
+        .max_tool_output_tokens(10)
+        .tool_output_artifacts(None);
     let agent = ReactAgent::new(config);
     let long_text = "a ".repeat(500);
     let result = agent.truncate_tool_output(long_text).await;
