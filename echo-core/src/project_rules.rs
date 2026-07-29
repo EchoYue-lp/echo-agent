@@ -12,6 +12,17 @@ const COMPATIBLE_FILES: &[(&str, &str)] = &[
     ("AGENTS.md", "agents"),
     ("CLAUDE.md", "claude"),
 ];
+const AGENTS_FILES: &[(&str, &str)] = &[
+    ("AGENTS.override.md", "agents_override"),
+    ("AGENTS.md", "agents"),
+];
+
+#[derive(Debug, Clone, Copy, Default)]
+enum InstructionFileSet {
+    #[default]
+    All,
+    AgentsOnly,
+}
 
 /// One instruction file included in the resolved chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +57,7 @@ impl ResolvedInstructions {
 pub struct InstructionResolver {
     working_dir: PathBuf,
     explicit_project_root: Option<PathBuf>,
+    file_set: InstructionFileSet,
 }
 
 impl InstructionResolver {
@@ -53,11 +65,23 @@ impl InstructionResolver {
         Self {
             working_dir: working_dir.into(),
             explicit_project_root: None,
+            file_set: InstructionFileSet::All,
         }
     }
 
     pub fn project_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.explicit_project_root = Some(root.into());
+        self
+    }
+
+    /// Resolve only the cross-tool `AGENTS.override.md` / `AGENTS.md` chain.
+    ///
+    /// This excludes echo-agent-native `.echo-agent/*` files and `CLAUDE.md`.
+    /// It is useful for consumers that own a separate product-specific
+    /// instruction namespace but still want the standard root-to-leaf AGENTS
+    /// semantics and repository-boundary protections.
+    pub fn agents_files_only(mut self) -> Self {
+        self.file_set = InstructionFileSet::AgentsOnly;
         self
     }
 
@@ -75,7 +99,9 @@ impl InstructionResolver {
         let mut sources = Vec::new();
         let mut blocks = Vec::new();
         for directory in directories {
-            let Some((path, kind, content)) = load_one_directory(&directory, &scan_root) else {
+            let Some((path, kind, content)) =
+                load_one_directory(&directory, &scan_root, self.file_set)
+            else {
                 continue;
             };
             let precedence = sources.len();
@@ -126,8 +152,13 @@ fn path_from_root_to_working_dir(root: &Path, working_dir: &Path) -> Vec<PathBuf
 fn load_one_directory(
     directory: &Path,
     project_root: &Path,
+    file_set: InstructionFileSet,
 ) -> Option<(PathBuf, &'static str, String)> {
-    for (relative, kind) in NATIVE_FILES.iter().chain(COMPATIBLE_FILES.iter()) {
+    let candidates: Box<dyn Iterator<Item = &(&str, &str)> + '_> = match file_set {
+        InstructionFileSet::All => Box::new(NATIVE_FILES.iter().chain(COMPATIBLE_FILES.iter())),
+        InstructionFileSet::AgentsOnly => Box::new(AGENTS_FILES.iter()),
+    };
+    for (relative, kind) in candidates {
         let candidate = directory.join(relative);
         let canonical = match candidate.canonicalize() {
             Ok(path) => path,
@@ -344,6 +375,31 @@ mod tests {
             Some(canonical_root.as_path())
         );
         assert!(resolved.content.contains("worktree rules"));
+        Ok(())
+    }
+
+    #[test]
+    fn agents_only_excludes_native_and_claude_files() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TestDir::new()?;
+        let root = temp.path().join("repo");
+        let child = root.join("src");
+        fs::create_dir_all(root.join(".git"))?;
+        fs::create_dir_all(&child)?;
+        write(&root.join(".echo-agent/AGENT.md"), "native")?;
+        write(&root.join("CLAUDE.md"), "claude")?;
+        write(&root.join("AGENTS.md"), "root agents")?;
+        write(&child.join("AGENTS.override.md"), "leaf override")?;
+
+        let resolved = InstructionResolver::new(&child)
+            .project_root(&root)
+            .agents_files_only()
+            .resolve();
+
+        assert_eq!(resolved.sources.len(), 2);
+        assert!(resolved.content.contains("root agents"));
+        assert!(resolved.content.contains("leaf override"));
+        assert!(!resolved.content.contains("native"));
+        assert!(!resolved.content.contains("claude"));
         Ok(())
     }
 }

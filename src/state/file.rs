@@ -205,9 +205,8 @@ impl RuntimeStateStore for FileRuntimeStateStore {
 
 /// Write `bytes` to `path` atomically (unique tmp + fsync + rename).
 ///
-/// See module docs for the durability trade-off (file content is durable; the
-/// parent-dir entry is not fsynced to avoid pulling a `libc` dep into the
-/// default-feature build).
+/// On Unix, the parent directory is fsynced after rename so the directory entry
+/// is durable as well as the file content.
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -218,13 +217,31 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         path.file_name().and_then(|n| n.to_str()).unwrap_or("data"),
         uuid::Uuid::new_v4()
     ));
-    {
+    let write_result = (|| {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        f.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
     }
-    std::fs::rename(&tmp, path)?;
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    sync_parent_directory(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

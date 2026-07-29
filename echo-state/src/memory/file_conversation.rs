@@ -21,8 +21,8 @@
 //!   `MemoryError::SerializationError` rather than silently returning `None` /
 //!   an empty list (which previously looked indistinguishable from "no data").
 //! - **Unique temp names + parent-dir sync.** Each atomic write uses a
-//!   uuid-suffixed temp file (no cross-write collisions) and `fsync`s the parent
-//!   directory after rename so the rename survives a crash.
+//!   uuid-suffixed temp file (no cross-write collisions) and, on Unix, `fsync`s
+//!   the parent directory after rename so the rename survives a crash.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -92,24 +92,53 @@ impl FileConversationStore {
         base.join("_meta.json")
     }
 
-    /// Read `_meta.json`. A missing file is `Ok(default)` (fresh store); a
-    /// present-but-corrupt file is an error (do not silently reset the counter).
+    /// Read `_meta.json` and reconcile it with persisted records.
+    ///
+    /// A record rename can become durable just before the corresponding meta
+    /// write during a crash. Scanning the existing records prevents the next
+    /// process from reusing an already-persisted conversation/message id.
     fn read_meta(base: &Path) -> Result<StoreMeta> {
-        match std::fs::read_to_string(Self::meta_path(base)) {
+        let mut meta = match std::fs::read_to_string(Self::meta_path(base)) {
             Ok(s) => {
                 let meta: StoreMeta = serde_json::from_str(&s).map_err(|e| {
                     MemoryError::SerializationError(format!("parse _meta.json: {e}"))
                 })?;
-                Ok(meta)
+                meta
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StoreMeta::default()),
-            Err(e) => Err(MemoryError::IoError(format!("read _meta.json: {e}")).into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => StoreMeta::default(),
+            Err(e) => return Err(MemoryError::IoError(format!("read _meta.json: {e}")).into()),
+        };
+
+        let entries =
+            std::fs::read_dir(base).map_err(|e| MemoryError::IoError(format!("readdir: {e}")))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| MemoryError::IoError(format!("readdir entry: {e}")))?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json")
+                || path.file_name().and_then(|value| value.to_str()) == Some("_meta.json")
+            {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| MemoryError::IoError(format!("read {}: {e}", path.display())))?;
+            let record: ConversationRecord = serde_json::from_str(&content).map_err(|e| {
+                MemoryError::SerializationError(format!("parse {}: {e}", path.display()))
+            })?;
+            meta.next_id = meta.next_id.max(record.conversation.id);
+            if let Some(message_id) = record
+                .messages
+                .iter()
+                .filter_map(|message| message.id)
+                .max()
+            {
+                meta.next_id = meta.next_id.max(message_id);
+            }
         }
+        Ok(meta)
     }
 
-    fn persist_meta(&self) -> Result<()> {
-        let meta = self.lock.lock().map_err(poison)?.clone();
-        let json = serde_json::to_string(&meta)
+    fn persist_meta(&self, meta: &StoreMeta) -> Result<()> {
+        let json = serde_json::to_string(meta)
             .map_err(|e| MemoryError::SerializationError(format!("serialize meta: {e}")))?;
         atomic_write(&Self::meta_path(&self.base), json.as_bytes())
             .map_err(|e| MemoryError::IoError(format!("write meta: {e}")))?;
@@ -145,6 +174,40 @@ impl FileConversationStore {
         Ok(())
     }
 
+    fn create_conversation_locked(
+        &self,
+        conv: NewConversation,
+        meta: &mut StoreMeta,
+    ) -> Result<Conversation> {
+        if self.read_record(&conv.conversation_id)?.is_some() {
+            return Err(MemoryError::IoError(format!(
+                "conversation already exists: {}",
+                conv.conversation_id
+            ))
+            .into());
+        }
+        let id = meta.take_id();
+        let now = now_rfc3339();
+        let conversation = Conversation {
+            id,
+            conversation_id: conv.conversation_id,
+            user_id: conv.user_id,
+            agent_type: conv.agent_type,
+            title: conv.title,
+            summary: None,
+            compressed_before_id: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let record = ConversationRecord {
+            conversation: conversation.clone(),
+            messages: Vec::new(),
+        };
+        self.write_record(&record)?;
+        self.persist_meta(meta)?;
+        Ok(conversation)
+    }
+
     /// Enumerate all conversation records on disk.
     ///
     /// A single corrupt record surfaces as an error (the previous behavior
@@ -153,7 +216,8 @@ impl FileConversationStore {
         let mut records = Vec::new();
         let entries = std::fs::read_dir(&self.base)
             .map_err(|e| MemoryError::IoError(format!("readdir: {e}")))?;
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.map_err(|e| MemoryError::IoError(format!("readdir entry: {e}")))?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -185,27 +249,7 @@ impl ConversationStore for FileConversationStore {
     fn create_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
         Box::pin(async move {
             let mut meta = self.lock.lock().map_err(poison)?;
-            let id = meta.take_id();
-            drop(meta);
-            let now = now_rfc3339();
-            let conversation = Conversation {
-                id,
-                conversation_id: conv.conversation_id,
-                user_id: conv.user_id,
-                agent_type: conv.agent_type,
-                title: conv.title,
-                summary: None,
-                compressed_before_id: None,
-                created_at: now.clone(),
-                updated_at: now,
-            };
-            let record = ConversationRecord {
-                conversation: conversation.clone(),
-                messages: Vec::new(),
-            };
-            self.write_record(&record)?;
-            self.persist_meta()?;
-            Ok(conversation)
+            self.create_conversation_locked(conv, &mut meta)
         })
     }
 
@@ -213,7 +257,12 @@ impl ConversationStore for FileConversationStore {
         &'a self,
         conversation_id: &'a str,
     ) -> BoxFut<'a, Option<Conversation>> {
-        Box::pin(async move { Ok(self.read_record(conversation_id)?.map(|r| r.conversation)) })
+        Box::pin(async move {
+            let _guard = self.lock.lock().map_err(poison)?;
+            Ok(self
+                .read_record(conversation_id)?
+                .map(|record| record.conversation))
+        })
     }
 
     fn list_conversations<'a>(
@@ -249,17 +298,10 @@ impl ConversationStore for FileConversationStore {
                 .collect();
             // ORDER BY updated_at DESC.
             metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-            // OFFSET then LIMIT.
+            // OFFSET then LIMIT without indexing into the collection.
             let offset = filter.offset.unwrap_or(0);
-            if offset >= metas.len() {
-                return Ok(Vec::new());
-            }
-            let slice: Vec<ConversationMeta> = if let Some(limit) = filter.limit {
-                metas[offset..].iter().take(limit).cloned().collect()
-            } else {
-                metas[offset..].to_vec()
-            };
-            Ok(slice)
+            let limit = filter.limit.unwrap_or(usize::MAX);
+            Ok(metas.into_iter().skip(offset).take(limit).collect())
         })
     }
 
@@ -271,6 +313,7 @@ impl ConversationStore for FileConversationStore {
         compressed_before_id: Option<i64>,
     ) -> BoxFut<'a, ()> {
         Box::pin(async move {
+            let _guard = self.lock.lock().map_err(poison)?;
             let mut record = match self.read_record(conversation_id)? {
                 Some(r) => r,
                 None => return Ok(()), // matches SQL UPDATE on 0 rows.
@@ -294,6 +337,7 @@ impl ConversationStore for FileConversationStore {
 
     fn delete_conversation<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, ()> {
         Box::pin(async move {
+            let _guard = self.lock.lock().map_err(poison)?;
             let path = self.conv_path(conversation_id)?;
             match std::fs::remove_file(&path) {
                 Ok(()) => Ok(()),
@@ -309,29 +353,31 @@ impl ConversationStore for FileConversationStore {
         messages: &'a [StoredMessage],
     ) -> BoxFut<'a, ()> {
         Box::pin(async move {
+            let mut meta = self.lock.lock().map_err(poison)?;
             let mut record = self
                 .read_record(conversation_id)?
                 .ok_or_else(|| MemoryError::NotFound(format!("conversation: {conversation_id}")))?;
             // Assign stable ids to messages that don't have one yet (matches
             // the SQLite autoincrement). Reuse existing ids when present.
-            let mut meta = self.lock.lock().map_err(poison)?;
             let mut assigned: Vec<StoredMessage> = messages.to_vec();
             for m in assigned.iter_mut() {
-                if m.id.is_none() {
-                    m.id = Some(meta.take_id());
+                m.conversation_id = conversation_id.to_string();
+                match m.id {
+                    Some(id) => meta.next_id = meta.next_id.max(id),
+                    None => m.id = Some(meta.take_id()),
                 }
             }
-            drop(meta);
             record.messages = assigned;
             record.conversation.updated_at = now_rfc3339();
             self.write_record(&record)?;
-            self.persist_meta()?;
+            self.persist_meta(&meta)?;
             Ok(())
         })
     }
 
     fn get_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, Vec<StoredMessage>> {
         Box::pin(async move {
+            let _guard = self.lock.lock().map_err(poison)?;
             Ok(self
                 .read_record(conversation_id)?
                 .map(|r| r.messages)
@@ -341,6 +387,7 @@ impl ConversationStore for FileConversationStore {
 
     fn count_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, usize> {
         Box::pin(async move {
+            let _guard = self.lock.lock().map_err(poison)?;
             Ok(self
                 .read_record(conversation_id)?
                 .map(|r| r.messages.len())
@@ -354,6 +401,7 @@ impl ConversationStore for FileConversationStore {
         limit: usize,
     ) -> BoxFut<'a, Vec<ConversationMeta>> {
         Box::pin(async move {
+            let _guard = self.lock.lock().map_err(poison)?;
             let needle = query.to_lowercase();
             let mut results: Vec<ConversationMeta> = self
                 .read_all_records()?
@@ -388,6 +436,16 @@ impl ConversationStore for FileConversationStore {
             results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             results.truncate(limit);
             Ok(results)
+        })
+    }
+
+    fn ensure_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
+        Box::pin(async move {
+            let mut meta = self.lock.lock().map_err(poison)?;
+            if let Some(existing) = self.read_record(&conv.conversation_id)? {
+                return Ok(existing.conversation);
+            }
+            self.create_conversation_locked(conv, &mut meta)
         })
     }
 }
@@ -430,13 +488,9 @@ fn safe_segment(id: &str) -> Result<String> {
 /// Write `bytes` to `path` atomically: write to a unique temp file, fsync it,
 /// then rename into place.
 ///
-/// The temp file is fsynced so the *content* is durable before the rename.
-/// The rename itself is atomic on POSIX filesystems. We do not fsync the parent
-/// directory (that would require a `libc`/`fs2` dependency in `echo-state`,
-/// which is otherwise dependency-light); the trade-off is that on a hard crash
-/// the rename may not be reflected on disk even though the temp file's content
-/// is. The file-content durability is the load-bearing property for "no
-/// half-written records".
+/// The temp file is fsynced so the *content* is durable before the rename. On
+/// Unix, the parent directory is fsynced as well so the renamed directory entry
+/// survives a crash.
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -450,13 +504,31 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         path.file_name().and_then(|n| n.to_str()).unwrap_or("data"),
         uuid::Uuid::new_v4()
     ));
-    {
+    let write_result = (|| {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        f.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
     }
-    std::fs::rename(&tmp, path)?;
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    sync_parent_directory(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -582,7 +654,9 @@ mod tests {
     #[tokio::test]
     async fn round_trip_messages_via_project_and_restore() {
         use crate::memory::{project_messages, restore_messages};
-        use echo_core::llm::types::{FunctionCall, Message, Role, ToolCall};
+        use echo_core::llm::types::{
+            ContentPart, FunctionCall, ImageUrl, Message, MessageContent, Role, ToolCall,
+        };
 
         let base = tmp_base();
         let store = FileConversationStore::new(&base).unwrap();
@@ -591,9 +665,22 @@ mod tests {
             .await
             .unwrap();
 
+        let mut multimodal = Message::user("placeholder".to_string());
+        multimodal.content = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "inspect ".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,AA==".to_string(),
+                    detail: Some("low".to_string()),
+                },
+            },
+        ]);
+        multimodal.reasoning_content = Some("reasoning trace".to_string());
         let original = vec![
             Message::system("be helpful".into()),
-            Message::user("hi".into()),
+            multimodal,
             Message::assistant_with_tools(vec![ToolCall {
                 id: "call-1".into(),
                 call_type: "function".into(),
@@ -613,6 +700,11 @@ mod tests {
         assert_eq!(restored.len(), original.len());
         assert_eq!(restored[0].role, Role::System);
         assert_eq!(restored[1].role, Role::User);
+        assert!(matches!(&restored[1].content, MessageContent::Parts(_)));
+        assert_eq!(
+            restored[1].reasoning_content.as_deref(),
+            Some("reasoning trace")
+        );
         assert_eq!(restored[2].role, Role::Assistant);
         assert_eq!(restored[2].tool_calls.as_ref().unwrap().len(), 1);
         assert_eq!(restored[2].tool_calls.as_ref().unwrap()[0].id, "call-1");
@@ -624,6 +716,56 @@ mod tests {
         assert_eq!(restored[3].tool_call_id.as_deref(), Some("call-1"));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn stale_meta_is_reconciled_from_records() {
+        let base = tmp_base();
+        let first_id = {
+            let store = FileConversationStore::new(&base).unwrap();
+            let conversation = store
+                .create_conversation(new_conv("first", None))
+                .await
+                .unwrap();
+            store
+                .save_messages("first", &[stored("user", "hello")])
+                .await
+                .unwrap();
+            conversation.id
+        };
+        std::fs::write(
+            base.join("conversations").join("_meta.json"),
+            r#"{"next_id":0}"#,
+        )
+        .unwrap();
+
+        let reopened = FileConversationStore::new(&base).unwrap();
+        let second = reopened
+            .create_conversation(new_conv("second", None))
+            .await
+            .unwrap();
+        assert!(second.id > first_id.saturating_add(1));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn supplied_message_ids_advance_the_live_counter() -> Result<()> {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        store.create_conversation(new_conv("c1", None)).await?;
+
+        let mut imported = stored("user", "imported");
+        imported.id = Some(1_000);
+        store.save_messages("c1", &[imported]).await?;
+        store
+            .save_messages("c1", &[stored("assistant", "next")])
+            .await?;
+
+        let saved = store.get_messages("c1").await?;
+        assert_eq!(saved.first().and_then(|message| message.id), Some(1_001));
+        let _ = std::fs::remove_dir_all(&base);
+        Ok(())
     }
 
     #[test]
