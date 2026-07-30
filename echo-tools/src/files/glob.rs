@@ -3,6 +3,7 @@
 //! Walks a directory tree and returns file paths matching a glob pattern.
 
 use echo_core::error::{Result, ToolError};
+use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -65,9 +66,15 @@ impl Tool for GlobTool {
                     "type": "string",
                     "description": "Directory to search in (default: current directory)"
                 },
-                "max_results": {
+                "limit": {
                     "type": "integer",
-                    "description": "Maximum number of file paths to return (default: 200)"
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "Results per page (default 100)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Cursor from the previous page"
                 }
             },
             "required": ["pattern"]
@@ -90,10 +97,10 @@ impl Tool for GlobTool {
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
 
-            let max_results = parameters
-                .get("max_results")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(200) as usize;
+            let page_request = match PageRequest::from_parameters(&parameters, 100, 200) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
 
             // Effective base: construction-time base_dir (with confinement)
             // takes priority; otherwise fall back to runtime working_dir
@@ -135,30 +142,33 @@ impl Tool for GlobTool {
             }
 
             let mut results = Vec::new();
-            walk_glob(&search_path, pattern_str, max_results, &mut results).await;
-
-            if results.is_empty() {
-                return Ok(ToolResult::success(format!(
-                    "No files matching '{}' found.",
-                    pattern_str
-                )));
-            }
-
-            let total = results.len();
-            let output = results.join("\n");
-            let summary = format!("\n\n{} files matched", total);
-
-            Ok(ToolResult::success(format!("{}{}", output, summary)))
+            walk_glob(&search_path, pattern_str, &mut results).await;
+            let query = serde_json::json!({
+                "pattern": pattern_str,
+                "path": search_path,
+            });
+            let (page, page_info) = match page_request.paginate(results, &query) {
+                Ok(page) => page,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+            let output = if page.is_empty() {
+                format!("No files matching '{pattern_str}' found.")
+            } else {
+                format!(
+                    "{}\n\n{} files returned ({} total)",
+                    page.join("\n"),
+                    page_info.returned,
+                    page_info.total.unwrap_or(0)
+                )
+            };
+            let mut result = ToolResult::success(output);
+            page_info.apply_to(&mut result);
+            Ok(result)
         })
     }
 }
 
-async fn walk_glob(
-    dir: &std::path::Path,
-    pattern: &str,
-    max_results: usize,
-    results: &mut Vec<String>,
-) {
+async fn walk_glob(dir: &std::path::Path, pattern: &str, results: &mut Vec<String>) {
     let mut entries = match fs::read_dir(dir).await {
         Ok(e) => e,
         Err(_) => return,
@@ -171,10 +181,6 @@ async fn walk_glob(
     entry_paths.sort();
 
     for path in entry_paths {
-        if results.len() >= max_results {
-            break;
-        }
-
         // Skip hidden and common ignored directories
         if path.is_dir()
             && let Some(name) = path.file_name().and_then(|n| n.to_str())
@@ -191,7 +197,7 @@ async fn walk_glob(
         }
 
         if path.is_dir() {
-            Box::pin(walk_glob(&path, pattern, max_results, results)).await;
+            Box::pin(walk_glob(&path, pattern, results)).await;
         } else if path.is_file()
             && let Some(name) = path.file_name().and_then(|n| n.to_str())
             && glob_pattern_matches(pattern, name, &path)
@@ -238,8 +244,12 @@ fn glob_with_doublestar(pattern: &str, full_path: &std::path::Path) -> bool {
     let parts: Vec<&str> = pattern.split("**").collect();
 
     if parts.len() == 2 {
-        let prefix = parts[0];
-        let suffix = parts[1];
+        let Some(prefix) = parts.first().copied() else {
+            return false;
+        };
+        let Some(suffix) = parts.get(1).copied() else {
+            return false;
+        };
 
         // Try matching at each level
         if prefix.is_empty() && suffix.is_empty() {
@@ -258,8 +268,12 @@ fn glob_with_doublestar(pattern: &str, full_path: &std::path::Path) -> bool {
 
         // src/**/*.rs — match paths starting with prefix and ending with suffix
         let suffix_clean = suffix.trim_start_matches('/');
-        if let Some(pos) = path_str.find(prefix.trim_end_matches('/')) {
-            let rest = &path_str[pos + prefix.trim_end_matches('/').len()..];
+        let prefix_clean = prefix.trim_end_matches('/');
+        if let Some(pos) = path_str.find(prefix_clean)
+            && let Some(rest) = path_str
+                .get(pos..)
+                .and_then(|tail| tail.strip_prefix(prefix_clean))
+        {
             return rest.ends_with(suffix_clean);
         }
         return false;
@@ -276,11 +290,13 @@ fn glob_match_advanced(pattern: &str, text: &str) -> bool {
     let p_chars: Vec<char> = pattern.chars().collect();
     let t_chars: Vec<char> = text.chars().collect();
 
-    while pi < p_chars.len() && ti < t_chars.len() {
-        match p_chars[pi] {
+    while let (Some(pattern_character), Some(text_character)) =
+        (p_chars.get(pi).copied(), t_chars.get(ti).copied())
+    {
+        match pattern_character {
             '*' => {
                 // Match any sequence
-                pi += 1;
+                pi = pi.saturating_add(1);
                 if pi == p_chars.len() {
                     return true;
                 }
@@ -289,8 +305,8 @@ fn glob_match_advanced(pattern: &str, text: &str) -> bool {
                     // p_chars/t_chars), NOT byte indices. Using &pattern[pi..]
                     // would panic on multibyte chars (e.g. paths like
                     // screenshot_北京.png). Reconstruct via char iterators.
-                    let pat_rest: String = p_chars[pi..].iter().collect();
-                    let txt_rest: String = t_chars[skip..].iter().collect();
+                    let pat_rest: String = p_chars.get(pi..).unwrap_or_default().iter().collect();
+                    let txt_rest: String = t_chars.get(skip..).unwrap_or_default().iter().collect();
                     if glob_match_advanced(&pat_rest, &txt_rest) {
                         return true;
                     }
@@ -298,25 +314,25 @@ fn glob_match_advanced(pattern: &str, text: &str) -> bool {
                 return false;
             }
             '?' => {
-                pi += 1;
-                ti += 1;
+                pi = pi.saturating_add(1);
+                ti = ti.saturating_add(1);
             }
             '[' => {
                 // Character class
-                pi += 1;
+                pi = pi.saturating_add(1);
                 let mut found = false;
-                let negated = pi < p_chars.len() && p_chars[pi] == '!';
+                let negated = p_chars.get(pi).is_some_and(|character| *character == '!');
                 if negated {
-                    pi += 1;
+                    pi = pi.saturating_add(1);
                 }
-                while pi < p_chars.len() && p_chars[pi] != ']' {
-                    if ti < t_chars.len() && p_chars[pi] == t_chars[ti] {
+                while p_chars.get(pi).is_some_and(|character| *character != ']') {
+                    if p_chars.get(pi) == t_chars.get(ti) {
                         found = true;
                     }
-                    pi += 1;
+                    pi = pi.saturating_add(1);
                 }
                 if pi < p_chars.len() {
-                    pi += 1; // skip ]
+                    pi = pi.saturating_add(1); // skip ]
                 }
                 if negated {
                     found = !found;
@@ -324,16 +340,28 @@ fn glob_match_advanced(pattern: &str, text: &str) -> bool {
                 if !found {
                     return false;
                 }
-                ti += 1;
+                ti = ti.saturating_add(1);
             }
             '{' => {
                 // Brace expansion
-                let close = p_chars[pi..].iter().position(|&c| c == '}');
-                if let Some(close_idx) = close {
-                    let brace_content: String = p_chars[pi + 1..pi + close_idx].iter().collect();
+                let close = p_chars
+                    .get(pi..)
+                    .and_then(|remainder| remainder.iter().position(|character| *character == '}'));
+                if let Some(close_offset) = close {
+                    let close_index = pi.saturating_add(close_offset);
+                    let brace_content: String = p_chars
+                        .get(pi.saturating_add(1)..close_index)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
                     let alternatives: Vec<&str> = brace_content.split(',').collect();
-                    let after_brace: String = p_chars[pi + close_idx + 1..].iter().collect();
-                    let before_brace: String = p_chars[..pi].iter().collect();
+                    let after_brace: String = p_chars
+                        .get(close_index.saturating_add(1)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
+                    let before_brace: String =
+                        p_chars.get(..pi).unwrap_or_default().iter().collect();
                     for alt in alternatives {
                         let full = format!("{}{}{}", before_brace, alt.trim(), after_brace);
                         if glob_match_advanced(&full, text) {
@@ -343,17 +371,17 @@ fn glob_match_advanced(pattern: &str, text: &str) -> bool {
                     return false;
                 }
                 // No closing brace, treat as literal
-                if p_chars[pi] == t_chars[ti] {
-                    pi += 1;
-                    ti += 1;
+                if pattern_character == text_character {
+                    pi = pi.saturating_add(1);
+                    ti = ti.saturating_add(1);
                 } else {
                     return false;
                 }
             }
             c => {
-                if ti < t_chars.len() && c == t_chars[ti] {
-                    pi += 1;
-                    ti += 1;
+                if c == text_character {
+                    pi = pi.saturating_add(1);
+                    ti = ti.saturating_add(1);
                 } else {
                     return false;
                 }
@@ -362,8 +390,8 @@ fn glob_match_advanced(pattern: &str, text: &str) -> bool {
     }
 
     // Consume trailing * in pattern
-    while pi < p_chars.len() && p_chars[pi] == '*' {
-        pi += 1;
+    while p_chars.get(pi).is_some_and(|character| *character == '*') {
+        pi = pi.saturating_add(1);
     }
 
     pi == p_chars.len() && ti == t_chars.len()

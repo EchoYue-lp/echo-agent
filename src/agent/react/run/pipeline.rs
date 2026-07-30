@@ -178,6 +178,7 @@ impl PipelineStage for ToolVisibilityStage {
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
         if snapshot.tools.disabled_tools.contains(&ctx.tool_name) {
+            snapshot.tools.tool_manager.record_tool_selection_failure();
             ctx.blocked = true;
             ctx.block_reason = Some(format!(
                 "Tool '{}' is not available in this invocation",
@@ -190,6 +191,7 @@ impl PipelineStage for ToolVisibilityStage {
             .as_ref()
             .is_some_and(|visibility| !visibility.is_visible(&ctx.tool_name))
         {
+            snapshot.tools.tool_manager.record_tool_selection_failure();
             ctx.blocked = true;
             ctx.block_reason = Some(format!(
                 "Tool '{}' is not activated in this invocation; use tool_search first",
@@ -561,7 +563,7 @@ impl PipelineStage for ExecuteStage {
             }
         };
 
-        ctx.duration_ms = execution_start.elapsed().as_millis() as u64;
+        ctx.duration_ms = u64::try_from(execution_start.elapsed().as_millis()).unwrap_or(u64::MAX);
         ctx.result = Some(result.clone());
 
         // Record file read if tool was read_file and succeeded
@@ -680,6 +682,12 @@ impl PipelineStage for TruncationStage {
         if let Some(result) = ctx.result.as_mut() {
             result.truncated = result.truncated || processed.truncated;
             result.metadata.extend(processed.metadata);
+            snapshot.tools.tool_manager.record_tool_result(
+                &ctx.tool_name,
+                result,
+                processed.output.len(),
+                ctx.duration_ms,
+            );
         }
         ctx.output = Some(processed.output);
         Ok(())

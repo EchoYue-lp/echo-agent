@@ -43,6 +43,8 @@ pub mod data_quality;
 #[cfg(feature = "database")]
 #[cfg_attr(docsrs, doc(cfg(feature = "database")))]
 pub mod database;
+#[cfg(any(feature = "files", feature = "git"))]
+mod diff_pagination;
 #[cfg(feature = "media")]
 #[cfg_attr(docsrs, doc(cfg(feature = "media")))]
 pub mod excel;

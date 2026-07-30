@@ -394,7 +394,20 @@ fn tools_for_request(snap: &AgentRunSnapshot, final_only: bool) -> Option<Vec<To
         return None;
     }
     let tools = snap.tools.tools_for_llm();
-    (!tools.is_empty()).then_some(tools)
+    if tools.is_empty() {
+        return None;
+    }
+    if let Ok(stats) = echo_execution::tools::ToolManager::schema_stats_for(&tools) {
+        snap.tools.tool_manager.record_schema_stats(&stats);
+        tracing::info!(
+            target: "echo_agent::tool_budget",
+            tool_count = stats.tool_count,
+            schema_bytes = stats.schema_bytes,
+            schema_estimated_tokens = stats.estimated_tokens,
+            "model tool schema budget"
+        );
+    }
+    Some(tools)
 }
 
 pub(crate) fn cache_fingerprint(

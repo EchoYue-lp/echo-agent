@@ -15,6 +15,7 @@ use crate::evolution::{MemoryLayer, MemoryLayerManager};
 use crate::memory::{SearchQuery, Store, StoreItem};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
+use echo_core::tools::pagination::PageRequest;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::debug;
@@ -262,8 +263,7 @@ impl Tool for RecallTool {
     }
 
     fn description(&self) -> &str {
-        "Search the persistent memory store for relevant historical memories, returning the best matches. \
-         Search by keywords, topics, or natural language fragments."
+        "Search persistent memory by keyword or natural-language fragment."
     }
 
     fn parameters(&self) -> Value {
@@ -438,9 +438,7 @@ impl Tool for SearchMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Use hybrid search to find the most relevant historical memories in the persistent memory store. \
-         Supports natural language queries, combining keyword and semantic similarity for recall. \
-         Falls back to keyword search when the underlying Store does not support hybrid search."
+        "Hybrid search persistent memory, with keyword fallback."
     }
 
     fn parameters(&self) -> Value {
@@ -455,7 +453,11 @@ impl Tool for SearchMemoryTool {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 20,
-                    "description": "Maximum number of results to return (default 5)"
+                    "description": "Results per page (default 5)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Cursor from the previous page"
                 }
             },
             "required": ["query"]
@@ -472,48 +474,42 @@ impl Tool for SearchMemoryTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
 
-            let limit = parameters
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .map(|n| n.clamp(1, 20) as usize)
-                .unwrap_or(5);
+            let page_request = match PageRequest::from_parameters(&parameters, 5, 20) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
 
-            debug!(query = %query, limit = limit, "🔎 search_memory hybrid search on Store");
+            debug!(query = %query, limit = page_request.limit, "🔎 search_memory hybrid search on Store");
 
             let ns: Vec<&str> = self.ns_refs();
             let items = match self
                 .store
-                .search_with(&ns, SearchQuery::hybrid(query, limit))
+                .search_with(&ns, SearchQuery::hybrid(query, 20))
                 .await
             {
                 Ok(items) => items,
                 Err(err) if format!("{err}").contains("hybrid search") => {
-                    self.store.search(&ns, query, limit).await?
+                    self.store.search(&ns, query, 20).await?
                 }
                 Err(err) => return Err(err),
             };
 
-            if items.is_empty() {
-                return Ok(ToolResult::success(format!(
-                    "No memories found matching \"{}\".",
-                    query
-                )));
-            }
-
-            let mut lines = vec![format!(
-                "Hybrid search found {} matching memories:",
-                items.len()
-            )];
-            for (i, item) in items.iter().enumerate() {
-                lines.push(format!(
-                    "{}. [ID:{}] {}",
-                    i + 1,
-                    item.key.get(..8).unwrap_or(&item.key),
-                    format_store_item(item),
-                ));
-            }
-
-            Ok(ToolResult::success(lines.join("\n")))
+            let records = items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "[ID:{}] {}",
+                        memory_key_preview(&item.key),
+                        format_store_item(item)
+                    )
+                })
+                .collect();
+            let query_identity = serde_json::json!({
+                "query": query,
+                "namespace": self.namespace,
+                "mode": "hybrid",
+            });
+            paginated_memory_result(&page_request, records, &query_identity, query)
         })
     }
 }
@@ -616,7 +612,26 @@ impl Tool for LayeredSearchMemoryTool {
     }
 
     fn parameters(&self) -> Value {
-        LayeredRecallTool::new(self.layer_manager.clone()).parameters()
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language query describing the memory content you want to find"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "description": "Results per page (default 5)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Cursor from the previous page"
+                }
+            },
+            "required": ["query"]
+        })
     }
 
     fn execute(
@@ -628,33 +643,58 @@ impl Tool for LayeredSearchMemoryTool {
                 .get("query")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
-            let limit = parameters
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .map(|n| n.clamp(1, 20) as usize)
-                .unwrap_or(5);
-
-            let items = self.layer_manager.search_layered(query, limit).await?;
-            if items.is_empty() {
-                return Ok(ToolResult::success(format!(
-                    "No memories found matching \"{}\".",
-                    query
-                )));
-            }
-
-            let mut lines = vec![format!("Found {} matching typed memories:", items.len())];
-            for (i, (layer, item)) in items.iter().enumerate() {
-                lines.push(format!(
-                    "{}. [{}:{}] {}",
-                    i + 1,
-                    format_memory_layer(*layer),
-                    item.key.get(..8).unwrap_or(&item.key),
-                    format_typed_memory(item),
-                ));
-            }
-            Ok(ToolResult::success(lines.join("\n")))
+            let page_request = match PageRequest::from_parameters(&parameters, 5, 20) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+            let items = self.layer_manager.search_layered(query, 20).await?;
+            let records = items
+                .iter()
+                .map(|(layer, item)| {
+                    format!(
+                        "[{}:{}] {}",
+                        format_memory_layer(*layer),
+                        memory_key_preview(&item.key),
+                        format_typed_memory(item)
+                    )
+                })
+                .collect();
+            let query_identity = serde_json::json!({
+                "query": query,
+                "mode": "layered_hybrid",
+            });
+            paginated_memory_result(&page_request, records, &query_identity, query)
         })
     }
+}
+
+fn paginated_memory_result(
+    request: &PageRequest,
+    records: Vec<String>,
+    query_identity: &Value,
+    query: &str,
+) -> crate::error::Result<ToolResult> {
+    let (page, page_info) = match request.paginate(records, query_identity) {
+        Ok(page) => page,
+        Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+    };
+    let output = if page.is_empty() {
+        format!("No memories found matching \"{query}\".")
+    } else {
+        format!(
+            "Found {} matching memories on this page ({} total):\n{}",
+            page_info.returned,
+            page_info.total.unwrap_or(0),
+            page.join("\n")
+        )
+    };
+    let mut result = ToolResult::success(output);
+    page_info.apply_to(&mut result);
+    Ok(result)
+}
+
+fn memory_key_preview(key: &str) -> String {
+    key.chars().take(8).collect()
 }
 
 // ── LayeredForgetTool ──────────────────────────────────────────────────────

@@ -5,6 +5,7 @@
 
 use crate::security::ssrf_safe_redirect_policy;
 use echo_core::error::{Result, ToolError};
+use echo_core::tools::artifact::{ToolOutputArtifactIdentity, persist_tool_output};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::StreamExt;
@@ -137,8 +138,7 @@ impl Tool for WebFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetches web page content from a specified URL and converts HTML to readable text. \
-         Parameters: url - web page address (required), max_length - maximum content length (optional, default 50000 chars)"
+        "Fetch a URL as readable text; large content is stored as a recoverable artifact."
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {
@@ -151,18 +151,22 @@ impl Tool for WebFetchTool {
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "The web page URL to fetch content from"
+                    "description": "URL to fetch"
                 },
                 "max_length": {
                     "type": "integer",
-                    "description": "Maximum content length to return (characters, default 50000)"
+                    "description": "Inline characters (default 50000)"
                 }
             },
             "required": ["url"]
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let url = parameters
                 .get("url")
@@ -178,10 +182,18 @@ impl Tool for WebFetchTool {
                 return Ok(ToolResult::error("URL must start with http:// or https://"));
             }
 
-            let max_length = parameters
-                .get("max_length")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(self.max_content_length as u64) as usize;
+            let max_length = match parameters.get("max_length") {
+                Some(value) => value
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| ToolError::InvalidParameter {
+                        name: "max_length".to_string(),
+                        message: "must be a positive integer supported by this platform"
+                            .to_string(),
+                    })?,
+                None => self.max_content_length,
+            };
 
             // SSRF protection: resolve + validate + connect on pinned IPs, closing
             // the DNS-rebinding TOCTOU window that validate_url+client.get leaves.
@@ -235,7 +247,9 @@ impl Tool for WebFetchTool {
                         )));
                     }
                 };
-                if body_bytes.len() + chunk.len() > MAX_BODY_BYTES as usize {
+                if body_bytes.len().saturating_add(chunk.len())
+                    > usize::try_from(MAX_BODY_BYTES).unwrap_or(usize::MAX)
+                {
                     return Ok(ToolResult::error(format!(
                         "Response body exceeds limit of {} bytes ({} MB)",
                         MAX_BODY_BYTES,
@@ -258,18 +272,62 @@ impl Tool for WebFetchTool {
                 body
             };
 
-            let was_truncated = content.chars().count() > max_length;
-            let content = Self::truncate_content(&content, max_length);
-
-            let output = format!(
+            let full_output = format!(
                 "URL: {}\nStatus: {}\nContent-Type: {}\n\n{}",
                 url, status, content_type, content
             );
+            let oversized = content.chars().count() > max_length;
+            let mut artifact_error = None;
+            if oversized && let Some(mut config) = ctx.output_artifacts.clone() {
+                config.threshold_bytes = 1;
+                let artifact = match persist_tool_output(
+                    config,
+                    ToolOutputArtifactIdentity::from_context(ctx, "web_fetch"),
+                    &full_output,
+                ) {
+                    Ok(artifact) => artifact,
+                    Err(error) => {
+                        tracing::warn!(%error, "web_fetch output artifact write failed");
+                        artifact_error = Some(error.to_string());
+                        None
+                    }
+                };
+                if let Some(artifact) = artifact {
+                    let preview = Self::truncate_content(&content, max_length);
+                    let output = format!(
+                        "URL: {}\nStatus: {}\nContent-Type: {}\n\n{}\n\nFull content artifact: {} (sha256 {}). Use read_artifact to continue.",
+                        url,
+                        status,
+                        content_type,
+                        preview,
+                        artifact.path.display(),
+                        artifact.sha256
+                    );
+                    let mut result = ToolResult::success(output)
+                        .with_truncated(true)
+                        .with_mime_type(content_type)
+                        .with_meta("url", url)
+                        .with_meta("output_handling", "spilled")
+                        .with_meta("original_bytes", full_output.len().to_string());
+                    result.metadata.insert(
+                        "returned_bytes".to_string(),
+                        result.output.len().to_string(),
+                    );
+                    artifact.extend_metadata(&mut result.metadata);
+                    return Ok(result);
+                }
+            }
 
-            Ok(ToolResult::success(output)
-                .with_truncated(was_truncated)
+            let mut result = ToolResult::success(full_output)
                 .with_mime_type(content_type)
-                .with_meta("url", url))
+                .with_meta("url", url);
+            if let Some(error) = artifact_error {
+                result
+                    .metadata
+                    .insert("artifact_status".to_string(), "write_failed".to_string());
+                result.metadata.insert("artifact_error".to_string(), error);
+            }
+            Ok(result)
         })
     }
 }

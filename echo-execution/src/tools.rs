@@ -69,6 +69,7 @@ pub struct ToolManager {
     /// Tool result cache: (tool_name, params_json) -> ToolResult.
     /// Only caches read-only tool results. Cleared on write operations.
     result_cache: RwLock<HashMap<(String, String), (ToolResult, std::time::Instant)>>,
+    budget_metrics: ToolBudgetMetrics,
 }
 
 /// Deterministic size accounting for the tool definitions sent to an LLM.
@@ -77,6 +78,47 @@ pub struct ToolSchemaStats {
     pub tool_count: usize,
     pub schema_bytes: usize,
     pub estimated_tokens: usize,
+}
+
+/// Content-free aggregate metrics for schema and tool-output budgets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolBudgetMetricsSnapshot {
+    pub schema_requests: u64,
+    pub schema_bytes: u64,
+    pub schema_estimated_tokens: u64,
+    pub activated_tool_observations: u64,
+    pub tool_searches: u64,
+    pub tool_search_matches: u64,
+    pub tool_search_misses: u64,
+    pub tool_selection_failures: u64,
+    pub tool_results: u64,
+    pub successful_tool_results: u64,
+    pub visible_result_bytes: u64,
+    pub spilled_payload_bytes: u64,
+    pub tool_duration_ms: u64,
+    pub artifact_reads: u64,
+    pub paginated_results: u64,
+    pub pagination_continuations: u64,
+}
+
+#[derive(Default)]
+struct ToolBudgetMetrics {
+    schema_requests: AtomicU64,
+    schema_bytes: AtomicU64,
+    schema_estimated_tokens: AtomicU64,
+    activated_tool_observations: AtomicU64,
+    tool_searches: AtomicU64,
+    tool_search_matches: AtomicU64,
+    tool_search_misses: AtomicU64,
+    tool_selection_failures: AtomicU64,
+    tool_results: AtomicU64,
+    successful_tool_results: AtomicU64,
+    visible_result_bytes: AtomicU64,
+    spilled_payload_bytes: AtomicU64,
+    tool_duration_ms: AtomicU64,
+    artifact_reads: AtomicU64,
+    paginated_results: AtomicU64,
+    pagination_continuations: AtomicU64,
 }
 
 /// Catalog search that activates full schemas inside one invocation.
@@ -193,6 +235,7 @@ impl Tool for ToolSearchTool {
                 .as_ref()
                 .map(|visibility| visibility.activate(names.clone()))
                 .unwrap_or_default();
+            manager.record_tool_search(total_matches, activated.len());
 
             if matches.is_empty() {
                 return Ok(ToolResult::success(format!(
@@ -276,6 +319,154 @@ impl ToolManager {
         })
     }
 
+    pub fn record_schema_stats(&self, stats: &ToolSchemaStats) {
+        self.budget_metrics
+            .schema_requests
+            .fetch_add(1, Ordering::Relaxed);
+        add_usize(&self.budget_metrics.schema_bytes, stats.schema_bytes);
+        add_usize(
+            &self.budget_metrics.schema_estimated_tokens,
+            stats.estimated_tokens,
+        );
+        add_usize(
+            &self.budget_metrics.activated_tool_observations,
+            stats.tool_count,
+        );
+    }
+
+    pub fn record_tool_search(&self, matched: usize, activated: usize) {
+        self.budget_metrics
+            .tool_searches
+            .fetch_add(1, Ordering::Relaxed);
+        add_usize(&self.budget_metrics.tool_search_matches, matched);
+        if matched == 0 || activated == 0 {
+            self.budget_metrics
+                .tool_search_misses
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_tool_selection_failure(&self) {
+        self.budget_metrics
+            .tool_selection_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tool_result(
+        &self,
+        tool_name: &str,
+        result: &ToolResult,
+        visible_bytes: usize,
+        duration_ms: u64,
+    ) {
+        self.budget_metrics
+            .tool_results
+            .fetch_add(1, Ordering::Relaxed);
+        if result.success {
+            self.budget_metrics
+                .successful_tool_results
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        add_usize(&self.budget_metrics.visible_result_bytes, visible_bytes);
+        let spilled_bytes = result
+            .metadata
+            .get("artifact_payload_bytes")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        self.budget_metrics
+            .spilled_payload_bytes
+            .fetch_add(spilled_bytes, Ordering::Relaxed);
+        self.budget_metrics
+            .tool_duration_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
+        let paginated = result.metadata.contains_key("page.returned");
+        if tool_name == "read_artifact" && result.success {
+            self.budget_metrics
+                .artifact_reads
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if paginated {
+            self.budget_metrics
+                .paginated_results
+                .fetch_add(1, Ordering::Relaxed);
+            if result
+                .metadata
+                .get("page.truncated")
+                .is_some_and(|value| value == "true")
+            {
+                self.budget_metrics
+                    .pagination_continuations
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        tracing::info!(
+            target: "echo_agent::tool_budget",
+            tool = tool_name,
+            success = result.success,
+            visible_bytes,
+            spilled_payload_bytes = spilled_bytes,
+            duration_ms,
+            paginated,
+            artifact_sha256 = result
+                .metadata
+                .get("artifact_sha256")
+                .map(String::as_str)
+                .unwrap_or(""),
+            "tool result budget"
+        );
+    }
+
+    pub fn budget_metrics(&self) -> ToolBudgetMetricsSnapshot {
+        ToolBudgetMetricsSnapshot {
+            schema_requests: self.budget_metrics.schema_requests.load(Ordering::Relaxed),
+            schema_bytes: self.budget_metrics.schema_bytes.load(Ordering::Relaxed),
+            schema_estimated_tokens: self
+                .budget_metrics
+                .schema_estimated_tokens
+                .load(Ordering::Relaxed),
+            activated_tool_observations: self
+                .budget_metrics
+                .activated_tool_observations
+                .load(Ordering::Relaxed),
+            tool_searches: self.budget_metrics.tool_searches.load(Ordering::Relaxed),
+            tool_search_matches: self
+                .budget_metrics
+                .tool_search_matches
+                .load(Ordering::Relaxed),
+            tool_search_misses: self
+                .budget_metrics
+                .tool_search_misses
+                .load(Ordering::Relaxed),
+            tool_selection_failures: self
+                .budget_metrics
+                .tool_selection_failures
+                .load(Ordering::Relaxed),
+            tool_results: self.budget_metrics.tool_results.load(Ordering::Relaxed),
+            successful_tool_results: self
+                .budget_metrics
+                .successful_tool_results
+                .load(Ordering::Relaxed),
+            visible_result_bytes: self
+                .budget_metrics
+                .visible_result_bytes
+                .load(Ordering::Relaxed),
+            spilled_payload_bytes: self
+                .budget_metrics
+                .spilled_payload_bytes
+                .load(Ordering::Relaxed),
+            tool_duration_ms: self.budget_metrics.tool_duration_ms.load(Ordering::Relaxed),
+            artifact_reads: self.budget_metrics.artifact_reads.load(Ordering::Relaxed),
+            paginated_results: self
+                .budget_metrics
+                .paginated_results
+                .load(Ordering::Relaxed),
+            pagination_continuations: self
+                .budget_metrics
+                .pagination_continuations
+                .load(Ordering::Relaxed),
+        }
+    }
+
     fn invalidate_cache(&self) {
         self.definitions_version.fetch_add(1, Ordering::Release);
         // No need to clear cached_definitions — version mismatch will trigger
@@ -307,6 +498,7 @@ impl ToolManager {
             cached_definitions: RwLock::new(None),
             definitions_version: AtomicU64::new(0),
             result_cache: RwLock::new(HashMap::new()),
+            budget_metrics: ToolBudgetMetrics::default(),
         }
     }
 
@@ -325,6 +517,7 @@ impl ToolManager {
             cached_definitions: RwLock::new(None),
             definitions_version: AtomicU64::new(0),
             result_cache: RwLock::new(HashMap::new()),
+            budget_metrics: ToolBudgetMetrics::default(),
         }
     }
 
@@ -719,6 +912,10 @@ impl ToolManager {
     }
 }
 
+fn add_usize(counter: &AtomicU64, value: usize) {
+    counter.fetch_add(u64::try_from(value).unwrap_or(u64::MAX), Ordering::Relaxed);
+}
+
 #[cfg(test)]
 mod execute_with_context_tests {
     use super::*;
@@ -1105,6 +1302,51 @@ mod execute_with_context_tests {
         assert!(result.success);
         assert_eq!(result.output, "completed under internal deadline");
         Ok(())
+    }
+
+    #[test]
+    fn budget_metrics_store_only_content_free_aggregates() {
+        let manager = ToolManager::new();
+        manager.record_schema_stats(&ToolSchemaStats {
+            tool_count: 3,
+            schema_bytes: 120,
+            estimated_tokens: 30,
+        });
+        manager.record_tool_search(2, 1);
+        manager.record_tool_selection_failure();
+        let mut result = ToolResult::success("sensitive output is not retained");
+        result
+            .metadata
+            .insert("page.returned".to_string(), "2".to_string());
+        result
+            .metadata
+            .insert("page.truncated".to_string(), "true".to_string());
+        result
+            .metadata
+            .insert("artifact_payload_bytes".to_string(), "4096".to_string());
+        manager.record_tool_result("read_artifact", &result, 128, 25);
+
+        assert_eq!(
+            manager.budget_metrics(),
+            ToolBudgetMetricsSnapshot {
+                schema_requests: 1,
+                schema_bytes: 120,
+                schema_estimated_tokens: 30,
+                activated_tool_observations: 3,
+                tool_searches: 1,
+                tool_search_matches: 2,
+                tool_search_misses: 0,
+                tool_selection_failures: 1,
+                tool_results: 1,
+                successful_tool_results: 1,
+                visible_result_bytes: 128,
+                spilled_payload_bytes: 4096,
+                tool_duration_ms: 25,
+                artifact_reads: 1,
+                paginated_results: 1,
+                pagination_continuations: 1,
+            }
+        );
     }
 
     #[tokio::test]

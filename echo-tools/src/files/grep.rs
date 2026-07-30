@@ -4,6 +4,7 @@
 //! file type filtering, and case-insensitive mode.
 
 use echo_core::error::{Result, ToolError};
+use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -45,7 +46,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regex pattern. Walks directories and returns matching lines with file paths and line numbers. Use glob parameter to filter file types (e.g. '*.rs', '*.py')."
+        "Exact text search over file contents using a regex. Returns matching lines with file paths and line numbers; use code_search for symbol-oriented code discovery."
     }
 
     fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
@@ -79,9 +80,15 @@ impl Tool for GrepTool {
                     "type": "integer",
                     "description": "Number of context lines before and after each match (default: 0)"
                 },
-                "max_results": {
+                "limit": {
                     "type": "integer",
-                    "description": "Maximum number of matched lines to return (default: 100)"
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "Results per page (default 50)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Cursor from the previous page"
                 }
             },
             "required": ["pattern"]
@@ -111,15 +118,23 @@ impl Tool for GrepTool {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            let context_lines = parameters
-                .get("context")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            let context_lines = match parameters.get("context") {
+                Some(value) => match value.as_u64().and_then(|value| usize::try_from(value).ok()) {
+                    Some(value) => value,
+                    None => {
+                        return Ok(ToolResult::invalid_arguments(
+                            "context must be a non-negative integer supported by this platform"
+                                .to_string(),
+                        ));
+                    }
+                },
+                None => 0,
+            };
 
-            let max_results = parameters
-                .get("max_results")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(100) as usize;
+            let page_request = match PageRequest::from_parameters(&parameters, 50, 200) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
 
             // Compile regex
             let regex = regex::RegexBuilder::new(pattern_str)
@@ -162,7 +177,6 @@ impl Tool for GrepTool {
             }
 
             let mut results = Vec::new();
-            let mut total_matches = 0usize;
 
             if search_path.is_file() {
                 search_file(
@@ -170,9 +184,7 @@ impl Tool for GrepTool {
                     &regex,
                     glob_filter,
                     context_lines,
-                    max_results,
                     &mut results,
-                    &mut total_matches,
                 )
                 .await?;
             } else if search_path.is_dir() {
@@ -181,28 +193,35 @@ impl Tool for GrepTool {
                     &regex,
                     glob_filter,
                     context_lines,
-                    max_results,
                     &mut results,
-                    &mut total_matches,
                 )
                 .await?;
             }
 
-            if results.is_empty() {
-                return Ok(ToolResult::success("No matches found.".to_string()));
-            }
-
-            let output = results.join("\n");
-            let summary = if total_matches > max_results {
-                format!(
-                    "\n\n... (showing {} of {} matches)",
-                    max_results, total_matches
-                )
-            } else {
-                format!("\n\n{} matches found", total_matches)
+            let query = serde_json::json!({
+                "pattern": pattern_str,
+                "path": search_path,
+                "glob": glob_filter,
+                "case_insensitive": case_insensitive,
+                "context": context_lines,
+            });
+            let (page, page_info) = match page_request.paginate(results, &query) {
+                Ok(page) => page,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
             };
-
-            Ok(ToolResult::success(format!("{}{}", output, summary)))
+            let output = if page.is_empty() {
+                "No matches found.".to_string()
+            } else {
+                format!(
+                    "{}\n\n{} matches returned ({} total)",
+                    page.join("\n"),
+                    page_info.returned,
+                    page_info.total.unwrap_or(0)
+                )
+            };
+            let mut result = ToolResult::success(output);
+            page_info.apply_to(&mut result);
+            Ok(result)
         })
     }
 }
@@ -212,9 +231,7 @@ async fn search_file(
     regex: &regex::Regex,
     glob_filter: Option<&str>,
     context_lines: usize,
-    max_results: usize,
     results: &mut Vec<String>,
-    total_matches: &mut usize,
 ) -> Result<()> {
     // Check glob filter
     if let Some(glob) = glob_filter
@@ -247,26 +264,27 @@ async fn search_file(
 
     for (line_idx, line) in lines.iter().enumerate() {
         if regex.is_match(line) {
-            *total_matches += 1;
-            if results.len() < max_results {
-                let line_num = line_idx + 1;
-
-                if context_lines > 0 {
-                    // Show context lines
-                    let start = line_idx.saturating_sub(context_lines);
-                    let end = (line_idx + context_lines + 1).min(lines.len());
-
-                    for (ctx_idx, line) in lines.iter().enumerate().skip(start).take(end - start) {
-                        let ctx_num = ctx_idx + 1;
-                        let prefix = if ctx_idx == line_idx { ">" } else { " " };
-                        results.push(format!("{}{}:{}:  {}", prefix, path_display, ctx_num, line));
-                    }
-                    if end < lines.len() || start > 0 {
-                        results.push(format!("  {}---", path_display));
-                    }
-                } else {
-                    results.push(format!("{}:{}:  {}", path_display, line_num, line));
+            let line_num = line_idx.saturating_add(1);
+            if context_lines > 0 {
+                let start = line_idx.saturating_sub(context_lines);
+                let end = line_idx
+                    .saturating_add(context_lines)
+                    .saturating_add(1)
+                    .min(lines.len());
+                let mut record = Vec::new();
+                for (ctx_idx, context_line) in lines
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                {
+                    let ctx_num = ctx_idx.saturating_add(1);
+                    let prefix = if ctx_idx == line_idx { ">" } else { " " };
+                    record.push(format!("{prefix}{path_display}:{ctx_num}:  {context_line}"));
                 }
+                results.push(record.join("\n"));
+            } else {
+                results.push(format!("{path_display}:{line_num}:  {line}"));
             }
         }
     }
@@ -279,9 +297,7 @@ async fn walk_and_search(
     regex: &regex::Regex,
     glob_filter: Option<&str>,
     context_lines: usize,
-    max_results: usize,
     results: &mut Vec<String>,
-    total_matches: &mut usize,
 ) -> Result<()> {
     let mut entries = match fs::read_dir(dir).await {
         Ok(e) => e,
@@ -310,32 +326,17 @@ async fn walk_and_search(
     entry_paths.sort();
 
     for path in entry_paths {
-        if *total_matches >= max_results && results.len() >= max_results {
-            break;
-        }
-
         if path.is_dir() {
             Box::pin(walk_and_search(
                 &path,
                 regex,
                 glob_filter,
                 context_lines,
-                max_results,
                 results,
-                total_matches,
             ))
             .await?;
         } else if path.is_file() {
-            search_file(
-                &path,
-                regex,
-                glob_filter,
-                context_lines,
-                max_results,
-                results,
-                total_matches,
-            )
-            .await?;
+            search_file(&path, regex, glob_filter, context_lines, results).await?;
         }
     }
 
@@ -345,15 +346,10 @@ async fn walk_and_search(
 /// Simple glob matching supporting * and ? wildcards
 fn glob_matches(pattern: &str, name: &str) -> bool {
     // Handle brace patterns like *.{rs,ts}
-    if pattern.contains('{')
-        && pattern.contains('}')
-        && let Some(start) = pattern.find('{')
-        && let Some(end) = pattern.find('}')
+    if let Some((prefix, remainder)) = pattern.split_once('{')
+        && let Some((alternatives, suffix)) = remainder.split_once('}')
     {
-        let prefix = &pattern[..start];
-        let suffix = &pattern[end + 1..];
-        let alternatives: Vec<&str> = pattern[start + 1..end].split(',').collect();
-        for alt in alternatives {
+        for alt in alternatives.split(',') {
             let full = format!("{}{}{}", prefix, alt.trim(), suffix);
             if glob_matches_simple(&full, name) {
                 return true;
@@ -376,10 +372,10 @@ fn glob_match_inner(pat: &[char], name: &[char], pi: usize, ni: usize) -> bool {
         return ni == name.len();
     }
 
-    if pat[pi] == '*' {
+    if pat.get(pi).is_some_and(|character| *character == '*') {
         // Try matching 0 or more characters
         for skip in ni..=name.len() {
-            if glob_match_inner(pat, name, pi + 1, skip) {
+            if glob_match_inner(pat, name, pi.saturating_add(1), skip) {
                 return true;
             }
         }
@@ -390,8 +386,12 @@ fn glob_match_inner(pat: &[char], name: &[char], pi: usize, ni: usize) -> bool {
         return false;
     }
 
-    if pat[pi] == '?' || pat[pi] == name[ni] {
-        return glob_match_inner(pat, name, pi + 1, ni + 1);
+    let pattern_character = pat.get(pi);
+    let name_character = name.get(ni);
+    if pattern_character.is_some_and(|character| *character == '?')
+        || pattern_character == name_character
+    {
+        return glob_match_inner(pat, name, pi.saturating_add(1), ni.saturating_add(1));
     }
 
     false

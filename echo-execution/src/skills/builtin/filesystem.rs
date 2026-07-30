@@ -148,10 +148,10 @@ impl Skill for FileSystemSkill {
              - `edit_file(path, old_content, new_content, replace_all?, dry_run?)`: Edit file content — replace old_content with new_content (exact match). Returns unified diff. Use replace_all=true for multiple occurrences, dry_run=true to preview.\n\
              - `update_file(path, old_content, new_content)`: Modify file content, replace old content with new content (exact match, first occurrence)\n\
              - `append_file(path, content)`: Append content to the end of a file, does not clear existing content\n\
-             - `diff(path_a, path_b?, content_b?, context?)`: Compare two files or a file against a string, returns unified diff.\n\
-             - `list_dir(path)`: List files and subdirectories in a directory\n\
-             - `grep(pattern, path?, glob?, case_insensitive?, context?, max_results?)`: Search file contents by regex pattern. Use glob to filter file types (e.g. '*.rs').\n\
-             - `glob(pattern, path?, max_results?)`: Find files by name pattern (e.g. '**/*.rs', 'src/**/*.ts').\n\
+             - `diff(path_a, path_b?, content_b?, context?, limit?, cursor?)`: Compare files or content, returning unified-diff hunks by page.\n\
+             - `list_dir(path, limit?, cursor?)`: List files and subdirectories by page.\n\
+             - `grep(pattern, path?, glob?, case_insensitive?, context?, limit?, cursor?)`: Exact regex text search. Use glob to filter file types.\n\
+             - `glob(pattern, path?, limit?, cursor?)`: Find file names by pattern (e.g. '**/*.rs', 'src/**/*.ts').\n\
              **Note**: Prefer `edit_file` over `update_file` for code editing — it provides diff output, replace_all, dry_run, and better error messages. Use `write_file` only for new files or complete rewrites."
         ))
     }

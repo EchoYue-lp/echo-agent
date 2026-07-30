@@ -444,10 +444,14 @@ mod tests {
     };
 
     fn test_root(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
         std::env::temp_dir().join(format!(
             "echo-read-artifact-{label}-{}-{}",
             std::process::id(),
-            uuid::Uuid::new_v4()
+            nonce
         ))
     }
 

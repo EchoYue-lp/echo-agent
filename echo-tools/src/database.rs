@@ -11,8 +11,17 @@ use sqlx::any::AnyPoolOptions;
 use sqlx::{Column, Row};
 
 use echo_core::error::{Result, ToolError};
+use echo_core::tools::artifact::{
+    ToolOutputArtifactIdentity, ToolOutputArtifactRef, persist_tool_output,
+};
+use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+
+const DEFAULT_SQL_PAGE_ROWS: usize = 50;
+const MAX_SQL_PAGE_ROWS: usize = 100;
+const MAX_INLINE_COLUMN_CHARS: usize = 80;
+const MAX_INLINE_CELL_CHARS: usize = 512;
 
 // sqlx 0.8 `any` mode requires drivers to be installed at runtime before the
 // first `AnyPool` connection. Without this, connecting panics with
@@ -61,13 +70,27 @@ impl Tool for SqlQueryTool {
                 "query": {
                     "type": "string",
                     "description": "SQL query to execute (only SELECT / SHOW / DESCRIBE / EXPLAIN allowed)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_SQL_PAGE_ROWS,
+                    "description": "Maximum rows per page (default 50)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor from page.next_cursor; reuse only with identical parameters"
                 }
             },
             "required": ["connection_url", "query"]
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let conn_url = parameters
                 .get("connection_url")
@@ -81,6 +104,14 @@ impl Tool for SqlQueryTool {
                 .get("query")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
+            let page_request = match PageRequest::from_parameters(
+                &parameters,
+                DEFAULT_SQL_PAGE_ROWS,
+                MAX_SQL_PAGE_ROWS,
+            ) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
 
             // Defense-in-depth: keyword filter is the first layer; SET TRANSACTION READ ONLY
             // in execute_readonly_query provides database-enforced protection as second layer.
@@ -139,7 +170,25 @@ impl Tool for SqlQueryTool {
             }
 
             match execute_readonly_query(conn_url, query).await {
-                Ok(data) => Ok(ToolResult::success_json(data)),
+                Ok(data) => {
+                    let query_identity = serde_json::json!({
+                        "connection_url": conn_url,
+                        "query": query,
+                    });
+                    let (page, page_info) = match page_request.paginate(data.rows, &query_identity)
+                    {
+                        Ok(page) => page,
+                        Err(error) => {
+                            return Ok(ToolResult::invalid_arguments(error.to_string()));
+                        }
+                    };
+                    let full_data = serde_json::json!({
+                        "columns": data.columns,
+                        "rows": page,
+                        "page": &page_info,
+                    });
+                    sql_page_result(ctx, full_data, page_info)
+                }
                 Err(e) => Ok(ToolResult::error(format!("Query failed: {}", e))),
             }
         })
@@ -197,7 +246,7 @@ impl Tool for ListTablesTool {
             };
 
             match execute_readonly_query(conn_url, query).await {
-                Ok(data) => Ok(ToolResult::success_json(data)),
+                Ok(data) => Ok(ToolResult::success_json(data.into_json())),
                 Err(e) => Ok(ToolResult::error(format!("List tables failed: {}", e))),
             }
         })
@@ -287,7 +336,7 @@ impl Tool for DescribeTableTool {
             };
 
             match execute_readonly_query(conn_url, &query).await {
-                Ok(data) => Ok(ToolResult::success_json(data)),
+                Ok(data) => Ok(ToolResult::success_json(data.into_json())),
                 Err(e) => Ok(ToolResult::error(format!("Describe table failed: {}", e))),
             }
         })
@@ -301,13 +350,12 @@ impl Tool for DescribeTableTool {
 /// Only allows `sqlite://`, `mysql://`, `postgresql://`, and `postgres://` schemes.
 /// For SQLite, also validates that the path doesn't contain suspicious patterns.
 fn validate_db_url(url_str: &str) -> Result<()> {
-    let scheme_end = url_str
-        .find("://")
+    let (scheme, path) = url_str
+        .split_once("://")
         .ok_or_else(|| ToolError::InvalidParameter {
             name: "connection_url".to_string(),
             message: "Invalid URL format: missing '://'".to_string(),
         })?;
-    let scheme = &url_str[..scheme_end];
 
     match scheme {
         "sqlite" | "mysql" | "postgresql" | "postgres" => {}
@@ -325,7 +373,6 @@ fn validate_db_url(url_str: &str) -> Result<()> {
 
     // For SQLite, validate the path doesn't contain suspicious patterns
     if scheme == "sqlite" {
-        let path = &url_str[scheme_end + 3..];
         // Strip leading slash for relative paths (sqlite:///path vs sqlite://:memory:)
         let path = path.strip_prefix('/').unwrap_or(path);
         if path.contains('\0') || path.contains('\n') || path.contains('\r') {
@@ -344,7 +391,23 @@ fn validate_db_url(url_str: &str) -> Result<()> {
 ///
 /// Defense-in-depth: wraps non-SQLite queries in an explicit READ ONLY transaction,
 /// so the database itself rejects any mutation attempt (not just our keyword filter).
-async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_json::Value> {
+struct DbRows {
+    columns: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+}
+
+impl DbRows {
+    fn into_json(self) -> serde_json::Value {
+        let total_rows = self.rows.len();
+        serde_json::json!({
+            "columns": self.columns,
+            "rows": self.rows,
+            "total_rows": total_rows,
+        })
+    }
+}
+
+async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<DbRows> {
     ensure_drivers_installed();
     let pool = AnyPoolOptions::new()
         .max_connections(1)
@@ -397,16 +460,11 @@ async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_jso
 }
 
 /// Format sqlx query result rows into structured JSON.
-fn format_db_rows(rows: &[sqlx::any::AnyRow]) -> Result<serde_json::Value> {
-    let columns: Vec<String> = if rows.is_empty() {
-        vec![]
-    } else {
-        rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect()
-    };
+fn format_db_rows(rows: &[sqlx::any::AnyRow]) -> Result<DbRows> {
+    let columns: Vec<String> = rows
+        .first()
+        .map(|row| row.columns().iter().map(|c| c.name().to_string()).collect())
+        .unwrap_or_default();
 
     let col_count = columns.len();
     let mut row_values: Vec<Vec<serde_json::Value>> = Vec::with_capacity(rows.len());
@@ -427,9 +485,126 @@ fn format_db_rows(rows: &[sqlx::any::AnyRow]) -> Result<serde_json::Value> {
         row_values.push(values);
     }
 
-    Ok(serde_json::json!({
+    Ok(DbRows {
+        columns,
+        rows: row_values,
+    })
+}
+
+fn sql_page_result(
+    ctx: &echo_core::tools::ToolContext,
+    full_data: serde_json::Value,
+    page_info: echo_core::tools::pagination::PageInfo,
+) -> Result<ToolResult> {
+    let full_output =
+        serde_json::to_string(&full_data).map_err(|error| ToolError::ExecutionFailed {
+            tool: "sql_query".to_string(),
+            message: format!("Failed to serialize query page: {error}"),
+        })?;
+    let mut artifact_error = None;
+    let artifact = match ctx.output_artifacts.clone() {
+        Some(config) => match persist_tool_output(
+            config,
+            ToolOutputArtifactIdentity::from_context(ctx, "sql_query"),
+            &full_output,
+        ) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                tracing::warn!(%error, "sql_query output artifact write failed");
+                artifact_error = Some(error.to_string());
+                None
+            }
+        },
+        None => None,
+    };
+
+    let visible_data = if artifact.is_some() {
+        project_sql_data(&full_data)
+    } else {
+        full_data
+    };
+    let mut result = ToolResult::success_json(visible_data);
+    if let Some(artifact) = artifact {
+        apply_sql_artifact(&artifact, full_output.len(), &mut result);
+    } else if let Some(error) = artifact_error {
+        result
+            .metadata
+            .insert("artifact_status".to_string(), "write_failed".to_string());
+        result.metadata.insert("artifact_error".to_string(), error);
+    }
+    page_info.apply_to(&mut result);
+    Ok(result)
+}
+
+fn project_sql_data(data: &serde_json::Value) -> serde_json::Value {
+    let columns = data
+        .get("columns")
+        .and_then(Value::as_array)
+        .map(|columns| {
+            columns
+                .iter()
+                .map(|column| match column.as_str() {
+                    Some(column) => Value::String(char_preview(column, MAX_INLINE_COLUMN_CHARS)),
+                    None => column.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let rows = data
+        .get("rows")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    Value::Array(
+                        row.as_array()
+                            .map(|cells| {
+                                cells
+                                    .iter()
+                                    .map(|cell| match cell.as_str() {
+                                        Some(cell) => {
+                                            Value::String(char_preview(cell, MAX_INLINE_CELL_CHARS))
+                                        }
+                                        None => cell.clone(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
         "columns": columns,
-        "rows": row_values,
-        "total_rows": row_values.len(),
-    }))
+        "rows": rows,
+        "page": data.get("page").cloned().unwrap_or(Value::Null),
+        "complete_page": "stored in artifact metadata",
+    })
+}
+
+fn char_preview(value: &str, max_chars: usize) -> String {
+    let mut preview: String = value.chars().take(max_chars).collect();
+    if value.chars().count() > max_chars {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn apply_sql_artifact(
+    artifact: &ToolOutputArtifactRef,
+    original_bytes: usize,
+    result: &mut ToolResult,
+) {
+    artifact.extend_metadata(&mut result.metadata);
+    result
+        .metadata
+        .insert("output_handling".to_string(), "spilled".to_string());
+    result
+        .metadata
+        .insert("original_bytes".to_string(), original_bytes.to_string());
+    result.metadata.insert(
+        "returned_bytes".to_string(),
+        result.output.len().to_string(),
+    );
 }

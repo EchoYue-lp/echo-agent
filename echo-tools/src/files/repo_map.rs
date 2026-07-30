@@ -5,6 +5,7 @@
 //! extraction so repo mapping remains available without a language server.
 
 use echo_core::error::{Result, ToolError};
+use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 use futures::future::BoxFuture;
@@ -71,6 +72,16 @@ impl Tool for RepoMapTool {
                     "type": "string",
                     "enum": ["tree", "symbols"],
                     "description": "Output format (default: tree)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "Maximum tree or symbol lines per page (default: 100)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor from page.next_cursor; reuse only with identical parameters"
                 }
             }
         })
@@ -95,6 +106,10 @@ impl Tool for RepoMapTool {
                 .get("format")
                 .and_then(Value::as_str)
                 .unwrap_or("tree");
+            let page_request = match PageRequest::from_parameters(&parameters, 100, 200) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
             let effective_base = self
                 .base_dir
                 .clone()
@@ -111,12 +126,28 @@ impl Tool for RepoMapTool {
             } else {
                 build_tree(&root, max_depth).await?
             };
-            if output.is_empty() {
-                return Ok(ToolResult::success(
-                    "Empty directory or no source files found.".to_string(),
-                ));
-            }
-            Ok(ToolResult::success(output))
+            let lines = if output.is_empty() {
+                Vec::new()
+            } else {
+                output.lines().map(str::to_string).collect()
+            };
+            let query = serde_json::json!({
+                "path": root,
+                "max_depth": max_depth,
+                "format": format,
+            });
+            let (page, page_info) = match page_request.paginate(lines, &query) {
+                Ok(page) => page,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+            let output = if page.is_empty() {
+                "Empty directory or no source files found.".to_string()
+            } else {
+                page.join("\n")
+            };
+            let mut result = ToolResult::success(output);
+            page_info.apply_to(&mut result);
+            Ok(result)
         })
     }
 }

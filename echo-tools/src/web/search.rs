@@ -12,6 +12,7 @@ use super::providers::brave::BraveSearchProvider;
 use super::providers::duckduckgo::DuckDuckGoProvider;
 use super::providers::tavily::TavilyProvider;
 use echo_core::error::{Result, ToolError};
+use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolFailure, ToolFailureCategory, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
@@ -97,7 +98,7 @@ impl Tool for WebSearchTool {
 
     fn description(&self) -> &str {
         "Search for information on the internet. Returns search result titles, links, and snippets. \
-         Parameters: query - search keywords (required), max_results - max results returned (optional, default 5, max 10)"
+         Results use cursor pagination; repeat the same query and limit with page.next_cursor."
     }
 
     fn parameters(&self) -> Value {
@@ -108,10 +109,16 @@ impl Tool for WebSearchTool {
                     "type": "string",
                     "description": "Search keywords"
                 },
-                "max_results": {
+                "limit": {
                     "type": "integer",
-                    "description": format!("Maximum number of results (default {}, max {})", DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS)
+                    "minimum": 1,
+                    "maximum": MAX_ALLOWED_RESULTS,
+                    "description": format!("Results per page (default {}, max {})", DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS)
                 },
+                "cursor": {
+                    "type": "string",
+                    "description": "Cursor from the previous page"
+                }
             },
             "required": ["query"]
         })
@@ -131,23 +138,42 @@ impl Tool for WebSearchTool {
                 ));
             }
 
-            let max_results = parameters
-                .get("max_results")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(self.default_max_results as u64) as usize;
-
-            let max_results = max_results.clamp(1, MAX_ALLOWED_RESULTS);
+            let page_request = match PageRequest::from_parameters(
+                &parameters,
+                self.default_max_results,
+                MAX_ALLOWED_RESULTS,
+            ) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
 
             tracing::info!(
-                "WebSearch: query='{}', max_results={}, provider={}",
+                "WebSearch: query='{}', page_limit={}, provider={}",
                 query,
-                max_results,
+                page_request.limit,
                 self.provider.name()
             );
-            match self.provider.search(query, max_results).await {
-                Ok(results) => Ok(ToolResult::success_json(
-                    serde_json::to_value(&results).unwrap_or_default(),
-                )),
+            match self.provider.search(query, MAX_ALLOWED_RESULTS).await {
+                Ok(results) => {
+                    let query_identity = serde_json::json!({
+                        "query": query,
+                        "provider": self.provider.name(),
+                    });
+                    let (page, page_info) = match page_request.paginate(results, &query_identity) {
+                        Ok(page) => page,
+                        Err(error) => {
+                            return Ok(ToolResult::invalid_arguments(error.to_string()));
+                        }
+                    };
+                    let data =
+                        serde_json::to_value(page).map_err(|error| ToolError::ExecutionFailed {
+                            tool: "web_search".to_string(),
+                            message: format!("Failed to serialize search results: {error}"),
+                        })?;
+                    let mut result = ToolResult::success_json(data);
+                    page_info.apply_to(&mut result);
+                    Ok(result)
+                }
                 Err(error) => Ok(ToolResult::error(format!(
                     "Search provider '{}' failed: {error}",
                     self.provider.name()

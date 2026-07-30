@@ -70,6 +70,10 @@ pub mod permission;
 pub mod artifact {
     pub use echo_core::tools::artifact::*;
 }
+/// Cursor pagination contract for collection-returning tools.
+pub mod pagination {
+    pub use echo_core::tools::pagination::*;
+}
 /// Shell tool (re-export from echo_tools)
 pub mod shell {
     pub use echo_tools::shell::*;
@@ -103,9 +107,9 @@ pub mod execution {
 }
 
 pub use echo_execution::tools::{
-    Tool, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolManager, ToolOutputChannel,
-    ToolParameters, ToolRecoveryAction, ToolResult, ToolRiskLevel, ToolSchemaStats, ToolSearchTool,
-    ToolSideEffect, ToolStreamEvent,
+    Tool, ToolBudgetMetricsSnapshot, ToolExecutionConfig, ToolFailure, ToolFailureCategory,
+    ToolManager, ToolOutputChannel, ToolParameters, ToolRecoveryAction, ToolResult, ToolRiskLevel,
+    ToolSchemaStats, ToolSearchTool, ToolSideEffect, ToolStreamEvent,
 };
 
 // ── Common file tool classification ──────────────────────────────────────────

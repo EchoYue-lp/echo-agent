@@ -6,6 +6,7 @@
 
 use super::resolve_path;
 use echo_core::error::{Result, ToolError};
+use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -73,6 +74,16 @@ impl Tool for DiffTool {
                 "context": {
                     "type": "integer",
                     "description": "Number of context lines around changes (default: 3)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Hunks per page (default 10)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Cursor from the previous page"
                 }
             },
             "required": ["path_a"]
@@ -93,10 +104,22 @@ impl Tool for DiffTool {
             let path_b_str = parameters.get("path_b").and_then(|v| v.as_str());
             let content_b = parameters.get("content_b").and_then(|v| v.as_str());
 
-            let context_lines = parameters
-                .get("context")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(3) as usize;
+            let context_lines = match parameters.get("context") {
+                Some(value) => match value.as_u64().and_then(|value| usize::try_from(value).ok()) {
+                    Some(value) => value,
+                    None => {
+                        return Ok(ToolResult::invalid_arguments(
+                            "context must be a non-negative integer supported by this platform"
+                                .to_string(),
+                        ));
+                    }
+                },
+                None => 3,
+            };
+            let page_request = match PageRequest::from_parameters(&parameters, 10, 50) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
 
             if path_b_str.is_none() && content_b.is_none() {
                 return Ok(ToolResult::invalid_arguments(
@@ -164,13 +187,28 @@ impl Tool for DiffTool {
                 Some((&label_a, &label_b)),
             );
 
-            if diff.is_empty() {
-                return Ok(ToolResult::success(
-                    "Files are identical — no differences found.".to_string(),
-                ));
-            }
-
-            Ok(ToolResult::success(diff))
+            let chunks = crate::diff_pagination::split_unified_diff(&diff);
+            let query = serde_json::json!({
+                "path_a": path_a,
+                "path_b": path_b_str,
+                "content_b_sha256": content_b.map(|content| {
+                    use sha2::{Digest, Sha256};
+                    format!("{:x}", Sha256::digest(content.as_bytes()))
+                }),
+                "context": context_lines,
+            });
+            let (page, page_info) = match page_request.paginate(chunks, &query) {
+                Ok(page) => page,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+            let output = if page.is_empty() {
+                "Files are identical - no differences found.".to_string()
+            } else {
+                page.join("\n")
+            };
+            let mut result = ToolResult::success(output);
+            page_info.apply_to(&mut result);
+            Ok(result)
         })
     }
 }

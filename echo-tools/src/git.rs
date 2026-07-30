@@ -14,6 +14,7 @@ use std::path::Path;
 use std::process::Command;
 
 use echo_core::error::{Result, ToolError};
+use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel, ToolRunner};
 
@@ -83,6 +84,16 @@ impl Tool for GitDiffTool {
                 "file_path": {
                     "type": "string",
                     "description": "Show diff for specified file only"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum file/hunk blocks per page (default: 10)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor from page.next_cursor; reuse only with identical parameters"
                 }
             },
             "required": []
@@ -100,6 +111,10 @@ impl Tool for GitDiffTool {
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
             let repo_path = effective_repo_path(repo_path, ctx);
+            let page_request = match PageRequest::from_parameters(&parameters, 10, 50) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
 
             let mut args = vec!["diff"];
             let staged = parameters
@@ -113,24 +128,39 @@ impl Tool for GitDiffTool {
             let target = parameters.get("target").and_then(|v| v.as_str());
             let file_path = parameters.get("file_path").and_then(|v| v.as_str());
 
-            // Add -- separator before user-supplied arguments to prevent
-            // argument injection (e.g., target starting with -)
-            if target.is_some() || file_path.is_some() {
-                args.push("--");
-            }
             if let Some(t) = target {
+                if t.starts_with('-') {
+                    return Ok(ToolResult::invalid_arguments(
+                        "target must be a branch or commit name, not an option",
+                    ));
+                }
                 args.push(t);
             }
             if let Some(fp) = file_path {
+                args.push("--");
                 args.push(fp);
             }
 
             let output = run_git(&repo_path, &args)?;
-            if output.is_empty() {
-                Ok(ToolResult::success("No differences".to_string()))
+            let chunks = crate::diff_pagination::split_unified_diff(&output);
+            let query = serde_json::json!({
+                "repo_path": repo_path,
+                "staged": staged,
+                "target": target,
+                "file_path": file_path,
+            });
+            let (page, page_info) = match page_request.paginate(chunks, &query) {
+                Ok(page) => page,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+            let output = if page.is_empty() {
+                "No differences".to_string()
             } else {
-                Ok(ToolResult::success(format!("```diff\n{}```", output)))
-            }
+                format!("```diff\n{}\n```", page.join("\n"))
+            };
+            let mut result = ToolResult::success(output);
+            page_info.apply_to(&mut result);
+            Ok(result)
         })
     }
 }
@@ -275,13 +305,27 @@ impl Tool for GitBlameTool {
                 "end_line": {
                     "type": "integer",
                     "description": "End line number"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "description": "Maximum blame lines per page (default: 100)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor from page.next_cursor; reuse only with identical parameters"
                 }
             },
             "required": ["file_path"]
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let file_path = parameters
                 .get("file_path")
@@ -291,6 +335,11 @@ impl Tool for GitBlameTool {
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
+            let repo_path = effective_repo_path(repo_path, ctx);
+            let page_request = match PageRequest::from_parameters(&parameters, 100, 300) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
 
             let mut args: Vec<String> = vec!["blame".to_string()];
             if let (Some(start), Some(end)) = (
@@ -305,8 +354,21 @@ impl Tool for GitBlameTool {
             args.push(file_path.to_string());
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(repo_path, &str_args)?;
-            Ok(ToolResult::success(output))
+            let output = run_git(&repo_path, &str_args)?;
+            let lines = output.lines().map(str::to_string).collect();
+            let query = serde_json::json!({
+                "repo_path": repo_path,
+                "file_path": file_path,
+                "start_line": parameters.get("start_line"),
+                "end_line": parameters.get("end_line"),
+            });
+            let (page, page_info) = match page_request.paginate(lines, &query) {
+                Ok(page) => page,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+            let mut result = ToolResult::success(page.join("\n"));
+            page_info.apply_to(&mut result);
+            Ok(result)
         })
     }
 }

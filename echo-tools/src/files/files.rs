@@ -1,6 +1,7 @@
 use super::resolve_path;
 use echo_core::error::ToolError;
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
+use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
     Tool, ToolFailure, ToolFailureCategory, ToolParameters, ToolResult, ToolRiskLevel,
@@ -1151,6 +1152,16 @@ impl Tool for ListDirTool {
                 "path": {
                     "type": "string",
                     "description": "Directory path to list, defaults to current directory"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "Entries per page (default 100)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Cursor from the previous page"
                 }
             },
             "required": []
@@ -1167,6 +1178,10 @@ impl Tool for ListDirTool {
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
+            let page_request = match PageRequest::from_parameters(&parameters, 100, 200) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
 
             let path = resolve_path(
                 "list_dir",
@@ -1228,27 +1243,29 @@ impl Tool for ListDirTool {
             dirs.sort();
             files.sort();
 
-            if dirs.is_empty() && files.is_empty() {
-                return Ok(ToolResult::success(format!(
-                    "Directory '{}' is empty",
-                    path.display()
-                )));
-            }
-
-            let mut output = format!("Directory '{}' contents:\n", path.display());
-            for d in &dirs {
-                output.push_str(&format!("  {}\n", d));
-            }
-            for f in &files {
-                output.push_str(&format!("  {}\n", f));
+            let dir_count = dirs.len();
+            let file_count = files.len();
+            dirs.extend(files);
+            let query = serde_json::json!({ "path": path });
+            let (page, page_info) = match page_request.paginate(dirs, &query) {
+                Ok(page) => page,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+            let mut output = if page.is_empty() {
+                format!("Directory '{}' is empty", path.display())
+            } else {
+                format!("Directory '{}' contents:\n", path.display())
+            };
+            for entry in page {
+                output.push_str(&format!("  {entry}\n"));
             }
             output.push_str(&format!(
-                "\nTotal: {} dirs, {} files",
-                dirs.len(),
-                files.len()
+                "\nTotal: {dir_count} dirs, {file_count} files; {} returned",
+                page_info.returned
             ));
-
-            Ok(ToolResult::success(output))
+            let mut result = ToolResult::success(output);
+            page_info.apply_to(&mut result);
+            Ok(result)
         })
     }
 }
