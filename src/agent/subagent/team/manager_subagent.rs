@@ -179,6 +179,11 @@ impl ManagerSubagentOrchestrator {
              {}\n\n\
              Decompose this task into 2-5 sub-tasks, one per line:\n\
              {}\n\n\
+             Rules:\n\
+             - Plan only — you do not execute the sub-tasks yourself.\n\
+             - Each sub-task must be independently executable by one subagent, with a clear deliverable.\n\
+             - Assign disjoint scope (files/modules/questions) so parallel subagents do not overlap or conflict.\n\
+             - State an explicit dependency only when one sub-task truly requires another's output.\n\n\
              Output only the sub-tasks, one per line. No numbering, no extra text.",
             team.subagent_descriptions(),
             task
@@ -359,7 +364,9 @@ impl ManagerSubagentOrchestrator {
              Original task: {original_task}\n\n\
              Subagent results:\n{results_text}\n\
              Synthesize these results into a single, coherent answer.\n\
-             If any sub-tasks failed, note the failures and suggest next steps."
+             - Reconcile conflicting results explicitly by weighing evidence quality; do not silently drop either side.\n\
+             - Report failed or blocked sub-tasks truthfully with suggested next steps; never claim they succeeded.\n\
+             - Base the answer only on the subagent results provided — do not invent findings."
         );
 
         manager

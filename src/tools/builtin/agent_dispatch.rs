@@ -221,6 +221,18 @@ impl AgentDispatchTool {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
+            let constraints = parameters
+                .get("constraints")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
             // Inheritance is independent of execution mode:
             // - omit / sync → fresh (no parent system/history/memory)
             // - fork → inherit a filtered parent slice
@@ -282,6 +294,7 @@ impl AgentDispatchTool {
                 runtime_context,
                 message: None,
                 prompt_payload: None,
+                constraints,
                 background: run_background,
             };
 
@@ -414,6 +427,11 @@ impl Tool for AgentDispatchTool {
                     "type": "string",
                     "enum": ["sync", "fork", "teammate", "team"],
                     "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = parallel mailbox agent; \"team\" = ManagerSubagent (requires TeamSpec)."
+                },
+                "constraints": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional. Explicit constraints or boundary rules the SubAgent must respect — scope limits, files/dirs to avoid, verification expectations, output format. Rendered into the task context even for fresh-context dispatches."
                 },
                 "background": {
                     "type": "boolean",

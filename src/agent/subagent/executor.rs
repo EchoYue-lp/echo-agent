@@ -8,6 +8,7 @@ use echo_core::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationTo
 use echo_core::llm::types::Message;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -59,6 +60,11 @@ pub struct DispatchRequest {
     pub message: Option<Message>,
     /// Opaque structured payload consumed only by an injected product compiler.
     pub prompt_payload: Option<serde_json::Value>,
+    /// Explicit task constraints / boundaries from the dispatch caller (e.g.
+    /// the `agent_tool` `constraints` parameter). Rendered by the invocation
+    /// compiler independently of `parent_context`, so fresh-context dispatches
+    /// can still carry boundaries.
+    pub constraints: Vec<String>,
     /// When true, this dispatch was (or will be) started via
     /// [`SubagentExecutor::dispatch_background`]. Propagated onto
     /// [`SubagentEvent::DispatchStarted`] so UI can mark background cards.
@@ -91,6 +97,23 @@ impl DispatchRequest {
             delegate_depth: depth.min(u8::MAX as u32) as u8,
             max_delegate_depth: 3,
         }
+    }
+}
+
+/// Append dispatch-time working-dir context to a compiled task input.
+///
+/// `compile_invocation` runs before worktree/workspace creation (the isolation
+/// path is chosen at dispatch time), so the actual working directory is not
+/// available at compile time. The executor appends it after isolation is
+/// established, using the same `[workspace]` shape as planned invocations.
+/// Only appended when isolation actually changed the cwd — otherwise the
+/// subagent works in the main directory the parent context already covers.
+fn append_working_dir_context(task_input: &mut String, working_dir: Option<&Path>) {
+    if let Some(dir) = working_dir {
+        task_input.push_str(&format!(
+            "\n\n[workspace]\n- root: {}\n[/workspace]",
+            dir.display()
+        ));
     }
 }
 
@@ -623,6 +646,7 @@ impl SubagentExecutor {
                                         runtime_context: rt_ctx,
                                         message: retry_msg,
                                         prompt_payload,
+                                        constraints: Vec::new(),
                                         background: false,
                                     };
                                     // This attempt is recoverable, so it is not a terminal event.
@@ -657,6 +681,7 @@ impl SubagentExecutor {
                                         runtime_context: rt_ctx,
                                         message: retry_msg,
                                         prompt_payload,
+                                        constraints: Vec::new(),
                                         background: false,
                                     };
                                     // This attempt is recoverable, so it is not a terminal event.
@@ -1062,6 +1087,7 @@ impl SubagentExecutor {
                 parent_context: req.parent_context.as_ref(),
                 inherit_history,
                 payload: req.prompt_payload.as_ref(),
+                constraints: &req.constraints,
             })
     }
 
@@ -1598,6 +1624,7 @@ impl SubagentExecutor {
 
         let result = tokio::spawn(async move {
             let _permit = permit;
+            let mut enhanced_task = enhanced_task;
             let start = Instant::now();
 
             // Check cancellation
@@ -1684,6 +1711,10 @@ impl SubagentExecutor {
                     execution_id: event_execution_id.clone(),
                     run_id: event_run_id.clone(),
                 });
+            // The compiled task input cannot know the isolated working dir
+            // (created just above, at dispatch time), so append it here with
+            // the same `[workspace]` shape planned invocations use.
+            append_working_dir_context(&mut enhanced_task, invocation.working_dir.as_deref());
 
             let mut result = if timeout_secs > 0 {
                 tokio::select! {
@@ -1813,6 +1844,22 @@ mod tests {
     use crate::agent::subagent::registry::FnAgentFactory;
     use crate::testing::{FailingMockAgent, MockAgent};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn append_working_dir_context_appends_workspace_section_only_when_isolated() {
+        let mut input = String::from("task text");
+        append_working_dir_context(&mut input, None);
+        assert_eq!(
+            input, "task text",
+            "no isolation must not touch the task input"
+        );
+
+        append_working_dir_context(&mut input, Some(Path::new("/tmp/eko-work-42")));
+        assert!(
+            input.contains("\n\n[workspace]\n- root: /tmp/eko-work-42\n[/workspace]"),
+            "isolated working dir must be appended with the [workspace] shape, got: {input}"
+        );
+    }
 
     struct PrefixPromptCompiler;
 
@@ -2029,6 +2076,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2067,6 +2115,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await?;
@@ -2096,6 +2145,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2175,6 +2225,7 @@ mod tests {
             }),
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2226,6 +2277,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2255,6 +2307,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2299,6 +2352,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await?;
@@ -2336,6 +2390,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await
@@ -2386,6 +2441,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await
@@ -2431,6 +2487,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await
@@ -2473,6 +2530,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2520,6 +2578,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2563,6 +2622,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await
@@ -2619,6 +2679,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2662,6 +2723,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await
@@ -2699,6 +2761,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2748,6 +2811,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2791,6 +2855,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await
@@ -2834,6 +2899,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await?;
@@ -2903,6 +2969,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2933,6 +3000,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -3013,6 +3081,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -3065,6 +3134,7 @@ mod tests {
                 }),
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             })
             .await
@@ -3109,6 +3179,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -3183,6 +3254,7 @@ mod tests {
             }),
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -3254,6 +3326,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -3292,6 +3365,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -3336,6 +3410,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -3422,6 +3497,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -3465,6 +3541,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -3515,6 +3592,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 

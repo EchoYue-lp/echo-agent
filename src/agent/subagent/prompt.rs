@@ -77,6 +77,11 @@ pub struct SubagentPromptInput<'a> {
     pub inherit_history: Option<usize>,
     /// Opaque product-layer payload. Framework compilers ignore it.
     pub payload: Option<&'a Value>,
+    /// Explicit task constraints from the dispatch request (e.g. the
+    /// `agent_tool` `constraints` parameter). Carried independently of
+    /// `parent_context` so fresh-context dispatches can still express
+    /// boundaries. Product compilers render them in the task context.
+    pub constraints: &'a [String],
 }
 
 /// Dispatch-time compiler result consumed by the executor.

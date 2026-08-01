@@ -2121,6 +2121,7 @@ impl ReactAgent {
                 runtime_context: self.build_runtime_context(),
                 message: None,
                 prompt_payload: None,
+                constraints: Vec::new(),
                 background: false,
             };
 
@@ -2187,6 +2188,7 @@ impl ReactAgent {
             runtime_context: self.build_runtime_context(),
             message: None,
             prompt_payload: None,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2361,6 +2363,7 @@ impl ReactAgent {
             runtime_context,
             message: None,
             prompt_payload,
+            constraints: Vec::new(),
             background: false,
         };
 
@@ -2502,6 +2505,7 @@ impl ReactAgent {
             runtime_context,
             message: Some(message),
             prompt_payload,
+            constraints: Vec::new(),
             background: false,
         };
 
