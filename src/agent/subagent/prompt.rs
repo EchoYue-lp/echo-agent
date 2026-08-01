@@ -52,6 +52,12 @@ pub struct SubagentSystemPromptInput<'a> {
     pub readonly: bool,
     pub can_delegate: bool,
     pub isolation: &'a str,
+    /// Optional static environment grounding (OS/arch/date — facts that do not
+    /// change per dispatch). Product compilers render it as a system-prompt
+    /// section; the framework default compiler ignores it. Dynamic per-dispatch
+    /// state (cwd, workspace root) must NOT go here — it belongs in the
+    /// invocation, where the runtime knows the actual working directory.
+    pub environment: Option<String>,
 }
 
 /// Registration-time compiler result.

@@ -356,7 +356,11 @@ impl Tool for AgentDispatchTool {
          task. When the host provides a formal task planner, use that planner for \
          coordinated, dependent, or parallel multi-task work. Synchronous completion returns a \
          JSON result with status, summary, artifacts, verification, remaining_work, \
-         and touched_files. Use only agent_name values listed in the schema."
+         and touched_files. Use only agent_name values listed in the schema.\n\
+         The SubAgent's result is not visible to the user — summarize it in your reply to the user.\n\
+         Tell the SubAgent clearly whether to write code or only do research, and the expected result format.\n\
+         Do not duplicate work the SubAgent is already doing (same searches, edits, or checks).\n\
+         To run multiple independent SubAgents in parallel, send a single message with multiple agent_tool calls."
     }
 
     /// `agent_tool` dispatches a subagent that runs its own multi-step ReAct
