@@ -635,6 +635,7 @@ impl SubagentExecutor {
                                     let rt_ctx = req.runtime_context.clone();
                                     let retry_msg = req.message.clone();
                                     let prompt_payload = req.prompt_payload.clone();
+                                    let constraints = req.constraints.clone();
                                     req = DispatchRequest {
                                         agent_name: alternative_agent,
                                         task: hook_ctx.task.clone(),
@@ -646,7 +647,7 @@ impl SubagentExecutor {
                                         runtime_context: rt_ctx,
                                         message: retry_msg,
                                         prompt_payload,
-                                        constraints: Vec::new(),
+                                        constraints,
                                         background: false,
                                     };
                                     // This attempt is recoverable, so it is not a terminal event.
@@ -670,6 +671,7 @@ impl SubagentExecutor {
                                     let rt_ctx = req.runtime_context.clone();
                                     let retry_msg = req.message.clone();
                                     let prompt_payload = req.prompt_payload.clone();
+                                    let constraints = req.constraints.clone();
                                     req = DispatchRequest {
                                         agent_name: hook_ctx.subagent_name.clone(),
                                         task: hook_ctx.task.clone(),
@@ -681,7 +683,7 @@ impl SubagentExecutor {
                                         runtime_context: rt_ctx,
                                         message: retry_msg,
                                         prompt_payload,
-                                        constraints: Vec::new(),
+                                        constraints,
                                         background: false,
                                     };
                                     // This attempt is recoverable, so it is not a terminal event.
@@ -2332,10 +2334,11 @@ mod tests {
                 Box::new(FailingMockAgent::new("primary", "first attempt failed")),
             )
             .await;
+        let recovery = MockAgent::new("recovery").with_response("recovered");
         registry
             .register(
                 super::super::types::SubagentDefinition::new("recovery", "Recovery"),
-                Box::new(MockAgent::new("recovery").with_response("recovered")),
+                Box::new(recovery.clone()),
             )
             .await;
         let mut events = registry.event_bus().subscribe();
@@ -2352,11 +2355,18 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
-                constraints: Vec::new(),
+                constraints: vec!["Preserve the caller boundary".to_string()],
                 background: false,
             })
             .await?;
         assert_eq!(result.outcome.status, SubagentStatus::Completed);
+        assert!(
+            recovery
+                .last_task()
+                .as_deref()
+                .is_some_and(|task| task.contains("Preserve the caller boundary")),
+            "delegated recovery must receive the original constraints"
+        );
 
         let terminal_events = collect_terminal_events(&mut events);
         assert_eq!(terminal_events.len(), 1);

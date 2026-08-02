@@ -1,8 +1,12 @@
 use super::ReactAgent;
 use crate::agent::Agent;
+#[cfg(feature = "subagent")]
+use crate::agent::ReactAgentBuilder;
 use crate::agent::config::{AgentConfig, DEFAULT_TOKEN_LIMIT};
 #[cfg(feature = "subagent")]
 use crate::agent::subagent::SubagentBuilder;
+#[cfg(feature = "subagent")]
+use crate::agent::subagent::SubagentRegistry;
 use crate::llm::types::{Message, Role};
 use crate::sandbox::SandboxManager;
 use crate::skills::builtin::ShellSkill;
@@ -829,6 +833,70 @@ fn react_agent_register_agent_dispatch_tool() {
     // When register_agent_dispatch_tool is enabled, agent_tool should be registered
     let tool_names = agent.tool_names();
     assert!(tool_names.contains(&String::from("agent_tool")));
+}
+
+#[cfg(feature = "subagent")]
+#[tokio::test]
+async fn shared_subagent_registry_exposes_parent_registrations_to_child() -> crate::error::Result<()>
+{
+    let registry = Arc::new(SubagentRegistry::new());
+    let mut parent = ReactAgentBuilder::new()
+        .model("test-model")
+        .name("parent")
+        .enable_tools()
+        .enable_subagent()
+        .subagent_registry(registry.clone())
+        .build()?;
+    let child = ReactAgentBuilder::new()
+        .model("test-model")
+        .name("child")
+        .enable_tools()
+        .enable_subagent()
+        .subagent_registry(registry.clone())
+        .register_agent_dispatch_tool()
+        .build()?;
+
+    parent.register_subagent_with_definition(
+        SubagentBuilder::new("reviewer")
+            .description("Review code")
+            .build(),
+        Box::new(MockAgent::new("reviewer")),
+    );
+
+    assert!(Arc::ptr_eq(
+        parent.subagent_registry(),
+        child.subagent_registry()
+    ));
+    assert!(
+        child
+            .subagent_registry()
+            .list_available()
+            .await
+            .iter()
+            .any(|definition| definition.name == "reviewer")
+    );
+    assert!(child.tool_names().iter().any(|name| name == "agent_tool"));
+    let definitions = child.subagent_registry().list_available().await;
+    child.sync_subagent_dispatch_catalog(&definitions);
+    let dispatch_schema = <ReactAgent as Agent>::tool_definitions(&child)
+        .into_iter()
+        .find(|definition| definition.function.name == "agent_tool")
+        .and_then(|definition| {
+            definition
+                .function
+                .parameters
+                .pointer("/properties/agent_name/enum")
+                .cloned()
+        });
+    assert!(
+        dispatch_schema.is_some_and(|schema| {
+            schema
+                .as_array()
+                .is_some_and(|names| names.iter().any(|name| name == "reviewer"))
+        }),
+        "shared targets must be discoverable through the child agent_tool schema"
+    );
+    Ok(())
 }
 
 #[cfg(feature = "subagent")]

@@ -216,10 +216,10 @@ pub struct TaskClaim {
 }
 
 impl TaskClaim {
-    /// Stable execution identity. The plan revision separates changed specs
-    /// even when their retry counters are unchanged.
-    pub fn execution_id(&self, task_id: &str) -> String {
-        format!("{task_id}:{}:{}", self.revision, self.attempt)
+    /// Globally unique execution identity. The run namespace prevents the same
+    /// plan task/revision/attempt in separate TaskRuns from sharing lifecycle.
+    pub fn execution_id(&self, run_id: &str, task_id: &str) -> String {
+        format!("{run_id}:{task_id}:{}:{}", self.revision, self.attempt)
     }
 }
 

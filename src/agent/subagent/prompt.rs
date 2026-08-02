@@ -52,8 +52,8 @@ pub struct SubagentSystemPromptInput<'a> {
     pub readonly: bool,
     pub can_delegate: bool,
     pub isolation: &'a str,
-    /// Optional static environment grounding (OS/arch/date — facts that do not
-    /// change per dispatch). Product compilers render it as a system-prompt
+    /// Optional static environment grounding (for example OS/arch — facts that
+    /// do not change per dispatch). Product compilers render it as a system-prompt
     /// section; the framework default compiler ignores it. Dynamic per-dispatch
     /// state (cwd, workspace root) must NOT go here — it belongs in the
     /// invocation, where the runtime knows the actual working directory.
@@ -128,8 +128,18 @@ impl SubagentPromptCompiler for DefaultSubagentPromptCompiler {
         } else {
             Vec::new()
         };
+        let task_input = if input.constraints.is_empty() {
+            input.task.to_string()
+        } else {
+            diagnostics.record("constraints", "dispatch_request.constraints");
+            format!(
+                "{}\n\n[constraints]\n{}\n[/constraints]",
+                input.task.trim(),
+                input.constraints.join("\n")
+            )
+        };
         CompiledSubagentInvocation {
-            task_input: input.task.to_string(),
+            task_input,
             history,
             diagnostics,
         }
@@ -284,5 +294,27 @@ mod tests {
             Some(ContentPart::Text { text }) if text == "new task"
         ));
         assert!(matches!(parts.get(1), Some(ContentPart::File { .. })));
+    }
+
+    #[test]
+    fn default_compiler_renders_dispatch_constraints() {
+        let constraints = vec![
+            "Only edit src/prompt.rs".to_string(),
+            "Run cargo test".to_string(),
+        ];
+        let compiled = DefaultSubagentPromptCompiler.compile_invocation(&SubagentPromptInput {
+            agent_name: "implementer",
+            task: "Update prompt compilation",
+            mode: ExecutionMode::Sync,
+            transfer_policy: ContextTransferPolicy::Fresh,
+            parent_context: None,
+            inherit_history: None,
+            payload: None,
+            constraints: &constraints,
+        });
+
+        assert_eq!(compiled.diagnostics.count("constraints"), 1);
+        assert!(compiled.task_input.contains("Only edit src/prompt.rs"));
+        assert!(compiled.task_input.contains("Run cargo test"));
     }
 }

@@ -1,5 +1,5 @@
 //! Per-iteration tool-call branch: emit `ToolCall` events, push assistant
-//! message, split approval/concurrent batches, execute, dispatch verifier
+//! message, split sequential/concurrent batches, execute, dispatch verifier
 //! handoff to `finalize_completed_run` when `final_answer` is accepted.
 
 use super::super::processor::build_tool_calls_from_map;
@@ -21,9 +21,25 @@ use tracing::{Instrument, info_span};
 
 const TOOL_CANCELLATION_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
+async fn requires_sequential_execution(snap: &AgentRunSnapshot, tool_name: &str) -> bool {
+    let tool_disallows_parallel_execution = snap
+        .tools
+        .tool_manager
+        .get_tool(tool_name)
+        .is_some_and(|tool| !tool.value().allows_parallel_batch_execution());
+    #[cfg(feature = "human-loop")]
+    {
+        tool_disallows_parallel_execution || snap.tool_needs_approval(tool_name).await
+    }
+    #[cfg(not(feature = "human-loop"))]
+    {
+        tool_disallows_parallel_execution
+    }
+}
+
 /// Tool-call branch of one iteration. Emits the `ToolBatchStart` /
 /// `ToolCall` events, pushes the assistant-with-tools message, splits the
-/// batch by approval requirement, runs both sub-batches, and short-circuits
+/// batch by approval or tool concurrency policy, runs both sub-batches, and short-circuits
 /// with [`IterOutcome::Finish`] the moment a `final_answer` tool call is
 /// verifier-accepted.
 ///
@@ -93,23 +109,18 @@ pub(crate) async fn run_tools(
             .push(Message::assistant_with_tools(msg_tc));
     }
 
-    #[cfg(feature = "human-loop")]
-    let (appr, conc) = {
-        let mut a = vec![];
-        let mut c = vec![];
+    let (serial, conc) = {
+        let mut serial = vec![];
+        let mut concurrent = vec![];
         for s in steps {
-            if snap.tool_needs_approval(&s.1).await {
-                a.push(s);
+            if requires_sequential_execution(snap, &s.1).await {
+                serial.push(s);
             } else {
-                c.push(s);
+                concurrent.push(s);
             }
         }
-        (a, c)
+        (serial, concurrent)
     };
-    #[cfg(not(feature = "human-loop"))]
-    #[allow(clippy::type_complexity)]
-    let (appr, conc): (Vec<(String, String, Value)>, Vec<(String, String, Value)>) =
-        (vec![], steps);
 
     let mut finish_output = None;
 
@@ -286,7 +297,7 @@ pub(crate) async fn run_tools(
         }
     }
 
-    for (id, fname, args) in appr {
+    for (id, fname, args) in serial {
         if snap
             .cancel_token
             .as_ref()

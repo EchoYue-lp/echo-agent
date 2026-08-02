@@ -369,6 +369,20 @@ impl ReactAgent {
         }
     }
 
+    /// Refresh this Agent's model-facing dispatch catalog from authoritative
+    /// registry definitions.
+    ///
+    /// A shared [`SubagentRegistry`] owns execution targets, while each Agent's
+    /// `agent_tool` keeps a local schema projection so tool definitions can be
+    /// produced synchronously. Product runtimes call this after registering the
+    /// shared definitions or creating a fresh delegation-capable Agent.
+    #[cfg(feature = "subagent")]
+    pub fn sync_subagent_dispatch_catalog(&self, definitions: &[SubagentDefinition]) {
+        for definition in definitions {
+            self.update_dispatch_catalog(definition);
+        }
+    }
+
     /// Batch register subagents
     ///
     /// # Parameters

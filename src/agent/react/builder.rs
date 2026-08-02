@@ -56,6 +56,11 @@ pub struct ReactAgentBuilder {
     #[cfg(feature = "subagent")]
     subagent_prompt_compiler:
         Option<std::sync::Arc<dyn crate::agent::subagent::SubagentPromptCompiler>>,
+    /// Optional registry shared by a parent Agent and delegation-capable
+    /// Subagents. Each Agent keeps its own executor/tool surface while resolving
+    /// dispatch targets through this single registry.
+    #[cfg(feature = "subagent")]
+    subagent_registry: Option<std::sync::Arc<crate::agent::subagent::SubagentRegistry>>,
     enable_cot: bool,
     tool_error_feedback: bool,
     tool_execution: ToolExecutionConfig,
@@ -136,6 +141,8 @@ impl ReactAgentBuilder {
             subagent_runtime_state_store: None,
             #[cfg(feature = "subagent")]
             subagent_prompt_compiler: None,
+            #[cfg(feature = "subagent")]
+            subagent_registry: None,
             enable_cot: true,
             tool_error_feedback: true,
             tool_execution: ToolExecutionConfig::default(),
@@ -385,6 +392,19 @@ impl ReactAgentBuilder {
         compiler: std::sync::Arc<dyn crate::agent::subagent::SubagentPromptCompiler>,
     ) -> Self {
         self.subagent_prompt_compiler = Some(compiler);
+        self
+    }
+
+    /// Share one dispatch catalog across a parent Agent and its Subagents.
+    ///
+    /// The registry remains a framework runtime primitive. Product layers own
+    /// which definitions are registered and which roles expose `agent_tool`.
+    #[cfg(feature = "subagent")]
+    pub fn subagent_registry(
+        mut self,
+        registry: std::sync::Arc<crate::agent::subagent::SubagentRegistry>,
+    ) -> Self {
+        self.subagent_registry = Some(registry);
         self
     }
 
@@ -930,6 +950,13 @@ impl ReactAgentBuilder {
             config = config.enable_memory(false);
         }
 
+        #[cfg(feature = "subagent")]
+        let mut agent = if let Some(registry) = self.subagent_registry {
+            crate::agent::react::ReactAgent::new_with_subagent_registry(config, registry)
+        } else {
+            crate::agent::react::ReactAgent::new(config)
+        };
+        #[cfg(not(feature = "subagent"))]
         let mut agent = crate::agent::react::ReactAgent::new(config);
 
         if let Some(service) = self.task_revision_service {

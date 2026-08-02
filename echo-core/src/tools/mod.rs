@@ -808,6 +808,15 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether calls to this tool may run concurrently with peer calls from
+    /// the same model response.
+    ///
+    /// Stateful tools whose inputs depend on a revision, cursor, or result of
+    /// another call should return `false`.
+    fn allows_parallel_batch_execution(&self) -> bool {
+        true
+    }
+
     /// Whether this tool enforces its own execution deadline.
     ///
     /// Tools that opt out of the outer batch timeout are long-running by

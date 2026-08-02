@@ -183,7 +183,7 @@ impl ManagerSubagentOrchestrator {
              - Plan only — you do not execute the sub-tasks yourself.\n\
              - Each sub-task must be independently executable by one subagent, with a clear deliverable.\n\
              - Assign disjoint scope (files/modules/questions) so parallel subagents do not overlap or conflict.\n\
-             - State an explicit dependency only when one sub-task truly requires another's output.\n\n\
+             - Do not create dependencies between lines: every line starts concurrently. If work requires ordering, keep those dependent steps together in one sub-task.\n\n\
              Output only the sub-tasks, one per line. No numbering, no extra text.",
             team.subagent_descriptions(),
             task

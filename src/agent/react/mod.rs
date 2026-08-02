@@ -301,6 +301,28 @@ impl ReactAgent {
     /// initialization and provides sensible defaults. Direct construction with
     /// [`new`](Self::new) initialises every subsystem eagerly.
     pub fn new(config: AgentConfig) -> Self {
+        #[cfg(feature = "subagent")]
+        {
+            Self::new_inner(config, None)
+        }
+        #[cfg(not(feature = "subagent"))]
+        {
+            Self::new_inner(config)
+        }
+    }
+
+    #[cfg(feature = "subagent")]
+    pub(crate) fn new_with_subagent_registry(
+        config: AgentConfig,
+        registry: Arc<SubagentRegistry>,
+    ) -> Self {
+        Self::new_inner(config, Some(registry))
+    }
+
+    fn new_inner(
+        config: AgentConfig,
+        #[cfg(feature = "subagent")] provided_subagent_registry: Option<Arc<SubagentRegistry>>,
+    ) -> Self {
         let system_prompt = Self::build_system_prompt(&config);
 
         let sp_for_canonical = system_prompt.clone();
@@ -381,7 +403,8 @@ impl ReactAgent {
         #[cfg(feature = "tasks")]
         let task_spawner = Arc::new(TaskSpawner::new(crate::tasks::TaskSpawnerConfig::default()));
         #[cfg(feature = "subagent")]
-        let subagent_registry = Arc::new(SubagentRegistry::new());
+        let subagent_registry =
+            provided_subagent_registry.unwrap_or_else(|| Arc::new(SubagentRegistry::new()));
 
         // Create hook_registry early so the subagent executor can reference it
         let hook_registry = Arc::new(tokio::sync::RwLock::new(HookRegistry::new()));

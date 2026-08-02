@@ -28,11 +28,15 @@ impl Tool for TaskCreateTool {
     }
 
     fn description(&self) -> &str {
-        "Create one task or atomically create a related task graph in the current TaskRun. Dependencies are optional; use base_revision when adding tasks to an existing graph."
+        "Atomically create the complete task graph in one call. Always put every task in the tasks array, including a single task; never split one graph across concurrent task_create calls. Dependencies are optional; use base_revision when adding tasks to an existing graph."
     }
 
     fn parameters(&self) -> serde_json::Value {
         task_create_schema(&self.service)
+    }
+
+    fn allows_parallel_batch_execution(&self) -> bool {
+        false
     }
 
     fn execute_with_context<'a>(
@@ -96,6 +100,10 @@ impl Tool for TaskUpdateTool {
 
     fn parameters(&self) -> serde_json::Value {
         task_update_schema(&self.service)
+    }
+
+    fn allows_parallel_batch_execution(&self) -> bool {
+        false
     }
 
     fn execute_with_context<'a>(
@@ -218,12 +226,12 @@ fn task_create_schema(service: &TaskRevisionService) -> serde_json::Value {
     let task_schema = task_input_schema(service);
     serde_json::json!({
         "type": "object",
+        "additionalProperties": false,
         "properties": {
-            "task": task_schema.clone(),
             "tasks": {
                 "type": "array",
                 "minItems": 1,
-                "description": "One atomic task batch. Dependency ids may refer to this batch or existing tasks.",
+                "description": "The complete atomic task graph. Include every related task in this one array, even when it contains only one task. Dependency ids may refer to this batch or existing tasks.",
                 "items": task_schema
             },
             "base_revision": {
@@ -236,10 +244,7 @@ fn task_create_schema(service: &TaskRevisionService) -> serde_json::Value {
             "risks": { "type": "array", "items": { "type": "string" } },
             "execution_mode": { "type": "string", "enum": ["parallel", "sequential"] }
         },
-        "oneOf": [
-            { "required": ["task"] },
-            { "required": ["tasks"] }
-        ]
+        "required": ["tasks"]
     })
 }
 
@@ -398,22 +403,16 @@ fn parse_task_create_input(
     params: &ToolParameters,
     extension_schemas: &serde_json::Map<String, serde_json::Value>,
 ) -> std::result::Result<TaskCreateInput, String> {
-    let single_task = params.get("task");
-    let task_batch = params.get("tasks").and_then(serde_json::Value::as_array);
-    if single_task.is_some() == task_batch.is_some() {
-        return Err("task_create requires exactly one of task or tasks".to_string());
-    }
-    let raw_tasks = match (single_task, task_batch) {
-        (Some(task), None) if task.is_object() => vec![task],
-        (None, Some(tasks)) => tasks.iter().collect::<Vec<_>>(),
-        (Some(_), None) => return Err("task_create task must be an object".to_string()),
-        _ => Vec::new(),
-    };
+    let raw_tasks = params
+        .get("tasks")
+        .ok_or_else(|| "task_create requires one atomic tasks array".to_string())?
+        .as_array()
+        .ok_or_else(|| "task_create tasks must be an array".to_string())?;
     if raw_tasks.is_empty() {
         return Err("task_create requires at least one task".to_string());
     }
     let tasks = raw_tasks
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(index, value)| parse_task_draft(value, index, extension_schemas))
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -657,13 +656,13 @@ mod tests {
         let create = TaskCreateTool::new(service.clone());
         let created = create
             .execute(parameters(serde_json::json!({
-                "task": {
+                "tasks": [{
                     "id": "分析",
                     "title": "分析问题",
                     "description": "检查输入",
                     "kind": "investigation",
                     "acceptance_criteria": ["完成"]
-                }
+                }]
             }))?)
             .await
             .map_err(|error| error.to_string())?;
@@ -695,5 +694,39 @@ mod tests {
     fn default_schema_exposes_manual_status_updates() {
         let schema = task_update_schema(&service());
         assert!(schema.to_string().contains("set_status"));
+    }
+
+    #[test]
+    fn task_create_schema_requires_one_atomic_tasks_array() {
+        let tool = TaskCreateTool::new(service());
+        let schema = tool.parameters();
+        assert_eq!(schema.get("required"), Some(&serde_json::json!(["tasks"])));
+        assert!(
+            schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|properties| {
+                    properties.contains_key("tasks") && !properties.contains_key("task")
+                })
+        );
+        assert!(!tool.allows_parallel_batch_execution());
+    }
+
+    #[test]
+    fn task_create_rejects_the_removed_singular_shape() -> std::result::Result<(), String> {
+        let input = parameters(serde_json::json!({
+            "task": {
+                "id": "analysis",
+                "title": "Analyze",
+                "description": "Inspect input",
+                "kind": "investigation"
+            }
+        }))?;
+        let result = parse_task_create_input(&input, &serde_json::Map::new());
+        assert_eq!(
+            result.err().as_deref(),
+            Some("task_create requires one atomic tasks array")
+        );
+        Ok(())
     }
 }
