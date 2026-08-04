@@ -145,20 +145,51 @@ impl Tool for GrepTool {
                     message: format!("Invalid regex pattern '{}': {}", pattern_str, e),
                 })?;
 
-            // Effective base: construction-time base_dir (with confinement)
-            // takes priority; otherwise fall back to runtime working_dir.
-            let effective_base: Option<PathBuf> = self
+            // Allowed root set (all canonicalized so symlinks/`..` can't escape):
+            //   1. construction-time base_dir (highest priority for resolution)
+            //   2. runtime working_dir
+            //   3. output_artifacts.root_dir — lets the model grep spilled
+            //      tool output and user-input artifacts by absolute path, the
+            //      same paths `read_artifact` already hands out. Mirrors
+            //      `resolve_artifact_path` in `artifact.rs`.
+            // Relative `path` is joined to the first available root (base_dir,
+            // then working_dir) to preserve the existing single-root behavior;
+            // absolute `path` is used as-is. Confinement passes if the
+            // canonicalized path starts with *any* allowed root.
+            let mut allowed_roots: Vec<PathBuf> = Vec::new();
+            if let Some(base) = &self.base_dir {
+                allowed_roots.push(base.clone());
+            }
+            if let Some(working) = &ctx.working_dir {
+                allowed_roots.push(working.clone());
+            }
+            if let Some(artifacts) = ctx.output_artifacts.as_ref() {
+                allowed_roots.push(artifacts.root_dir.clone());
+            }
+
+            let preferred_root = self
                 .base_dir
                 .clone()
                 .or_else(|| ctx.working_dir.as_ref().map(|p| p.to_path_buf()));
 
-            let search_path = if let Some(ref base) = effective_base {
+            let search_path = if let Some(ref base) = preferred_root {
                 let resolved = if Path::new(path_str).is_absolute() {
                     PathBuf::from(path_str)
                 } else {
                     base.join(path_str)
                 };
-                if !resolved.starts_with(base) {
+                // Canonicalize both the candidate and the roots so symlink /
+                // `..` escapes are caught. Missing roots (e.g. an uncreated
+                // artifact dir) are skipped rather than erroring.
+                let resolved_canon = match tokio::fs::canonicalize(&resolved).await {
+                    Ok(p) => p,
+                    Err(_) => resolved.clone(),
+                };
+                let within_scope = canonicalize_roots(&allowed_roots)
+                    .await
+                    .iter()
+                    .any(|root| resolved_canon.starts_with(root));
+                if !within_scope {
                     return Ok(ToolResult::invalid_arguments(format!(
                         "Path '{}' is outside the allowed directory scope",
                         path_str
@@ -166,6 +197,7 @@ impl Tool for GrepTool {
                 }
                 resolved
             } else {
+                // No roots configured — no confinement (legacy behavior).
                 PathBuf::from(path_str)
             };
 
@@ -224,6 +256,20 @@ impl Tool for GrepTool {
             Ok(result)
         })
     }
+}
+
+/// Resolve each candidate root to its canonical form, skipping any that do not
+/// exist on disk (e.g. an artifact dir not yet created). Used for confinement
+/// checks so symlinks and `..` cannot escape the allowed scope.
+async fn canonicalize_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut canon: Vec<PathBuf> = Vec::with_capacity(roots.len());
+    for root in roots {
+        // Missing root (e.g. an uncreated artifact dir) is skipped, not errored.
+        if let Ok(p) = tokio::fs::canonicalize(root).await {
+            canon.push(p);
+        }
+    }
+    canon
 }
 
 async fn search_file(
@@ -427,5 +473,102 @@ mod tests {
     fn test_glob_matches_exact() {
         assert!(glob_matches("main.rs", "main.rs"));
         assert!(!glob_matches("main.rs", "lib.rs"));
+    }
+
+    // ── confinement / artifact-root extension (execute_with_context) ──
+    // These verify the new candidate-root-set logic: grep can search files
+    // under the artifact root (so the model can grep spilled tool output /
+    // user-input artifacts by absolute path) while still rejecting paths
+    // outside every allowed root.
+
+    use echo_core::tools::artifact::ToolOutputArtifactConfig;
+
+    /// Unique temp dir for a test (no uuid dep — mirrors artifact.rs's test_root).
+    fn test_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("echo-grep-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    /// Build grep parameters for the given path/pattern.
+    fn grep_params(pattern: &str, path: &str) -> ToolParameters {
+        ToolParameters::from([
+            ("pattern".to_string(), Value::String(pattern.to_string())),
+            ("path".to_string(), Value::String(path.to_string())),
+        ])
+    }
+
+    #[tokio::test]
+    async fn grep_finds_content_under_artifact_root() {
+        // Artifact root containing a spilled log; grep by absolute path must
+        // succeed even though it is not under working_dir.
+        let root = test_dir("artifact");
+        std::fs::create_dir_all(&root).unwrap();
+        let log = root.join("server.log");
+        std::fs::write(&log, "ERROR something failed\nINFO ok\n").unwrap();
+
+        let ctx = echo_core::tools::ToolContext {
+            output_artifacts: Some(ToolOutputArtifactConfig::new(&root, "test")),
+            ..Default::default()
+        };
+        let tool = GrepTool::new();
+        let result = tool
+            .execute_with_context(grep_params("ERROR", &log.display().to_string()), &ctx)
+            .await
+            .unwrap();
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert!(result.output.contains("something failed"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn grep_rejects_path_outside_all_roots() {
+        // A temp file under neither working_dir nor the artifact root must be
+        // rejected as outside the allowed scope.
+        let outside = test_dir("outside");
+        std::fs::write(&outside, "SECRET").unwrap();
+
+        let working = test_dir("working");
+        std::fs::create_dir_all(&working).unwrap();
+        let artifact = test_dir("artifact2");
+        std::fs::create_dir_all(&artifact).unwrap();
+
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(working.clone()),
+            output_artifacts: Some(ToolOutputArtifactConfig::new(&artifact, "test")),
+            ..Default::default()
+        };
+        let tool = GrepTool::new();
+        let result = tool
+            .execute_with_context(grep_params("SECRET", &outside.display().to_string()), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.success, "path outside all roots should be rejected");
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&working).ok();
+        std::fs::remove_dir_all(&artifact).ok();
+    }
+
+    #[tokio::test]
+    async fn grep_relative_path_still_uses_working_dir() {
+        // Relative path resolves against working_dir (preferred root) as before.
+        let working = test_dir("rel");
+        std::fs::create_dir_all(&working).unwrap();
+        std::fs::write(working.join("notes.txt"), "TODO fix this\n").unwrap();
+
+        let ctx = echo_core::tools::ToolContext {
+            working_dir: Some(working.clone()),
+            ..Default::default()
+        };
+        let tool = GrepTool::new();
+        let result = tool
+            .execute_with_context(grep_params("TODO", "notes.txt"), &ctx)
+            .await
+            .unwrap();
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        assert!(result.output.contains("fix this"));
+        std::fs::remove_dir_all(&working).ok();
     }
 }
