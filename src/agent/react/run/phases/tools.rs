@@ -5,12 +5,12 @@
 use super::super::processor::build_tool_calls_from_map;
 use super::super::stream_macros::{try_send_or, yield_event_or, yield_final_event_or};
 use super::verify::verify_answer;
-use super::{IterOutcome, LoopState, ThinkOutput};
+use super::{IterOutcome, LoopState, ThinkOutput, with_reasoning_content};
 use crate::agent::AgentEvent;
 use crate::agent::react::{StepType, TOOL_FINAL_ANSWER};
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::{ReactError, Result};
-use crate::llm::types::Message;
+use crate::llm::types::{Message, MessageContent};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -98,16 +98,19 @@ pub(crate) async fn run_tools(
     // reject the next request with HTTP 400 ("content or tool_calls must be
     // set"). Fall back to a content-bearing assistant message so the turn is
     // structurally valid and the model can retry the call.
-    if msg_tc.is_empty() {
-        context.lock().await.push(Message::assistant(
-            "(流式工具调用参数解析失败,已跳过;请重新发起工具调用)".to_string(),
-        ));
+    let assistant_message = if msg_tc.is_empty() {
+        Message::assistant("(流式工具调用参数解析失败,已跳过;请重新发起工具调用)".to_string())
     } else {
-        context
-            .lock()
-            .await
-            .push(Message::assistant_with_tools(msg_tc));
-    }
+        let mut message = Message::assistant_with_tools(msg_tc);
+        if !think.content_buffer.is_empty() {
+            message.content = MessageContent::Text(think.content_buffer);
+        }
+        message
+    };
+    context.lock().await.push(with_reasoning_content(
+        assistant_message,
+        think.reasoning_buffer,
+    ));
 
     let (serial, conc) = {
         let mut serial = vec![];

@@ -102,6 +102,7 @@ pub(crate) async fn run_think(
         ThinkOutcome::Abandoned
     ));
     let mut content_buffer = String::new();
+    let mut reasoning_buffer = String::new();
     let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
     let mut last_usage = None;
     let mut in_reasoning = false;
@@ -114,6 +115,7 @@ pub(crate) async fn run_think(
         for event in process_stream_chunk(
             &chunk,
             &mut content_buffer,
+            &mut reasoning_buffer,
             &mut tool_call_map,
             &mut in_reasoning,
             false,
@@ -247,6 +249,7 @@ pub(crate) async fn run_think(
     Ok(ThinkOutcome::Continue(ThinkOutput {
         messages,
         content_buffer,
+        reasoning_buffer,
         tool_call_map,
         pt,
         ct,

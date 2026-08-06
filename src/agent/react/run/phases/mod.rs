@@ -120,6 +120,8 @@ pub(crate) struct ThinkOutput {
     pub messages: Vec<Message>,
     /// Plain assistant text accumulated from streaming chunks.
     pub content_buffer: String,
+    /// DeepSeek/Qwen reasoning accumulated for assistant-message replay.
+    pub reasoning_buffer: String,
     /// Tool calls accumulated by index → (tool_call_id, function_name, args).
     pub tool_call_map: HashMap<u32, (String, String, String)>,
     /// Prompt tokens reported by the LLM.
@@ -139,12 +141,22 @@ pub(crate) enum IterOutcome {
     Finish { output: String },
     /// Text-only branch: the LLM produced a content answer that passed
     /// verification. The driver invokes `phases::finalize::emit_final_text`.
-    FinalText { answer: String },
+    FinalText {
+        answer: String,
+        reasoning_content: String,
+    },
     /// LLM produced neither tool calls nor content. Terminal failure.
     NoResponse,
     /// Channel closed mid-iteration (a yield/try_send macro fired
     /// `return Ok(())`). The driver returns `Ok(())` immediately.
     Abandoned,
+}
+
+pub(crate) fn with_reasoning_content(mut message: Message, reasoning_content: String) -> Message {
+    if !reasoning_content.is_empty() {
+        message.reasoning_content = Some(reasoning_content);
+    }
+    message
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 //! `NoResponse` failure, and the `MaxIterationsExceeded` failure.
 
 use super::super::stream_macros::yield_final_event;
-use super::LoopState;
+use super::{LoopState, with_reasoning_content};
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::{AgentError, ReactError, Result};
@@ -134,6 +134,7 @@ pub(crate) async fn emit_final_text(
     pt: usize,
     ct: usize,
     answer: String,
+    reasoning_content: String,
 ) -> Result<ControlFlow<(), ()>> {
     let agent = &snap.config.agent_name;
 
@@ -142,10 +143,10 @@ pub(crate) async fn emit_final_text(
         cb.on_think_end(agent, &ts, pt, ct).await;
         cb.on_final_answer(agent, &answer).await;
     }
-    context
-        .lock()
-        .await
-        .push(Message::assistant(answer.clone()));
+    context.lock().await.push(with_reasoning_content(
+        Message::assistant(answer.clone()),
+        reasoning_content,
+    ));
     snap.auto_snapshot(context, iteration).await;
     if let Some(al) = &snap.guard.audit_logger {
         let ev = crate::audit::AuditEvent::now(

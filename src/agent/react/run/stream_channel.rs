@@ -328,7 +328,7 @@ impl AgentSnapshot {
     async fn drain_steer_into_context(
         &self,
         context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
-        assistant_draft: Option<String>,
+        assistant_draft: Option<Message>,
     ) -> usize {
         let Some(turn_id) = self.current_run_id.as_deref() else {
             return 0;
@@ -339,10 +339,8 @@ impl AgentSnapshot {
         }
         let count = pending.len();
         let mut guard = context.lock().await;
-        if let Some(draft) = assistant_draft
-            && !draft.is_empty()
-        {
-            guard.push(Message::assistant(draft));
+        if let Some(draft) = assistant_draft {
+            guard.push(draft);
         }
         for message in pending {
             guard.push(message);
@@ -657,8 +655,12 @@ impl AgentSnapshot {
                 phases::tools::run_tools(&self, &context, &tx, &mut state, iteration, think, &label)
                     .await?
             } else if !think.content_buffer.is_empty() {
+                let assistant_draft = phases::with_reasoning_content(
+                    Message::assistant(think.content_buffer.clone()),
+                    think.reasoning_buffer.clone(),
+                );
                 if self
-                    .drain_steer_into_context(&context, Some(think.content_buffer.clone()))
+                    .drain_steer_into_context(&context, Some(assistant_draft))
                     .await
                     > 0
                 {
@@ -672,9 +674,20 @@ impl AgentSnapshot {
                 .await?
                 {
                     IterOutcome::Continue => continue,
-                    IterOutcome::FinalText { answer } => {
+                    IterOutcome::FinalText {
+                        answer,
+                        reasoning_content,
+                    } => {
                         match phases::finalize::emit_final_text(
-                            &self, &context, &tx, &mut state, iteration, pt, ct, answer,
+                            &self,
+                            &context,
+                            &tx,
+                            &mut state,
+                            iteration,
+                            pt,
+                            ct,
+                            answer,
+                            reasoning_content,
                         )
                         .await?
                         {
@@ -706,11 +719,22 @@ impl AgentSnapshot {
                 // it here would mean a phase returned an outcome out of band
                 // — guard against future refactors by treating it as a
                 // terminal text emission.
-                IterOutcome::FinalText { answer } => {
+                IterOutcome::FinalText {
+                    answer,
+                    reasoning_content,
+                } => {
                     let pt = 0;
                     let ct = 0;
                     match phases::finalize::emit_final_text(
-                        &self, &context, &tx, &mut state, iteration, pt, ct, answer,
+                        &self,
+                        &context,
+                        &tx,
+                        &mut state,
+                        iteration,
+                        pt,
+                        ct,
+                        answer,
+                        reasoning_content,
                     )
                     .await?
                     {
@@ -1440,6 +1464,137 @@ mod tests {
             matches!(last, AgentEvent::FinalAnswer(t) if t.contains("42")),
             "expected FinalAnswer with 42, got: {last:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn deepseek_tool_turn_replays_complete_assistant_message() -> Result<()> {
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_reasoning_tool_call(
+                    "call_1",
+                    "mock_calc",
+                    r#"{"x":6,"y":7}"#,
+                    "I will calculate that.",
+                    "The user requested a multiplication, so I should use the calculator.",
+                )
+                .with_response("The result is 42."),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("You are a test assistant. Use tools when asked.")
+            .tool(Box::new(MockTool::new("mock_calc").with_response("42")))
+            .build()?;
+
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "What is 6 times 7?".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        let _events = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        let calls = llm.all_calls();
+        let second_request = calls.get(1).ok_or_else(|| {
+            crate::error::ReactError::Other(
+                "DeepSeek tool cycle did not issue a second request".to_string(),
+            )
+        })?;
+        let assistant = second_request
+            .iter()
+            .find(|message| message.role == crate::llm::types::Role::Assistant)
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "second DeepSeek request did not replay the assistant tool turn".to_string(),
+                )
+            })?;
+
+        assert_eq!(
+            assistant.reasoning_content.as_deref(),
+            Some("The user requested a multiplication, so I should use the calculator.")
+        );
+        assert_eq!(
+            assistant.content.as_text().as_deref(),
+            Some("I will calculate that.")
+        );
+        assert_eq!(
+            assistant.tool_calls.as_ref().map(Vec::len),
+            Some(1),
+            "the replayed assistant message must retain its tool call"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deepseek_malformed_tool_turn_replays_reasoning_before_retry() -> Result<()> {
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_reasoning_tool_call(
+                    "call_1",
+                    "mock_calc",
+                    r#"{"x":6"#,
+                    "",
+                    "I should call the calculator, but the arguments were truncated.",
+                )
+                .with_response("I will retry with a complete call next time."),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("You are a test assistant. Use tools when asked.")
+            .tool(Box::new(MockTool::new("mock_calc").with_response("42")))
+            .build()?;
+
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "What is 6 times 7?".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        let _events = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        let calls = llm.all_calls();
+        let second_request = calls.get(1).ok_or_else(|| {
+            crate::error::ReactError::Other(
+                "malformed DeepSeek tool turn did not reach its retry request".to_string(),
+            )
+        })?;
+        let assistant = second_request
+            .iter()
+            .find(|message| message.role == crate::llm::types::Role::Assistant)
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "retry request did not contain the recovered assistant turn".to_string(),
+                )
+            })?;
+
+        assert_eq!(
+            assistant.reasoning_content.as_deref(),
+            Some("I should call the calculator, but the arguments were truncated.")
+        );
+        assert!(assistant.tool_calls.is_none());
+        assert!(
+            assistant.content.as_text().is_some_and(|content| {
+                content.contains("流式工具调用参数解析失败")
+            })
+        );
+        Ok(())
     }
 
     #[tokio::test]

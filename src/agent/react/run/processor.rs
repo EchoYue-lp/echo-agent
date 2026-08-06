@@ -16,6 +16,7 @@ use std::collections::HashMap;
 pub(crate) fn process_stream_chunk(
     chunk: &ChatCompletionChunk,
     content_buffer: &mut String,
+    reasoning_buffer: &mut String,
     tool_call_map: &mut HashMap<u32, (String, String, String)>,
     in_reasoning: &mut bool,
     emit_content_tokens: bool,
@@ -27,6 +28,7 @@ pub(crate) fn process_stream_chunk(
         if let Some(reasoning) = &choice.delta.reasoning_content
             && !reasoning.is_empty()
         {
+            reasoning_buffer.push_str(reasoning);
             if !*in_reasoning {
                 *in_reasoning = true;
                 events.push(AgentEvent::ThinkStart);
@@ -126,6 +128,7 @@ fn parse_tool_args(args_str: &str) -> Result<(Value, String), serde_json::Error>
                     break;
                 }
             }
+
             Err(original_err)
         }
     }
@@ -142,7 +145,9 @@ pub(crate) fn build_tool_calls_from_map(
     let mut steps: Vec<(String, String, Value)> = Vec::new();
 
     for idx in &sorted_indices {
-        let (id, name, args_str) = &tool_call_map[idx];
+        let Some((id, name, args_str)) = tool_call_map.get(idx) else {
+            continue;
+        };
         match parse_tool_args(args_str) {
             Ok((args, canonical_args)) => {
                 // Send the CANONICAL (repaired) args back to the provider so
@@ -179,40 +184,46 @@ pub(crate) fn build_tool_calls_from_map(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_tool_args;
+    use super::{parse_tool_args, process_stream_chunk};
+    use crate::llm::types::ChatCompletionChunk;
+    use std::collections::HashMap;
 
     #[test]
-    fn parse_tool_args_valid_json_passes_through() {
+    fn parse_tool_args_valid_json_passes_through() -> Result<(), serde_json::Error> {
         let raw = r#"{"task": {"agent_role": "explorer"}}"#;
-        let (val, echo) = parse_tool_args(raw).expect("valid JSON should parse");
+        let (val, echo) = parse_tool_args(raw)?;
         assert_eq!(val["task"]["agent_role"], "explorer");
         // Echoed args are the canonical re-serialized form.
         assert_eq!(echo, val.to_string());
+        Ok(())
     }
 
     #[test]
-    fn parse_tool_args_repairs_deepseek_extra_trailing_brace() {
+    fn parse_tool_args_repairs_deepseek_extra_trailing_brace() -> Result<(), serde_json::Error> {
         // DeepSeek "fake-stream" artifact: one extra `}` at the tail.
         // See vLLM issue #42878.
         let raw = r#"{"task": {"agent_role": "explorer"}}}"#;
-        let (val, _echo) = parse_tool_args(raw).expect("repair should recover valid JSON");
+        let (val, _echo) = parse_tool_args(raw)?;
         assert_eq!(val["task"]["agent_role"], "explorer");
+        Ok(())
     }
 
     #[test]
-    fn parse_tool_args_repairs_trailing_whitespace_after_brace() {
+    fn parse_tool_args_repairs_trailing_whitespace_after_brace() -> Result<(), serde_json::Error> {
         // DeepSeek variant: valid JSON followed by trailing whitespace.
         let raw = "{\"task\": {\"agent_role\": \"explorer\"}}   \n";
-        let (val, _echo) = parse_tool_args(raw).expect("repair should strip trailing whitespace");
+        let (val, _echo) = parse_tool_args(raw)?;
         assert_eq!(val["task"]["agent_role"], "explorer");
+        Ok(())
     }
 
     #[test]
-    fn parse_tool_args_repairs_multiple_extra_braces() {
+    fn parse_tool_args_repairs_multiple_extra_braces() -> Result<(), serde_json::Error> {
         // Worst case: several extra trailing `}`.
         let raw = r#"{"task": {"agent_role": "explorer"}}}}}"#;
-        let (val, _echo) = parse_tool_args(raw).expect("repair should recover valid JSON");
+        let (val, _echo) = parse_tool_args(raw)?;
         assert_eq!(val["task"]["agent_role"], "explorer");
+        Ok(())
     }
 
     #[test]
@@ -223,9 +234,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_args_empty_object() {
-        let (val, echo) = parse_tool_args("{}").expect("empty object is valid");
+    fn parse_tool_args_empty_object() -> Result<(), serde_json::Error> {
+        let (val, echo) = parse_tool_args("{}")?;
         assert!(val.is_object());
         assert_eq!(echo, "{}");
+        Ok(())
+    }
+
+    #[test]
+    fn process_stream_chunk_accumulates_reasoning_for_protocol_replay()
+    -> Result<(), serde_json::Error> {
+        let chunk: ChatCompletionChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "先分析，再调用工具。"}
+            }]
+        }))?;
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut calls = HashMap::new();
+        let mut in_reasoning = false;
+
+        let _events = process_stream_chunk(
+            &chunk,
+            &mut content,
+            &mut reasoning,
+            &mut calls,
+            &mut in_reasoning,
+            false,
+        );
+
+        assert_eq!(reasoning, "先分析，再调用工具。");
+        assert!(in_reasoning);
+        Ok(())
     }
 }

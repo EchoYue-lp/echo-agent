@@ -42,7 +42,7 @@ use std::time::Duration;
 /// Enum of preset responses (text, tool calls, or errors)
 enum MockLlmResponse {
     Content(String, Option<crate::llm::types::Usage>),
-    ToolCalls(Vec<ToolCall>, Option<crate::llm::types::Usage>),
+    ToolCalls(Message, Option<crate::llm::types::Usage>),
     Err(ReactError),
 }
 
@@ -168,7 +168,38 @@ impl MockLlmClient {
         self.responses
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push_back(MockLlmResponse::ToolCalls(vec![tc], None));
+            .push_back(MockLlmResponse::ToolCalls(
+                Message::assistant_with_tools(vec![tc]),
+                None,
+            ));
+        self
+    }
+
+    /// Append a DeepSeek-style tool-call response with reasoning content.
+    #[cfg(test)]
+    pub(crate) fn then_reasoning_tool_call(
+        self,
+        id: impl Into<String>,
+        function_name: impl Into<String>,
+        arguments: impl Into<String>,
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+    ) -> Self {
+        let tc = ToolCall {
+            id: id.into(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: function_name.into(),
+                arguments: arguments.into(),
+            },
+        };
+        let mut message = Message::assistant_with_tools(vec![tc]);
+        message.content = crate::llm::types::MessageContent::Text(content.into());
+        message.reasoning_content = Some(reasoning_content.into());
+        self.responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(MockLlmResponse::ToolCalls(message, None));
         self
     }
 
@@ -191,7 +222,10 @@ impl MockLlmClient {
         self.responses
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push_back(MockLlmResponse::ToolCalls(vec![tc], Some(usage)));
+            .push_back(MockLlmResponse::ToolCalls(
+                Message::assistant_with_tools(vec![tc]),
+                Some(usage),
+            ));
         self
     }
 
@@ -200,7 +234,10 @@ impl MockLlmClient {
         self.responses
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push_back(MockLlmResponse::ToolCalls(calls, None));
+            .push_back(MockLlmResponse::ToolCalls(
+                Message::assistant_with_tools(calls),
+                None,
+            ));
         self
     }
 
@@ -276,8 +313,8 @@ impl MockLlmClient {
             .pop_front()
         {
             Some(MockLlmResponse::Content(text, usage)) => Ok(PopResult::Content(text, usage)),
-            Some(MockLlmResponse::ToolCalls(calls, usage)) => {
-                Ok(PopResult::ToolCalls(calls, usage))
+            Some(MockLlmResponse::ToolCalls(message, usage)) => {
+                Ok(PopResult::ToolCalls(message, usage))
             }
             Some(MockLlmResponse::Err(e)) => Err(e),
             None => Err(ReactError::Llm(Box::new(LlmError::EmptyResponse))),
@@ -287,7 +324,7 @@ impl MockLlmClient {
 
 enum PopResult {
     Content(String, Option<crate::llm::types::Usage>),
-    ToolCalls(Vec<ToolCall>, Option<crate::llm::types::Usage>),
+    ToolCalls(Message, Option<crate::llm::types::Usage>),
 }
 
 impl LlmClient for MockLlmClient {
@@ -328,8 +365,8 @@ impl LlmClient for MockLlmClient {
                         ..crate::llm::types::ChatCompletionResponse::default()
                     },
                 }),
-                PopResult::ToolCalls(calls, usage) => Ok(ChatResponse {
-                    message: Message::assistant_with_tools(calls),
+                PopResult::ToolCalls(message, usage) => Ok(ChatResponse {
+                    message,
                     finish_reason: Some("tool_calls".to_string()),
                     raw: crate::llm::types::ChatCompletionResponse {
                         usage,
@@ -386,9 +423,11 @@ impl LlmClient for MockLlmClient {
                     });
                     Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
                 }
-                PopResult::ToolCalls(calls, usage) => {
+                PopResult::ToolCalls(message, usage) => {
                     // Convert ToolCall → DeltaToolCall for streaming
-                    let delta_calls: Vec<DeltaToolCall> = calls
+                    let delta_calls: Vec<DeltaToolCall> = message
+                        .tool_calls
+                        .unwrap_or_default()
                         .into_iter()
                         .enumerate()
                         .map(|(i, tc)| DeltaToolCall {
@@ -401,12 +440,14 @@ impl LlmClient for MockLlmClient {
                             }),
                         })
                         .collect();
+                    let content = message.content.as_text();
+                    let reasoning_content = message.reasoning_content;
                     let stream = futures::stream::once(async move {
                         Ok(ChatChunk {
                             delta: DeltaMessage {
                                 role: Some("assistant".to_string()),
-                                content: None,
-                                reasoning_content: None,
+                                content,
+                                reasoning_content,
                                 tool_calls: Some(delta_calls),
                             },
                             finish_reason: Some("tool_calls".to_string()),

@@ -5,7 +5,7 @@
 //! of one iteration: verify, then on pass return `IterOutcome::FinalText` so
 //! the driver can call `phases::finalize::emit_final_text`.
 
-use super::{IterOutcome, LoopState, ThinkOutput};
+use super::{IterOutcome, LoopState, ThinkOutput, with_reasoning_content};
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::Result;
@@ -114,18 +114,20 @@ pub(crate) async fn verify_final_text(
     _label: &str,
 ) -> Result<IterOutcome> {
     let content_buffer = think.content_buffer;
+    let reasoning_content = think.reasoning_buffer;
     if !verify_answer(snap, context, &content_buffer, state.verifier_retry_count).await {
         // Push the LLM's answer to context so it can see its own attempt
-        context
-            .lock()
-            .await
-            .push(Message::assistant(content_buffer));
+        context.lock().await.push(with_reasoning_content(
+            Message::assistant(content_buffer),
+            reasoning_content,
+        ));
         state.verifier_retry_count += 1;
         return Ok(IterOutcome::Continue);
     }
 
     Ok(IterOutcome::FinalText {
         answer: content_buffer,
+        reasoning_content,
     })
 }
 
