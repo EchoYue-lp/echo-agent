@@ -1352,7 +1352,7 @@ impl TaskExecutor {
         let mut handles = Vec::with_capacity(ready_tasks.len());
         for task in ready_tasks {
             let task_id = task.id.clone();
-            let task_name = format!("dag-task-{}", &task_id);
+            let task_name = format!("dag-task-{task_id}");
 
             // Clone everything needed for the spawn
             let manager = self.task_manager.clone();

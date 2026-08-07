@@ -924,19 +924,6 @@ fn platform_termination_message(_status: &std::process::ExitStatus) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn default_linux_read_paths() -> Vec<&'static str> {
-    vec![
-        "/usr",
-        "/bin",
-        "/lib",
-        "/lib64",
-        "/etc/alternatives",
-        "/etc/ssl",
-        "/etc/ca-certificates",
-    ]
-}
-
-#[cfg(target_os = "linux")]
 fn default_sandbox_env(extra: &std::collections::HashMap<String, String>) -> Vec<(String, String)> {
     let mut env = vec![
         (

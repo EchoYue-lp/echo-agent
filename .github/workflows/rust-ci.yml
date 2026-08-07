@@ -10,30 +10,20 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
       - uses: Swatinem/rust-cache@v2
-
-      - run: cargo fmt --all -- --check
-      # --locked: fail if Cargo.lock would need updating, so CI never silently
-      # regresses dependency versions vs the committed lockfile.
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo test --workspace --all-targets --all-features --locked
-      # Verify every workspace library still compiles with no optional features.
-      - run: cargo check --workspace --lib --no-default-features --locked
-      # Compile production targets without test cfg, then deny panicking APIs.
-      # This avoids the false positives produced by source-text grep on inline
-      # #[cfg(test)] modules while covering every workspace library and binary.
-      - name: Ban panicking APIs in production targets
-        run: >-
-          cargo clippy --workspace --lib --bins --all-features --locked --
-          -D clippy::unwrap_used
-          -D clippy::expect_used
-          -D clippy::panic
-          -D clippy::unreachable
+      - name: Verify workspace
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo clippy --workspace --lib --bins --all-features --locked -- \
+            -D clippy::unwrap_used \
+            -D clippy::expect_used \
+            -D clippy::panic \
+            -D clippy::unreachable
+          cargo test --workspace --all-targets --all-features --locked
+          cargo check --workspace --lib --no-default-features --locked
