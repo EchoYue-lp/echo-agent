@@ -244,7 +244,7 @@ impl EvalRunner {
                 if !found {
                     result.violations.push(format!(
                         "Output missing: {substring}. Got: {}",
-                        &output.chars().take(200).collect::<String>()
+                        output.chars().take(200).collect::<String>()
                     ));
                 }
                 result

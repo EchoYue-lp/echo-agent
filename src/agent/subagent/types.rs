@@ -640,11 +640,8 @@ fn hash_file(path: &Path) -> Option<String> {
         if read == 0 {
             break;
         }
-        if let Some(chunk) = buffer.get(..read) {
-            hasher.update(chunk);
-        } else {
-            return None;
-        }
+        let chunk = buffer.get(..read)?;
+        hasher.update(chunk);
     }
     Some(format!("{:x}", hasher.finalize()))
 }

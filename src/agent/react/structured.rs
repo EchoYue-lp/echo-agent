@@ -100,10 +100,8 @@ fn extract_json_from_markdown(text: &str) -> Option<&str> {
     // Match ```json\n...\n``` or ```\n...\n```
     let start = if let Some(pos) = text.find("```json") {
         pos + 7
-    } else if let Some(pos) = text.find("```") {
-        pos + 3
     } else {
-        return None;
+        text.find("```")?.checked_add(3)?
     };
 
     let remaining = &text[start..];
