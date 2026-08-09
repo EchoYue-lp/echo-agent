@@ -15,7 +15,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -39,13 +39,14 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: "false"
       - name: Test workspace
-        run: cargo test --workspace --all-targets --all-features --locked
+        # The lint job already compiles examples and benches with --all-targets.
+        run: cargo test --workspace --lib --tests --all-features --locked
 
   minimal:
     runs-on: ubuntu-latest
@@ -53,7 +54,7 @@ jobs:
       CARGO_BUILD_JOBS: "1"
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
