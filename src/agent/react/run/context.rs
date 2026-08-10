@@ -380,6 +380,10 @@ impl ReactAgent {
                 "",
                 "",
                 matcher.unwrap_or(""),
+                // Fallback mapping lacks a real terminal status; callers that
+                // fire SubagentStop directly pass the actual status. Default
+                // to Completed so this placeholder compiles without guessing.
+                echo_core::hooks::SubagentStopStatus::Completed,
                 &session_id,
                 &agent_name,
             ),
@@ -398,9 +402,6 @@ impl ReactAgent {
                 HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
             }
             HookEvent::TaskTimeout | HookEvent::TaskCancelled => {
-                HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
-            }
-            HookEvent::SubagentCancelled => {
                 HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
             }
             // Evolution events — use dedicated factory methods

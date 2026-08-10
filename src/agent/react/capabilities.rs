@@ -934,8 +934,9 @@ impl ReactAgent {
     }
 
     /// Create a `SubagentHookBridge` that fires subagent lifecycle events
-    /// (SubagentStart, SubagentStop, SubagentCancelled) into the
-    /// central `HookRegistry`.
+    /// (SubagentStart, SubagentStop) into the central `HookRegistry`.
+    /// SubagentStop carries a terminal status (completed/failed/cancelled/
+    /// timed_out); there is no separate SubagentCancelled event.
     pub fn create_subagent_hook_bridge(&self) -> crate::hooks_bridge::SubagentHookBridge {
         crate::hooks_bridge::SubagentHookBridge::new(
             self.tools.hook_registry.clone(),

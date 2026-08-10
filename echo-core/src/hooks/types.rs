@@ -33,6 +33,44 @@ pub enum HookEventCategory {
     Evolution,
 }
 
+// ── Subagent Stop Status ────────────────────────────────────────────────
+
+/// Terminal status of a subagent run, carried by the `SubagentStop` event.
+///
+/// Industry alignment (Claude Code / Codex / OpenAI Agents SDK / AGTP): all
+/// converge on "two boundary events (Start/Stop) + a status enum on the
+/// terminal event" rather than one independent event per terminal state
+/// (Stop/Cancelled/Failed/TimedOut). `SubagentStop` is always emitted exactly
+/// once by the subagent executor's `finalize(status)` convergence point,
+/// regardless of how the run ended.
+///
+/// `SubagentCancelled` (the former independent event) is removed per this
+/// model — cancelled is a `SubagentStop` status value, not a separate event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStopStatus {
+    /// Subagent finished normally with output.
+    Completed,
+    /// Subagent exited with an error / reported failure.
+    Failed,
+    /// Subagent was cancelled (user abort, parent run cancelled, etc.).
+    Cancelled,
+    /// Subagent hit a deadline / timeout.
+    TimedOut,
+}
+
+impl SubagentStopStatus {
+    /// Stable wire name (used in serialized hook payloads and logs).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
 // ── Hook Event ─────────────────────────────────────────────────────────
 
 /// When a hook fires in the agent lifecycle.
@@ -43,7 +81,7 @@ pub enum HookEventCategory {
 /// |----------|--------|-------------------|
 /// | Tool | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` | Tool name (exact, glob, `|`-separated) |
 /// | Lifecycle | `SessionStart`, `SessionEnd`, `Stop`, `Notification`, `UserPromptSubmit`, `PreCompact`, `PostCompact`, `ConfigChange`, `InstructionsLoaded`, `PostToolBatch` | Lifecycle hint (e.g. "startup", "permission_prompt") |
-/// | Subagent | `SubagentStart`, `SubagentStop` | Subagent type/name |
+/// | Subagent | `SubagentStart`, `SubagentStop` | Subagent type/name. `SubagentStop` carries a `subagent_stop_status` (completed/failed/cancelled/timed_out); there is no separate `SubagentCancelled` event. |
 /// | Task | `TaskCreated`, `TaskCompleted` | Task subject/name |
 /// | Error | `StopFailure` | Not supported |
 /// | Evolution | `PostMemoryWrite`, `MemoryLayerChange` | Memory source or layer name |
@@ -113,8 +151,11 @@ pub enum HookEvent {
     TaskCancelled,
 
     // ── Extended subagent events ──
-    /// Subagent was cancelled.
-    SubagentCancelled,
+    // SubagentCancelled removed: the terminal model is now
+    // SubagentStop(status = completed|failed|cancelled|timed_out), emitted
+    // exactly once. Cancelled is a SubagentStop status, not a separate event.
+    // (Claude Code / Codex / OpenAI Agents SDK / AGTP all converge on this
+    // two-event + status-enum model.)
 
     // ── Evolution events ──
     /// After any memory is persisted to the Store.
@@ -145,9 +186,7 @@ impl HookEvent {
             | HookEvent::PermissionRequest
             | HookEvent::PermissionDenied => HookEventCategory::Tool,
 
-            HookEvent::SubagentStart | HookEvent::SubagentStop | HookEvent::SubagentCancelled => {
-                HookEventCategory::Subagent
-            }
+            HookEvent::SubagentStart | HookEvent::SubagentStop => HookEventCategory::Subagent,
 
             HookEvent::TaskCreated
             | HookEvent::TaskCompleted
@@ -226,7 +265,6 @@ impl HookEvent {
             HookEvent::PluginDisabled => "PluginDisabled",
             HookEvent::TaskTimeout => "TaskTimeout",
             HookEvent::TaskCancelled => "TaskCancelled",
-            HookEvent::SubagentCancelled => "SubagentCancelled",
             HookEvent::PostMemoryWrite => "PostMemoryWrite",
             HookEvent::MemoryLayerChange => "MemoryLayerChange",
             HookEvent::SkillCandidateDetected => "SkillCandidateDetected",
@@ -327,6 +365,13 @@ pub struct HookContext {
     /// Subagent result summary (SubagentStop only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_result: Option<String>,
+    /// Terminal status of the subagent run (SubagentStop only).
+    ///
+    /// Always present on SubagentStop contexts. Lets consumers distinguish
+    /// completed/failed/cancelled/timed_out without inspecting free-form
+    /// result text. Industry-aligned (see [`SubagentStopStatus`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_stop_status: Option<SubagentStopStatus>,
 
     // ── Task fields ──
     /// Task ID (TaskCreated, TaskCompleted only).
@@ -392,6 +437,7 @@ impl Default for HookContext {
             subagent_mode: None,
             subagent_task: None,
             subagent_result: None,
+            subagent_stop_status: None,
             task_id: None,
             task_subject: None,
             task_result: None,
@@ -693,6 +739,7 @@ impl HookContext {
         subagent_name: &str,
         subagent_mode: &str,
         result: &str,
+        status: SubagentStopStatus,
         session_id: &str,
         agent_name: &str,
     ) -> Self {
@@ -704,6 +751,7 @@ impl HookContext {
             subagent_name: Some(subagent_name.to_string()),
             subagent_mode: Some(subagent_mode.to_string()),
             subagent_result: Some(result.to_string()),
+            subagent_stop_status: Some(status),
             ..Self::default()
         }
     }
@@ -1185,5 +1233,35 @@ mod tests {
             r.activate_skill,
             Some(("docx".to_string(), "检测到 .docx 文件".to_string()))
         );
+    }
+
+    #[test]
+    fn test_subagent_stop_status_serde_and_str() {
+        // Industry-aligned terminal model: SubagentStop carries a status enum,
+        // there is no separate SubagentCancelled event.
+        for (status, expected) in [
+            (SubagentStopStatus::Completed, "completed"),
+            (SubagentStopStatus::Failed, "failed"),
+            (SubagentStopStatus::Cancelled, "cancelled"),
+            (SubagentStopStatus::TimedOut, "timed_out"),
+        ] {
+            assert_eq!(status.as_str(), expected);
+            let json = serde_json::to_string(&status).unwrap_or_default();
+            assert_eq!(json, format!("\"{expected}\""));
+        }
+    }
+
+    #[test]
+    fn test_for_subagent_stop_carries_status() {
+        let ctx = HookContext::for_subagent_stop(
+            "coder",
+            "sync",
+            "done",
+            SubagentStopStatus::TimedOut,
+            "sess-1",
+            "agent",
+        );
+        assert_eq!(ctx.event, HookEvent::SubagentStop);
+        assert_eq!(ctx.subagent_stop_status, Some(SubagentStopStatus::TimedOut));
     }
 }

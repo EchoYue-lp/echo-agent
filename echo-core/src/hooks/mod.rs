@@ -8,5 +8,5 @@ pub mod types;
 
 pub use types::{
     CompressHookStats, HookContext, HookEvent, HookEventCategory, HookResult, HookSource,
-    UnifiedHookExecutorFn,
+    SubagentStopStatus, UnifiedHookExecutorFn,
 };

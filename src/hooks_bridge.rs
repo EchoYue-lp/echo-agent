@@ -134,11 +134,24 @@ impl SubagentHookBridge {
     }
 
     /// Fire SubagentStop event (maps to after_dispatch).
-    pub async fn on_after_dispatch(&self, subagent_name: &str, execution_mode: &str, task: &str) {
+    ///
+    /// Always emits exactly one SubagentStop carrying the terminal `status`
+    /// (completed/failed/cancelled/timed_out). This is the single convergence
+    /// point for all subagent terminal states — callers must NOT also fire a
+    /// separate cancelled event. Industry-aligned model (Claude Code / Codex /
+    /// OpenAI Agents SDK / AGTP: two boundary events + status enum).
+    pub async fn on_after_dispatch(
+        &self,
+        subagent_name: &str,
+        execution_mode: &str,
+        task: &str,
+        status: echo_core::hooks::SubagentStopStatus,
+    ) {
         let ctx = HookContext::for_subagent_stop(
             subagent_name,
             execution_mode,
             task,
+            status,
             &self.session_id,
             &self.agent_name,
         );
@@ -150,18 +163,6 @@ impl SubagentHookBridge {
     pub async fn on_failure(&self, subagent_name: &str, error: &str) {
         let ctx =
             HookContext::for_stop_failure(subagent_name, error, &self.session_id, &self.agent_name);
-        let registry = self.hook_registry.read().await;
-        let _ = registry.run_lifecycle_hooks(&ctx).await;
-    }
-
-    /// Fire SubagentCancelled event.
-    pub async fn on_cancelled(&self, subagent_name: &str) {
-        let ctx = HookContext::for_lifecycle(
-            HookEvent::SubagentCancelled,
-            subagent_name,
-            &self.session_id,
-            &self.agent_name,
-        );
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
     }
@@ -293,14 +294,31 @@ mod tests {
             "agent-1".to_string(),
         );
 
-        // These should not panic even with an empty registry
+        // These should not panic even with an empty registry.
+        // SubagentStop is the single convergence point for all terminal
+        // states (completed/failed/cancelled/timed_out) — no separate
+        // on_cancelled anymore.
         bridge
             .on_before_dispatch("researcher", "sync", "Find papers")
             .await;
         bridge
-            .on_after_dispatch("researcher", "sync", "Find papers")
+            .on_after_dispatch(
+                "researcher",
+                "sync",
+                "Find papers",
+                echo_core::hooks::SubagentStopStatus::Completed,
+            )
             .await;
         bridge.on_failure("researcher", "timeout").await;
-        bridge.on_cancelled("researcher").await;
+        // Verify cancelled is delivered as a SubagentStop status, not a
+        // separate event.
+        bridge
+            .on_after_dispatch(
+                "researcher",
+                "sync",
+                "cancelled mid-run",
+                echo_core::hooks::SubagentStopStatus::Cancelled,
+            )
+            .await;
     }
 }

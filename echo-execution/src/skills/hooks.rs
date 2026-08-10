@@ -1728,7 +1728,14 @@ mod tests {
 
     #[test]
     fn test_matches_hook_subagent_stop() {
-        let ctx = HookContext::for_subagent_stop("coder", "sync", "success", "", "");
+        let ctx = HookContext::for_subagent_stop(
+            "coder",
+            "sync",
+            "success",
+            echo_core::hooks::SubagentStopStatus::Completed,
+            "",
+            "",
+        );
         assert!(matches_hook("coder", &ctx));
         assert!(!matches_hook("planner", &ctx));
     }
