@@ -687,6 +687,7 @@ mod tests {
 
         let mut registry = SkillRegistry::new();
         registry.register_descriptor(SkillDescriptor {
+            source: None,
             name: "locked-skill".into(),
             description: "desc".into(),
             location: skill_dir.join("SKILL.md"),

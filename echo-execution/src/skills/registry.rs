@@ -55,6 +55,12 @@ pub struct SkillRegistry {
     /// Active sandbox policies for activated skills: name -> policy.
     /// Populated during activation when a skill declares a sandbox policy.
     active_sandbox_policies: std::sync::Mutex<HashMap<String, SkillSandboxPolicy>>,
+
+    /// Reverse index: source tag (e.g. `"plugin:my-plugin"`) -> skill names
+    /// registered under that source. Lets `unregister_by_source` remove
+    /// exactly one plugin's skills on disable/uninstall without scanning all
+    /// descriptors. Skills without a `source` are absent from this map.
+    by_source: HashMap<String, HashSet<String>>,
 }
 
 impl SkillRegistry {
@@ -75,6 +81,7 @@ impl SkillRegistry {
             code_skills: HashMap::new(),
             sandbox: None,
             active_sandbox_policies: std::sync::Mutex::new(HashMap::new()),
+            by_source: HashMap::new(),
         }
     }
 
@@ -86,7 +93,59 @@ impl SkillRegistry {
         for warning in descriptor.validate_paths() {
             warn!("Skill '{}': {}", descriptor.name, warning);
         }
+        // Track source provenance so disable/uninstall can remove exactly
+        // this group later (P1-reload).
+        if let Some(src) = descriptor.source.as_deref() {
+            self.by_source
+                .entry(src.to_string())
+                .or_default()
+                .insert(descriptor.name.clone());
+        }
         self.descriptors.insert(descriptor.name.clone(), descriptor);
+    }
+
+    /// Remove all skills registered under a given source tag (e.g.
+    /// `"plugin:my-plugin"`), returning the number removed.
+    ///
+    /// Used by the plugin runtime on disable/uninstall so the agent's
+    /// SkillRegistry doesn't keep a disabled plugin's skills. Each removed
+    /// skill is also deactivated and purged from legacy/sandbox bookkeeping
+    /// via `remove_descriptor`.
+    pub fn unregister_by_source(&mut self, source: &str) -> usize {
+        let names = match self.by_source.remove(source) {
+            Some(set) => set,
+            None => return 0,
+        };
+        let mut removed = 0;
+        for name in names {
+            if self.remove_descriptor(&name) {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// Tag already-registered skills with a source so they can be group-unloaded
+    /// later via `unregister_by_source`.
+    ///
+    /// This is the post-load entry point for the plugin integrator: it calls
+    /// `load_skills_from_dir` (which discovers + registers descriptors without
+    /// knowing the source), then tags the returned names with the plugin
+    /// source. Skills already tagged under a different source are skipped to
+    /// avoid cross-plugin contamination.
+    pub fn tag_source(&mut self, names: &[String], source: &str) {
+        for name in names {
+            if let Some(desc) = self.descriptors.get_mut(name) {
+                // Only tag if not already owned by another source.
+                if desc.source.is_none() {
+                    desc.source = Some(source.to_string());
+                    self.by_source
+                        .entry(source.to_string())
+                        .or_default()
+                        .insert(name.clone());
+                }
+            }
+        }
     }
 
     /// Register a discovered file-based skill descriptor and its legacy instructions.
@@ -653,6 +712,7 @@ mod tests {
 
     fn make_descriptor(name: &str, desc: &str) -> SkillDescriptor {
         SkillDescriptor {
+            source: None,
             name: name.into(),
             description: desc.into(),
             location: PathBuf::from(format!("/skills/{}/SKILL.md", name)),
@@ -720,6 +780,7 @@ mod tests {
         let mut reg = SkillRegistry::new();
         reg.register_descriptor_with_legacy(
             SkillDescriptor {
+                source: None,
                 name: "legacy-skill".into(),
                 description: "Legacy skill".into(),
                 location: skill_dir.join("SKILL.md"),

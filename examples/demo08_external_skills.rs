@@ -778,6 +778,7 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
 
         let mut locked_registry = SkillRegistry::new();
         locked_registry.register_descriptor(SkillDescriptor {
+            source: None,
             name: "locked-skill".into(),
             description: "Demo skill with a narrow allowed-tools whitelist".into(),
             location: locked_dir.join("SKILL.md"),

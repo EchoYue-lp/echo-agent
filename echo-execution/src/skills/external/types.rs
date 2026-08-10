@@ -98,6 +98,16 @@ pub struct SkillDescriptor {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
 
+    /// Origin source tag for grouped unload (e.g. `"plugin:my-plugin"`).
+    ///
+    /// Set by the plugin integrator when loading skills from a plugin
+    /// directory so `SkillRegistry::unregister_by_source` can remove exactly
+    /// that plugin's skills on disable/uninstall. `None` for user-loaded /
+    /// built-in skills (never group-unloaded). Skipped in serialization to
+    /// avoid a breaking change for frontend consumers.
+    #[serde(skip, default)]
+    pub source: Option<String>,
+
     /// Pre-approved tools the skill may use (space-delimited in SKILL.md).
     #[serde(
         default,
@@ -522,6 +532,7 @@ impl RawFrontmatter {
         }
 
         SkillDescriptor {
+            source: None,
             name: self.name,
             description: self.description,
             location,
@@ -566,6 +577,7 @@ mod tests {
     #[test]
     fn test_descriptor_validate_name_valid() {
         let d = SkillDescriptor {
+            source: None,
             name: "code-review".into(),
             description: "Review code".into(),
             location: PathBuf::new(),
@@ -594,6 +606,7 @@ mod tests {
         ];
         for (name, reason) in cases {
             let d = SkillDescriptor {
+                source: None,
                 name: name.into(),
                 description: "test".into(),
                 location: PathBuf::new(),
@@ -620,6 +633,7 @@ mod tests {
     #[test]
     fn test_descriptor_catalog_line() {
         let d = SkillDescriptor {
+            source: None,
             name: "pdf-processing".into(),
             description: "Extract PDF text, fill forms.".into(),
             location: PathBuf::new(),
@@ -644,6 +658,7 @@ mod tests {
     fn test_skill_content_prompt_block() {
         let content = SkillContent {
             descriptor: SkillDescriptor {
+                source: None,
                 name: "test-skill".into(),
                 description: "A test".into(),
                 location: PathBuf::from("/home/user/skills/test-skill/SKILL.md"),
@@ -763,6 +778,7 @@ mod tests {
 
     fn make_desc_with_paths(paths: Vec<&str>) -> SkillDescriptor {
         SkillDescriptor {
+            source: None,
             name: "test".into(),
             description: "test".into(),
             location: PathBuf::new(),

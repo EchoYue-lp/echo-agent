@@ -139,6 +139,7 @@ mod tests {
 
     fn desc_with_metadata(md: HashMap<String, String>) -> SkillDescriptor {
         SkillDescriptor {
+            source: None,
             name: "test-skill".into(),
             description: "test".into(),
             license: None,

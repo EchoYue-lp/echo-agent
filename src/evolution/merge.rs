@@ -342,6 +342,7 @@ mod tests {
         description: &str,
     ) -> SkillDescriptor {
         SkillDescriptor {
+            source: None,
             name: name.to_string(),
             description: description.to_string(),
             triggers: triggers.into_iter().map(|s| s.to_string()).collect(),

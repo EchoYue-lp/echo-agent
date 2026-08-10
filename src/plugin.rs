@@ -142,7 +142,7 @@ impl PluginIntegrator {
         };
 
         // Collect components from all enabled plugins
-        let mut skill_dirs: Vec<PathBuf> = Vec::new();
+        let mut skill_dirs: Vec<(String, PathBuf)> = Vec::new();
         let mut hooks_defs: Vec<(
             String,
             String,
@@ -176,8 +176,11 @@ impl PluginIntegrator {
                 }
             };
 
-            // Collect skill dirs
-            skill_dirs.extend(resolved.skill_dirs.iter().cloned());
+            // Collect skill dirs, tagged with the owning plugin id so the
+            // wiring loop can `tag_source` them for grouped unload (P1-reload).
+            for d in &resolved.skill_dirs {
+                skill_dirs.push((plugin_id.clone(), d.clone()));
+            }
 
             // Collect hooks
             if let Some(ref hooks_file) = resolved.hooks_file
@@ -232,10 +235,14 @@ impl PluginIntegrator {
             }
         }
 
-        // Wire skills
-        for dir in &skill_dirs {
+        // Wire skills — load then tag each batch with its owning plugin id so
+        // `SkillRegistry::unregister_by_source("plugin:{id}")` can remove them
+        // on disable/uninstall (P1-reload).
+        for (plugin_id, dir) in &skill_dirs {
             match agent.load_skills_from_dir(dir).await {
                 Ok(names) => {
+                    let source_tag = format!("plugin:{plugin_id}");
+                    agent.skill_registry_mut().tag_source(&names, &source_tag);
                     result.skills_loaded.extend(names);
                 }
                 Err(e) => {
