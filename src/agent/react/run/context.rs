@@ -390,18 +390,22 @@ impl ReactAgent {
             HookEvent::TaskCreated => {
                 HookContext::for_task_created("", matcher.unwrap_or(""), &session_id, &agent_name)
             }
+            HookEvent::TaskStarted => {
+                HookContext::for_task_started("", matcher.unwrap_or(""), &session_id, &agent_name)
+            }
             HookEvent::TaskCompleted => HookContext::for_task_completed(
                 "",
                 matcher.unwrap_or(""),
                 "",
+                // Fallback mapping lacks a real terminal status; direct
+                // callers pass the actual status. Default Completed so this
+                // placeholder compiles without guessing.
+                echo_core::hooks::TaskTerminalStatus::Completed,
                 &session_id,
                 &agent_name,
             ),
             // New events — use generic lifecycle context
             HookEvent::PluginLoaded | HookEvent::PluginDisabled => {
-                HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
-            }
-            HookEvent::TaskTimeout | HookEvent::TaskCancelled => {
                 HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
             }
             // Evolution events — use dedicated factory methods

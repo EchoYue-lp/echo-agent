@@ -1750,7 +1750,14 @@ mod tests {
 
     #[test]
     fn test_matches_hook_task_completed() {
-        let ctx = HookContext::for_task_completed("t-1", "build API", "success", "", "");
+        let ctx = HookContext::for_task_completed(
+            "t-1",
+            "build API",
+            "success",
+            echo_core::hooks::TaskTerminalStatus::Completed,
+            "",
+            "",
+        );
         assert!(matches_hook("build API", &ctx));
         assert!(!matches_hook("deploy", &ctx));
     }

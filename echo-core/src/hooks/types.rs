@@ -71,6 +71,48 @@ impl SubagentStopStatus {
     }
 }
 
+// ── Task Terminal Status ────────────────────────────────────────────────
+
+/// Terminal status of a PlanTask node, carried by the `TaskCompleted` event.
+///
+/// Industry alignment: timeout/cancelled are status values on the terminal
+/// event, not independent event types (Codex `CommandExecutionStatus`; this
+/// avoids the "no carrier object" problem — `TodoStatus` has no Timeout/
+/// Cancelled variants, so firing them at the PlanTask layer was a category
+/// error). The values map 1:1 to EKO `TodoStatus` terminals plus a TimedOut
+/// reason for runs that end on a deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskTerminalStatus {
+    /// PlanTask finished successfully (all execution/review/integration gates passed).
+    Completed,
+    /// PlanTask failed terminally (retry budget exhausted or hard failure).
+    Failed,
+    /// PlanTask was cancelled (parent run cancelled before it ran).
+    Cancelled,
+    /// PlanTask hit a deadline / timeout.
+    TimedOut,
+    /// PlanTask was skipped (e.g. upstream dependency failed, or cancelled run).
+    Skipped,
+    /// PlanTask is blocked awaiting review/acceptance (non-terminal from the
+    /// graph view, but a stable resting state the hook consumer should see).
+    Blocked,
+}
+
+impl TaskTerminalStatus {
+    /// Stable wire name (serialized payload + logs).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Skipped => "skipped",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
 // ── Hook Event ─────────────────────────────────────────────────────────
 
 /// When a hook fires in the agent lifecycle.
@@ -129,9 +171,19 @@ pub enum HookEvent {
     SubagentStop,
 
     // ── Task events ──
-    /// Task created/scheduled.
+    // Three-stage task lifecycle aligned with industry (Codex item.started/
+    // item.completed; Cursor plan-submit vs build-start; Claude Code
+    // TaskCreated/TaskCompleted). TaskCreated = node enters the executable
+    // graph (plan revision committed); TaskStarted = scheduler picks the node
+    // and is about to dispatch; TaskCompleted = node reached a terminal state,
+    // carried on `task_terminal_status`. Timeout/Cancelled are NOT separate
+    // events — they are `TaskCompleted` status values (Codex
+    // CommandExecutionStatus model).
+    /// Task node entered the executable graph (plan revision committed).
     TaskCreated,
-    /// Task completed (success or failure).
+    /// Scheduler picked the task and is about to dispatch execution.
+    TaskStarted,
+    /// Task reached a terminal state (see `task_terminal_status`).
     TaskCompleted,
 
     // ── Error events ──
@@ -145,10 +197,13 @@ pub enum HookEvent {
     PluginDisabled,
 
     // ── Extended task events ──
-    /// Task execution timed out.
-    TaskTimeout,
-    /// Task was cancelled by the user or system.
-    TaskCancelled,
+    // TaskTimeout / TaskCancelled removed: terminal reasons are now
+    // `TaskCompleted` status values (see TaskTerminalStatus), not separate
+    // events. Industry-aligned (Codex CommandExecutionStatus; Claude Code
+    // lacks a TaskStarted but its TaskCompleted is terminal-agnostic). This
+    // avoids the former "no carrier object" problem — TodoStatus has no
+    // Timeout/Cancelled variants, so firing them at the PlanTask layer was a
+    // category error; they belong on the terminal event's status.
 
     // ── Extended subagent events ──
     // SubagentCancelled removed: the terminal model is now
@@ -188,10 +243,9 @@ impl HookEvent {
 
             HookEvent::SubagentStart | HookEvent::SubagentStop => HookEventCategory::Subagent,
 
-            HookEvent::TaskCreated
-            | HookEvent::TaskCompleted
-            | HookEvent::TaskTimeout
-            | HookEvent::TaskCancelled => HookEventCategory::Task,
+            HookEvent::TaskCreated | HookEvent::TaskStarted | HookEvent::TaskCompleted => {
+                HookEventCategory::Task
+            }
 
             HookEvent::StopFailure => HookEventCategory::Error,
 
@@ -259,12 +313,11 @@ impl HookEvent {
             HookEvent::SubagentStart => "SubagentStart",
             HookEvent::SubagentStop => "SubagentStop",
             HookEvent::TaskCreated => "TaskCreated",
+            HookEvent::TaskStarted => "TaskStarted",
             HookEvent::TaskCompleted => "TaskCompleted",
             HookEvent::StopFailure => "StopFailure",
             HookEvent::PluginLoaded => "PluginLoaded",
             HookEvent::PluginDisabled => "PluginDisabled",
-            HookEvent::TaskTimeout => "TaskTimeout",
-            HookEvent::TaskCancelled => "TaskCancelled",
             HookEvent::PostMemoryWrite => "PostMemoryWrite",
             HookEvent::MemoryLayerChange => "MemoryLayerChange",
             HookEvent::SkillCandidateDetected => "SkillCandidateDetected",
@@ -374,15 +427,41 @@ pub struct HookContext {
     pub subagent_stop_status: Option<SubagentStopStatus>,
 
     // ── Task fields ──
-    /// Task ID (TaskCreated, TaskCompleted only).
+    /// Task ID (TaskCreated, TaskStarted, TaskCompleted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    /// Task subject/name (TaskCreated, TaskCompleted only).
+    /// Task subject/name (TaskCreated, TaskStarted, TaskCompleted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_subject: Option<String>,
     /// Task result summary (TaskCompleted only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_result: Option<String>,
+    /// Terminal status of the PlanTask node (TaskCompleted only).
+    ///
+    /// Always present on TaskCompleted contexts. Lets consumers distinguish
+    /// completed/failed/cancelled/timed_out/skipped/blocked without parsing
+    /// free-form text. Replaces the former TaskTimeout/TaskCancelled events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_terminal_status: Option<TaskTerminalStatus>,
+
+    // ── Run / plan correlation fields ──
+    // These let a hook correlate a Task/Subagent event back to the owning
+    // TaskRun, the plan revision, and the specific attempt. They are optional
+    // because the framework layer (which defines HookContext) does not always
+    // know them — application runtimes (e.g. EKO task_runtime) populate them
+    // at fire time.
+    /// Owning TaskRun ID (Task/Subagent events when known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Plan revision the event belongs to (Task/Subagent events when known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_revision: Option<String>,
+    /// SubagentRun ID (Subagent events only): `{run_id}:{task_id}:{rev}:{attempt}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_run_id: Option<String>,
+    /// 1-based attempt ordinal for this task's SubagentRun (Subagent events).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
 
     // ── StopFailure fields ──
     /// Error message (StopFailure only).
@@ -441,6 +520,11 @@ impl Default for HookContext {
             task_id: None,
             task_subject: None,
             task_result: None,
+            task_terminal_status: None,
+            run_id: None,
+            plan_revision: None,
+            subagent_run_id: None,
+            attempt: None,
             failure_error: None,
             failure_category: None,
             stop_hook_active: None,
@@ -775,10 +859,34 @@ impl HookContext {
         }
     }
 
+    /// Create context for TaskStarted (scheduler picked the task, about to dispatch).
+    pub fn for_task_started(
+        task_id: &str,
+        task_subject: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::TaskStarted,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(task_subject.to_string()),
+            task_id: Some(task_id.to_string()),
+            task_subject: Some(task_subject.to_string()),
+            ..Self::default()
+        }
+    }
+
+    /// Create context for TaskCompleted (terminal state).
+    ///
+    /// `status` is the structured terminal reason (completed/failed/cancelled/
+    /// timed_out/skipped/blocked), replacing the former TaskTimeout/Cancelled
+    /// independent events.
     pub fn for_task_completed(
         task_id: &str,
         task_subject: &str,
         result: &str,
+        status: TaskTerminalStatus,
         session_id: &str,
         agent_name: &str,
     ) -> Self {
@@ -790,6 +898,7 @@ impl HookContext {
             task_id: Some(task_id.to_string()),
             task_subject: Some(task_subject.to_string()),
             task_result: Some(result.to_string()),
+            task_terminal_status: Some(status),
             ..Self::default()
         }
     }
@@ -1263,5 +1372,49 @@ mod tests {
         );
         assert_eq!(ctx.event, HookEvent::SubagentStop);
         assert_eq!(ctx.subagent_stop_status, Some(SubagentStopStatus::TimedOut));
+    }
+
+    #[test]
+    fn test_task_terminal_status_serde_and_str() {
+        // Timeout/Cancelled are status values, not separate events.
+        for (status, expected) in [
+            (TaskTerminalStatus::Completed, "completed"),
+            (TaskTerminalStatus::Failed, "failed"),
+            (TaskTerminalStatus::Cancelled, "cancelled"),
+            (TaskTerminalStatus::TimedOut, "timed_out"),
+            (TaskTerminalStatus::Skipped, "skipped"),
+            (TaskTerminalStatus::Blocked, "blocked"),
+        ] {
+            assert_eq!(status.as_str(), expected);
+            let json = serde_json::to_string(&status).unwrap_or_default();
+            assert_eq!(json, format!("\"{expected}\""));
+        }
+    }
+
+    #[test]
+    fn test_three_stage_task_lifecycle_factories() {
+        // TaskCreated → TaskStarted → TaskCompleted(status)
+        let created = HookContext::for_task_created("t-1", "build API", "sess-1", "agent");
+        assert_eq!(created.event, HookEvent::TaskCreated);
+        assert_eq!(created.task_id.as_deref(), Some("t-1"));
+        assert_eq!(created.task_terminal_status, None);
+
+        let started = HookContext::for_task_started("t-1", "build API", "sess-1", "agent");
+        assert_eq!(started.event, HookEvent::TaskStarted);
+        assert_eq!(started.task_id.as_deref(), Some("t-1"));
+
+        let completed = HookContext::for_task_completed(
+            "t-1",
+            "build API",
+            "ok",
+            TaskTerminalStatus::Completed,
+            "sess-1",
+            "agent",
+        );
+        assert_eq!(completed.event, HookEvent::TaskCompleted);
+        assert_eq!(
+            completed.task_terminal_status,
+            Some(TaskTerminalStatus::Completed)
+        );
     }
 }

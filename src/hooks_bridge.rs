@@ -20,7 +20,7 @@
 //! traits directly. The bridges ensure that YAML-configured hooks also
 //! see these lifecycle events.
 
-use echo_core::hooks::{HookContext, HookEvent};
+use echo_core::hooks::HookContext;
 use echo_execution::skills::hooks::HookRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -52,24 +52,58 @@ impl TaskHookBridge {
         }
     }
 
-    /// Fire a task lifecycle event in the central hook registry.
-    async fn fire_event(&self, event: HookEvent, _task_id: &str, task_subject: &str) {
-        let ctx =
-            HookContext::for_lifecycle(event, task_subject, &self.session_id, &self.agent_name);
+    /// Fire TaskCreated — a task node entered the executable graph.
+    ///
+    /// For the framework `TaskExecutor`, task creation coincides with enqueue,
+    /// so this maps to the enqueue moment. For application runtimes (EKO
+    /// task_runtime), this should fire at plan-revision-commit time (where the
+    /// PlanTask is actually created), NOT at execute_task before.
+    pub async fn on_created(&self, task_id: &str, task_subject: &str) {
+        let ctx = HookContext::for_task_created(
+            task_id,
+            task_subject,
+            &self.session_id,
+            &self.agent_name,
+        );
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
     }
 
-    /// Fire TaskCreated event (maps to before_execute).
+    /// Fire TaskStarted — the scheduler picked the task and is about to
+    /// execute. This is the framework `TaskHooks::before_execute` mapping.
     pub async fn on_before_execute(&self, task_id: &str, task_subject: &str) {
-        self.fire_event(HookEvent::TaskCreated, task_id, task_subject)
-            .await;
+        let ctx = HookContext::for_task_started(
+            task_id,
+            task_subject,
+            &self.session_id,
+            &self.agent_name,
+        );
+        let registry = self.hook_registry.read().await;
+        let _ = registry.run_lifecycle_hooks(&ctx).await;
     }
 
-    /// Fire TaskCompleted event (maps to after_execute).
-    pub async fn on_after_execute(&self, task_id: &str, task_subject: &str) {
-        self.fire_event(HookEvent::TaskCompleted, task_id, task_subject)
-            .await;
+    /// Fire TaskCompleted — the task reached a terminal state.
+    ///
+    /// `status` is the structured terminal reason. The former separate
+    /// `TaskTimeout`/`TaskCancelled` events are gone — timeout/cancelled are
+    /// `status` values here (industry-aligned: Codex CommandExecutionStatus).
+    pub async fn on_after_execute(
+        &self,
+        task_id: &str,
+        task_subject: &str,
+        result: &str,
+        status: echo_core::hooks::TaskTerminalStatus,
+    ) {
+        let ctx = HookContext::for_task_completed(
+            task_id,
+            task_subject,
+            result,
+            status,
+            &self.session_id,
+            &self.agent_name,
+        );
+        let registry = self.hook_registry.read().await;
+        let _ = registry.run_lifecycle_hooks(&ctx).await;
     }
 
     /// Fire StopFailure event (maps to on_failure).
@@ -78,18 +112,6 @@ impl TaskHookBridge {
             HookContext::for_stop_failure(task_subject, error, &self.session_id, &self.agent_name);
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
-    }
-
-    /// Fire TaskTimeout event.
-    pub async fn on_timeout(&self, task_id: &str, task_subject: &str) {
-        self.fire_event(HookEvent::TaskTimeout, task_id, task_subject)
-            .await;
-    }
-
-    /// Fire TaskCancelled event.
-    pub async fn on_cancelled(&self, task_id: &str, task_subject: &str) {
-        self.fire_event(HookEvent::TaskCancelled, task_id, task_subject)
-            .await;
     }
 }
 
@@ -198,14 +220,21 @@ impl BridgedTaskHooks {
 #[async_trait::async_trait]
 impl echo_orchestration::tasks::TaskHooks for BridgedTaskHooks {
     async fn before_execute(&self, ctx: &echo_orchestration::tasks::TaskHookContext) {
+        // before_execute = scheduler picked the task → TaskStarted.
         self.bridge
             .on_before_execute(&ctx.task.id, &ctx.task.subject)
             .await;
     }
 
-    async fn after_execute(&self, ctx: &echo_orchestration::tasks::TaskHookContext, _result: &str) {
+    async fn after_execute(&self, ctx: &echo_orchestration::tasks::TaskHookContext, result: &str) {
+        // after_execute is the framework executor's success path → TaskCompleted(Completed).
         self.bridge
-            .on_after_execute(&ctx.task.id, &ctx.task.subject)
+            .on_after_execute(
+                &ctx.task.id,
+                &ctx.task.subject,
+                result,
+                echo_core::hooks::TaskTerminalStatus::Completed,
+            )
             .await;
     }
 
@@ -214,8 +243,18 @@ impl echo_orchestration::tasks::TaskHooks for BridgedTaskHooks {
         ctx: &echo_orchestration::tasks::TaskHookContext,
         error: &str,
     ) -> echo_orchestration::tasks::RetryDecision {
+        // Failure fires StopFailure (observability) AND TaskCompleted(Failed)
+        // so consumers listening only on the terminal event still see it.
         self.bridge
             .on_failure(&ctx.task.id, &ctx.task.subject, error)
+            .await;
+        self.bridge
+            .on_after_execute(
+                &ctx.task.id,
+                &ctx.task.subject,
+                error,
+                echo_core::hooks::TaskTerminalStatus::Failed,
+            )
             .await;
         echo_orchestration::tasks::RetryDecision::Fail
     }
@@ -224,15 +263,27 @@ impl echo_orchestration::tasks::TaskHooks for BridgedTaskHooks {
         &self,
         ctx: &echo_orchestration::tasks::TaskHookContext,
     ) -> echo_orchestration::tasks::RetryDecision {
+        // Timeout → TaskCompleted(TimedOut). No separate TaskTimeout event.
         self.bridge
-            .on_timeout(&ctx.task.id, &ctx.task.subject)
+            .on_after_execute(
+                &ctx.task.id,
+                &ctx.task.subject,
+                "timed out",
+                echo_core::hooks::TaskTerminalStatus::TimedOut,
+            )
             .await;
         echo_orchestration::tasks::RetryDecision::Fail
     }
 
     async fn on_cancelled(&self, ctx: &echo_orchestration::tasks::TaskHookContext) {
+        // Cancelled → TaskCompleted(Cancelled). No separate TaskCancelled event.
         self.bridge
-            .on_cancelled(&ctx.task.id, &ctx.task.subject)
+            .on_after_execute(
+                &ctx.task.id,
+                &ctx.task.subject,
+                "cancelled",
+                echo_core::hooks::TaskTerminalStatus::Cancelled,
+            )
             .await;
     }
 }
@@ -275,14 +326,39 @@ mod tests {
             "agent-1".to_string(),
         );
 
-        // These should not panic even with an empty registry
+        // Three-stage task lifecycle: created (graph entry) → started
+        // (scheduler pick) → completed (terminal, with status). The former
+        // on_timeout/on_cancelled are now on_after_execute(status).
+        bridge.on_created("task-1", "Build project").await;
         bridge.on_before_execute("task-1", "Build project").await;
-        bridge.on_after_execute("task-1", "Build project").await;
+        bridge
+            .on_after_execute(
+                "task-1",
+                "Build project",
+                "ok",
+                echo_core::hooks::TaskTerminalStatus::Completed,
+            )
+            .await;
         bridge
             .on_failure("task-1", "Build project", "compile error")
             .await;
-        bridge.on_timeout("task-1", "Build project").await;
-        bridge.on_cancelled("task-1", "Build project").await;
+        // Verify timeout/cancelled reach consumers as TaskCompleted status.
+        bridge
+            .on_after_execute(
+                "task-1",
+                "Build project",
+                "deadline exceeded",
+                echo_core::hooks::TaskTerminalStatus::TimedOut,
+            )
+            .await;
+        bridge
+            .on_after_execute(
+                "task-1",
+                "Build project",
+                "aborted",
+                echo_core::hooks::TaskTerminalStatus::Cancelled,
+            )
+            .await;
     }
 
     #[tokio::test]

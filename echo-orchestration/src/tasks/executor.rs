@@ -985,6 +985,7 @@ impl TaskExecutor {
                             &task_id,
                             &task.subject,
                             &output,
+                            echo_core::hooks::TaskTerminalStatus::Completed,
                             "", // session_id not available at this layer
                             "", // agent_name not available at this layer
                         );
@@ -1112,6 +1113,7 @@ impl TaskExecutor {
                             &task_id,
                             &task.subject,
                             &format!("error: {}", error_str),
+                            echo_core::hooks::TaskTerminalStatus::Failed,
                             "", // session_id not available at this layer
                             "", // agent_name not available at this layer
                         );
