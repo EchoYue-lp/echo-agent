@@ -463,6 +463,86 @@ impl HookRegistry {
         );
     }
 
+    /// Register hooks contributed by an installed plugin.
+    ///
+    /// This is the plugin-source counterpart of [`register`](Self::register):
+    /// it stores the definition under [`HookSource::Plugin`] so plugin hooks
+    /// keep a distinct source identity from skill and user-config hooks (audit
+    /// P0-2). Previously plugin hooks were filed under
+    /// `HookSource::Skill("plugin:…")`, which (1) never exercised the
+    /// `HookSource::Plugin` variant and (2) made plugin hooks indistinguishable
+    /// from skill hooks in `list_sources` / hot-reload source replacement.
+    ///
+    /// Every action is validated up front (see [`HookAction::validate`]);
+    /// invalid actions are logged and dropped rather than aborting the whole
+    /// plugin (a single malformed hook should not poison a plugin's other
+    /// components). Re-registering the same plugin replaces its prior
+    /// definition, enabling rebuild-on-reload without manual unregister.
+    pub fn register_plugin_hooks(
+        &mut self,
+        plugin_name: &str,
+        source_dir: &str,
+        definition: HooksDefinition,
+    ) {
+        if definition.is_empty() {
+            return;
+        }
+        // Validate every action; collect a clean definition containing only
+        // valid actions (mirrors the per-action leniency of `add_rules`).
+        let mut clean = HooksDefinition::default();
+        let mut skipped = 0usize;
+        let total = definition.rules.values().map(|v| v.len()).sum::<usize>();
+        for (event, rules) in definition.rules {
+            let mut kept_rules = Vec::with_capacity(rules.len());
+            for mut rule in rules {
+                let mut kept_actions = Vec::with_capacity(rule.hooks.len());
+                for action in rule.hooks.drain(..) {
+                    match action.validate() {
+                        Ok(()) => kept_actions.push(action),
+                        Err(e) => {
+                            warn!(
+                                plugin = plugin_name,
+                                ?event,
+                                error = %e,
+                                "Invalid plugin hook action skipped"
+                            );
+                            skipped += 1;
+                        }
+                    }
+                }
+                if !kept_actions.is_empty() {
+                    rule.hooks = kept_actions;
+                    kept_rules.push(rule);
+                }
+            }
+            if !kept_rules.is_empty() {
+                clean.rules.insert(event, kept_rules);
+            }
+        }
+        if clean.is_empty() {
+            warn!(
+                plugin = plugin_name,
+                total,
+                skipped,
+                "Plugin registered no valid hooks after validation; nothing registered"
+            );
+            return;
+        }
+        info!(
+            plugin = plugin_name,
+            rule_count = clean.rules.values().map(|v| v.len()).sum::<usize>(),
+            skipped,
+            "Registered plugin hooks"
+        );
+        self.sources.insert(
+            HookSource::Plugin(plugin_name.to_string()),
+            RegisteredHook {
+                definition: clean,
+                source_dir: source_dir.to_string(),
+            },
+        );
+    }
+
     /// Unregister hooks from a specific source.
     pub fn unregister(&mut self, source: &HookSource) -> bool {
         self.sources.remove(source).is_some()
@@ -1698,6 +1778,83 @@ mod tests {
         assert!(!def.is_empty());
         assert_eq!(def.rules_for(HookEvent::PreToolUse).len(), 1);
         assert_eq!(def.rules_for(HookEvent::PostToolUse).len(), 0);
+    }
+
+    #[test]
+    fn test_register_plugin_hooks_distinct_source() {
+        // P0-2: plugin hooks must register under HookSource::Plugin, not be
+        // collapsed into HookSource::Skill. Verify the source identity shows up
+        // distinctly in list_sources.
+        let mut registry = HookRegistry::new();
+        let mut def = HooksDefinition::default();
+        def.add_rules(
+            HookEvent::PreToolUse,
+            vec![HookRule {
+                matcher: "Bash".into(),
+                hooks: vec![HookAction::Prompt {
+                    prompt: "audit plugin".into(),
+                }],
+            }],
+        );
+
+        registry.register_plugin_hooks("data-analysis-pack", "/plugins/data", def);
+
+        let sources = registry.list_sources();
+        // Should appear as plugin:data-analysis-pack, never as skill:plugin:...
+        assert!(
+            sources
+                .iter()
+                .any(|(name, _)| name == "plugin:data-analysis-pack"),
+            "plugin hook source must be plugin-prefixed, got {sources:?}"
+        );
+        assert!(
+            !sources
+                .iter()
+                .any(|(name, _)| name.starts_with("skill:plugin:")),
+            "plugin hook must not be filed as skill source, got {sources:?}"
+        );
+    }
+
+    #[test]
+    fn test_register_plugin_hooks_drops_invalid_actions() {
+        // P0-2: an invalid action is dropped, valid siblings survive, and the
+        // plugin is still registered under the plugin source.
+        let mut registry = HookRegistry::new();
+        let mut def = HooksDefinition::default();
+        def.add_rules(
+            HookEvent::PostToolUse,
+            vec![HookRule {
+                matcher: "*".into(),
+                hooks: vec![
+                    // valid
+                    HookAction::Prompt {
+                        prompt: "keep".into(),
+                    },
+                    // invalid: empty command
+                    HookAction::Command {
+                        command: String::new(),
+                        shell: None,
+                        timeout: 10,
+                    },
+                ],
+            }],
+        );
+
+        registry.register_plugin_hooks("mixed-plugin", "/p", def);
+        let sources = registry.list_sources();
+        assert!(
+            sources
+                .iter()
+                .any(|(name, count)| name == "plugin:mixed-plugin" && *count == 1),
+            "valid sibling rule should survive (1 rule), got {sources:?}"
+        );
+    }
+
+    #[test]
+    fn test_register_plugin_hooks_empty_noop() {
+        let mut registry = HookRegistry::new();
+        registry.register_plugin_hooks("empty-plugin", "/p", HooksDefinition::default());
+        assert!(registry.is_empty(), "empty definition must not register");
     }
 
     #[test]

@@ -21,7 +21,8 @@
 pub use echo_core::plugin::{
     InstallSource, PluginAuthor, PluginCapability, PluginComponents, PluginDependency, PluginEntry,
     PluginId, PluginLifecycle, PluginManifest, PluginRegistry, PluginScope, PluginUserConfigEntry,
-    PluginUserConfigType, PluginVariables, ResolvedComponents,
+    PluginUserConfigType, PluginVariables, ResolvedComponents, plugin_data_base_dir,
+    set_plugin_data_base_dir, set_plugin_data_base_dir_name,
 };
 
 use std::path::PathBuf;
@@ -168,11 +169,14 @@ impl PluginIntegrator {
             }
         }
 
-        // Wire hooks
+        // Wire hooks — use the plugin-source registration path so hooks carry
+        // `HookSource::Plugin(name)`, distinct from skill/user-config sources
+        // (audit P0-2). Previously this filed plugin hooks under
+        // `HookSource::Skill("plugin:…")`, collapsing source identity.
         {
             let mut hook_reg = agent.hook_registry().write().await;
             for (plugin_name, source_dir, def) in &hooks_defs {
-                hook_reg.register(&format!("plugin:{plugin_name}"), source_dir, def.clone());
+                hook_reg.register_plugin_hooks(plugin_name, source_dir, def.clone());
                 result.hooks_registered.push(plugin_name.clone());
             }
         }
@@ -226,7 +230,7 @@ impl PluginIntegrator {
     ) {
         let mut registry = agent.hook_registry().write().await;
         for (plugin_name, source_dir, def) in hooks {
-            registry.register(&format!("plugin:{plugin_name}"), source_dir, def.clone());
+            registry.register_plugin_hooks(plugin_name, source_dir, def.clone());
         }
     }
 

@@ -47,7 +47,9 @@ impl PluginVariables {
 
     /// Get the persistent data directory path for a named plugin.
     ///
-    /// Located at `~/.echo-agent/plugins/data/{plugin-name}/`.
+    /// Located at `<plugin_base>/plugins/data/{plugin-name}/` (default
+    /// `~/.echo-agent/plugins/data/...`; app-overridable via
+    /// [`super::set_plugin_data_base_dir`]).
     pub fn data_dir_for(plugin_name: &str) -> PathBuf {
         let sanitized = plugin_name
             .chars()
@@ -60,14 +62,7 @@ impl PluginVariables {
             })
             .collect::<String>();
 
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("~"));
-
-        home.join(".echo-agent")
-            .join("plugins")
-            .join("data")
-            .join(sanitized)
+        super::plugins_child("data").join(sanitized)
     }
 
     /// Substitute all variables in a string.

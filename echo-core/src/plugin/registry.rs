@@ -75,12 +75,13 @@ pub struct PluginRegistry {
 
 impl PluginRegistry {
     /// Create a new registry with the default state file location.
+    ///
+    /// State and data paths resolve under the configurable plugin base dir
+    /// ([`super::plugin_data_base_dir`], default `~/.echo-agent`); applications
+    /// override it at startup via [`super::set_plugin_data_base_dir`] so plugin
+    /// data co-locates with their brand directory (e.g. `~/.eko`).
     pub fn new(project_root: Option<PathBuf>) -> Self {
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("~"));
-
-        let base = home.join(".echo-agent");
+        let base = super::plugin_data_base_dir();
         let state_file = base.join("plugins").join("registry.json");
         let data_dir = base.join("plugins").join("data");
 

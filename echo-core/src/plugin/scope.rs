@@ -2,9 +2,9 @@
 //!
 //! | Scope | Path | Use case |
 //! |-------|------|----------|
-//! | `User` | `~/.echo-agent/plugins/` | Personal plugins |
-//! | `Project` | `.echo-agent/plugins/` | Team-shared via VCS |
-//! | `Local` | `.echo-agent/plugins.local/` | Project-private, gitignored |
+//! | `User` | `<plugin_base>/plugins/` (default `~/.echo-agent/plugins/`, app-overridable) | Personal plugins |
+//! | `Project` | `.echo-agent/plugins/` (project root) | Team-shared via VCS |
+//! | `Local` | `.echo-agent/plugins.local/` (project root) | Project-private, gitignored |
 
 use std::path::{Path, PathBuf};
 
@@ -26,15 +26,18 @@ pub enum PluginScope {
 impl PluginScope {
     /// Resolve the filesystem path for this scope.
     ///
-    /// - `User`: `~/.echo-agent/plugins/`
+    /// - `User`: `<plugin_base>/plugins/` (default `~/.echo-agent/plugins/`,
+    ///   overridable via [`super::set_plugin_data_base_dir`])
     /// - `Project`: `<project_root>/.echo-agent/plugins/`
     /// - `Local`: `<project_root>/.echo-agent/plugins.local/`
+    ///
+    /// Project/Local scopes intentionally stay `.echo-agent` regardless of the
+    /// user-scope override: they are workspace-relative convention directories,
+    /// not user-data directories, and team-shared plugins committed to VCS must
+    /// land at a stable path independent of any one developer's brand setting.
     pub fn resolve_dir(&self, project_root: Option<&Path>) -> PathBuf {
         match self {
-            Self::User => {
-                let home = dirs_or_default();
-                home.join(".echo-agent").join("plugins")
-            }
+            Self::User => super::plugins_dir(),
             Self::Project => {
                 let root = project_root.unwrap_or_else(|| Path::new("."));
                 root.join(".echo-agent").join("plugins")
@@ -118,13 +121,6 @@ impl std::fmt::Display for InstallSource {
             }
         }
     }
-}
-
-/// Get the user's home directory, falling back to `~` expansion.
-fn dirs_or_default() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("~"))
 }
 
 #[cfg(test)]
