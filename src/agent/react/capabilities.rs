@@ -324,6 +324,37 @@ impl ReactAgent {
         }
     }
 
+    /// Register a subagent **definition only** — no instance and no factory.
+    ///
+    /// This is the discovery / late-binding entry point used by the plugin
+    /// integrator and team-mode topologies: a definition becomes visible to
+    /// `list_available`, `agent_names`, and the dispatch catalog before any
+    /// executable instance exists. The application layer (which owns the
+    /// prompt-compiler / tool-filter / sandbox wiring needed to build a real
+    /// `ReactAgent` instance) later supplies the instance via
+    /// [`register_subagent_with_definition`](Self::register_subagent_with_definition)
+    /// or [`register_subagent_factory`](Self::register_subagent_factory)
+    /// under the same name, overwriting the definition.
+    ///
+    /// Dispatching a definition registered this way **without** subsequently
+    /// providing an instance will fail at execution time (no agent to run).
+    #[cfg(feature = "subagent")]
+    pub fn register_subagent_definition(&mut self, def: SubagentDefinition) {
+        let name = def.name.clone();
+        let inserted = self
+            .tools
+            .subagent_registry
+            .register_definition_sync(def.clone());
+        if inserted {
+            self.update_dispatch_catalog(&def);
+            info!(
+                agent = %self.config.agent_name,
+                subagent = %name,
+                "Subagent definition registered (late-binding, no instance)"
+            );
+        }
+    }
+
     /// Register a factory used to create an independent agent for each isolated dispatch.
     #[cfg(feature = "subagent")]
     pub fn register_subagent_factory(

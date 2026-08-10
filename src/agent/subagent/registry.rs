@@ -201,6 +201,48 @@ impl SubagentRegistry {
         }
     }
 
+    /// Register a **definition only** — no agent instance and no factory.
+    ///
+    /// This is the late-binding / discovery path used by plugin integrators
+    /// and team-mode topologies: the definition becomes discoverable
+    /// (`list_available`, `agent_names`, dispatch catalog) before any
+    /// executable instance exists. A later call to
+    /// [`register`](Self::register) / [`register_sync`](Self::register_sync)
+    /// / [`register_factory`](Self::register_factory) under the same name
+    /// supplies (or lazily produces) the instance, overwriting the definition.
+    ///
+    /// Dispatching a definition registered this way **without** subsequently
+    /// providing an instance will fail at execution time (no agent to run) —
+    /// this is intentional, so callers cannot silently get a no-op agent.
+    ///
+    /// Returns `true` if inserted (always, under uncontended locks).
+    pub async fn register_definition(&self, def: SubagentDefinition) -> bool {
+        let name = def.name.clone();
+        debug!(subagent = %name, "Registering subagent definition (no instance)");
+        let mut defs = self.definitions.write().await;
+        defs.insert(name, def);
+        true
+    }
+
+    /// Sync variant of [`register_definition`](Self::register_definition).
+    ///
+    /// Uses `try_write` to avoid `block_on` deadlock from synchronous
+    /// contexts (e.g. `PluginIntegrator::wire_all` collection phase).
+    /// Logs a warning and returns `false` on lock contention.
+    pub fn register_definition_sync(&self, def: SubagentDefinition) -> bool {
+        let name = def.name.clone();
+        match self.definitions.try_write() {
+            Ok(mut defs) => {
+                defs.insert(name, def);
+                true
+            }
+            Err(error) => {
+                warn!(subagent = %name, %error, "Cannot register subagent definition");
+                false
+            }
+        }
+    }
+
     /// Register a definition factory while constructing an agent synchronously.
     pub fn register_factory_sync(
         &self,
@@ -530,6 +572,64 @@ mod tests {
 
         let names = registry.agent_names().await;
         assert_eq!(names, vec!["x"]);
+    }
+
+    #[tokio::test]
+    async fn test_register_definition_only_makes_definition_discoverable() {
+        // Definition-only registration (no instance, no factory) is the
+        // late-binding path used by the plugin integrator. The definition
+        // must be discoverable, but no agent instance may exist yet.
+        let registry = SubagentRegistry::new();
+        let def = SubagentDefinition::new("plugin_agent", "Plugin-defined agent");
+
+        let inserted = registry.register_definition(def).await;
+        assert!(inserted);
+
+        assert!(registry.contains("plugin_agent").await);
+        let available = registry.list_available().await;
+        assert!(available.iter().any(|d| d.name == "plugin_agent"));
+        assert_eq!(
+            registry.agent_names().await,
+            vec!["plugin_agent".to_string()]
+        );
+
+        // No instance: get_agent must return None (no factory to invoke).
+        let registered = registry.get("plugin_agent").await.unwrap();
+        assert!(!registered.has_instance);
+        assert!(registry.get_agent("plugin_agent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_definition_then_promote_to_instance() {
+        // A later register() under the same name supplies the instance,
+        // overwriting the definition — this is how the application layer
+        // hydrates a plugin-discovered definition with a real agent.
+        let registry = SubagentRegistry::new();
+        registry
+            .register_definition(SubagentDefinition::new("hydrated", "H"))
+            .await;
+        assert!(!registry.get("hydrated").await.unwrap().has_instance);
+
+        registry
+            .register(
+                SubagentDefinition::new("hydrated", "Hydrated"),
+                Box::new(MockAgent::new("hydrated")),
+            )
+            .await;
+
+        let registered = registry.get("hydrated").await.unwrap();
+        assert!(registered.has_instance);
+        assert_eq!(registered.definition.description, "Hydrated");
+    }
+
+    #[test]
+    fn test_register_definition_sync_inserts_under_uncontended_locks() {
+        let registry = SubagentRegistry::new();
+        let inserted = registry.register_definition_sync(SubagentDefinition::new("sync", "S"));
+        assert!(inserted);
+        // try_read is fine here — we just inserted, no async contention.
+        let defs = registry.definitions.try_read().unwrap();
+        assert!(defs.contains_key("sync"));
     }
 
     #[tokio::test]
