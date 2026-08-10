@@ -47,11 +47,23 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 
 #### Subagent 事件（matcher = subagent 名称/类型）
 
-| 事件 | 触发时机 |
-|------|---------|
-| `SubagentStart` | 子代理调度前 |
-| `SubagentStop` | 子代理完成后 |
-| `SubagentCancelled` | 子代理被取消时 |
+业界归一模型(Claude Code / Codex / OpenAI Agents SDK / AGTP):两个边界事件 + 终态 status 枚举,无独立 Cancelled 事件。
+
+| 事件 | 触发时机 | Context |
+|------|---------|---------|
+| `SubagentStart` | 子代理调度前 | name/mode/task |
+| `SubagentStop` | 子代理到达终态(始终只发一次) | name/mode/result + `subagent_stop_status` |
+
+`SubagentStop` 的 `subagent_stop_status` 取值(穷尽终态):
+
+| status | 含义 |
+|--------|------|
+| `completed` | 正常结束,有产出 |
+| `failed` | 报错/异常退出 |
+| `cancelled` | 被外部取消(用户 Esc / 父 run 取消) |
+| `timed_out` | 触发 deadline/timeout |
+
+> 注:旧的 `SubagentCancelled` 独立事件已删除 —— cancelled 现在是 `SubagentStop` 的一个 status 值。emission owner 是 `SubagentExecutor`(经 `unified_hook_executor`),在成功/失败/取消/超时四条 return 路径的汇聚点发一次,保证 exactly-once。
 
 #### Task 事件（matcher = task subject/name）
 
