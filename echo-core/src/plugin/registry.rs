@@ -578,14 +578,30 @@ impl PluginRegistry {
             in_degree.entry(id.as_str()).or_insert(0);
         }
 
-        // Build edges
+        // Build edges + enforce version constraints
         for (id, entry) in &self.plugins {
             for dep in &entry.manifest.dependencies {
                 let dep_name = dep.name();
-                if !self.plugins.contains_key(dep_name) {
-                    return Err(format!(
-                        "Plugin '{id}' depends on '{dep_name}' which is not installed"
-                    ));
+                let dep_entry = self.plugins.get(dep_name).ok_or_else(|| {
+                    format!("Plugin '{id}' depends on '{dep_name}' which is not installed")
+                })?;
+                // Enforce the declared version constraint (P1 — previously the
+                // name-exists check ignored version entirely, so any version
+                // satisfied the dependency).
+                match dep.satisfies(&dep_entry.manifest.version) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(format!(
+                            "Plugin '{id}' requires '{dep_name} {}' but installed version is '{}'",
+                            dep.version_constraint().unwrap_or("any"),
+                            dep_entry.manifest.version
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Plugin '{id}' dependency '{dep_name}' version check failed: {e}"
+                        ));
+                    }
                 }
                 graph.entry(dep_name).or_default().push(id.as_str());
                 *in_degree.entry(id.as_str()).or_insert(0) += 1;

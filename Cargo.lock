@@ -1088,6 +1088,7 @@ dependencies = [
  "rand 0.9.4",
  "regex",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",

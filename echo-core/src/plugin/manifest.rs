@@ -268,6 +268,27 @@ impl PluginDependency {
             Self::Versioned { version, .. } => Some(version),
         }
     }
+
+    /// Check whether an installed plugin version satisfies this dependency's
+    /// version constraint (if any).
+    ///
+    /// - `Simple` deps accept any version.
+    /// - `Versioned` deps parse the constraint as a semver `VersionReq`
+    ///   (e.g. `">=1.0.0"`, `"^2"`, `"~1.2"`, `"*"`). `installed_version` is
+    ///   parsed as a semver `Version`. Both sides must parse; a malformed
+    ///   constraint or version is reported via the returned `Err` so callers
+    ///   can surface a clear validation error instead of silently passing.
+    pub fn satisfies(&self, installed_version: &str) -> Result<bool, String> {
+        let constraint = match self.version_constraint() {
+            None => return Ok(true),
+            Some(c) => c,
+        };
+        let req = semver::VersionReq::parse(constraint)
+            .map_err(|e| format!("invalid version constraint '{constraint}': {e}"))?;
+        let ver = semver::Version::parse(installed_version)
+            .map_err(|e| format!("invalid installed version '{installed_version}': {e}"))?;
+        Ok(req.matches(&ver))
+    }
 }
 
 // ── Validation ───────────────────────────────────────────────────────────
@@ -602,6 +623,46 @@ dependencies:
         assert_eq!(m.dependencies[0].version_constraint(), None);
         assert_eq!(m.dependencies[1].name(), "versioned-dep");
         assert_eq!(m.dependencies[1].version_constraint(), Some(">=2.0.0"));
+    }
+
+    #[test]
+    fn test_dependency_satisfies_semver() {
+        // Simple deps accept any version.
+        let simple = PluginDependency::Simple("base".into());
+        assert!(simple.satisfies("0.0.1").unwrap_or(false));
+        assert!(simple.satisfies("9.9.9").unwrap_or(false));
+
+        // Versioned deps enforce semver VersionReq.
+        let v = PluginDependency::Versioned {
+            name: "base".into(),
+            version: ">=1.0.0".into(),
+        };
+        assert!(v.satisfies("1.0.0").unwrap_or(false));
+        assert!(v.satisfies("2.5.0").unwrap_or(false));
+        assert!(!v.satisfies("0.9.0").unwrap_or(false));
+
+        // Caret constraint
+        let caret = PluginDependency::Versioned {
+            name: "base".into(),
+            version: "^2".into(),
+        };
+        assert!(caret.satisfies("2.0.0").unwrap_or(false));
+        assert!(caret.satisfies("2.9.9").unwrap_or(false));
+        assert!(!caret.satisfies("3.0.0").unwrap_or(false));
+
+        // Wildcard
+        let wild = PluginDependency::Versioned {
+            name: "base".into(),
+            version: "*".into(),
+        };
+        assert!(wild.satisfies("1.2.3").unwrap_or(false));
+
+        // Malformed constraint → Err
+        let bad = PluginDependency::Versioned {
+            name: "base".into(),
+            version: "not-a-constraint@@".into(),
+        };
+        assert!(bad.satisfies("1.0.0").is_err());
     }
 
     #[test]
