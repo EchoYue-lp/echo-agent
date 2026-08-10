@@ -181,6 +181,17 @@ impl BridgedTaskHooks {
     pub fn new(bridge: Arc<TaskHookBridge>) -> Self {
         Self { bridge }
     }
+
+    /// Borrow the inner `TaskHookBridge`.
+    ///
+    /// The `TaskHooks` trait impl (used by the framework `TaskExecutor`) only
+    /// fires via `TaskHookContext`. Application-layer runtimes that do not go
+    /// through the framework executor — e.g. EKO's `task_runtime` DAG
+    /// scheduler — can borrow this bridge and call the `(task_id, subject)`
+    /// methods directly at their own lifecycle points.
+    pub fn bridge(&self) -> &Arc<TaskHookBridge> {
+        &self.bridge
+    }
 }
 
 #[async_trait::async_trait]

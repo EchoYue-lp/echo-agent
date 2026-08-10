@@ -4,7 +4,7 @@
 
 Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架提供三套独立的 Hook 系统：
 
-1. **Skills Hooks** — 主 Hook 系统，支持 20 个事件和 5 种动作类型
+1. **Skills Hooks** — 主 Hook 系统，支持 33 个事件和 7 种动作类型
 2. **Task Hooks** — DAG 任务执行的生命周期回调
 3. **Subagent Hooks** — 子代理调度的生命周期回调
 
@@ -12,9 +12,13 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 
 ## Skills Hooks
 
-主 Hook 系统。通过 YAML 配置（`echo-agent.yaml` 或 SKILL.md frontmatter），由 `HookExecutor` 执行。
+主 Hook 系统。通过 YAML 配置（`echo-agent.yaml` 或 SKILL.md frontmatter），由 `HookRegistry` 统一分发执行。
 
 ### Hook 事件
+
+事件按类别分组，matcher 语义因类别而异（见 `HookEventCategory`）。权威定义见 `echo-core/src/hooks/types.rs`。
+
+#### 工具事件（matcher = 工具名）
 
 | 事件 | 触发时机 | 可修改内容 |
 |------|---------|-----------|
@@ -23,10 +27,14 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 | `PostToolUseFailure` | 工具失败后 | 错误反馈 |
 | `PermissionRequest` | 权限对话框出现时 | 自动批准/拒绝 |
 | `PermissionDenied` | 权限被拒绝时 | 重试信号 |
+
+#### 会话生命周期事件（matcher = lifecycle hint）
+
+| 事件 | 触发时机 | 可修改内容 |
+|------|---------|-----------|
 | `SessionStart` | 会话开始或恢复时 | 上下文注入 |
 | `SessionEnd` | 会话终止时 | 清理 |
 | `Stop` | Agent 完成响应时 | 继续原因 |
-| `StopFailure` | Agent 遇到不可恢复错误时 | 告警/恢复 |
 | `Notification` | Agent 需要用户注意时 | 权限快捷方式 |
 | `UserPromptSubmit` | 用户提交 prompt 时 | 上下文注入、阻止 |
 | `PreCompact` | 上下文压缩前 | 上下文注入 |
@@ -34,20 +42,70 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 | `ConfigChange` | 配置文件变更时 | 阻止/重载 |
 | `InstructionsLoaded` | 技能/指令加载后 | 加载后验证 |
 | `PostToolBatch` | 并行工具调用批次完成后 | 聚合 |
-| `SubagentStart` | 子代理调度前 | 上下文注入 |
-| `SubagentStop` | 子代理完成后 | 结果注入 |
-| `TaskCreated` | 任务创建/调度时 | 上下文注入 |
-| `TaskCompleted` | 任务完成时 | 结果注入 |
+| `PluginLoaded` | 插件加载并注册组件后 | — |
+| `PluginDisabled` | 插件禁用/卸载后 | — |
 
-### Hook 类型
+#### Subagent 事件（matcher = subagent 名称/类型）
+
+| 事件 | 触发时机 |
+|------|---------|
+| `SubagentStart` | 子代理调度前 |
+| `SubagentStop` | 子代理完成后 |
+| `SubagentCancelled` | 子代理被取消时 |
+
+#### Task 事件（matcher = task subject/name）
+
+| 事件 | 触发时机 |
+|------|---------|
+| `TaskCreated` | 任务创建/调度时 |
+| `TaskCompleted` | 任务完成时 |
+| `TaskTimeout` | 任务执行超时 |
+| `TaskCancelled` | 任务被用户/系统取消 |
+
+#### 错误事件（不支持 matcher）
+
+| 事件 | 触发时机 |
+|------|---------|
+| `StopFailure` | Agent 遇到不可恢复错误时 |
+
+#### Evolution 事件（matcher = memory source / layer）
+
+| 事件 | 触发时机 |
+|------|---------|
+| `PostMemoryWrite` | 任意记忆写入 Store 后 |
+| `MemoryLayerChange` | 记忆在层间升/降级后 |
+| `SkillCandidateDetected` | 从记忆模式检测到技能候选后 |
+| `SkillLifecycleTransition` | 技能在生命周期状态间转换后 |
+| `SkillHealthCheck` | 技能健康检查完成后 |
+| `SkillPatchApplied` | 技能补丁应用后 |
+| `SkillMergeApplied` | 两个或更多技能合并后 |
+| `RulePromoted` | 记忆提升为 AGENTS.md 规则后 |
+
+> 注：部分 Evolution / Plugin 事件目前尚无生产触发点（见 MASTER-PLAN「Hook/Plugin 收敛路线」P1 的「每个非保留事件须有生产触发点」契约测试）。已接入主路径的事件：工具类全部、会话类全部、Task 四个（经 `TaskHookBridge`）、Subagent 三个（经 `SubagentHookBridge`）、`StopFailure`。
+
+### Hook 动作类型
 
 | 类型 | 行为 |
 |------|------|
 | `command` | 执行 shell 命令；stdin 接收 JSON 上下文 |
 | `prompt` | 为 LLM 注入提示消息 |
 | `permission` | 直接返回权限决策（allow/deny/ask） |
-| `http` | POST 事件数据到 URL，解析响应 |
-| `mcp_tool` | 调用 MCP 服务器工具 |
+| `http` | POST 事件数据到 URL，解析响应（经 SSRF 安全管线 + 密钥脱敏） |
+| `mcp_tool` | 调用 MCP 服务器工具（执行类工具在 deny-list 中） |
+| `agent` | 派发一个 subagent 处理该 hook 动作 |
+| `activate_skill` | 直接激活一个技能（不经 LLM），reason 作为系统说明呈现给模型 |
+
+### Hook 来源（source identity）
+
+每个 hook 注册时携带来源标识，用于 `list_sources`、热更新按来源替换、reload 重建：
+
+| `HookSource` | 含义 | 注册入口 |
+|---|---|---|
+| `Skill(name)` | 来自文件型 skill 的 hooks | `HookRegistry::register` |
+| `UserConfig` | 来自用户配置（echo-agent.yaml 内嵌 + hooks.yaml 文件） | `HookRegistry::register_user_hooks` |
+| `Plugin(name)` | 来自已安装插件的 hooks | `HookRegistry::register_plugin_hooks` |
+
+执行优先级：`UserConfig` < `Plugin` < `Skill`（见 `HookRegistry::run_hooks` 的 source 排序）。
 
 ### YAML 配置
 
@@ -95,27 +153,31 @@ hooks:
 
 ### Command Hook 上下文
 
-Command Hook 通过 stdin 接收 JSON：
+Command Hook 通过 stdin 接收完整的 `HookContext` JSON（含 `hook_event_name` 兼容字段）：
 
 ```json
 {
   "event": "PreToolUse",
+  "hook_event_name": "PreToolUse",
   "tool_name": "Bash",
   "tool_input": { "command": "ls -la" },
   "session_id": "abc123",
-  "timestamp": "2026-05-29T10:30:00Z"
+  "agent_name": "eko",
+  "cwd": "/home/user/project"
 }
 ```
 
-命令的 stdout 被解析为 `HookResult`：
+命令的 stdout 被解析为 `HookResult`（见 `parse_hook_output`）：
 
 ```json
 {
   "decision": "allow",
-  "modified_input": { "command": "ls -la --color=never" },
-  "message": "已修改命令以禁用颜色"
+  "updatedInput": { "command": "ls -la --color=never" },
+  "injected_context": "已修改命令以禁用颜色"
 }
 ```
+
+退出码语义（对齐 Claude Code 约定）：`0`/`1` 不阻塞，`2` 显式阻塞，其它非零仅告警不阻塞。
 
 ### 安全限制
 
