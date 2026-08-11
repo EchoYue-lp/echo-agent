@@ -113,10 +113,18 @@ impl PluginRegistry {
     ///
     /// Returns the number of plugins discovered.
     pub fn scan_all(&mut self) -> std::io::Result<usize> {
+        self.scan_scopes(PluginScope::all())
+    }
+
+    /// Scan only the requested installation scopes.
+    ///
+    /// This is useful for embedded runtimes and isolated integration tests
+    /// that intentionally expose a subset of the standard plugin scopes.
+    pub fn scan_scopes(&mut self, scopes: &[PluginScope]) -> std::io::Result<usize> {
         self.plugins.clear();
         let mut total = 0;
 
-        for scope in PluginScope::all() {
+        for scope in scopes {
             let dir = scope.resolve_dir(self.project_root.as_deref());
             let count = self.scan_scope_dir(*scope, &dir)?;
             total += count;
@@ -125,6 +133,47 @@ impl PluginRegistry {
         // Load persisted enabled/disabled state
         self.load_state();
         Ok(total)
+    }
+
+    /// Validate a plugin directory and resolve every declared component.
+    ///
+    /// Unlike discovery, validation is strict: an explicitly declared path
+    /// must exist. Conventional optional defaults (for example `skills/` when
+    /// `components.skills` is omitted) remain optional.
+    pub fn validate_plugin_dir(
+        root: &Path,
+    ) -> Result<(PluginManifest, ResolvedComponents), Vec<String>> {
+        let manifest_path = root.join(".echo-plugin").join("manifest.yaml");
+        let manifest = PluginManifest::from_file(&manifest_path).map_err(|error| vec![error])?;
+        let errors = manifest
+            .validate()
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+
+        let plugin_id = manifest.name.clone();
+        let mut registry = Self::with_paths(
+            root.join(".echo-plugin").join(".validation-state.json"),
+            root.join(".echo-plugin").join(".validation-data"),
+            root.parent().map(Path::to_path_buf),
+        );
+        registry.plugins.insert(
+            plugin_id.clone(),
+            PluginEntry {
+                manifest: manifest.clone(),
+                root: root.to_path_buf(),
+                scope: PluginScope::Local,
+                enabled: true,
+                resolved_components: None,
+            },
+        );
+        registry
+            .resolve_components(&plugin_id)
+            .map(|resolved| (manifest, resolved))
+            .map_err(|error| vec![error])
     }
 
     /// Scan a single directory for plugin subdirectories.
@@ -517,6 +566,8 @@ impl PluginRegistry {
                 let dir = resolve_plugin_path(root, p);
                 if dir.is_dir() {
                     resolved.skill_dirs.push(dir);
+                } else {
+                    return Err(missing_component_path(plugin_id, "skills", &dir));
                 }
             }
         } else {
@@ -543,6 +594,8 @@ impl PluginRegistry {
                             }
                         }
                     }
+                } else {
+                    return Err(missing_component_path(plugin_id, "agents", &path));
                 }
             }
         }
@@ -554,6 +607,8 @@ impl PluginRegistry {
             let path = resolve_plugin_path(root, p);
             if path.is_file() {
                 resolved.hooks_file = Some(path);
+            } else {
+                return Err(missing_component_path(plugin_id, "hooks", &path));
             }
         }
 
@@ -563,6 +618,8 @@ impl PluginRegistry {
                 let path = resolve_plugin_path(root, p);
                 if path.is_file() {
                     resolved.mcp_config_file = Some(path);
+                } else {
+                    return Err(missing_component_path(plugin_id, "mcp_servers", &path));
                 }
             }
         } else {
@@ -580,6 +637,8 @@ impl PluginRegistry {
             let path = resolve_plugin_path(root, p);
             if path.is_file() {
                 resolved.lsp_config_file = Some(path);
+            } else {
+                return Err(missing_component_path(plugin_id, "lsp_servers", &path));
             }
         }
 
@@ -590,6 +649,8 @@ impl PluginRegistry {
             let path = resolve_plugin_path(root, p);
             if path.is_file() {
                 resolved.monitors_file = Some(path);
+            } else {
+                return Err(missing_component_path(plugin_id, "monitors", &path));
             }
         }
 
@@ -608,6 +669,8 @@ impl PluginRegistry {
                             resolved.theme_files.push(p);
                         }
                     }
+                } else {
+                    return Err(missing_component_path(plugin_id, "themes", &path));
                 }
             }
         }
@@ -627,6 +690,8 @@ impl PluginRegistry {
                             resolved.output_style_files.push(p);
                         }
                     }
+                } else {
+                    return Err(missing_component_path(plugin_id, "output_styles", &path));
                 }
             }
         }
@@ -800,6 +865,13 @@ impl PluginRegistry {
     pub fn data_dir_for(&self, plugin_id: &str) -> PathBuf {
         PluginEntry::data_dir_for(plugin_id, &self.data_dir)
     }
+}
+
+fn missing_component_path(plugin_id: &str, component: &str, path: &Path) -> String {
+    format!(
+        "Plugin '{plugin_id}' declares {component} path '{}' but it does not exist",
+        path.display()
+    )
 }
 
 impl PluginEntry {
@@ -1236,5 +1308,31 @@ components:
         assert!(resolved.mcp_config_file.is_some());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn validate_plugin_dir_rejects_declared_missing_component() -> Result<(), String> {
+        let tmp = std::env::temp_dir().join(format!(
+            "echo-plugin-validate-missing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".echo-plugin")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            tmp.join(".echo-plugin/manifest.yaml"),
+            "name: strict-validation\nversion: \"1.0.0\"\ndescription: Test\ncomponents:\n  skills: ./missing-skills\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let errors = PluginRegistry::validate_plugin_dir(&tmp)
+            .err()
+            .ok_or_else(|| "declared missing component unexpectedly validated".to_string())?;
+        assert!(
+            errors
+                .iter()
+                .any(|error| { error.contains("skills") && error.contains("missing-skills") })
+        );
+        std::fs::remove_dir_all(&tmp).map_err(|error| error.to_string())?;
+        Ok(())
     }
 }

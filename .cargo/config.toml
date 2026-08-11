@@ -1,0 +1,3 @@
+# Large macOS debug test binaries fall back from compact unwind to DWARF.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-A", "linker_messages"]

@@ -146,6 +146,17 @@ pub fn subagent_status_from_error(error: &ReactError) -> SubagentStatus {
     }
 }
 
+#[cfg(test)]
+mod typed_error_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_status_ignores_misleading_error_text() {
+        let error = ReactError::Other("cancelled timeout are ordinary words here".to_string());
+        assert_eq!(subagent_status_from_error(&error), SubagentStatus::Failed);
+    }
+}
+
 fn hook_stop_status(status: SubagentStatus) -> echo_core::hooks::SubagentStopStatus {
     match status {
         SubagentStatus::Completed => echo_core::hooks::SubagentStopStatus::Completed,

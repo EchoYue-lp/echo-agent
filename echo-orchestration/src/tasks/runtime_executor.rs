@@ -624,7 +624,9 @@ mod tests {
                 .contains(&task.spec.id);
             if wait_for_cancel {
                 context.cancel.cancelled().await;
-                return Err(ReactError::Other("cancelled by test".to_string()));
+                return Err(ReactError::Agent(Box::new(
+                    echo_core::error::AgentError::Cancelled("cancelled by test".to_string()),
+                )));
             }
             let delay = self
                 .dispatch_delay
@@ -673,7 +675,15 @@ mod tests {
                 }
                 current.execution.status = match &dispatch {
                     Ok(_) => TaskStatus::Completed,
-                    Err(error) if error.to_string().contains("cancelled") => TaskStatus::Cancelled,
+                    Err(ReactError::Agent(error))
+                        if matches!(
+                            error.as_ref(),
+                            echo_core::error::AgentError::Cancelled(_)
+                                | echo_core::error::AgentError::Interrupted
+                        ) =>
+                    {
+                        TaskStatus::Cancelled
+                    }
                     Err(error) => TaskStatus::Failed(error.to_string()),
                 };
             }
@@ -694,7 +704,13 @@ mod tests {
 
             Ok(match dispatch {
                 Ok(_) => RuntimeTaskResolution::Completed,
-                Err(error) if error.to_string().contains("cancelled") => {
+                Err(ReactError::Agent(error))
+                    if matches!(
+                        error.as_ref(),
+                        echo_core::error::AgentError::Cancelled(_)
+                            | echo_core::error::AgentError::Interrupted
+                    ) =>
+                {
                     RuntimeTaskResolution::Cancelled
                 }
                 Err(error) => RuntimeTaskResolution::Failed {

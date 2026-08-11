@@ -193,6 +193,18 @@ impl CronTaskStore {
         Ok(removed)
     }
 
+    /// Remove exactly one task by its complete ID and persist.
+    pub fn remove_exact(&self, id: &str) -> echo_core::error::Result<bool> {
+        let mut tasks = self.load_all()?;
+        let before = tasks.len();
+        tasks.retain(|task| task.id != id);
+        let removed = tasks.len() < before;
+        if removed {
+            self.save_all(&tasks)?;
+        }
+        Ok(removed)
+    }
+
     /// Update the status of a task by ID and persist.
     pub fn set_status(&self, id: &str, status: CronTaskStatus) -> echo_core::error::Result<bool> {
         let mut tasks = self.load_all()?;
@@ -321,5 +333,35 @@ mod tests {
         let task = CronTask::new("bad", "not a cron", "test");
         assert!(!task.validate_cron());
         assert!(task.next_run().is_none());
+    }
+
+    #[test]
+    fn remove_exact_does_not_remove_tasks_with_the_same_prefix() -> Result<(), String> {
+        let temp = std::env::temp_dir().join(format!(
+            "echo-scheduler-remove-exact-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp).map_err(|error| error.to_string())?;
+        let store = CronTaskStore::new().with_path(temp.join("cron-tasks.json"));
+        let mut exact = CronTask::new("exact", "*/5 * * * *", "exact");
+        exact.id = "plugin-monitor".to_string();
+        let mut prefixed = CronTask::new("prefixed", "*/5 * * * *", "prefixed");
+        prefixed.id = "plugin-monitor-longer".to_string();
+        store.add(exact).map_err(|error| error.to_string())?;
+        store.add(prefixed).map_err(|error| error.to_string())?;
+
+        assert!(
+            store
+                .remove_exact("plugin-monitor")
+                .map_err(|error| error.to_string())?
+        );
+        let remaining = store.load_all().map_err(|error| error.to_string())?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining.first().map(|task| task.id.as_str()),
+            Some("plugin-monitor-longer")
+        );
+        std::fs::remove_dir_all(&temp).map_err(|error| error.to_string())?;
+        Ok(())
     }
 }

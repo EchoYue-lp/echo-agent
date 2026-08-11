@@ -27,7 +27,7 @@ pub use context_builder::{ContextBuilder, SubagentOutput};
 pub use events::{SubagentEvent, SubagentEventBus};
 pub use executor::{
     BackgroundSubagentHandle, DispatchRequest, SubagentExecutor, SubagentExecutorConfig,
-    TeammateHandle, merge_observed_evidence,
+    TeammateHandle, merge_observed_evidence, subagent_status_from_error,
 };
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
 pub use prompt::{

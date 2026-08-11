@@ -135,6 +135,15 @@ impl SchedulerRunner {
         Ok(removed)
     }
 
+    /// Remove exactly one cron task by its complete ID.
+    pub async fn remove_task_exact(&self, id: &str) -> echo_core::error::Result<bool> {
+        let removed = self.store.remove_exact(id)?;
+        if removed {
+            self.tasks.write().await.retain(|task| task.id != id);
+        }
+        Ok(removed)
+    }
+
     /// Enable or disable a task.
     pub async fn set_status(
         &self,

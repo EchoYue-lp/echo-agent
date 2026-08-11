@@ -400,6 +400,29 @@ impl ReactAgent {
         }
     }
 
+    /// Unregister a Subagent and remove it from the model-facing dispatch
+    /// catalog. Returns whether a definition existed before removal.
+    #[cfg(feature = "subagent")]
+    pub async fn unregister_subagent(&mut self, name: &str) -> bool {
+        let existed = self.tools.subagent_registry.contains(name).await;
+        self.tools.subagent_registry.remove(name).await;
+        if let Some(handle) = &self.dispatch_catalog_handle {
+            match handle.write() {
+                Ok(mut catalog) => catalog.retain(|entry| entry.name != name),
+                Err(error) => {
+                    warn!(
+                        agent = %self.config.agent_name,
+                        subagent = %name,
+                        %error,
+                        "failed to remove Subagent from dispatch catalog"
+                    );
+                }
+            }
+            self.tools.tool_manager.invalidate_definition_cache();
+        }
+        existed
+    }
+
     /// Refresh this Agent's model-facing dispatch catalog from authoritative
     /// registry definitions.
     ///
@@ -929,6 +952,25 @@ impl ReactAgent {
             "Skill activated and injected as a replaceable context projection"
         );
         Ok(())
+    }
+
+    /// Replace or remove a named system-context projection.
+    ///
+    /// Product runtimes use this for user-selectable instruction artifacts
+    /// such as output styles. The marker is the stable ownership boundary, so
+    /// replacing or unloading one projection never mutates the base prompt or
+    /// unrelated runtime context.
+    pub async fn replace_system_context_projection(
+        &self,
+        marker: impl Into<String>,
+        content: Option<String>,
+    ) {
+        let message = content.map(crate::llm::types::Message::system);
+        self.memory
+            .context
+            .lock()
+            .await
+            .replace_projection(marker.into(), message);
     }
 
     /// List all installed code-based skills.
