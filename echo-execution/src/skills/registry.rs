@@ -93,6 +93,21 @@ impl SkillRegistry {
         for warning in descriptor.validate_paths() {
             warn!("Skill '{}': {}", descriptor.name, warning);
         }
+        // If a caller replaces a descriptor directly, remove the old reverse
+        // index first. Discovery normally rejects duplicate names, but this
+        // keeps the public registry internally consistent for all callers.
+        if let Some(previous_source) = self
+            .descriptors
+            .get(&descriptor.name)
+            .and_then(|previous| previous.source.as_deref())
+            .map(str::to_string)
+            && let Some(names) = self.by_source.get_mut(&previous_source)
+        {
+            names.remove(&descriptor.name);
+            if names.is_empty() {
+                self.by_source.remove(&previous_source);
+            }
+        }
         // Track source provenance so disable/uninstall can remove exactly
         // this group later (P1-reload).
         if let Some(src) = descriptor.source.as_deref() {
@@ -112,16 +127,22 @@ impl SkillRegistry {
     /// skill is also deactivated and purged from legacy/sandbox bookkeeping
     /// via `remove_descriptor`.
     pub fn unregister_by_source(&mut self, source: &str) -> usize {
+        self.unregister_names_by_source(source).len()
+    }
+
+    /// Remove and return all skill names registered by one source.
+    pub fn unregister_names_by_source(&mut self, source: &str) -> Vec<String> {
         let names = match self.by_source.remove(source) {
             Some(set) => set,
-            None => return 0,
+            None => return Vec::new(),
         };
-        let mut removed = 0;
+        let mut removed = Vec::new();
         for name in names {
             if self.remove_descriptor(&name) {
-                removed += 1;
+                removed.push(name);
             }
         }
+        removed.sort();
         removed
     }
 
@@ -165,7 +186,18 @@ impl SkillRegistry {
 
     /// Remove one file-based descriptor and all of its activation metadata.
     pub fn remove_descriptor(&mut self, name: &str) -> bool {
-        let removed = self.descriptors.remove(name).is_some();
+        let removed_descriptor = self.descriptors.remove(name);
+        if let Some(source) = removed_descriptor
+            .as_ref()
+            .and_then(|descriptor| descriptor.source.as_deref())
+            .map(str::to_string)
+            && let Some(names) = self.by_source.get_mut(&source)
+        {
+            names.remove(name);
+            if names.is_empty() {
+                self.by_source.remove(&source);
+            }
+        }
         self.legacy_instructions.remove(name);
         self.activated
             .lock()
@@ -175,7 +207,7 @@ impl SkillRegistry {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(name);
-        removed
+        removed_descriptor.is_some()
     }
 
     /// Attach a sandbox manager used for inline command execution during activation.
@@ -744,6 +776,41 @@ mod tests {
         assert_eq!(reg.descriptor_count(), 1);
         assert!(reg.get_descriptor("code-review").is_some());
         assert!(reg.is_installed("code-review"));
+    }
+
+    #[test]
+    fn source_group_unload_returns_exact_skill_names() {
+        let mut reg = SkillRegistry::new();
+        reg.register_descriptor(make_descriptor("plugin-a-one", "one"));
+        reg.register_descriptor(make_descriptor("plugin-a-two", "two"));
+        reg.register_descriptor(make_descriptor("baseline", "baseline"));
+        reg.tag_source(
+            &["plugin-a-one".to_string(), "plugin-a-two".to_string()],
+            "plugin:a",
+        );
+
+        assert_eq!(
+            reg.unregister_names_by_source("plugin:a"),
+            vec!["plugin-a-one".to_string(), "plugin-a-two".to_string()]
+        );
+        assert!(reg.get_descriptor("plugin-a-one").is_none());
+        assert!(reg.get_descriptor("plugin-a-two").is_none());
+        assert!(reg.get_descriptor("baseline").is_some());
+    }
+
+    #[test]
+    fn replacing_descriptor_updates_source_reverse_index() {
+        let mut reg = SkillRegistry::new();
+        let mut first = make_descriptor("shared", "first");
+        first.source = Some("plugin:a".to_string());
+        reg.register_descriptor(first);
+        let mut replacement = make_descriptor("shared", "replacement");
+        replacement.source = Some("plugin:b".to_string());
+        reg.register_descriptor(replacement);
+
+        assert_eq!(reg.unregister_by_source("plugin:a"), 0);
+        assert_eq!(reg.unregister_by_source("plugin:b"), 1);
+        assert!(reg.get_descriptor("shared").is_none());
     }
 
     #[test]

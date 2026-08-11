@@ -4,15 +4,15 @@
 
 The plugin system extends Agent capabilities through declarative `manifest.yaml` files without modifying core code. A plugin is a self-contained directory that can provide the following components:
 
-| Component | Target Subsystem | Description |
-|-----------|-----------------|-------------|
-| Skills | `SkillRegistry` | SKILL.md files with progressive disclosure |
-| Hooks | `HookRegistry` | Tool call interception hooks |
-| MCP Servers | `McpManager` | MCP protocol server configurations |
-| LSP Servers | `LspManager` | Language server configurations |
-| Agents | `SubagentRegistry` | Sub-agent definition files |
-| Monitors | Background process manager | Background monitor configurations |
-| Themes | UI theme registry | Color theme JSON files |
+| Component | Current Status | Description |
+|-----------|----------------|-------------|
+| Skills | Wired to `SkillRegistry` | SKILL.md files with live load/unload |
+| Hooks | Wired to `HookRegistry` | Lifecycle and tool hooks with live load/unload |
+| MCP Servers | Wired to `McpManager` | MCP servers and tools with live load/unload |
+| Agents | Discovery only | The application does not yet construct a definition + executable factory atomically |
+| LSP Servers | Discovery only | `ReactAgent` does not hold an `LspManager` |
+| Monitors | Discovery only | No runtime consumer exists yet |
+| Themes / Output Styles | Discovery only | Reserved for application UI/output consumers |
 
 ```
 Core framework:  React Agent loop, tool execution, context management
@@ -399,6 +399,7 @@ Wiring order:
 | Skills | `agent.load_skills_from_dir()` |
 | Hooks | `hook_registry.register("plugin:{name}", ...)` |
 | MCP Servers | `agent.load_mcp_from_file()` |
+| Agents / LSP / Monitors / Themes / Output Styles | Returned as `*_discovered` paths only; excluded from wired totals |
 
 You can also wire only specific component types:
 

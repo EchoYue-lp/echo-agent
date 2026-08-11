@@ -25,20 +25,32 @@ pub use echo_core::plugin::{
     set_plugin_data_base_dir, set_plugin_data_base_dir_name,
 };
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Successfully assembled components grouped by their owning plugin.
+#[derive(Debug, Clone, Default)]
+pub struct WiredPluginComponents {
+    pub skills: Vec<String>,
+    pub hooks_registered: bool,
+    pub mcp_servers: Vec<String>,
+}
 
 /// Result of wiring plugin components into an agent.
 #[derive(Debug, Default)]
 pub struct PluginWiringResult {
+    /// Enabled plugins with at least one live component wired successfully and
+    /// no known wiring error in this reload.
+    pub plugins_loaded: Vec<String>,
     /// Names of skills loaded.
     pub skills_loaded: Vec<String>,
     /// Names of plugins whose hooks were registered.
     pub hooks_registered: Vec<String>,
     /// Names of MCP servers connected.
     pub mcp_connected: Vec<String>,
-    /// Names of subagent definitions registered (late-binding: the application
-    /// layer supplies the executable instance afterwards).
-    pub agents_registered: Vec<String>,
+    /// Agent definition files discovered for an application-layer constructor.
+    /// They are not advertised as runnable until an executable instance exists.
+    pub agents_discovered: Vec<String>,
     /// LSP config files discovered but not yet wired (TODO: framework
     /// `ReactAgent` does not hold an `LspManager`; the application layer
     /// constructs one and feeds it `LspConfig::from_file`).
@@ -49,6 +61,8 @@ pub struct PluginWiringResult {
     pub themes_discovered: Vec<String>,
     /// Output-style files discovered (TODO: output-format consumer, not framework).
     pub output_styles_discovered: Vec<String>,
+    /// Successful live registrations, grouped for exact unload/reload.
+    pub components_by_plugin: HashMap<String, WiredPluginComponents>,
     /// Errors encountered during wiring.
     pub errors: Vec<String>,
 }
@@ -61,15 +75,10 @@ impl PluginWiringResult {
 
     /// Total number of components wired into the agent.
     ///
-    /// Counts the four assembled categories (skills, hooks, MCP, subagent
-    /// definitions). Discovery-only categories (lsp/monitors/themes/output
-    /// styles) are excluded — they have no framework consumer yet and are
-    /// reported via their own `*_discovered` fields.
+    /// Discovery-only categories are excluded because they have no live
+    /// runtime consumer yet.
     pub fn total_wired(&self) -> usize {
-        self.skills_loaded.len()
-            + self.hooks_registered.len()
-            + self.mcp_connected.len()
-            + self.agents_registered.len()
+        self.skills_loaded.len() + self.hooks_registered.len() + self.mcp_connected.len()
     }
 }
 
@@ -83,7 +92,7 @@ impl PluginWiringResult {
 /// | Skills | `SkillRegistry` via `ReactAgent::load_skills_from_dir` | assembled |
 /// | Hooks | `HookRegistry` via `HookRegistry::register` | assembled |
 /// | MCP servers | `McpManager` via `ReactAgent::load_mcp_from_file` | assembled |
-/// | Agents | `SubagentRegistry` via `ReactAgent::register_subagent_definition` (definition only; app supplies instance) | assembled (late-binding) |
+/// | Agents | discovered path for an application-owned constructor | discovery only |
 /// | LSP servers | discovered path; `ReactAgent` holds no `LspManager` | TODO |
 /// | Monitors / Themes / Output styles | discovered paths; no framework runtime consumer | TODO |
 ///
@@ -101,21 +110,15 @@ impl PluginIntegrator {
     /// This is the primary entry point. It:
     /// 1. Scans all plugin scopes and resolves dependencies.
     /// 2. For each enabled plugin, resolves component paths.
-    /// 3. Wires skills, hooks, MCP servers, and subagent **definitions**
-    ///    into the agent; reports discovered-but-unconsumed LSP/monitors/
-    ///    themes/output styles.
+    /// 3. Wires skills, hooks, and MCP servers into the agent; reports
+    ///    discovered-but-unconsumed agent/LSP/monitor/theme/output-style files.
     ///
     /// # Subagent definitions (agents)
     ///
-    /// Each `.md` agent file is parsed by the framework-minimal
-    /// [`parse_subagent_md`] and registered via
-    /// [`ReactAgent::register_subagent_definition`](crate::agent::react::ReactAgent::register_subagent_definition)
-    /// — a **definition-only**, late-binding path (no executable instance).
-    /// The application layer, which owns the prompt-compiler / tool-filter /
-    /// sandbox wiring, is expected to subsequently supply the real instance
-    /// (or a factory) under the same name. This keeps the framework free of
-    /// product-specific subagent construction while still making plugin
-    /// agents discoverable end-to-end.
+    /// Agent definition files remain discovery-only here. Registering a
+    /// definition without an executable instance makes it appear in
+    /// `agent_tool` while every dispatch fails, so the application must parse,
+    /// construct, and register the definition and factory atomically.
     ///
     /// # Discovery-only components
     ///
@@ -131,7 +134,7 @@ impl PluginIntegrator {
         let mut result = PluginWiringResult::default();
 
         // Resolve dependency order
-        let ordered_ids = match registry.resolve_dependencies() {
+        let ordered_ids = match registry.resolve_enabled_dependencies() {
             Ok(ids) => ids,
             Err(e) => {
                 result
@@ -148,27 +151,24 @@ impl PluginIntegrator {
             String,
             echo_execution::skills::hooks::HooksDefinition,
         )> = Vec::new();
-        let mut mcp_files: Vec<PathBuf> = Vec::new();
-        // (plugin_id, source_tag, file_path) — source_tag marks provenance
-        // (e.g. "plugin:my-plugin") for the framework SubagentKind::Plugin.
-        let mut agent_files: Vec<(String, String, PathBuf)> = Vec::new();
+        let mut mcp_files: Vec<(String, PathBuf)> = Vec::new();
+        let mut agent_files: Vec<(String, PathBuf)> = Vec::new();
+        let mut failed_plugins = std::collections::HashSet::new();
 
         for plugin_id in &ordered_ids {
             // Extract entry info before mutable borrow
             let entry_info = registry
                 .get(plugin_id)
-                .map(|e| (e.enabled, e.root.display().to_string()));
+                .map(|e| e.root.display().to_string());
 
-            let Some((enabled, root_display)) = entry_info else {
+            let Some(root_display) = entry_info else {
                 continue;
             };
-            if !enabled {
-                continue;
-            }
 
             let resolved = match registry.resolve_components(plugin_id) {
                 Ok(r) => r,
                 Err(e) => {
+                    failed_plugins.insert(plugin_id.clone());
                     result
                         .errors
                         .push(format!("Plugin '{plugin_id}' component resolution: {e}"));
@@ -183,35 +183,40 @@ impl PluginIntegrator {
             }
 
             // Collect hooks
-            if let Some(ref hooks_file) = resolved.hooks_file
-                && let Ok(content) = std::fs::read_to_string(hooks_file)
-            {
-                match serde_yaml_ng::from_str::<echo_execution::skills::hooks::HooksDefinition>(
-                    &content,
-                ) {
-                    Ok(def) => {
-                        hooks_defs.push((plugin_id.clone(), root_display, def));
+            if let Some(ref hooks_file) = resolved.hooks_file {
+                match std::fs::read_to_string(hooks_file) {
+                    Ok(content) => {
+                        match serde_yaml_ng::from_str::<
+                            echo_execution::skills::hooks::HooksDefinition,
+                        >(&content)
+                        {
+                            Ok(def) => hooks_defs.push((plugin_id.clone(), root_display, def)),
+                            Err(error) => {
+                                failed_plugins.insert(plugin_id.clone());
+                                result.errors.push(format!(
+                                    "Plugin '{plugin_id}' hooks YAML parse: {error}"
+                                ));
+                            }
+                        }
                     }
-                    Err(e) => {
-                        result
-                            .errors
-                            .push(format!("Plugin '{plugin_id}' hooks YAML parse: {e}"));
+                    Err(error) => {
+                        failed_plugins.insert(plugin_id.clone());
+                        result.errors.push(format!(
+                            "Plugin '{plugin_id}' hooks file {}: {error}",
+                            hooks_file.display()
+                        ));
                     }
                 }
             }
 
             // Collect MCP files
             if let Some(ref mcp_file) = resolved.mcp_config_file {
-                mcp_files.push(mcp_file.clone());
+                mcp_files.push((plugin_id.clone(), mcp_file.clone()));
             }
 
-            // Collect agent definition files (late-binding; wired below)
+            // Collect agent definition files for application-owned construction.
             for file in &resolved.agent_files {
-                agent_files.push((
-                    plugin_id.clone(),
-                    format!("plugin:{plugin_id}"),
-                    file.clone(),
-                ));
+                agent_files.push((plugin_id.clone(), file.clone()));
             }
 
             // Discovery-only: report but do not assemble (no framework consumer).
@@ -242,13 +247,21 @@ impl PluginIntegrator {
             match agent.load_skills_from_dir(dir).await {
                 Ok(names) => {
                     let source_tag = format!("plugin:{plugin_id}");
-                    agent.skill_registry_mut().tag_source(&names, &source_tag);
+                    agent.tag_skills_source(&names, &source_tag).await;
+                    result
+                        .components_by_plugin
+                        .entry(plugin_id.clone())
+                        .or_default()
+                        .skills
+                        .extend(names.clone());
                     result.skills_loaded.extend(names);
                 }
                 Err(e) => {
-                    result
-                        .errors
-                        .push(format!("Skills from {}: {e}", dir.display()));
+                    failed_plugins.insert(plugin_id.clone());
+                    result.errors.push(format!(
+                        "Plugin '{plugin_id}' skills from {}: {e}",
+                        dir.display()
+                    ));
                 }
             }
         }
@@ -260,69 +273,102 @@ impl PluginIntegrator {
         {
             let mut hook_reg = agent.hook_registry().write().await;
             for (plugin_name, source_dir, def) in &hooks_defs {
-                hook_reg.register_plugin_hooks(plugin_name, source_dir, def.clone());
-                result.hooks_registered.push(plugin_name.clone());
+                if hook_reg.register_plugin_hooks(plugin_name, source_dir, def.clone()) {
+                    result
+                        .components_by_plugin
+                        .entry(plugin_name.clone())
+                        .or_default()
+                        .hooks_registered = true;
+                    result.hooks_registered.push(plugin_name.clone());
+                } else if !def.is_empty() {
+                    failed_plugins.insert(plugin_name.clone());
+                    result.errors.push(format!(
+                        "Plugin '{plugin_name}' registered no valid hook actions"
+                    ));
+                }
             }
         }
 
         // Wire MCP servers
         #[cfg(feature = "mcp")]
         {
-            for mcp_file in &mcp_files {
-                match agent.load_mcp_from_file(mcp_file).await {
-                    Ok(clients) => {
-                        for _c in &clients {
-                            result.mcp_connected.push(mcp_file.display().to_string());
-                        }
+            for (plugin_id, mcp_file) in &mcp_files {
+                let expected_servers = match crate::mcp::McpConfigFile::from_file(mcp_file) {
+                    Ok(config) => {
+                        let mut names = config.mcp_servers.keys().cloned().collect::<Vec<_>>();
+                        names.sort();
+                        names
                     }
-                    Err(e) => {
-                        result
-                            .errors
-                            .push(format!("MCP from {}: {e}", mcp_file.display()));
-                    }
-                }
-            }
-        }
-
-        // Wire subagent definitions — parse each `.md` and register a
-        // definition-only entry (late-binding). The application layer supplies
-        // the executable instance afterwards (see `wire_all` doc comment).
-        #[cfg(feature = "subagent")]
-        {
-            for (plugin_id, source_tag, file) in &agent_files {
-                let content = match std::fs::read_to_string(file) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        result.errors.push(format!("Agent {}: {e}", file.display()));
+                    Err(error) => {
+                        failed_plugins.insert(plugin_id.clone());
+                        result.errors.push(format!(
+                            "Plugin '{plugin_id}' MCP config {}: {error}",
+                            mcp_file.display()
+                        ));
                         continue;
                     }
                 };
-                match parse_subagent_md(&content, Some(source_tag)) {
-                    Ok(def) => {
-                        let name = def.name.clone();
-                        agent.register_subagent_definition(def);
-                        result.agents_registered.push(name);
+                match agent.load_mcp_from_file(mcp_file).await {
+                    Ok(clients) => {
+                        let connected_servers = clients
+                            .iter()
+                            .map(|client| client.server_name().to_string())
+                            .collect::<std::collections::HashSet<_>>();
+                        for client in &clients {
+                            let server_name = client.server_name().to_string();
+                            result.mcp_connected.push(server_name.clone());
+                            result
+                                .components_by_plugin
+                                .entry(plugin_id.clone())
+                                .or_default()
+                                .mcp_servers
+                                .push(server_name);
+                        }
+                        let missing = expected_servers
+                            .into_iter()
+                            .filter(|name| !connected_servers.contains(name))
+                            .collect::<Vec<_>>();
+                        if !missing.is_empty() {
+                            failed_plugins.insert(plugin_id.clone());
+                            result.errors.push(format!(
+                                "Plugin '{plugin_id}' failed to connect MCP server(s): {}",
+                                missing.join(", ")
+                            ));
+                        }
                     }
                     Err(e) => {
+                        failed_plugins.insert(plugin_id.clone());
                         result.errors.push(format!(
-                            "Plugin '{plugin_id}' agent {}: {e}",
-                            file.display()
+                            "Plugin '{plugin_id}' MCP from {}: {e}",
+                            mcp_file.display()
                         ));
                     }
                 }
             }
         }
-        // Without the `subagent` feature, agent files are still discoverable
-        // (their paths were resolved) but cannot be wired — surface a single
-        // notice per result so callers aren't left guessing.
-        #[cfg(not(feature = "subagent"))]
-        if !agent_files.is_empty() {
+
+        #[cfg(not(feature = "mcp"))]
+        for (plugin_id, mcp_file) in &mcp_files {
+            failed_plugins.insert(plugin_id.clone());
             result.errors.push(format!(
-                "{} plugin agent definition(s) discovered but the `subagent` feature is \
-                 disabled; skipping registration",
-                agent_files.len()
+                "Plugin '{plugin_id}' declares MCP config {}, but the framework was built without the 'mcp' feature",
+                mcp_file.display()
             ));
         }
+
+        for (plugin_id, file) in agent_files {
+            result
+                .agents_discovered
+                .push(format!("{plugin_id}:{}", file.display()));
+        }
+
+        result.plugins_loaded = ordered_ids
+            .into_iter()
+            .filter(|plugin_id| {
+                result.components_by_plugin.contains_key(plugin_id)
+                    && !failed_plugins.contains(plugin_id)
+            })
+            .collect();
 
         result
     }
@@ -354,7 +400,7 @@ impl PluginIntegrator {
     ) {
         let mut registry = agent.hook_registry().write().await;
         for (plugin_name, source_dir, def) in hooks {
-            registry.register_plugin_hooks(plugin_name, source_dir, def.clone());
+            let _ = registry.register_plugin_hooks(plugin_name, source_dir, def.clone());
         }
     }
 
@@ -368,8 +414,8 @@ impl PluginIntegrator {
         let mut connected = Vec::new();
         for file in mcp_files {
             if let Ok(clients) = agent.load_mcp_from_file(file).await {
-                for _ in clients {
-                    connected.push(file.display().to_string());
+                for client in clients {
+                    connected.push(client.server_name().to_string());
                 }
             }
         }
@@ -380,165 +426,6 @@ impl PluginIntegrator {
 impl Default for PluginIntegrator {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// ── Framework-minimal subagent `.md` parser ──────────────────────────────
-//
-// This parser is intentionally minimal: it extracts the framework-relevant
-// subset of the agent-definition frontmatter (name / description / model /
-// tools / tags) and treats the markdown body as the system prompt. Richer,
-// EKO-specific frontmatter (readonly / worktree / workspace / team) stays in
-// the application-layer loader (`echo-agent-app-core::subagent_loader`), which
-// owns the full prompt-compiler / tool-filter / sandbox wiring needed to
-// build a real subagent instance. The two layers do not duplicate semantics:
-// this parser is the framework *discovery* surface; the app loader is the
-// *construction* surface.
-//
-// The frontmatter convention (`---\n<yaml>\n---\n<body>`) is the same one
-// used across the codebase (skills loader, evolution MEMORY.md, app
-// subagent loader), so a single `.md` file is valid for both layers.
-
-/// Parsed frontmatter for a plugin agent definition (framework subset).
-#[cfg(feature = "subagent")]
-#[derive(Debug, Default, serde::Deserialize)]
-struct AgentFrontmatter {
-    name: Option<String>,
-    description: Option<String>,
-    /// Optional model override (None/empty/"inherit" → inherit parent).
-    #[serde(default)]
-    model: Option<String>,
-    /// Optional tool whitelist (None → inherit all parent tools).
-    #[serde(default)]
-    tools: Option<Vec<String>>,
-    /// Discovery / filter tags.
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-}
-
-/// Parse a plugin agent-definition `.md` into a framework
-/// [`SubagentDefinition`].
-///
-/// `source_tag` (e.g. `"plugin:my-plugin"`) marks provenance on the
-/// resulting [`SubagentKind::Plugin`] and is also used as the fallback name
-/// when the frontmatter omits `name`.
-///
-/// Only `name` and `description` are required; the body is the system prompt.
-/// Returns an error string suitable for inclusion in
-/// [`PluginWiringResult::errors`].
-///
-/// Only available with the `subagent` feature (the framework
-/// `SubagentDefinition` type lives under that feature).
-#[cfg(feature = "subagent")]
-pub fn parse_subagent_md(
-    content: &str,
-    source_tag: Option<&str>,
-) -> Result<crate::agent::subagent::SubagentDefinition, String> {
-    use crate::agent::subagent::types::ExecutionMode;
-    use crate::agent::subagent::{SubagentBuilder, SubagentKind};
-
-    let (fm_str, body) = split_frontmatter(content)?;
-    let fm: AgentFrontmatter = if fm_str.trim().is_empty() {
-        AgentFrontmatter::default()
-    } else {
-        serde_yaml_ng::from_str(fm_str)
-            .map_err(|e| format!("agent frontmatter parse error: {e}"))?
-    };
-
-    // Resolve name: frontmatter wins; otherwise an explicit source_tag;
-    // otherwise error (a nameless agent is undiscoverable).
-    let name = fm
-        .name
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())
-        .or_else(|| source_tag.map(|s| s.to_string()))
-        .ok_or_else(|| "agent frontmatter missing required `name` field".to_string())?;
-
-    let description = fm
-        .description
-        .map(|d| d.trim().to_string())
-        .filter(|d| !d.is_empty())
-        .ok_or_else(|| format!("agent `{name}` missing `description`"))?;
-
-    let system_prompt = body.trim().to_string();
-
-    let model = fm
-        .model
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty() && m != "inherit");
-
-    let mut builder = SubagentBuilder::new(&name)
-        .description(&description)
-        // Plugin agents default to Fork (independent, inherit-trailing context)
-        // — matches the app loader's default for `.md` subagents.
-        .fork_mode();
-    builder = builder.kind(SubagentKind::Plugin {
-        source: source_tag.unwrap_or("plugin").to_string(),
-    });
-    if !system_prompt.is_empty() {
-        builder = builder.system_prompt(&system_prompt);
-    }
-    if let Some(model) = model {
-        builder = builder.model(&model);
-    }
-    if let Some(tools) = fm.tools.filter(|v| !v.is_empty()) {
-        builder = builder.tools(tools);
-    }
-    if let Some(tags) = fm.tags.filter(|v| !v.is_empty()) {
-        builder = builder.tags(tags);
-    }
-    // Fork-mode default inherit_history(2) is kept; clear only if the body
-    // explicitly requested otherwise (not exposed here — app loader handles
-    // the richer field). ExecutionMode stays Fork.
-    let _ = ExecutionMode::Fork;
-    Ok(builder.build())
-}
-
-/// Split a `.md` document into `(frontmatter_yaml, markdown_body)`.
-///
-/// Mirrors the skills loader / app subagent loader convention:
-/// - Requires a leading `---` on the first line (a BOM is tolerated).
-/// - The closing `---` (on its own line) ends the frontmatter.
-/// - Returns `(frontmatter_str, body_str)`; an empty document or one with no
-///   closing delimiter yields an error.
-///
-/// Kept compiled even without the `subagent` feature so the unit tests below
-/// (which exercise frontmatter splitting independently of subagent
-/// construction) run under the default test matrix; the `allow(dead_code)`
-/// silences the unused warning in non-subagent lib builds where
-/// [`parse_subagent_md`] is configured out.
-#[cfg_attr(not(feature = "subagent"), allow(dead_code))]
-fn split_frontmatter(content: &str) -> Result<(&str, &str), String> {
-    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let after_open = content
-        .strip_prefix("---")
-        .ok_or_else(|| "missing leading `---` frontmatter delimiter".to_string())?;
-    let after_open = after_open
-        .strip_prefix(['\r', '\n'])
-        .ok_or_else(|| "opening `---` must be on its own line".to_string())?;
-
-    // Find the closing `\n---` delimiter on its own line.
-    let mut search_from = 0;
-    loop {
-        let Some(relative) = after_open[search_from..].find("---") else {
-            return Err("missing closing `---` frontmatter delimiter".to_string());
-        };
-        // The `---` must start at the beginning of a line (preceded by `\n`).
-        let absolute = search_from + relative;
-        let at_line_start =
-            absolute == 0 || after_open.as_bytes().get(absolute - 1) == Some(&b'\n');
-        if at_line_start {
-            let fm = after_open.get(..absolute).unwrap_or("");
-            // Skip the closing `---` and its trailing newline.
-            let after_close = absolute + 3;
-            let body = after_open.get(after_close..).unwrap_or("");
-            let body = body
-                .strip_prefix(['\r', '\n'])
-                .or_else(|| body.strip_prefix('\n'))
-                .unwrap_or(body);
-            return Ok((fm, body));
-        }
-        search_from = absolute + 3;
     }
 }
 
@@ -566,123 +453,5 @@ pub trait NativePlugin: Send + Sync {
     /// Shutdown the plugin. Called at agent shutdown.
     fn shutdown(&mut self) -> Result<(), String> {
         Ok(())
-    }
-}
-
-// ── Tests ───────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn split_frontmatter_extracts_yaml_and_body() {
-        let md = "---\nname: reviewer\ndescription: rev\n---\nYou are a reviewer.\n";
-        let (fm, body) = split_frontmatter(md).unwrap();
-        assert!(fm.contains("name: reviewer"));
-        assert_eq!(body, "You are a reviewer.\n");
-    }
-
-    #[test]
-    fn split_frontmatter_strips_leading_bom() {
-        let md = "\u{feff}---\nname: x\n---\nbody";
-        let (fm, body) = split_frontmatter(md).unwrap();
-        assert!(fm.contains("name: x"));
-        assert_eq!(body, "body");
-    }
-
-    #[test]
-    fn split_frontmatter_handles_body_with_hr_separator() {
-        // A `---` inside the body (markdown horizontal rule) must not be
-        // mistaken for the closing delimiter: only a `---` at line start
-        // immediately after a newline closes the frontmatter. Here the first
-        // line-start `---` after the opening one is the real closer.
-        let md = "---\nname: x\n---\nintro\n\n---\n\nmore";
-        let (fm, body) = split_frontmatter(md).unwrap();
-        assert!(fm.contains("name: x"));
-        assert_eq!(body, "intro\n\n---\n\nmore");
-    }
-
-    #[test]
-    fn split_frontmatter_errors_without_closing_delimiter() {
-        let md = "---\nname: x\nbody without close";
-        assert!(split_frontmatter(md).is_err());
-    }
-
-    #[test]
-    fn split_frontmatter_errors_without_opening_delimiter() {
-        assert!(split_frontmatter("no frontmatter here").is_err());
-    }
-
-    #[test]
-    fn split_frontmatter_allows_empty_body() {
-        let md = "---\nname: x\ndescription: y\n---\n";
-        let (fm, body) = split_frontmatter(md).unwrap();
-        assert!(fm.contains("name: x"));
-        assert_eq!(body, "");
-    }
-
-    #[cfg(feature = "subagent")]
-    #[test]
-    fn parse_subagent_md_full_subset() {
-        use crate::agent::subagent::SubagentKind;
-        let md = "---\n\
-                  name: data-explorer\n\
-                  description: Explores datasets\n\
-                  model: qwen3\n\
-                  tools: [read_file, search]\n\
-                  tags: [data, readonly]\n\
-                  ---\n\
-                  You are a data exploration specialist.";
-        let def = parse_subagent_md(md, Some("plugin:data-pack")).unwrap();
-        assert_eq!(def.name, "data-explorer");
-        assert_eq!(def.description, "Explores datasets");
-        assert_eq!(def.model.as_deref(), Some("qwen3"));
-        assert_eq!(
-            def.tool_filter.as_deref(),
-            Some(["read_file".to_string(), "search".to_string()].as_slice())
-        );
-        assert_eq!(def.tags, vec!["data".to_string(), "readonly".to_string()]);
-        assert_eq!(
-            def.system_prompt.as_deref(),
-            Some("You are a data exploration specialist.")
-        );
-        assert!(matches!(def.kind, SubagentKind::Plugin { .. }));
-        if let SubagentKind::Plugin { source } = &def.kind {
-            assert_eq!(source, "plugin:data-pack");
-        }
-    }
-
-    #[cfg(feature = "subagent")]
-    #[test]
-    fn parse_subagent_md_inherit_model_drops_override() {
-        let md = "---\nname: a\ndescription: d\nmodel: inherit\n---\nbody";
-        let def = parse_subagent_md(md, None).unwrap();
-        assert!(def.model.is_none(), "inherit must map to None");
-    }
-
-    #[cfg(feature = "subagent")]
-    #[test]
-    fn parse_subagent_md_requires_name_and_description() {
-        let no_name = "---\ndescription: d\n---\nbody";
-        assert!(parse_subagent_md(no_name, None).is_err());
-
-        let no_desc = "---\nname: a\n---\nbody";
-        assert!(parse_subagent_md(no_desc, None).is_err());
-
-        // Missing frontmatter `name` is filled from source_tag fallback.
-        let with_fallback = "---\ndescription: d\n---\nbody";
-        let def = parse_subagent_md(with_fallback, Some("plugin:p")).unwrap();
-        assert_eq!(def.name, "plugin:p");
-    }
-
-    #[cfg(feature = "subagent")]
-    #[test]
-    fn parse_subagent_md_empty_body_keeps_auto_description() {
-        // Empty system prompt is allowed; SubagentBuilder auto-fills description.
-        let md = "---\nname: a\ndescription: d\n---\n";
-        let def = parse_subagent_md(md, None).unwrap();
-        assert_eq!(def.name, "a");
-        assert!(def.system_prompt.is_none());
     }
 }

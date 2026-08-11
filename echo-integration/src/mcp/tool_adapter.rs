@@ -38,17 +38,22 @@ impl McpToolAdapter {
         server_name: impl Into<String>,
     ) -> Self {
         let server_name = server_name.into();
-        let exposed_name = format!(
-            "mcp__{}__{}",
-            sanitize_tool_name_part(&server_name),
-            sanitize_tool_name_part(&tool.name)
-        );
+        let exposed_name = Self::exposed_name_for(&server_name, &tool.name);
         Self {
             client,
             tool,
             server_name: Some(server_name),
             exposed_name,
         }
+    }
+
+    /// Stable tool name used when a server's tools are registered on an agent.
+    pub fn exposed_name_for(server_name: &str, tool_name: &str) -> String {
+        format!(
+            "mcp__{}__{}",
+            sanitize_tool_name_part(server_name),
+            sanitize_tool_name_part(tool_name)
+        )
     }
 
     fn attach_result_metadata(&self, result: &mut ToolResult, result_type: &str) {

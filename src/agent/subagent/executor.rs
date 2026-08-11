@@ -146,6 +146,24 @@ pub fn subagent_status_from_error(error: &ReactError) -> SubagentStatus {
     }
 }
 
+fn hook_stop_status(status: SubagentStatus) -> echo_core::hooks::SubagentStopStatus {
+    match status {
+        SubagentStatus::Completed => echo_core::hooks::SubagentStopStatus::Completed,
+        SubagentStatus::Failed => echo_core::hooks::SubagentStopStatus::Failed,
+        SubagentStatus::Cancelled => echo_core::hooks::SubagentStopStatus::Cancelled,
+        SubagentStatus::TimedOut => echo_core::hooks::SubagentStopStatus::TimedOut,
+    }
+}
+
+fn correlate_subagent_hook(
+    ctx: crate::skills::hooks::HookContext,
+    run_id: Option<&str>,
+    execution_id: Option<&str>,
+    attempt: u32,
+) -> crate::skills::hooks::HookContext {
+    ctx.with_run_correlation(run_id, None, execution_id, Some(attempt))
+}
+
 fn verification_check_from_tool(name: &str, args: &serde_json::Value) -> Option<String> {
     let normalized = name.to_ascii_lowercase().replace('-', "_");
     if !matches!(
@@ -501,14 +519,19 @@ impl SubagentExecutor {
             let req_parent_agent = req.parent_agent.clone();
             let delegation_policy = req.delegation_policy;
 
-            // Fire unified SubagentStart hook
+            // Fire unified SubagentStart for this concrete dispatch attempt.
             if let Some(ref executor) = self.config.unified_hook_executor {
-                let ctx = crate::skills::hooks::HookContext::for_subagent_start(
-                    &req_agent_name,
-                    &format!("{:?}", mode),
-                    &req.task,
-                    "", // session_id not available at this layer
-                    &req_parent_agent,
+                let ctx = correlate_subagent_hook(
+                    crate::skills::hooks::HookContext::for_subagent_start(
+                        &req_agent_name,
+                        &mode.to_string(),
+                        &req.task,
+                        "", // session_id not available at this layer
+                        &req_parent_agent,
+                    ),
+                    event_run_id.as_deref(),
+                    event_execution_id.as_deref(),
+                    hook_ctx.attempt,
                 );
                 executor(ctx).await;
             }
@@ -577,18 +600,22 @@ impl SubagentExecutor {
                         self.hooks.after_dispatch(&hook_ctx, &sub_result).await;
                     }
 
-                    // Fire unified SubagentStop hook (success). SubagentStop is
-                    // the single terminal event, carrying the status — there is
-                    // no separate SubagentCancelled event (industry-aligned:
-                    // Claude Code / Codex / OpenAI Agents SDK / AGTP).
+                    // Every Start has exactly one Stop. An executor may return a
+                    // structured cancelled/failed outcome inside Ok, so map the
+                    // outcome instead of assuming Completed from the Result arm.
                     if let Some(ref executor) = self.config.unified_hook_executor {
-                        let ctx = crate::skills::hooks::HookContext::for_subagent_stop(
-                            &req_agent_name,
-                            &format!("{:?}", mode),
-                            &format!("{:?}", sub_result.output),
-                            echo_core::hooks::SubagentStopStatus::Completed,
-                            "",
-                            &req_parent_agent,
+                        let ctx = correlate_subagent_hook(
+                            crate::skills::hooks::HookContext::for_subagent_stop(
+                                &req_agent_name,
+                                &mode.to_string(),
+                                &sub_result.output,
+                                hook_stop_status(sub_result.outcome.status),
+                                "",
+                                &req_parent_agent,
+                            ),
+                            event_run_id.as_deref(),
+                            event_execution_id.as_deref(),
+                            hook_ctx.attempt,
                         );
                         executor(ctx).await;
                     }
@@ -610,6 +637,27 @@ impl SubagentExecutor {
                         error = %error_str,
                         "subagent_dispatch_failed"
                     );
+
+                    // Close this attempt before cancellation returns or a hook
+                    // policy starts another attempt. Previously cancellation
+                    // returned above the only Stop call, while retries emitted
+                    // multiple Starts followed by one terminal Stop.
+                    if let Some(ref executor) = self.config.unified_hook_executor {
+                        let ctx = correlate_subagent_hook(
+                            crate::skills::hooks::HookContext::for_subagent_stop(
+                                &req_agent_name,
+                                &mode.to_string(),
+                                &format!("error: {error_str}"),
+                                hook_stop_status(status),
+                                "",
+                                &req_parent_agent,
+                            ),
+                            event_run_id.as_deref(),
+                            event_execution_id.as_deref(),
+                            hook_ctx.attempt,
+                        );
+                        executor(ctx).await;
+                    }
 
                     if status == SubagentStatus::Cancelled {
                         self.registry
@@ -714,34 +762,6 @@ impl SubagentExecutor {
                             execution_id: event_execution_id.clone(),
                             run_id: event_run_id.clone(),
                         });
-
-                    // Fire unified SubagentStop hook (failure). Map the
-                    // internal SubagentStatus (Failed/Cancelled/TimedOut) to
-                    // the hook-layer SubagentStopStatus so consumers see the
-                    // structured terminal reason, not just free-form text.
-                    if let Some(ref executor) = self.config.unified_hook_executor {
-                        let stop_status = match status {
-                            SubagentStatus::Cancelled => {
-                                echo_core::hooks::SubagentStopStatus::Cancelled
-                            }
-                            SubagentStatus::TimedOut => {
-                                echo_core::hooks::SubagentStopStatus::TimedOut
-                            }
-                            SubagentStatus::Completed => {
-                                echo_core::hooks::SubagentStopStatus::Completed
-                            }
-                            SubagentStatus::Failed => echo_core::hooks::SubagentStopStatus::Failed,
-                        };
-                        let ctx = crate::skills::hooks::HookContext::for_subagent_stop(
-                            &req_agent_name,
-                            &format!("{:?}", mode),
-                            &format!("error: {}", error_str),
-                            stop_status,
-                            "",
-                            &req_parent_agent,
-                        );
-                        executor(ctx).await;
-                    }
 
                     return Err(e);
                 }

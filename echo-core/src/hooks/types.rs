@@ -40,9 +40,8 @@ pub enum HookEventCategory {
 /// Industry alignment (Claude Code / Codex / OpenAI Agents SDK / AGTP): all
 /// converge on "two boundary events (Start/Stop) + a status enum on the
 /// terminal event" rather than one independent event per terminal state
-/// (Stop/Cancelled/Failed/TimedOut). `SubagentStop` is always emitted exactly
-/// once by the subagent executor's `finalize(status)` convergence point,
-/// regardless of how the run ended.
+/// (Stop/Cancelled/Failed/TimedOut). Every concrete dispatch attempt emits one
+/// Start/Stop pair; a retry is a new attempt with its own pair.
 ///
 /// `SubagentCancelled` (the former independent event) is removed per this
 /// model — cancelled is a `SubagentStop` status value, not a separate event.
@@ -92,11 +91,8 @@ pub enum TaskTerminalStatus {
     Cancelled,
     /// PlanTask hit a deadline / timeout.
     TimedOut,
-    /// PlanTask was skipped (e.g. upstream dependency failed, or cancelled run).
+    /// PlanTask was skipped because an upstream dependency cannot complete.
     Skipped,
-    /// PlanTask is blocked awaiting review/acceptance (non-terminal from the
-    /// graph view, but a stable resting state the hook consumer should see).
-    Blocked,
 }
 
 impl TaskTerminalStatus {
@@ -108,7 +104,6 @@ impl TaskTerminalStatus {
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
             Self::Skipped => "skipped",
-            Self::Blocked => "blocked",
         }
     }
 }
@@ -124,7 +119,7 @@ impl TaskTerminalStatus {
 /// | Tool | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` | Tool name (exact, glob, `|`-separated) |
 /// | Lifecycle | `SessionStart`, `SessionEnd`, `Stop`, `Notification`, `UserPromptSubmit`, `PreCompact`, `PostCompact`, `ConfigChange`, `InstructionsLoaded`, `PostToolBatch` | Lifecycle hint (e.g. "startup", "permission_prompt") |
 /// | Subagent | `SubagentStart`, `SubagentStop` | Subagent type/name. `SubagentStop` carries a `subagent_stop_status` (completed/failed/cancelled/timed_out); there is no separate `SubagentCancelled` event. |
-/// | Task | `TaskCreated`, `TaskCompleted` | Task subject/name |
+/// | Task | `TaskCreated`, `TaskStarted`, `TaskCompleted` | Task subject/name. `TaskCompleted` carries the terminal status. |
 /// | Error | `StopFailure` | Not supported |
 /// | Evolution | `PostMemoryWrite`, `MemoryLayerChange` | Memory source or layer name |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -232,6 +227,41 @@ pub enum HookEvent {
 }
 
 impl HookEvent {
+    /// Every supported hook event in stable display order.
+    pub const ALL: &'static [Self] = &[
+        Self::PreToolUse,
+        Self::PostToolUse,
+        Self::PostToolUseFailure,
+        Self::PermissionRequest,
+        Self::PermissionDenied,
+        Self::SessionStart,
+        Self::SessionEnd,
+        Self::Stop,
+        Self::Notification,
+        Self::UserPromptSubmit,
+        Self::PreCompact,
+        Self::PostCompact,
+        Self::ConfigChange,
+        Self::InstructionsLoaded,
+        Self::PostToolBatch,
+        Self::SubagentStart,
+        Self::SubagentStop,
+        Self::TaskCreated,
+        Self::TaskStarted,
+        Self::TaskCompleted,
+        Self::StopFailure,
+        Self::PluginLoaded,
+        Self::PluginDisabled,
+        Self::PostMemoryWrite,
+        Self::MemoryLayerChange,
+        Self::SkillCandidateDetected,
+        Self::SkillLifecycleTransition,
+        Self::SkillHealthCheck,
+        Self::SkillPatchApplied,
+        Self::SkillMergeApplied,
+        Self::RulePromoted,
+    ];
+
     /// Event category — determines matcher semantics and routing.
     pub fn category(self) -> HookEventCategory {
         match self {
@@ -326,6 +356,45 @@ impl HookEvent {
             HookEvent::SkillPatchApplied => "SkillPatchApplied",
             HookEvent::SkillMergeApplied => "SkillMergeApplied",
             HookEvent::RulePromoted => "RulePromoted",
+        }
+    }
+
+    /// Parse the canonical PascalCase event name used by hook configuration
+    /// and user-facing test commands.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "PreToolUse" => Some(Self::PreToolUse),
+            "PostToolUse" => Some(Self::PostToolUse),
+            "PostToolUseFailure" => Some(Self::PostToolUseFailure),
+            "PermissionRequest" => Some(Self::PermissionRequest),
+            "PermissionDenied" => Some(Self::PermissionDenied),
+            "SessionStart" => Some(Self::SessionStart),
+            "SessionEnd" => Some(Self::SessionEnd),
+            "Stop" => Some(Self::Stop),
+            "Notification" => Some(Self::Notification),
+            "UserPromptSubmit" => Some(Self::UserPromptSubmit),
+            "PreCompact" => Some(Self::PreCompact),
+            "PostCompact" => Some(Self::PostCompact),
+            "ConfigChange" => Some(Self::ConfigChange),
+            "InstructionsLoaded" => Some(Self::InstructionsLoaded),
+            "PostToolBatch" => Some(Self::PostToolBatch),
+            "SubagentStart" => Some(Self::SubagentStart),
+            "SubagentStop" => Some(Self::SubagentStop),
+            "TaskCreated" => Some(Self::TaskCreated),
+            "TaskStarted" => Some(Self::TaskStarted),
+            "TaskCompleted" => Some(Self::TaskCompleted),
+            "StopFailure" => Some(Self::StopFailure),
+            "PluginLoaded" => Some(Self::PluginLoaded),
+            "PluginDisabled" => Some(Self::PluginDisabled),
+            "PostMemoryWrite" => Some(Self::PostMemoryWrite),
+            "MemoryLayerChange" => Some(Self::MemoryLayerChange),
+            "SkillCandidateDetected" => Some(Self::SkillCandidateDetected),
+            "SkillLifecycleTransition" => Some(Self::SkillLifecycleTransition),
+            "SkillHealthCheck" => Some(Self::SkillHealthCheck),
+            "SkillPatchApplied" => Some(Self::SkillPatchApplied),
+            "SkillMergeApplied" => Some(Self::SkillMergeApplied),
+            "RulePromoted" => Some(Self::RulePromoted),
+            _ => None,
         }
     }
 }
@@ -439,7 +508,7 @@ pub struct HookContext {
     /// Terminal status of the PlanTask node (TaskCompleted only).
     ///
     /// Always present on TaskCompleted contexts. Lets consumers distinguish
-    /// completed/failed/cancelled/timed_out/skipped/blocked without parsing
+    /// completed/failed/cancelled/timed_out/skipped without parsing
     /// free-form text. Replaces the former TaskTimeout/TaskCancelled events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_terminal_status: Option<TaskTerminalStatus>,
@@ -840,6 +909,25 @@ impl HookContext {
         }
     }
 
+    /// Add optional TaskRun/SubagentRun identifiers to this context.
+    ///
+    /// Framework-only dispatches may not know every identifier. Application
+    /// runtimes should populate all available fields instead of encoding them
+    /// into matcher or result strings.
+    pub fn with_run_correlation(
+        mut self,
+        run_id: Option<&str>,
+        plan_revision: Option<&str>,
+        subagent_run_id: Option<&str>,
+        attempt: Option<u32>,
+    ) -> Self {
+        self.run_id = run_id.map(str::to_string);
+        self.plan_revision = plan_revision.map(str::to_string);
+        self.subagent_run_id = subagent_run_id.map(str::to_string);
+        self.attempt = attempt;
+        self
+    }
+
     // ── Factory methods for task events ──
 
     pub fn for_task_created(
@@ -880,7 +968,7 @@ impl HookContext {
     /// Create context for TaskCompleted (terminal state).
     ///
     /// `status` is the structured terminal reason (completed/failed/cancelled/
-    /// timed_out/skipped/blocked), replacing the former TaskTimeout/Cancelled
+    /// timed_out/skipped), replacing the former TaskTimeout/Cancelled
     /// independent events.
     pub fn for_task_completed(
         task_id: &str,
@@ -1081,6 +1169,14 @@ pub type UnifiedHookExecutorFn =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_event_names_round_trip_for_every_event() {
+        for event in HookEvent::ALL {
+            assert_eq!(HookEvent::from_name(event.as_str()), Some(*event));
+        }
+        assert_eq!(HookEvent::from_name("UnknownEvent"), None);
+    }
 
     #[test]
     fn test_hook_event_category() {
@@ -1383,7 +1479,6 @@ mod tests {
             (TaskTerminalStatus::Cancelled, "cancelled"),
             (TaskTerminalStatus::TimedOut, "timed_out"),
             (TaskTerminalStatus::Skipped, "skipped"),
-            (TaskTerminalStatus::Blocked, "blocked"),
         ] {
             assert_eq!(status.as_str(), expected);
             let json = serde_json::to_string(&status).unwrap_or_default();

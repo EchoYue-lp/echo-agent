@@ -348,7 +348,7 @@ impl PluginManifest {
         }
 
         // Validate version
-        if self.version != "0.0.0" && !is_valid_semver_loose(&self.version) {
+        if self.version != "0.0.0" && !is_valid_semver(&self.version) {
             errors.push(ValidationError {
                 field: "version".into(),
                 message: format!("Version '{}' is not valid semver", self.version),
@@ -496,18 +496,8 @@ fn is_valid_identifier(s: &str) -> bool {
         && s.chars().next().is_some_and(|c| !c.is_ascii_digit())
 }
 
-/// Loose semver check: accepts "MAJOR.MINOR.PATCH" with optional pre-release.
-fn is_valid_semver_loose(s: &str) -> bool {
-    let parts: Vec<&str> = s.splitn(3, '.').collect();
-    if parts.len() != 3 {
-        return false;
-    }
-    parts[0].parse::<u32>().is_ok()
-        && parts[1].parse::<u32>().is_ok()
-        && parts[2]
-            .split('-')
-            .next()
-            .is_some_and(|p| p.parse::<u32>().is_ok())
+fn is_valid_semver(s: &str) -> bool {
+    semver::Version::parse(s).is_ok()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

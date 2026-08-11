@@ -326,8 +326,8 @@ impl ReactAgent {
 
     /// Register a subagent **definition only** — no instance and no factory.
     ///
-    /// This is the discovery / late-binding entry point used by the plugin
-    /// integrator and team-mode topologies: a definition becomes visible to
+    /// This is a low-level discovery / late-binding entry point for runtimes
+    /// that can guarantee later hydration: a definition becomes visible to
     /// `list_available`, `agent_names`, and the dispatch catalog before any
     /// executable instance exists. The application layer (which owns the
     /// prompt-compiler / tool-filter / sandbox wiring needed to build a real
@@ -826,15 +826,70 @@ impl ReactAgent {
         removed
     }
 
-    /// Backward-compatible: discover skills from a single directory.
-    ///
-    /// Equivalent to `discover_skills(&[DiscoveryScope::Custom(path)])`.
+    /// Discover skills from one explicit directory.
     pub async fn load_skills_from_dir(
         &mut self,
         skills_dir: impl Into<std::path::PathBuf>,
     ) -> Result<Vec<String>> {
         self.discover_skills(&[DiscoveryScope::Custom(skills_dir.into())])
             .await
+    }
+
+    /// Mark newly discovered skills with one component source in both live
+    /// registries. The progressive registry powers activation/resource tools;
+    /// tagging only the catalog registry would leave disabled plugin skills
+    /// executable through those tools.
+    pub async fn tag_skills_source(&mut self, names: &[String], source: &str) {
+        self.tools.skill_registry.tag_source(names, source);
+        if let Some(shared) = &self.tools.progressive_skill_registry {
+            shared.write().await.tag_source(names, source);
+        }
+    }
+
+    /// Remove every skill owned by `source` and refresh all projections/tools.
+    pub async fn unregister_skills_by_source(&mut self, source: &str) -> Vec<String> {
+        let removed = self.tools.skill_registry.unregister_names_by_source(source);
+        if removed.is_empty() {
+            return removed;
+        }
+
+        if let Some(shared) = &self.tools.progressive_skill_registry {
+            shared.write().await.unregister_by_source(source);
+        }
+        {
+            let mut hooks = self.tools.hook_registry.write().await;
+            for name in &removed {
+                hooks.unregister(&crate::skills::hooks::HookSource::Skill(name.clone()));
+            }
+        }
+        {
+            let mut context = self.memory.context.lock().await;
+            for name in &removed {
+                context.replace_projection(format!("echo-agent:skill:{name}"), None);
+            }
+            let catalog = self
+                .tools
+                .skill_registry
+                .catalog_prompt()
+                .map(crate::llm::types::Message::system);
+            context.replace_projection(SKILL_CATALOG_PROJECTION, catalog);
+        }
+
+        if let Some(shared) = self.tools.progressive_skill_registry.clone() {
+            let available_names = self.tools.skill_registry.available_names();
+            self.replace_tool(Box::new(ActivateSkillTool::new(
+                shared.clone(),
+                available_names,
+            )));
+            self.replace_tool(Box::new(ReadSkillResourceTool::new(shared.clone())));
+            let mut script_tool = RunSkillScriptTool::new(shared);
+            if let Some(manager) = &self.tools.sandbox_manager {
+                script_tool = script_tool.with_sandbox_manager(manager.clone());
+            }
+            self.replace_tool(Box::new(script_tool));
+        }
+
+        removed
     }
 
     /// Activate one installed skill and inject its instructions into context.
@@ -946,22 +1001,25 @@ impl ReactAgent {
         self.approval.permission_service.as_ref()
     }
 
-    /// Create a `TaskHookBridge` that fires task lifecycle events
-    /// (TaskCreated, TaskCompleted, TaskTimeout, TaskCancelled) into the
-    /// central `HookRegistry`.
+    /// Create a `TaskHookBridge` that lets an application-owned task runtime
+    /// translate its durable lifecycle events into the central registry.
     ///
-    /// Register the returned `BridgedTaskHooks` with your `TaskHookRegistry`
-    /// to ensure YAML-configured hooks see task events.
-    pub fn create_task_hook_bridge(&self) -> crate::hooks_bridge::BridgedTaskHooks {
-        let bridge = std::sync::Arc::new(crate::hooks_bridge::TaskHookBridge::new(
+    /// Framework [`TaskExecutor`](crate::tasks::TaskExecutor) users should set
+    /// `TaskExecutorConfig::unified_hook_executor` instead; the executor is the
+    /// lifecycle emission owner on that path.
+    ///
+    /// The bridge fires task lifecycle events
+    /// (`TaskCreated`, `TaskStarted`, and terminal `TaskCompleted`) into the
+    /// central `HookRegistry`. Terminal reason is carried by status.
+    pub fn create_task_hook_bridge(&self) -> crate::hooks_bridge::TaskHookBridge {
+        crate::hooks_bridge::TaskHookBridge::new(
             self.tools.hook_registry.clone(),
             self.config
                 .session_id
                 .clone()
                 .unwrap_or_else(|| "default".to_string()),
             self.config.agent_name.clone(),
-        ));
-        crate::hooks_bridge::BridgedTaskHooks::new(bridge)
+        )
     }
 
     /// Create a `SubagentHookBridge` that fires subagent lifecycle events
@@ -1009,6 +1067,12 @@ impl ReactAgent {
         config: McpServerConfig,
     ) -> crate::error::Result<Arc<McpClient>> {
         let name = config.name.clone();
+        // Reconnection must also remove tools that disappeared from the new
+        // server schema. McpManager replaces the client, but it cannot mutate
+        // the agent's ToolManager on its own.
+        if self.tools.mcp_manager.get_client(&name).is_some() {
+            self.disconnect_mcp(&name).await;
+        }
         let tools = self.tools.mcp_manager.connect(config).await?;
         let count = tools.len();
         self.add_tools(tools);
@@ -1156,6 +1220,21 @@ impl ReactAgent {
     /// This method disconnects from the specified MCP server and removes related tool registrations.
     /// After disconnection, tools provided by that server will no longer be available.
     pub async fn disconnect_mcp(&mut self, name: &str) -> bool {
+        let tool_names = self
+            .tools
+            .mcp_manager
+            .get_client(name)
+            .map(|client| {
+                client
+                    .tools()
+                    .iter()
+                    .map(|tool| crate::mcp::McpToolAdapter::exposed_name_for(name, &tool.name))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for tool_name in tool_names {
+            self.remove_tool(&tool_name);
+        }
         self.tools.mcp_manager.disconnect(name).await
     }
 

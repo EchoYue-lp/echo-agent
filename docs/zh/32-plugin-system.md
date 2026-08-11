@@ -4,15 +4,15 @@
 
 插件系统允许在不修改核心代码的前提下，通过声明式的 `manifest.yaml` 扩展 Agent 的能力。一个插件是一个自包含的目录，可以提供以下组件：
 
-| 组件 | 接入子系统 | 说明 |
-|------|-----------|------|
-| Skills | `SkillRegistry` | SKILL.md 文件，渐进式披露能力 |
-| Hooks | `HookRegistry` | 拦截工具调用的钩子定义 |
-| MCP Servers | `McpManager` | MCP 协议服务器配置 |
-| LSP Servers | `LspManager` | 语言服务器配置 |
-| Agents | `SubagentRegistry` | 子 Agent 定义文件 |
-| Monitors | 后台进程管理器 | 后台监控配置 |
-| Themes | UI 主题注册表 | 颜色主题 JSON 文件 |
+| 组件 | 当前状态 | 说明 |
+|------|---------|------|
+| Skills | 已接入 `SkillRegistry` | SKILL.md 文件，支持在线装卸 |
+| Hooks | 已接入 `HookRegistry` | 生命周期和工具钩子，支持在线装卸 |
+| MCP Servers | 已接入 `McpManager` | MCP 服务器及工具，支持在线装卸 |
+| Agents | 仅发现 | 应用层尚未原子构造 definition + executable factory |
+| LSP Servers | 仅发现 | `ReactAgent` 尚未持有 `LspManager` |
+| Monitors | 仅发现 | 尚无运行时消费者 |
+| Themes / Output Styles | 仅发现 | 由应用 UI / 输出层消费，尚未接入 |
 
 ```
 核心框架:  提供 React Agent 循环、工具执行、上下文管理
@@ -399,6 +399,7 @@ println!("共装配 {} 个组件", result.total_wired());
 | Skills | `agent.load_skills_from_dir()` |
 | Hooks | `hook_registry.register("plugin:{name}", ...)` |
 | MCP Servers | `agent.load_mcp_from_file()` |
+| Agents / LSP / Monitors / Themes / Output Styles | 仅返回 `*_discovered` 路径，不计入已装配组件 |
 
 也可以只装配部分组件：
 

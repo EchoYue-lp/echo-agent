@@ -54,7 +54,7 @@ use super::verifier::Verifier;
 use crate::planning::PlanValidator;
 use crate::tasks::BackgroundCheckpointStore;
 use async_trait::async_trait;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use echo_core::error::{ReactError, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -79,9 +79,11 @@ pub struct TaskExecutorConfig {
     pub retry_jitter: bool,
     /// Enable task hooks
     pub enable_hooks: bool,
-    /// Optional bridge to the unified lifecycle hook system (echo-core).
-    /// When set, TaskCreated/TaskCompleted events are fired into the
-    /// unified HookRegistry alongside the trait-based TaskHooks.
+    /// Optional emitter for the unified lifecycle hook system (echo-core).
+    ///
+    /// This is the sole owner of unified `TaskCreated`, `TaskStarted`, and
+    /// terminal `TaskCompleted` events. Trait-based [`TaskHooks`] remain an
+    /// execution-policy extension point and must not emit the same lifecycle.
     pub unified_hook_executor: Option<echo_core::hooks::UnifiedHookExecutorFn>,
 }
 
@@ -317,6 +319,10 @@ pub struct TaskExecutor {
     /// Tracks cancellation tokens for running tasks.
     /// Used by `cancel_task()` to abort in-flight executions.
     running_tasks: Arc<DashMap<String, CancellationToken>>,
+    /// Task ids whose unified `TaskCreated` event has already been emitted by
+    /// this executor. A task may be reset to Pending and scheduled again, but
+    /// creation remains a once-per-node lifecycle fact.
+    created_hook_tasks: Arc<DashSet<String>>,
     /// Optional shared [`TaskSpawner`] for `execute_all_async()`.
     ///
     /// When set, all async DAG executions share the same spawner so tasks
@@ -377,6 +383,7 @@ impl TaskExecutor {
             hooks,
             task_store: None,
             running_tasks: Arc::new(DashMap::new()),
+            created_hook_tasks: Arc::new(DashSet::new()),
             shared_spawner: None,
             cancel: CancellationToken::new(),
             // Step 10: Initialize integrated components
@@ -398,16 +405,94 @@ impl TaskExecutor {
         self
     }
 
-    /// Register a `TaskHooks` implementation for task lifecycle callbacks.
+    /// Register a `TaskHooks` implementation for execution policy callbacks.
     ///
-    /// Use this to wire `BridgedTaskHooks` so YAML-configured hooks see
-    /// task events (TaskCreated, TaskCompleted, etc.).
+    /// Unified lifecycle events are emitted through
+    /// [`TaskExecutorConfig::unified_hook_executor`].
     pub fn with_task_hook(mut self, hook: Arc<dyn super::hooks::TaskHooks>) -> Self {
         // Safe: we own the only reference during builder phase
         if let Some(registry) = Arc::get_mut(&mut self.hooks) {
             registry.register(hook);
         }
         self
+    }
+
+    async fn emit_task_created(
+        config: &TaskExecutorConfig,
+        created_hook_tasks: &DashSet<String>,
+        task: &ManagedTask,
+    ) {
+        if let Some(executor) = config.unified_hook_executor.as_ref()
+            && created_hook_tasks.insert(task.id.clone())
+        {
+            let context =
+                echo_core::hooks::HookContext::for_task_created(&task.id, &task.subject, "", "");
+            let _ = executor(context).await;
+        }
+    }
+
+    async fn emit_task_started(config: &TaskExecutorConfig, task: &ManagedTask, attempt: u32) {
+        if let Some(executor) = config.unified_hook_executor.as_ref() {
+            let context =
+                echo_core::hooks::HookContext::for_task_started(&task.id, &task.subject, "", "")
+                    .with_run_correlation(None, None, None, Some(attempt));
+            let _ = executor(context).await;
+        }
+    }
+
+    async fn emit_task_terminal(
+        config: &TaskExecutorConfig,
+        manager: &TaskManager,
+        hooks: &TaskHookRegistry,
+        task_id: &str,
+        task_subject: &str,
+        result: &TaskExecutionResult,
+    ) {
+        if config.enable_hooks && matches!(result.status, TaskStatus::Cancelled) {
+            let attempt = result.attempts.max(1);
+            if let Some(context) = manager.create_hook_context(task_id, attempt, None) {
+                hooks.on_cancelled(&context).await;
+            }
+        }
+
+        let terminal_status = match result.status {
+            TaskStatus::Completed => echo_core::hooks::TaskTerminalStatus::Completed,
+            TaskStatus::Failed(_) => echo_core::hooks::TaskTerminalStatus::Failed,
+            TaskStatus::Cancelled => echo_core::hooks::TaskTerminalStatus::Cancelled,
+            TaskStatus::TimedOut { .. } => echo_core::hooks::TaskTerminalStatus::TimedOut,
+            TaskStatus::Skipped => echo_core::hooks::TaskTerminalStatus::Skipped,
+            TaskStatus::Pending
+            | TaskStatus::Running
+            | TaskStatus::Blocked(_)
+            | TaskStatus::Retrying { .. }
+            | TaskStatus::Paused(_) => {
+                warn!(
+                    task_id,
+                    status = ?result.status,
+                    "Task execution returned without a terminal status"
+                );
+                return;
+            }
+        };
+
+        if let Some(executor) = config.unified_hook_executor.as_ref() {
+            let detail = result
+                .output
+                .as_deref()
+                .or(result.error.as_deref())
+                .unwrap_or_default();
+            let attempt = (result.attempts > 0).then_some(result.attempts);
+            let context = echo_core::hooks::HookContext::for_task_completed(
+                task_id,
+                task_subject,
+                detail,
+                terminal_status,
+                "",
+                "",
+            )
+            .with_run_correlation(None, None, None, attempt);
+            let _ = executor(context).await;
+        }
     }
 
     /// Set a persistent task store for cross-restart task resumption.
@@ -578,25 +663,34 @@ impl TaskExecutor {
         tasks: Vec<ManagedTask>,
     ) -> Result<Vec<TaskExecutionResult>> {
         let mut handles = Vec::with_capacity(tasks.len());
+        let mut immediate_results = Vec::new();
 
         for task in tasks {
-            // Fire unified TaskCreated hook at scheduling time
-            if let Some(ref executor) = self.config.unified_hook_executor {
-                let ctx = echo_core::hooks::HookContext::for_task_created(
-                    &task.id,
-                    &task.subject,
-                    "",
-                    "",
-                );
-                executor(ctx).await;
-            }
+            Self::emit_task_created(&self.config, self.created_hook_tasks.as_ref(), &task).await;
 
-            let permit = self
-                .semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|e| ReactError::Other(format!("Semaphore acquire error: {}", e)))?;
+            let task_id = task.id.clone();
+            let task_subject = task.subject.clone();
+            let initial_attempt = task.retry_count.saturating_add(1);
+
+            let permit = match self.semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    warn!(task_id, %error, "Task semaphore closed before dispatch");
+                    let _ = self.task_manager.cancel_task(&task_id);
+                    let result = TaskExecutionResult::cancelled(&task_id);
+                    Self::emit_task_terminal(
+                        &self.config,
+                        self.task_manager.as_ref(),
+                        self.hooks.as_ref(),
+                        &task_id,
+                        &task_subject,
+                        &result,
+                    )
+                    .await;
+                    immediate_results.push(result);
+                    continue;
+                }
+            };
             let manager = self.task_manager.clone();
             let config = self.config.clone();
             let execute_fn = task.execute_fn.clone().or_else(|| self.execute_fn.clone());
@@ -605,42 +699,54 @@ impl TaskExecutor {
             let task_store = self.task_store.clone();
             let verifier = self.verifier.clone();
             let replanner = self.replanner.clone();
-            let task_id = task.id.clone();
             let cancel = self.cancel.child_token();
             let cancel_clone = cancel.clone();
             running_tasks.insert(task_id.clone(), cancel);
 
-            handles.push(tokio::spawn(async move {
+            let joined_task_id = task_id.clone();
+            let joined_task_subject = task_subject.clone();
+
+            let handle = tokio::spawn(async move {
                 let _permit = permit;
                 let start = Instant::now();
 
-                if task.is_cancelled() || cancel_clone.is_cancelled() {
-                    running_tasks.remove(&task_id);
-                    return TaskExecutionResult::cancelled(&task_id);
-                }
-
-                let manager2 = manager.clone();
-                let verifier_clone = verifier.clone();
-                let result = tokio::select! {
-                    biased;
-                    _ = cancel_clone.cancelled() => {
-                        let _ = manager.cancel_task(&task_id);
-                        TaskExecutionResult::cancelled(&task_id)
-                    }
-                    result = Self::run_task_with_retry(
-                        task,
-                        manager2,
-                        config,
-                        execute_fn,
-                        hooks,
-                        cancel_clone.clone(),
-                        task_store,
-                        verifier_clone,
-                        replanner,
-                    ) => {
-                        result
+                let result = if task.is_cancelled() || cancel_clone.is_cancelled() {
+                    let _ = manager.cancel_task(&task_id);
+                    TaskExecutionResult::cancelled(&task_id)
+                } else {
+                    let manager2 = manager.clone();
+                    let verifier_clone = verifier.clone();
+                    tokio::select! {
+                        biased;
+                        _ = cancel_clone.cancelled() => {
+                            let _ = manager.cancel_task(&task_id);
+                            TaskExecutionResult::cancelled(&task_id)
+                        }
+                        result = Self::run_task_with_retry(
+                            task,
+                            manager2,
+                            config.clone(),
+                            execute_fn,
+                            hooks.clone(),
+                            cancel_clone.clone(),
+                            task_store,
+                            verifier_clone,
+                            replanner,
+                        ) => {
+                            result
+                        }
                     }
                 };
+
+                Self::emit_task_terminal(
+                    &config,
+                    manager.as_ref(),
+                    hooks.as_ref(),
+                    &task_id,
+                    &task_subject,
+                    &result,
+                )
+                .await;
 
                 running_tasks.remove(&task_id);
 
@@ -652,15 +758,34 @@ impl TaskExecutor {
                 );
 
                 result
-            }));
+            });
+            handles.push((joined_task_id, joined_task_subject, initial_attempt, handle));
         }
 
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
+        let mut results = immediate_results;
+        results.reserve(handles.len());
+        for (task_id, task_subject, attempt, handle) in handles {
             match handle.await {
                 Ok(result) => results.push(result),
-                Err(e) => {
-                    warn!(error = %e, "Task join error");
+                Err(error) => {
+                    let detail = format!("Task execution join error: {error}");
+                    warn!(task_id, %error, "Task execution future failed to join");
+                    let _ = self
+                        .task_manager
+                        .update_task_status(&task_id, TaskStatus::Failed(detail.clone()));
+                    self.running_tasks.remove(&task_id);
+                    let result =
+                        TaskExecutionResult::failure(&task_id, detail, Duration::ZERO, attempt);
+                    Self::emit_task_terminal(
+                        &self.config,
+                        self.task_manager.as_ref(),
+                        self.hooks.as_ref(),
+                        &task_id,
+                        &task_subject,
+                        &result,
+                    )
+                    .await;
+                    results.push(result);
                 }
             }
         }
@@ -674,21 +799,35 @@ impl TaskExecutor {
         task: ManagedTask,
         _max_concurrent: u32,
     ) -> TaskExecutionResult {
+        Self::emit_task_created(&self.config, self.created_hook_tasks.as_ref(), &task).await;
+        let task_id = task.id.clone();
+        let task_subject = task.subject.clone();
         let permit = self
             .semaphore
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| TaskExecutionResult::cancelled(&task.id));
+            .map_err(|_| TaskExecutionResult::cancelled(&task_id));
 
         let permit = match permit {
             Ok(p) => p,
-            Err(r) => return r,
+            Err(result) => {
+                let _ = self.task_manager.cancel_task(&task_id);
+                Self::emit_task_terminal(
+                    &self.config,
+                    self.task_manager.as_ref(),
+                    self.hooks.as_ref(),
+                    &task_id,
+                    &task_subject,
+                    &result,
+                )
+                .await;
+                return result;
+            }
         };
 
         let _permit = permit;
         let start = Instant::now();
-        let task_id = task.id.clone();
         let cancel = self.cancel.child_token();
         let cancel_clone = cancel.clone();
         self.running_tasks.insert(task_id.clone(), cancel);
@@ -714,6 +853,16 @@ impl TaskExecutor {
             }
         };
 
+        Self::emit_task_terminal(
+            &self.config,
+            self.task_manager.as_ref(),
+            self.hooks.as_ref(),
+            &task_id,
+            &task_subject,
+            &result,
+        )
+        .await;
+
         self.running_tasks.remove(&task_id);
         debug!(
             task_id = %task_id,
@@ -734,11 +883,8 @@ impl TaskExecutor {
         parent_cancel: CancellationToken,
     ) -> TaskExecutionResult {
         let task_id = task.id.clone();
-        if let Some(ref executor) = self.config.unified_hook_executor {
-            let ctx =
-                echo_core::hooks::HookContext::for_task_created(&task.id, &task.subject, "", "");
-            executor(ctx).await;
-        }
+        let task_subject = task.subject.clone();
+        Self::emit_task_created(&self.config, self.created_hook_tasks.as_ref(), &task).await;
 
         let cancel = parent_cancel.child_token();
         let cancel_for_execution = cancel.clone();
@@ -762,6 +908,15 @@ impl TaskExecutor {
                 self.replanner.clone(),
             ) => result,
         };
+        Self::emit_task_terminal(
+            &self.config,
+            self.task_manager.as_ref(),
+            self.hooks.as_ref(),
+            &task_id,
+            &task_subject,
+            &result,
+        )
+        .await;
         if matches!(result.status, TaskStatus::Cancelled) {
             let _ = self.task_manager.cancel_task(&task_id);
         }
@@ -796,6 +951,8 @@ impl TaskExecutor {
 
         // Update status to Running
         let _ = manager.update_task_status(&task_id, TaskStatus::Running);
+
+        Self::emit_task_started(&config, &task, current_attempt).await;
 
         // Call before_execute hook
         if config.enable_hooks
@@ -979,19 +1136,6 @@ impl TaskExecutor {
                         hooks.after_execute(&ctx, &output).await;
                     }
 
-                    // Fire unified TaskCompleted hook (success)
-                    if let Some(ref executor) = config.unified_hook_executor {
-                        let ctx = echo_core::hooks::HookContext::for_task_completed(
-                            &task_id,
-                            &task.subject,
-                            &output,
-                            echo_core::hooks::TaskTerminalStatus::Completed,
-                            "", // session_id not available at this layer
-                            "", // agent_name not available at this layer
-                        );
-                        executor(ctx).await;
-                    }
-
                     // Immediately persist completed task to store (close crash window)
                     if let Some(ref store) = task_store
                         && let Some(task_snapshot) = manager.get_task(&task_id)
@@ -1013,7 +1157,7 @@ impl TaskExecutor {
                     // Check if should retry
                     if current_attempt <= max_retries {
                         // Call on_failure hook
-                        let decision = if config.enable_hooks {
+                        let decision = if config.enable_hooks && !hooks.is_empty() {
                             if let Some(ctx) =
                                 manager.create_hook_context(&task_id, current_attempt, None)
                             {
@@ -1107,18 +1251,6 @@ impl TaskExecutor {
                     let _ =
                         manager.update_task_status(&task_id, TaskStatus::Failed(error_str.clone()));
 
-                    // Fire unified TaskCompleted hook (failure)
-                    if let Some(ref executor) = config.unified_hook_executor {
-                        let ctx = echo_core::hooks::HookContext::for_task_completed(
-                            &task_id,
-                            &task.subject,
-                            &format!("error: {}", error_str),
-                            echo_core::hooks::TaskTerminalStatus::Failed,
-                            "", // session_id not available at this layer
-                            "", // agent_name not available at this layer
-                        );
-                        executor(ctx).await;
-                    }
                     manager.record_task_execution(
                         &task_id,
                         current_attempt,
@@ -1354,6 +1486,7 @@ impl TaskExecutor {
         let mut handles = Vec::with_capacity(ready_tasks.len());
         for task in ready_tasks {
             let task_id = task.id.clone();
+            let task_subject = task.subject.clone();
             let task_name = format!("dag-task-{task_id}");
 
             // Clone everything needed for the spawn
@@ -1365,23 +1498,50 @@ impl TaskExecutor {
             let task_store = self.task_store.clone();
             let verifier = self.verifier.clone();
             let parent_cancel = self.cancel.clone();
+            let created_hook_tasks = self.created_hook_tasks.clone();
 
             let handle = spawner.spawn(&task_name, async move {
-                let _permit = semaphore
-                    .acquire()
-                    .await
-                    .map_err(|e| ReactError::Other(format!("Semaphore error: {e}")))?;
+                Self::emit_task_created(&config, created_hook_tasks.as_ref(), &task).await;
+
+                let _permit = match semaphore.acquire().await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        warn!(task_id, %error, "Task semaphore closed before dispatch");
+                        let _ = manager.cancel_task(&task_id);
+                        let result = TaskExecutionResult::cancelled(&task_id);
+                        Self::emit_task_terminal(
+                            &config,
+                            manager.as_ref(),
+                            hooks.as_ref(),
+                            &task_id,
+                            &task_subject,
+                            &result,
+                        )
+                        .await;
+                        return Ok(result);
+                    }
+                };
 
                 let result = Self::run_task_with_retry(
                     task,
                     manager.clone(),
-                    config,
+                    config.clone(),
                     execute_fn,
-                    hooks,
+                    hooks.clone(),
                     parent_cancel.child_token(),
                     task_store,
                     verifier,
                     None, // replanner
+                )
+                .await;
+
+                Self::emit_task_terminal(
+                    &config,
+                    manager.as_ref(),
+                    hooks.as_ref(),
+                    &task_id,
+                    &task_subject,
+                    &result,
                 )
                 .await;
 
@@ -1694,6 +1854,141 @@ impl RuntimeDagController for ManagedTaskDagController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capturing_hook_config(
+        captured: Arc<std::sync::Mutex<Vec<echo_core::hooks::HookContext>>>,
+    ) -> TaskExecutorConfig {
+        let unified_hook_executor = Arc::new(move |context| {
+            let captured = captured.clone();
+            Box::pin(async move {
+                captured
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(context);
+                echo_core::hooks::HookResult::default()
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = echo_core::hooks::HookResult> + Send>,
+                >
+        });
+        TaskExecutorConfig {
+            unified_hook_executor: Some(unified_hook_executor),
+            ..TaskExecutorConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn unified_task_hooks_emit_one_complete_lifecycle() {
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(ManagedTask::new("t1", "Build artifacts"));
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let executor = TaskExecutor::new(manager, capturing_hook_config(captured.clone()))
+            .with_execute_fn(Arc::new(|_| Box::pin(async { Ok("done".to_string()) })));
+
+        let execution = executor.execute_ready_tasks().await;
+        assert!(execution.is_ok(), "task execution failed: {execution:?}");
+
+        let contexts = captured
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let events = contexts
+            .iter()
+            .map(|context| context.event)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            vec![
+                echo_core::hooks::HookEvent::TaskCreated,
+                echo_core::hooks::HookEvent::TaskStarted,
+                echo_core::hooks::HookEvent::TaskCompleted,
+            ]
+        );
+        assert_eq!(
+            contexts
+                .last()
+                .and_then(|context| context.task_terminal_status),
+            Some(echo_core::hooks::TaskTerminalStatus::Completed)
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_retries_work_without_policy_hooks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(ManagedTask::new("t1", "Retry once").with_max_retries(1));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_execution = attempts.clone();
+        let config = TaskExecutorConfig {
+            retry_delay_secs: 0,
+            retry_jitter: false,
+            ..TaskExecutorConfig::default()
+        };
+        let executor = TaskExecutor::new(manager, config).with_execute_fn(Arc::new(move |_| {
+            let attempt = attempts_for_execution.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if attempt == 0 {
+                    Err(ReactError::Other("transient".to_string()))
+                } else {
+                    Ok("recovered".to_string())
+                }
+            })
+        }));
+
+        let execution = executor.execute_ready_tasks().await;
+        assert!(execution.is_ok(), "task execution failed: {execution:?}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            execution
+                .ok()
+                .and_then(|results| results.into_iter().next()),
+            Some(TaskExecutionResult {
+                status: TaskStatus::Completed,
+                attempts: 2,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_semaphore_still_closes_unified_task_lifecycle() {
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(ManagedTask::new("t1", "Never dispatched"));
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let executor = TaskExecutor::new(manager, capturing_hook_config(captured.clone()));
+        executor.semaphore.close();
+
+        let results = executor
+            .execute_ready_tasks()
+            .await
+            .unwrap_or_else(|_| Vec::new());
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            results.first().map(|result| &result.status),
+            Some(TaskStatus::Cancelled)
+        ));
+
+        let contexts = captured
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let events = contexts
+            .iter()
+            .map(|context| context.event)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            vec![
+                echo_core::hooks::HookEvent::TaskCreated,
+                echo_core::hooks::HookEvent::TaskCompleted,
+            ]
+        );
+        assert_eq!(
+            contexts
+                .last()
+                .and_then(|context| context.task_terminal_status),
+            Some(echo_core::hooks::TaskTerminalStatus::Cancelled)
+        );
+    }
 
     #[test]
     fn test_task_status_transitions() {

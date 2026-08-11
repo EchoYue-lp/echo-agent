@@ -63,16 +63,15 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 | `cancelled` | 被外部取消(用户 Esc / 父 run 取消) |
 | `timed_out` | 触发 deadline/timeout |
 
-> 注:旧的 `SubagentCancelled` 独立事件已删除 —— cancelled 现在是 `SubagentStop` 的一个 status 值。emission owner 是 `SubagentExecutor`(经 `unified_hook_executor`),在成功/失败/取消/超时四条 return 路径的汇聚点发一次,保证 exactly-once。
+> 注:旧的 `SubagentCancelled` 独立事件已删除 —— cancelled 现在是 `SubagentStop` 的一个 status 值。emission owner 是 `SubagentExecutor`(经 `unified_hook_executor`),每次实际 dispatch attempt 都有一对 Start/Stop；重试会开启新的 attempt。
 
 #### Task 事件（matcher = task subject/name）
 
 | 事件 | 触发时机 |
 |------|---------|
-| `TaskCreated` | 任务创建/调度时 |
-| `TaskCompleted` | 任务完成时 |
-| `TaskTimeout` | 任务执行超时 |
-| `TaskCancelled` | 任务被用户/系统取消 |
+| `TaskCreated` | 任务节点进入 plan revision 时 |
+| `TaskStarted` | 任务 attempt 被 claim 时 |
+| `TaskCompleted` | 任务终态；`task_terminal_status` 区分 completed/failed/skipped/cancelled/timed_out |
 
 #### 错误事件（不支持 matcher）
 
@@ -93,7 +92,7 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 | `SkillMergeApplied` | 两个或更多技能合并后 |
 | `RulePromoted` | 记忆提升为 AGENTS.md 规则后 |
 
-> 注：部分 Evolution / Plugin 事件目前尚无生产触发点（见 MASTER-PLAN「Hook/Plugin 收敛路线」P1 的「每个非保留事件须有生产触发点」契约测试）。已接入主路径的事件：工具类全部、会话类全部、Task 四个（经 `TaskHookBridge`）、Subagent 三个（经 `SubagentHookBridge`）、`StopFailure`。
+> 注：部分 Evolution 事件目前尚无生产触发点。已接入主路径的事件包括：工具类、会话类、Task 三段式事件（`TaskCreated` / `TaskStarted` / `TaskCompleted`）、Subagent 两段式事件（`SubagentStart` / `SubagentStop`）、Plugin 生命周期事件和 `StopFailure`。Task/Subagent 的取消与超时由对应终态事件的结构化 status 表达，不再使用独立事件。
 
 ### Hook 动作类型
 

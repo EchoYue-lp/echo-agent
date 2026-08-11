@@ -43,8 +43,9 @@
 //! | `PostToolBatch` | After batch of parallel tool calls | Aggregation |
 //! | `SubagentStart` | Before subagent dispatch | Context injection |
 //! | `SubagentStop` | After subagent completes | Result injection |
-//! | `TaskCreated` | Task created/scheduled | Context injection |
-//! | `TaskCompleted` | Task completed | Result injection |
+//! | `TaskCreated` | Task node enters an executable graph | Context injection |
+//! | `TaskStarted` | Scheduler claims a task for execution | Context injection |
+//! | `TaskCompleted` | Task reaches a terminal status | Result injection |
 //!
 //! ## Hook types
 //!
@@ -483,9 +484,9 @@ impl HookRegistry {
         plugin_name: &str,
         source_dir: &str,
         definition: HooksDefinition,
-    ) {
+    ) -> bool {
         if definition.is_empty() {
-            return;
+            return false;
         }
         // Validate every action; collect a clean definition containing only
         // valid actions (mirrors the per-action leniency of `add_rules`).
@@ -526,7 +527,7 @@ impl HookRegistry {
                 skipped,
                 "Plugin registered no valid hooks after validation; nothing registered"
             );
-            return;
+            return false;
         }
         info!(
             plugin = plugin_name,
@@ -541,6 +542,7 @@ impl HookRegistry {
                 source_dir: source_dir.to_string(),
             },
         );
+        true
     }
 
     /// Unregister hooks from a specific source.

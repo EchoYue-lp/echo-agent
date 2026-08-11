@@ -10,10 +10,10 @@
 //! ## Architecture
 //!
 //! ```text
-//! YAML hooks.yaml ──→ HookRegistry (25 events, 5 action types)
+//! YAML hooks.yaml ──→ HookRegistry
 //!                          ↑
-//! TaskHookBridge ──────┘  (fires TaskCreated/Completed/Timeout/Cancelled)
-//! SubagentHookBridge ──┘  (fires SubagentStart/Stop/Cancelled)
+//! TaskHookBridge ──────┘  (fires Created/Started/Completed(status))
+//! SubagentHookBridge ──┘  (fires Start/Stop(status))
 //! ```
 //!
 //! Rust developers can still use the `TaskHooks` and `SubagentHooks`
@@ -24,6 +24,24 @@ use echo_core::hooks::HookContext;
 use echo_execution::skills::hooks::HookRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Optional identifiers supplied by a product task runtime.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HookCorrelation<'a> {
+    pub run_id: Option<&'a str>,
+    pub plan_revision: Option<&'a str>,
+    pub subagent_run_id: Option<&'a str>,
+    pub attempt: Option<u32>,
+}
+
+fn apply_correlation(ctx: HookContext, correlation: HookCorrelation<'_>) -> HookContext {
+    ctx.with_run_correlation(
+        correlation.run_id,
+        correlation.plan_revision,
+        correlation.subagent_run_id,
+        correlation.attempt,
+    )
+}
 
 // ── Task Hook Bridge ────────────────────────────────────────────────
 
@@ -59,11 +77,24 @@ impl TaskHookBridge {
     /// task_runtime), this should fire at plan-revision-commit time (where the
     /// PlanTask is actually created), NOT at execute_task before.
     pub async fn on_created(&self, task_id: &str, task_subject: &str) {
-        let ctx = HookContext::for_task_created(
-            task_id,
-            task_subject,
-            &self.session_id,
-            &self.agent_name,
+        self.on_created_with_correlation(task_id, task_subject, HookCorrelation::default())
+            .await;
+    }
+
+    pub async fn on_created_with_correlation(
+        &self,
+        task_id: &str,
+        task_subject: &str,
+        correlation: HookCorrelation<'_>,
+    ) {
+        let ctx = apply_correlation(
+            HookContext::for_task_created(
+                task_id,
+                task_subject,
+                &self.session_id,
+                &self.agent_name,
+            ),
+            correlation,
         );
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
@@ -72,11 +103,24 @@ impl TaskHookBridge {
     /// Fire TaskStarted — the scheduler picked the task and is about to
     /// execute. This is the framework `TaskHooks::before_execute` mapping.
     pub async fn on_before_execute(&self, task_id: &str, task_subject: &str) {
-        let ctx = HookContext::for_task_started(
-            task_id,
-            task_subject,
-            &self.session_id,
-            &self.agent_name,
+        self.on_before_execute_with_correlation(task_id, task_subject, HookCorrelation::default())
+            .await;
+    }
+
+    pub async fn on_before_execute_with_correlation(
+        &self,
+        task_id: &str,
+        task_subject: &str,
+        correlation: HookCorrelation<'_>,
+    ) {
+        let ctx = apply_correlation(
+            HookContext::for_task_started(
+                task_id,
+                task_subject,
+                &self.session_id,
+                &self.agent_name,
+            ),
+            correlation,
         );
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
@@ -94,13 +138,34 @@ impl TaskHookBridge {
         result: &str,
         status: echo_core::hooks::TaskTerminalStatus,
     ) {
-        let ctx = HookContext::for_task_completed(
+        self.on_after_execute_with_correlation(
             task_id,
             task_subject,
             result,
             status,
-            &self.session_id,
-            &self.agent_name,
+            HookCorrelation::default(),
+        )
+        .await;
+    }
+
+    pub async fn on_after_execute_with_correlation(
+        &self,
+        task_id: &str,
+        task_subject: &str,
+        result: &str,
+        status: echo_core::hooks::TaskTerminalStatus,
+        correlation: HookCorrelation<'_>,
+    ) {
+        let ctx = apply_correlation(
+            HookContext::for_task_completed(
+                task_id,
+                task_subject,
+                result,
+                status,
+                &self.session_id,
+                &self.agent_name,
+            ),
+            correlation,
         );
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
@@ -144,12 +209,31 @@ impl SubagentHookBridge {
 
     /// Fire SubagentStart event (maps to before_dispatch).
     pub async fn on_before_dispatch(&self, subagent_name: &str, execution_mode: &str, task: &str) {
-        let ctx = HookContext::for_subagent_start(
+        self.on_before_dispatch_with_correlation(
             subagent_name,
             execution_mode,
             task,
-            &self.session_id,
-            &self.agent_name,
+            HookCorrelation::default(),
+        )
+        .await;
+    }
+
+    pub async fn on_before_dispatch_with_correlation(
+        &self,
+        subagent_name: &str,
+        execution_mode: &str,
+        task: &str,
+        correlation: HookCorrelation<'_>,
+    ) {
+        let ctx = apply_correlation(
+            HookContext::for_subagent_start(
+                subagent_name,
+                execution_mode,
+                task,
+                &self.session_id,
+                &self.agent_name,
+            ),
+            correlation,
         );
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
@@ -166,16 +250,37 @@ impl SubagentHookBridge {
         &self,
         subagent_name: &str,
         execution_mode: &str,
-        task: &str,
+        result: &str,
         status: echo_core::hooks::SubagentStopStatus,
     ) {
-        let ctx = HookContext::for_subagent_stop(
+        self.on_after_dispatch_with_correlation(
             subagent_name,
             execution_mode,
-            task,
+            result,
             status,
-            &self.session_id,
-            &self.agent_name,
+            HookCorrelation::default(),
+        )
+        .await;
+    }
+
+    pub async fn on_after_dispatch_with_correlation(
+        &self,
+        subagent_name: &str,
+        execution_mode: &str,
+        result: &str,
+        status: echo_core::hooks::SubagentStopStatus,
+        correlation: HookCorrelation<'_>,
+    ) {
+        let ctx = apply_correlation(
+            HookContext::for_subagent_stop(
+                subagent_name,
+                execution_mode,
+                result,
+                status,
+                &self.session_id,
+                &self.agent_name,
+            ),
+            correlation,
         );
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
@@ -191,102 +296,6 @@ impl SubagentHookBridge {
 }
 
 // ── TaskHooks adapter ───────────────────────────────────────────────
-
-/// A `TaskHooks` implementation that delegates to a `TaskHookBridge`.
-///
-/// Register this alongside (or instead of) other `TaskHooks` to ensure
-/// YAML-configured hooks see task lifecycle events.
-pub struct BridgedTaskHooks {
-    bridge: Arc<TaskHookBridge>,
-}
-
-impl BridgedTaskHooks {
-    pub fn new(bridge: Arc<TaskHookBridge>) -> Self {
-        Self { bridge }
-    }
-
-    /// Borrow the inner `TaskHookBridge`.
-    ///
-    /// The `TaskHooks` trait impl (used by the framework `TaskExecutor`) only
-    /// fires via `TaskHookContext`. Application-layer runtimes that do not go
-    /// through the framework executor — e.g. EKO's `task_runtime` DAG
-    /// scheduler — can borrow this bridge and call the `(task_id, subject)`
-    /// methods directly at their own lifecycle points.
-    pub fn bridge(&self) -> &Arc<TaskHookBridge> {
-        &self.bridge
-    }
-}
-
-#[async_trait::async_trait]
-impl echo_orchestration::tasks::TaskHooks for BridgedTaskHooks {
-    async fn before_execute(&self, ctx: &echo_orchestration::tasks::TaskHookContext) {
-        // before_execute = scheduler picked the task → TaskStarted.
-        self.bridge
-            .on_before_execute(&ctx.task.id, &ctx.task.subject)
-            .await;
-    }
-
-    async fn after_execute(&self, ctx: &echo_orchestration::tasks::TaskHookContext, result: &str) {
-        // after_execute is the framework executor's success path → TaskCompleted(Completed).
-        self.bridge
-            .on_after_execute(
-                &ctx.task.id,
-                &ctx.task.subject,
-                result,
-                echo_core::hooks::TaskTerminalStatus::Completed,
-            )
-            .await;
-    }
-
-    async fn on_failure(
-        &self,
-        ctx: &echo_orchestration::tasks::TaskHookContext,
-        error: &str,
-    ) -> echo_orchestration::tasks::RetryDecision {
-        // Failure fires StopFailure (observability) AND TaskCompleted(Failed)
-        // so consumers listening only on the terminal event still see it.
-        self.bridge
-            .on_failure(&ctx.task.id, &ctx.task.subject, error)
-            .await;
-        self.bridge
-            .on_after_execute(
-                &ctx.task.id,
-                &ctx.task.subject,
-                error,
-                echo_core::hooks::TaskTerminalStatus::Failed,
-            )
-            .await;
-        echo_orchestration::tasks::RetryDecision::Fail
-    }
-
-    async fn on_timeout(
-        &self,
-        ctx: &echo_orchestration::tasks::TaskHookContext,
-    ) -> echo_orchestration::tasks::RetryDecision {
-        // Timeout → TaskCompleted(TimedOut). No separate TaskTimeout event.
-        self.bridge
-            .on_after_execute(
-                &ctx.task.id,
-                &ctx.task.subject,
-                "timed out",
-                echo_core::hooks::TaskTerminalStatus::TimedOut,
-            )
-            .await;
-        echo_orchestration::tasks::RetryDecision::Fail
-    }
-
-    async fn on_cancelled(&self, ctx: &echo_orchestration::tasks::TaskHookContext) {
-        // Cancelled → TaskCompleted(Cancelled). No separate TaskCancelled event.
-        self.bridge
-            .on_after_execute(
-                &ctx.task.id,
-                &ctx.task.subject,
-                "cancelled",
-                echo_core::hooks::TaskTerminalStatus::Cancelled,
-            )
-            .await;
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -148,12 +148,26 @@ impl PluginRegistry {
 
             match PluginManifest::from_file(&manifest_path) {
                 Ok(manifest) => {
+                    let validation_errors = manifest.validate();
+                    if !validation_errors.is_empty() {
+                        tracing::warn!(
+                            path = %manifest_path.display(),
+                            errors = %validation_errors
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("; "),
+                            "Skipping invalid plugin manifest"
+                        );
+                        continue;
+                    }
                     let id = manifest.name.clone();
+                    let enabled = manifest.default_enabled;
                     let entry = PluginEntry {
                         manifest,
                         root: path.clone(),
                         scope,
-                        enabled: true, // default; overridden by state
+                        enabled, // overridden by persisted state when present
                         resolved_components: None,
                     };
                     self.plugins.insert(id, entry);
@@ -189,14 +203,19 @@ impl PluginRegistry {
             .map_err(|e| format!("Failed to create plugin directory: {e}"))?;
 
         match source {
-            InstallSource::Local(src_path) => self.install_local(src_path, &target_dir),
+            InstallSource::Local(src_path) => self.install_local(src_path, &target_dir, scope),
             InstallSource::Git { url, subdir } => {
-                self.install_git(url, subdir.as_deref(), &target_dir)
+                self.install_git(url, subdir.as_deref(), &target_dir, scope)
             }
         }
     }
 
-    fn install_local(&mut self, src: &Path, target_dir: &Path) -> Result<PluginId, String> {
+    fn install_local(
+        &mut self,
+        src: &Path,
+        target_dir: &Path,
+        scope: PluginScope,
+    ) -> Result<PluginId, String> {
         // Validate source has a manifest
         let manifest_path = src.join(".echo-plugin").join("manifest.yaml");
         if !manifest_path.exists() {
@@ -232,16 +251,38 @@ impl PluginRegistry {
         // Copy directory recursively
         copy_dir_recursive(src, &dest).map_err(|e| format!("Failed to copy plugin: {e}"))?;
 
+        let enabled = manifest.default_enabled;
         let entry = PluginEntry {
             manifest,
-            root: dest,
-            scope: PluginScope::User, // will be overridden by caller
-            enabled: true,
+            root: dest.clone(),
+            scope,
+            enabled,
             resolved_components: None,
         };
 
         self.plugins.insert(plugin_id.clone(), entry);
-        self.save_state();
+        if let Err(error) = self.resolve_enabled_dependencies() {
+            self.plugins.remove(&plugin_id);
+            let cleanup_error = std::fs::remove_dir_all(&dest).err();
+            return Err(match cleanup_error {
+                Some(cleanup_error) => format!(
+                    "Cannot install plugin '{plugin_id}': {error}; additionally failed to roll back {}: {cleanup_error}",
+                    dest.display()
+                ),
+                None => format!("Cannot install plugin '{plugin_id}': {error}"),
+            });
+        }
+        if let Err(error) = self.save_state() {
+            self.plugins.remove(&plugin_id);
+            let cleanup_error = std::fs::remove_dir_all(&dest).err();
+            return Err(match cleanup_error {
+                Some(cleanup_error) => format!(
+                    "{error}; additionally failed to roll back {}: {cleanup_error}",
+                    dest.display()
+                ),
+                None => error,
+            });
+        }
         Ok(plugin_id)
     }
 
@@ -250,36 +291,19 @@ impl PluginRegistry {
         url: &str,
         subdir: Option<&str>,
         target_dir: &Path,
+        scope: PluginScope,
     ) -> Result<PluginId, String> {
-        // Validate git URL: only allow https:// to prevent SSRF via file://, ssh://, git://
-        if !url.starts_with("https://") {
+        // EKO is a local user-controlled application. Accept the standard
+        // encrypted Git transports, including private repositories over SSH;
+        // reject only cleartext/obviously malformed remote inputs.
+        let supported = url.starts_with("https://")
+            || url.starts_with("ssh://")
+            || (url.starts_with("git@") && url.contains(':'));
+        if !supported {
             return Err(format!(
-                "Only https:// URLs are allowed for git clone (received: {}). \
-                 file://, ssh://, git://, and http:// are rejected for security.",
+                "Plugin git URL must use https:// or SSH (received: {})",
                 url.split("://").next().unwrap_or(url)
             ));
-        }
-
-        // Additional URL validation: parse and check host is not a private IP
-        if let Some(rest) = url.strip_prefix("https://") {
-            let host = rest.split('/').next().unwrap_or("");
-            let host = host.split(':').next().unwrap_or(host);
-            let host = host.split('@').next_back().unwrap_or(host);
-            // Check for IPv4 literals in the host — reject private IPs
-            if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
-                let octets = ip.octets();
-                if octets[0] == 127
-                    || octets[0] == 10
-                    || (octets[0] == 172 && (octets[1] & 0xF0) == 16)
-                    || (octets[0] == 192 && octets[1] == 168)
-                    || octets[0] == 0
-                {
-                    return Err(format!(
-                        "Git clone URL '{}' resolves to a private IP address, rejected for security",
-                        url
-                    ));
-                }
-            }
         }
 
         // Clone to a temporary directory
@@ -307,7 +331,7 @@ impl PluginRegistry {
             tmp_dir.clone()
         };
 
-        let result = self.install_local(&src, target_dir);
+        let result = self.install_local(&src, target_dir, scope);
 
         // Clean up temp directory
         let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -320,9 +344,11 @@ impl PluginRegistry {
     /// Uninstall a plugin. If `keep_data` is false, the persistent data
     /// directory is also removed.
     pub fn uninstall(&mut self, plugin_id: &str, keep_data: bool) -> Result<(), String> {
+        self.ensure_no_enabled_dependents(plugin_id)?;
         let entry = self
             .plugins
-            .remove(plugin_id)
+            .get(plugin_id)
+            .cloned()
             .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
 
         // Remove plugin directory
@@ -330,6 +356,10 @@ impl PluginRegistry {
             std::fs::remove_dir_all(&entry.root)
                 .map_err(|e| format!("Failed to remove plugin directory: {e}"))?;
         }
+
+        // Only remove the in-memory entry after the filesystem operation has
+        // succeeded. A failed delete must leave the live registry truthful.
+        self.plugins.remove(plugin_id);
 
         // Remove data directory unless keeping
         if !keep_data {
@@ -339,42 +369,89 @@ impl PluginRegistry {
             }
         }
 
-        self.save_state();
-        Ok(())
+        self.save_state().map_err(|error| {
+            format!("Plugin files were removed, but registry state could not be saved: {error}")
+        })
     }
 
     // ── Enable / Disable ───────────────────────────────────────────────
 
     /// Enable a disabled plugin.
     pub fn enable(&mut self, plugin_id: &str) -> Result<(), String> {
-        let entry = self
+        let was_enabled = self
             .plugins
-            .get_mut(plugin_id)
-            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
-
-        if entry.enabled {
+            .get(plugin_id)
+            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?
+            .enabled;
+        if was_enabled {
             return Ok(());
         }
 
-        entry.enabled = true;
-        self.save_state();
+        if let Some(entry) = self.plugins.get_mut(plugin_id) {
+            entry.enabled = true;
+        }
+        if let Err(error) = self.resolve_enabled_dependencies() {
+            if let Some(entry) = self.plugins.get_mut(plugin_id) {
+                entry.enabled = false;
+            }
+            return Err(format!("Cannot enable plugin '{plugin_id}': {error}"));
+        }
+        if let Err(error) = self.save_state() {
+            if let Some(entry) = self.plugins.get_mut(plugin_id) {
+                entry.enabled = false;
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
     /// Disable an enabled plugin without uninstalling it.
     pub fn disable(&mut self, plugin_id: &str) -> Result<(), String> {
-        let entry = self
+        let was_enabled = self
             .plugins
-            .get_mut(plugin_id)
-            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
-
-        if !entry.enabled {
+            .get(plugin_id)
+            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?
+            .enabled;
+        if !was_enabled {
             return Ok(());
         }
 
-        entry.enabled = false;
-        self.save_state();
+        self.ensure_no_enabled_dependents(plugin_id)?;
+        if let Some(entry) = self.plugins.get_mut(plugin_id) {
+            entry.enabled = false;
+        }
+        if let Err(error) = self.save_state() {
+            if let Some(entry) = self.plugins.get_mut(plugin_id) {
+                entry.enabled = true;
+            }
+            return Err(error);
+        }
         Ok(())
+    }
+
+    fn ensure_no_enabled_dependents(&self, plugin_id: &str) -> Result<(), String> {
+        let mut dependents = self
+            .plugins
+            .iter()
+            .filter(|(_, entry)| {
+                entry.enabled
+                    && entry
+                        .manifest
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency.name() == plugin_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        dependents.sort();
+        if dependents.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Plugin '{plugin_id}' is required by enabled plugin(s): {}",
+                dependents.join(", ")
+            ))
+        }
     }
 
     // ── Queries ────────────────────────────────────────────────────────
@@ -569,22 +646,47 @@ impl PluginRegistry {
     /// Returns plugin IDs in dependency order (dependencies first).
     /// Returns an error if there are circular dependencies or missing deps.
     pub fn resolve_dependencies(&self) -> Result<Vec<PluginId>, String> {
+        self.resolve_dependencies_matching(|_| true)
+    }
+
+    /// Resolve only enabled plugins and require every dependency of an enabled
+    /// plugin to be enabled as well. Disabled plugins cannot poison startup,
+    /// and an enabled plugin cannot silently consume a disabled dependency.
+    pub fn resolve_enabled_dependencies(&self) -> Result<Vec<PluginId>, String> {
+        self.resolve_dependencies_matching(|entry| entry.enabled)
+    }
+
+    fn resolve_dependencies_matching(
+        &self,
+        include: impl Fn(&PluginEntry) -> bool,
+    ) -> Result<Vec<PluginId>, String> {
         let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut in_degree: HashMap<&str, usize> = HashMap::new();
 
         // Initialize
-        for id in self.plugins.keys() {
+        for (id, entry) in &self.plugins {
+            if !include(entry) {
+                continue;
+            }
             graph.entry(id.as_str()).or_default();
             in_degree.entry(id.as_str()).or_insert(0);
         }
 
         // Build edges + enforce version constraints
         for (id, entry) in &self.plugins {
+            if !include(entry) {
+                continue;
+            }
             for dep in &entry.manifest.dependencies {
                 let dep_name = dep.name();
                 let dep_entry = self.plugins.get(dep_name).ok_or_else(|| {
                     format!("Plugin '{id}' depends on '{dep_name}' which is not installed")
                 })?;
+                if !include(dep_entry) {
+                    return Err(format!(
+                        "Plugin '{id}' depends on '{dep_name}' which is disabled"
+                    ));
+                }
                 // Enforce the declared version constraint (P1 — previously the
                 // name-exists check ignored version entirely, so any version
                 // satisfied the dependency).
@@ -614,7 +716,7 @@ impl PluginRegistry {
             .filter(|(_, deg)| **deg == 0)
             .map(|(id, _)| *id)
             .collect();
-        queue.sort(); // deterministic order
+        queue.sort_by(|left, right| right.cmp(left));
 
         let mut sorted = Vec::new();
         while let Some(node) = queue.pop() {
@@ -625,13 +727,14 @@ impl PluginRegistry {
                         *deg -= 1;
                         if *deg == 0 {
                             queue.push(neighbor);
+                            queue.sort_by(|left, right| right.cmp(left));
                         }
                     }
                 }
             }
         }
 
-        if sorted.len() != self.plugins.len() {
+        if sorted.len() != in_degree.len() {
             return Err("Circular dependency detected among plugins".to_string());
         }
 
@@ -641,7 +744,7 @@ impl PluginRegistry {
     // ── Persistence ────────────────────────────────────────────────────
 
     /// Save the current enabled/disabled state to disk.
-    fn save_state(&self) {
+    fn save_state(&self) -> Result<(), String> {
         let state = RegistryState {
             plugins: self
                 .plugins
@@ -659,18 +762,29 @@ impl PluginRegistry {
         };
 
         if let Some(parent) = self.state_file.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Failed to create plugin state directory: {error}"))?;
         }
-
-        if let Ok(json) = serde_json::to_string_pretty(&state) {
-            let _ = std::fs::write(&self.state_file, json);
-        }
+        let json = serde_json::to_string_pretty(&state)
+            .map_err(|error| format!("Failed to serialize plugin state: {error}"))?;
+        std::fs::write(&self.state_file, json)
+            .map_err(|error| format!("Failed to write plugin state: {error}"))
     }
 
     /// Load persisted state and merge with discovered plugins.
     fn load_state(&mut self) {
         let state: RegistryState = match std::fs::read_to_string(&self.state_file) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %self.state_file.display(),
+                        %error,
+                        "Ignoring invalid plugin registry state"
+                    );
+                    return;
+                }
+            },
             Err(_) => return,
         };
 
@@ -802,6 +916,58 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_honors_manifest_default_enabled() {
+        let tmp = std::env::temp_dir().join("echo-plugin-test-default-disabled");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let plugin_dir = create_test_plugin(&tmp, "disabled-by-default");
+        let manifest = "name: disabled-by-default\nversion: \"1.0.0\"\ndescription: disabled\ndefault_enabled: false";
+        std::fs::write(
+            plugin_dir.join(".echo-plugin").join("manifest.yaml"),
+            manifest,
+        )
+        .unwrap();
+
+        let mut reg = test_registry(&tmp);
+        let count = reg.scan_scope_dir(PluginScope::User, &tmp).unwrap();
+
+        assert_eq!(count, 1);
+        assert!(
+            reg.get("disabled-by-default")
+                .is_some_and(|entry| !entry.enabled)
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_scan_skips_invalid_manifest() {
+        let tmp = std::env::temp_dir().join("echo-plugin-test-scan-invalid");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let manifest_dir = tmp.join("bad-plugin").join(".echo-plugin");
+        let create_result = std::fs::create_dir_all(&manifest_dir);
+        assert!(create_result.is_ok(), "failed to create plugin fixture");
+        if create_result.is_err() {
+            return;
+        }
+        let write_result = std::fs::write(
+            manifest_dir.join("manifest.yaml"),
+            "name: ../bad\nversion: not-semver\ndescription: invalid",
+        );
+        assert!(write_result.is_ok(), "failed to write plugin fixture");
+        if write_result.is_err() {
+            return;
+        }
+
+        let mut reg = test_registry(&tmp);
+        let count = reg
+            .scan_scope_dir(PluginScope::User, &tmp)
+            .unwrap_or_default();
+        assert_eq!(count, 0);
+        assert!(reg.list().is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_install_local() {
         let tmp = std::env::temp_dir().join("echo-plugin-test-install");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -824,6 +990,10 @@ mod tests {
             .unwrap();
         assert_eq!(id, "src-plugin");
         assert!(reg.get("src-plugin").is_some());
+        assert_eq!(
+            reg.get("src-plugin").map(|entry| entry.scope),
+            Some(PluginScope::Local)
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -871,6 +1041,34 @@ mod tests {
     }
 
     #[test]
+    fn test_uninstall_keeps_registry_entry_when_directory_delete_fails() {
+        let tmp = std::env::temp_dir().join("echo-plugin-test-uninstall-failure");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let root_file = tmp.join("not-a-directory");
+        std::fs::write(&root_file, "plugin").unwrap();
+        let manifest =
+            PluginManifest::from_yaml("name: remove-me\nversion: \"1.0.0\"\ndescription: test")
+                .unwrap();
+
+        let mut reg = test_registry(&tmp);
+        reg.plugins.insert(
+            "remove-me".to_string(),
+            PluginEntry {
+                manifest,
+                root: root_file,
+                scope: PluginScope::User,
+                enabled: true,
+                resolved_components: None,
+            },
+        );
+
+        assert!(reg.uninstall("remove-me", true).is_err());
+        assert!(reg.get("remove-me").is_some());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_dependency_resolution() {
         let tmp = std::env::temp_dir().join("echo-plugin-test-deps");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -909,6 +1107,30 @@ mod tests {
         let pos_c = sorted.iter().position(|x| x == "plugin-c").unwrap();
         assert!(pos_c < pos_b);
         assert!(pos_b < pos_a);
+
+        let disable_error = reg.disable("plugin-b").err().unwrap_or_default();
+        assert!(disable_error.contains("plugin-a"));
+        assert!(reg.get("plugin-b").is_some_and(|entry| entry.enabled));
+        let uninstall_error = reg.uninstall("plugin-b", true).err().unwrap_or_default();
+        assert!(uninstall_error.contains("plugin-a"));
+        assert!(reg.get("plugin-b").is_some());
+
+        if let Some(entry) = reg.plugins.get_mut("plugin-a") {
+            entry.enabled = false;
+        }
+        let enabled = reg.resolve_enabled_dependencies().unwrap_or_default();
+        assert!(!enabled.iter().any(|id| id == "plugin-a"));
+        assert!(enabled.iter().any(|id| id == "plugin-b"));
+
+        if let Some(entry) = reg.plugins.get_mut("plugin-a") {
+            entry.enabled = true;
+        }
+        if let Some(entry) = reg.plugins.get_mut("plugin-b") {
+            entry.enabled = false;
+        }
+        let dependency_error = reg.resolve_enabled_dependencies().err().unwrap_or_default();
+        assert!(dependency_error.contains("plugin-b"));
+        assert!(dependency_error.contains("disabled"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

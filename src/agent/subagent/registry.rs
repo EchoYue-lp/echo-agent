@@ -203,8 +203,8 @@ impl SubagentRegistry {
 
     /// Register a **definition only** — no agent instance and no factory.
     ///
-    /// This is the late-binding / discovery path used by plugin integrators
-    /// and team-mode topologies: the definition becomes discoverable
+    /// This is a low-level late-binding path for runtimes that can guarantee
+    /// later hydration: the definition becomes discoverable
     /// (`list_available`, `agent_names`, dispatch catalog) before any
     /// executable instance exists. A later call to
     /// [`register`](Self::register) / [`register_sync`](Self::register_sync)
@@ -577,8 +577,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_definition_only_makes_definition_discoverable() {
         // Definition-only registration (no instance, no factory) is the
-        // late-binding path used by the plugin integrator. The definition
-        // must be discoverable, but no agent instance may exist yet.
+        // The definition must be discoverable, but no agent instance exists.
         let registry = SubagentRegistry::new();
         let def = SubagentDefinition::new("plugin_agent", "Plugin-defined agent");
 

@@ -675,7 +675,10 @@ pub fn config_search_paths() -> Vec<PathBuf> {
     paths
 }
 
-fn load_from_file(path: &PathBuf) -> Result<AppConfig, String> {
+/// Parse one explicit configuration file without falling back to defaults or
+/// another search path. Runtime reloaders use this to preserve their current
+/// live state when a file exists but is temporarily invalid during editing.
+pub fn load_config_file(path: &std::path::Path) -> Result<AppConfig, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("Failed to read config file: {}", e))?;
     serde_yaml_ng::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))
@@ -688,7 +691,12 @@ fn load_from_file(path: &PathBuf) -> Result<AppConfig, String> {
 pub fn save_config(config: &AppConfig) -> std::result::Result<(), String> {
     let search = config_search_paths();
     // Prefer an already-existing file; otherwise use the first path (./echo-agent.yaml)
-    let target = search.iter().find(|p| p.exists()).unwrap_or(&search[1]);
+    let target = search
+        .iter()
+        .find(|p| p.exists())
+        .or_else(|| search.get(1))
+        .or_else(|| search.first())
+        .ok_or_else(|| "no configuration path is available".to_string())?;
     let yaml =
         serde_yaml_ng::to_string(config).map_err(|e| format!("serialization failed: {e}"))?;
     let header = "# Echo Agent Configuration\n# Auto-saved via Web API or CLI\n\n";
@@ -717,7 +725,7 @@ pub fn save_config(config: &AppConfig) -> std::result::Result<(), String> {
 pub fn load_config(explicit_path: Option<&str>) -> AppConfig {
     if let Some(path_str) = explicit_path {
         let path = PathBuf::from(path_str);
-        match load_from_file(&path) {
+        match load_config_file(&path) {
             Ok(config) => {
                 tracing::info!("Config loaded: {}", path.display());
                 return config;
@@ -732,7 +740,7 @@ pub fn load_config(explicit_path: Option<&str>) -> AppConfig {
 
     for path in config_search_paths() {
         if path.exists() {
-            match load_from_file(&path) {
+            match load_config_file(&path) {
                 Ok(config) => {
                     tracing::info!("Config loaded: {}", path.display());
                     return config;

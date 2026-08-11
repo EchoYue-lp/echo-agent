@@ -89,6 +89,7 @@ impl InstallSource {
     pub fn parse(s: &str) -> Self {
         if s.starts_with("http://")
             || s.starts_with("https://")
+            || s.starts_with("ssh://")
             || s.starts_with("git://")
             || s.starts_with("git@")
             || s.ends_with(".git")
