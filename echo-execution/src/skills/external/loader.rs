@@ -85,6 +85,9 @@ pub struct SkillLoader {
     legacy_instructions: HashMap<String, String>,
     /// Optional authority consulted after parsing and before registration.
     policy: Option<Arc<dyn SkillLoadPolicy>>,
+    /// Optional plugin variable context applied before SKILL.md frontmatter
+    /// and adjacent hooks.json are parsed.
+    plugin_variables: Option<echo_core::plugin::PluginVariables>,
 }
 
 impl SkillLoader {
@@ -93,12 +96,19 @@ impl SkillLoader {
             descriptors: HashMap::new(),
             legacy_instructions: HashMap::new(),
             policy: None,
+            plugin_variables: None,
         }
     }
 
     /// Install a product-owned skill loading policy.
     pub fn with_policy(mut self, policy: Arc<dyn SkillLoadPolicy>) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// Apply plugin variables to skill metadata and hooks during discovery.
+    pub fn with_plugin_variables(mut self, variables: echo_core::plugin::PluginVariables) -> Self {
+        self.plugin_variables = Some(variables);
         self
     }
 
@@ -206,33 +216,45 @@ impl SkillLoader {
 
             let skill_file = path.join(SKILL_FILE);
             if skill_file.exists() {
-                match parse_skill_file(&skill_file, &dir_name).await {
+                match parse_skill_file_with_variables(
+                    &skill_file,
+                    &dir_name,
+                    self.plugin_variables.as_ref(),
+                )
+                .await
+                {
                     Ok((mut desc, legacy_instr)) => {
                         // Merge external hooks.json (EKO format) if present alongside SKILL.md.
                         let hooks_path = path.join(HOOKS_FILE);
                         if hooks_path.exists() {
                             match tokio::fs::read_to_string(&hooks_path).await {
-                                Ok(text) => match serde_json::from_str::<HooksDefinition>(&text) {
-                                    Ok(extra) => {
-                                        info!(
-                                            "Merged hooks.json for skill '{}' from {}",
-                                            desc.name,
-                                            hooks_path.display()
-                                        );
-                                        match &mut desc.hooks {
-                                            Some(existing) => existing.merge(extra),
-                                            None => desc.hooks = Some(extra),
+                                Ok(text) => {
+                                    let text = match &self.plugin_variables {
+                                        Some(variables) => variables.substitute(&text),
+                                        None => text,
+                                    };
+                                    match serde_json::from_str::<HooksDefinition>(&text) {
+                                        Ok(extra) => {
+                                            info!(
+                                                "Merged hooks.json for skill '{}' from {}",
+                                                desc.name,
+                                                hooks_path.display()
+                                            );
+                                            match &mut desc.hooks {
+                                                Some(existing) => existing.merge(extra),
+                                                None => desc.hooks = Some(extra),
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "Failed to parse '{}' for skill '{}': {}",
+                                                hooks_path.display(),
+                                                desc.name,
+                                                e
+                                            );
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!(
-                                            "Failed to parse '{}' for skill '{}': {}",
-                                            hooks_path.display(),
-                                            desc.name,
-                                            e
-                                        );
-                                    }
-                                },
+                                }
                                 Err(e) => {
                                     warn!("Cannot read '{}': {}", hooks_path.display(), e);
                                 }
@@ -315,10 +337,18 @@ impl Default for SkillLoader {
 ///
 /// Returns `(descriptor, legacy_instructions)` where `legacy_instructions`
 /// is empty if the skill uses the standard format.
-async fn parse_skill_file(path: &Path, parent_dir_name: &str) -> Result<(SkillDescriptor, String)> {
+async fn parse_skill_file_with_variables(
+    path: &Path,
+    parent_dir_name: &str,
+    variables: Option<&echo_core::plugin::PluginVariables>,
+) -> Result<(SkillDescriptor, String)> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| ReactError::Other(format!("Failed to read '{}': {}", path.display(), e)))?;
+    let content = match variables {
+        Some(variables) => variables.substitute(&content),
+        None => content,
+    };
 
     let raw = parse_frontmatter(&content)?;
 
@@ -734,6 +764,61 @@ resources:
             descriptors.first().map(|value| value.name.as_str()),
             Some("allowed")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn plugin_variables_are_applied_before_frontmatter_hooks_are_parsed()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "echo_plugin_skill_variables_{}",
+            uuid::Uuid::new_v4()
+        ));
+        struct Guard(std::path::PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = Guard(root.clone());
+        let skill_dir = root.join("configured-skill");
+        std::fs::create_dir_all(&skill_dir)?;
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: configured-skill\ndescription: Uses ${user_config.endpoint}\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: notify ${user_config.endpoint}\n---\nBody ${user_config.endpoint}\n",
+        )?;
+
+        let variables = echo_core::plugin::PluginVariables::new(
+            "configured-plugin",
+            root.clone(),
+            root.join("project"),
+        )
+        .with_user_config(std::collections::HashMap::from([(
+            "endpoint".to_string(),
+            "http://localhost:9100".to_string(),
+        )]));
+        let mut loader = SkillLoader::new().with_plugin_variables(variables);
+        let descriptors = loader.discover_from_dir(&root).await?;
+        let descriptor = descriptors
+            .first()
+            .ok_or("plugin skill was not discovered")?;
+        assert_eq!(descriptor.description, "Uses http://localhost:9100");
+        let action = descriptor
+            .hooks
+            .as_ref()
+            .and_then(|definition| {
+                definition
+                    .rules_for(echo_core::hooks::HookEvent::PreToolUse)
+                    .first()
+            })
+            .and_then(|rule| rule.hooks.first())
+            .ok_or("frontmatter hook was not parsed")?;
+        match action {
+            crate::skills::hooks::HookAction::Command { command, .. } => {
+                assert_eq!(command, "notify http://localhost:9100");
+            }
+            _ => return Err("expected command hook".into()),
+        }
         Ok(())
     }
 

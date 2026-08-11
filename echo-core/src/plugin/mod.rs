@@ -50,7 +50,7 @@ pub mod variables;
 
 // Re-export primary types at module level.
 pub use capability::PluginCapability;
-pub use lifecycle::PluginLifecycle;
+pub use lifecycle::{PluginLifecycle, PluginLifecycleManager};
 pub use manifest::{
     PluginAuthor, PluginComponents, PluginDependency, PluginManifest, PluginUserConfigEntry,
     PluginUserConfigType,

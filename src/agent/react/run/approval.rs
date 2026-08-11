@@ -68,9 +68,8 @@ impl ReactAgent {
         input: &Value,
     ) -> Result<Option<Value>> {
         let agent = &self.config.agent_name;
-
         // ── Phase -1: PermissionRequest hook ──
-        {
+        let permission_mode_override = {
             let hook_ctx = crate::skills::hooks::HookContext::for_permission_request(
                 tool_name,
                 input,
@@ -79,6 +78,7 @@ impl ReactAgent {
             );
             let registry = self.tools.hook_registry.read().await.clone();
             let perm_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+            let mode_override = perm_result.permission_mode_override;
             // Check block first: a hook may signal block via exit code 2 or
             // {"decision": "block"} without setting a PermissionDecision.
             if perm_result.block {
@@ -115,7 +115,8 @@ impl ReactAgent {
                     _ => {} // Ask/RequireApproval: fall through to normal approval flow
                 }
             }
-        }
+            mode_override
+        };
 
         // ── Phase 0: PermissionService unified pipeline ──
         if let Some(service) = &self.approval.permission_service {
@@ -128,7 +129,12 @@ impl ReactAgent {
                 .unwrap_or_default();
 
             let decision = service
-                .check_with_permissions(tool_name, input, &tool_perms)
+                .check_with_permissions_in_mode(
+                    tool_name,
+                    input,
+                    &tool_perms,
+                    permission_mode_override,
+                )
                 .await
                 .map_err(|e| ReactError::Other(format!("PermissionService error: {e}")))?;
 

@@ -231,14 +231,36 @@ pub struct MemoryLayerManager {
     change_log: Box<dyn ChangeLog>,
     /// Security guard for write-time checks (secret scan, injection, rate limit).
     security_guard: EvolutionSecurityGuard,
-    /// Optional observer called after a real memory write succeeds.
-    write_observer: Option<Arc<dyn MemoryWriteObserver>>,
+    /// Optional observer called after persisted evolution changes.
+    evolution_observer: Option<Arc<dyn EvolutionObserver>>,
 }
 
-/// Observer notified only after a memory write has reached the real layered store.
-pub trait MemoryWriteObserver: Send + Sync {
-    /// Called after [`MemoryLayerManager::write_memory`] succeeds.
-    fn on_memory_write<'a>(&'a self) -> BoxFuture<'a, ()>;
+/// Observer for durable memory and skill-evolution events.
+pub trait EvolutionObserver: Send + Sync {
+    /// Called after a memory has reached the layered store.
+    fn on_memory_write<'a>(&'a self, _key: &'a str, _source: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    /// Called after a memory layer transition is fully persisted.
+    fn on_memory_layer_change<'a>(
+        &'a self,
+        _key: &'a str,
+        _from_layer: &'a str,
+        _to_layer: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    /// Called after a new skill candidate is persisted.
+    fn on_skill_candidate_detected<'a>(&'a self, _skill_name: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    /// Called after a skill health report is computed.
+    fn on_skill_health_check<'a>(&'a self, _skill_name: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// Guard holding an exclusive lock on the MEMORY.md hot layer plus the
@@ -289,13 +311,13 @@ impl MemoryLayerManager {
             typed_store: TypedMemoryStore::new(store),
             change_log,
             security_guard: EvolutionSecurityGuard::default_config(),
-            write_observer: None,
+            evolution_observer: None,
         }
     }
 
-    /// Configure a write observer invoked after successful real memory writes.
-    pub fn with_write_observer(mut self, observer: Arc<dyn MemoryWriteObserver>) -> Self {
-        self.write_observer = Some(observer);
+    /// Configure an observer invoked after successful durable evolution events.
+    pub fn with_evolution_observer(mut self, observer: Arc<dyn EvolutionObserver>) -> Self {
+        self.evolution_observer = Some(observer);
         self
     }
 
@@ -412,6 +434,8 @@ impl MemoryLayerManager {
                     reason,
                     "demote",
                 )?;
+                self.notify_memory_layer_change(key, "warm", "archived")
+                    .await;
                 Ok(LayerChangeResult {
                     key: key.to_string(),
                     from_layer: MemoryLayer::Warm,
@@ -452,6 +476,8 @@ impl MemoryLayerManager {
                     "recent high-recall activity revived archived memory",
                     "dreaming",
                 )?;
+                self.notify_memory_layer_change(key, "archived", "warm")
+                    .await;
             }
             return Ok(updated);
         }
@@ -775,6 +801,11 @@ impl MemoryLayerManager {
             guard.commit().map_err(ReactError::from)?;
         }
 
+        for result in &results {
+            self.notify_memory_layer_change(&result.key, "hot", "warm")
+                .await;
+        }
+
         Ok(results)
     }
 
@@ -847,14 +878,11 @@ impl MemoryLayerManager {
             "write_memory",
         )?;
 
+        self.notify_memory_write(key, meta.source.as_str().unwrap_or("unknown"))
+            .await;
+
         // Consider promotion
-        let promotion = self.consider_promotion(key).await;
-        if promotion.is_ok()
-            && let Some(observer) = &self.write_observer
-        {
-            observer.on_memory_write().await;
-        }
-        promotion
+        self.consider_promotion(key).await
     }
 
     // ── Search ──────────────────────────────────────────────────────
@@ -1092,9 +1120,6 @@ impl MemoryLayerManager {
         // Only after hot write succeeds, remove from warm.
         self.typed_store.delete_typed(WARM_NAMESPACE, key).await?;
 
-        // Enforce budget (may demote other entries)
-        self.enforce_hot_budget().await?;
-
         self.record_change(
             key,
             ChangeType::Promote,
@@ -1103,6 +1128,12 @@ impl MemoryLayerManager {
             "warm→hot promotion (eligible)",
             "promote",
         )?;
+
+        self.notify_memory_layer_change(key, "warm", "hot").await;
+
+        // Enforce budget after publishing the promotion. Any resulting
+        // hot-to-warm events then retain their real chronological order.
+        self.enforce_hot_budget().await?;
 
         Ok(Some(LayerChangeResult {
             key: key.to_string(),
@@ -1149,6 +1180,8 @@ impl MemoryLayerManager {
             "demote",
         )?;
 
+        self.notify_memory_layer_change(key, "hot", "warm").await;
+
         Ok(LayerChangeResult {
             key: key.to_string(),
             from_layer: MemoryLayer::Hot,
@@ -1180,6 +1213,20 @@ impl MemoryLayerManager {
 
         let entry = builder.build(&*self.change_log);
         self.change_log.record(entry)
+    }
+
+    async fn notify_memory_write(&self, key: &str, source: &str) {
+        if let Some(observer) = &self.evolution_observer {
+            observer.on_memory_write(key, source).await;
+        }
+    }
+
+    async fn notify_memory_layer_change(&self, key: &str, from_layer: &str, to_layer: &str) {
+        if let Some(observer) = &self.evolution_observer {
+            observer
+                .on_memory_layer_change(key, from_layer, to_layer)
+                .await;
+        }
     }
 }
 

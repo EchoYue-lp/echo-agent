@@ -217,7 +217,8 @@ pub struct PluginUserConfigEntry {
     #[serde(default)]
     pub description: String,
 
-    /// If true, mask input and store in secure storage.
+    /// If true, mask input in configuration UIs. Persistence is owned by the
+    /// embedding application and must avoid logging the value.
     #[serde(default)]
     pub sensitive: bool,
 
@@ -375,6 +376,30 @@ impl PluginManifest {
                     message: "'multiple' is only valid for type 'string'".into(),
                 });
             }
+            if (entry.min.is_some() || entry.max.is_some())
+                && entry.value_type != PluginUserConfigType::Number
+            {
+                errors.push(ValidationError {
+                    field: format!("config.{key}"),
+                    message: "'min' and 'max' are only valid for type 'number'".into(),
+                });
+            }
+            if let (Some(minimum), Some(maximum)) = (entry.min, entry.max)
+                && minimum > maximum
+            {
+                errors.push(ValidationError {
+                    field: format!("config.{key}"),
+                    message: "'min' must not be greater than 'max'".into(),
+                });
+            }
+            if let Some(default) = entry.default.as_ref()
+                && let Some(message) = validate_config_value(entry, default)
+            {
+                errors.push(ValidationError {
+                    field: format!("config.{key}.default"),
+                    message,
+                });
+            }
         }
 
         // Validate dependencies
@@ -399,6 +424,85 @@ impl PluginManifest {
     /// Get the display name, falling back to the plugin name.
     pub fn display_name(&self) -> &str {
         self.display_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Resolve defaults and validate user-provided configuration values.
+    pub fn resolve_user_config(
+        &self,
+        provided: &HashMap<String, serde_json::Value>,
+    ) -> Result<HashMap<String, serde_json::Value>, Vec<ValidationError>> {
+        let mut resolved = self.user_config_defaults();
+        let mut errors = provided
+            .keys()
+            .filter(|key| !self.config.contains_key(*key))
+            .map(|key| ValidationError {
+                field: format!("config.{key}"),
+                message: "Unknown plugin configuration key".into(),
+            })
+            .collect::<Vec<_>>();
+        resolved.extend(
+            provided
+                .iter()
+                .filter(|(key, value)| self.config.contains_key(*key) && !value.is_null())
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        errors.extend(self.validate_user_config(&resolved));
+        if errors.is_empty() {
+            Ok(resolved)
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Collect manifest-declared default configuration values.
+    pub fn user_config_defaults(&self) -> HashMap<String, serde_json::Value> {
+        self.config
+            .iter()
+            .filter_map(|(key, entry)| {
+                entry
+                    .default
+                    .as_ref()
+                    .map(|value| (key.clone(), value.clone()))
+            })
+            .collect()
+    }
+
+    /// Validate concrete user configuration against the manifest schema.
+    pub fn validate_user_config(
+        &self,
+        values: &HashMap<String, serde_json::Value>,
+    ) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+        for key in values.keys() {
+            if !self.config.contains_key(key) {
+                errors.push(ValidationError {
+                    field: format!("config.{key}"),
+                    message: "Unknown plugin configuration key".into(),
+                });
+            }
+        }
+        for (key, entry) in &self.config {
+            let value = values.get(key);
+            if value.is_none_or(serde_json::Value::is_null) {
+                if entry.required {
+                    errors.push(ValidationError {
+                        field: format!("config.{key}"),
+                        message: "Required plugin configuration value is missing".into(),
+                    });
+                }
+                continue;
+            }
+            let Some(value) = value else {
+                continue;
+            };
+            if let Some(message) = validate_config_value(entry, value) {
+                errors.push(ValidationError {
+                    field: format!("config.{key}"),
+                    message,
+                });
+            }
+        }
+        errors
     }
 
     /// Infer capabilities from the component declarations.
@@ -427,6 +531,9 @@ impl PluginManifest {
         }
         if self.components.themes.is_some() {
             caps.push(PluginCapability::Theme);
+        }
+        if self.components.output_styles.is_some() {
+            caps.push(PluginCapability::OutputStyle);
         }
         caps
     }
@@ -476,6 +583,73 @@ impl PluginManifest {
             check("output_styles", v, errors);
         }
     }
+}
+
+fn validate_config_value(
+    entry: &PluginUserConfigEntry,
+    value: &serde_json::Value,
+) -> Option<String> {
+    match entry.value_type {
+        PluginUserConfigType::String if entry.multiple => {
+            let Some(values) = value.as_array() else {
+                return Some("Expected an array of strings".into());
+            };
+            if values.iter().any(|item| !item.is_string()) {
+                return Some("Expected an array containing only strings".into());
+            }
+            if entry.required && values.is_empty() {
+                return Some("Required value must not be empty".into());
+            }
+        }
+        PluginUserConfigType::String => {
+            let Some(text) = value.as_str() else {
+                return Some("Expected a string".into());
+            };
+            if entry.required && text.is_empty() {
+                return Some("Required value must not be empty".into());
+            }
+        }
+        PluginUserConfigType::Number => {
+            let Some(number) = value.as_f64() else {
+                return Some("Expected a number".into());
+            };
+            if let Some(minimum) = entry.min
+                && number < minimum
+            {
+                return Some(format!("Value must be at least {minimum}"));
+            }
+            if let Some(maximum) = entry.max
+                && number > maximum
+            {
+                return Some(format!("Value must be at most {maximum}"));
+            }
+        }
+        PluginUserConfigType::Boolean => {
+            if !value.is_boolean() {
+                return Some("Expected a boolean".into());
+            }
+        }
+        PluginUserConfigType::Directory | PluginUserConfigType::File => {
+            let Some(path) = value.as_str() else {
+                return Some("Expected a filesystem path string".into());
+            };
+            let exists = match entry.value_type {
+                PluginUserConfigType::Directory => Path::new(path).is_dir(),
+                PluginUserConfigType::File => Path::new(path).is_file(),
+                _ => false,
+            };
+            if !exists {
+                return Some(match entry.value_type {
+                    PluginUserConfigType::Directory => {
+                        format!("Directory does not exist: {path}")
+                    }
+                    PluginUserConfigType::File => format!("File does not exist: {path}"),
+                    _ => String::new(),
+                });
+            }
+        }
+    }
+    None
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -596,6 +770,85 @@ components:
         let m = PluginManifest::from_yaml(yaml).unwrap();
         let errors = m.validate();
         assert!(errors.iter().any(|e| e.field == "components.hooks"));
+    }
+
+    #[test]
+    fn config_schema_rejects_invalid_defaults_and_constraints() -> Result<(), String> {
+        let manifest = PluginManifest::from_yaml(
+            r#"
+name: invalid-config
+config:
+  retries:
+    type: number
+    title: Retries
+    min: 5
+    max: 2
+    default: "three"
+  label:
+    type: string
+    title: Label
+    min: 1
+"#,
+        )?;
+
+        let errors = manifest.validate();
+
+        assert!(
+            errors.iter().any(|error| {
+                error.field == "config.retries" && error.message.contains("greater")
+            })
+        );
+        assert!(errors.iter().any(|error| {
+            error.field == "config.retries.default" && error.message.contains("number")
+        }));
+        assert!(errors.iter().any(|error| {
+            error.field == "config.label" && error.message.contains("only valid")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn null_config_values_mean_not_provided_and_unknown_keys_still_fail() -> Result<(), String> {
+        let manifest = PluginManifest::from_yaml(
+            r#"
+name: config-resolution
+config:
+  retries:
+    type: number
+    title: Retries
+    default: 3
+"#,
+        )?;
+        let resolved = manifest
+            .resolve_user_config(&HashMap::from([(
+                "retries".to_string(),
+                serde_json::Value::Null,
+            )]))
+            .map_err(|errors| {
+                errors
+                    .into_iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })?;
+        assert_eq!(
+            resolved.get("retries").and_then(serde_json::Value::as_i64),
+            Some(3)
+        );
+
+        let errors = manifest
+            .resolve_user_config(&HashMap::from([(
+                "unknown".to_string(),
+                serde_json::Value::Null,
+            )]))
+            .err()
+            .ok_or_else(|| "unknown null config key unexpectedly validated".to_string())?;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors.first().map(|error| error.field.as_str()),
+            Some("config.unknown")
+        );
+        Ok(())
     }
 
     #[test]

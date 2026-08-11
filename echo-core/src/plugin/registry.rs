@@ -24,6 +24,9 @@ pub struct PluginEntry {
     pub scope: PluginScope,
     /// Whether the plugin is currently enabled.
     pub enabled: bool,
+    /// Validated user configuration, including manifest defaults.
+    #[serde(default)]
+    pub user_config: HashMap<String, serde_json::Value>,
     /// Resolved component paths (absolute, populated at load time).
     #[serde(skip)]
     pub resolved_components: Option<ResolvedComponents>,
@@ -167,6 +170,7 @@ impl PluginRegistry {
                 root: root.to_path_buf(),
                 scope: PluginScope::Local,
                 enabled: true,
+                user_config: manifest.user_config_defaults(),
                 resolved_components: None,
             },
         );
@@ -211,12 +215,21 @@ impl PluginRegistry {
                         continue;
                     }
                     let id = manifest.name.clone();
-                    let enabled = manifest.default_enabled;
+                    let user_config = manifest.user_config_defaults();
+                    let config_ready = manifest.validate_user_config(&user_config).is_empty();
+                    let enabled = manifest.default_enabled && config_ready;
+                    if manifest.default_enabled && !config_ready {
+                        tracing::info!(
+                            plugin = %manifest.name,
+                            "Plugin starts disabled until required configuration is provided"
+                        );
+                    }
                     let entry = PluginEntry {
                         manifest,
                         root: path.clone(),
                         scope,
                         enabled, // overridden by persisted state when present
+                        user_config,
                         resolved_components: None,
                     };
                     self.plugins.insert(id, entry);
@@ -300,12 +313,15 @@ impl PluginRegistry {
         // Copy directory recursively
         copy_dir_recursive(src, &dest).map_err(|e| format!("Failed to copy plugin: {e}"))?;
 
-        let enabled = manifest.default_enabled;
+        let user_config = manifest.user_config_defaults();
+        let enabled =
+            manifest.default_enabled && manifest.validate_user_config(&user_config).is_empty();
         let entry = PluginEntry {
             manifest,
             root: dest.clone(),
             scope,
             enabled,
+            user_config,
             resolved_components: None,
         };
 
@@ -427,13 +443,24 @@ impl PluginRegistry {
 
     /// Enable a disabled plugin.
     pub fn enable(&mut self, plugin_id: &str) -> Result<(), String> {
-        let was_enabled = self
+        let entry = self
             .plugins
             .get(plugin_id)
-            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?
-            .enabled;
+            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
+        let was_enabled = entry.enabled;
         if was_enabled {
             return Ok(());
+        }
+        let config_errors = entry.manifest.validate_user_config(&entry.user_config);
+        if !config_errors.is_empty() {
+            return Err(format!(
+                "Cannot enable plugin '{plugin_id}': {}",
+                config_errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
         }
 
         if let Some(entry) = self.plugins.get_mut(plugin_id) {
@@ -508,6 +535,62 @@ impl PluginRegistry {
     /// Get a plugin entry by ID.
     pub fn get(&self, plugin_id: &str) -> Option<&PluginEntry> {
         self.plugins.get(plugin_id)
+    }
+
+    /// Replace and persist a plugin's user configuration.
+    pub fn configure(
+        &mut self,
+        plugin_id: &str,
+        values: HashMap<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        let resolved = {
+            let entry = self
+                .plugins
+                .get(plugin_id)
+                .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
+            entry
+                .manifest
+                .resolve_user_config(&values)
+                .map_err(|errors| {
+                    errors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })?
+        };
+        let previous = self
+            .plugins
+            .get(plugin_id)
+            .map(|entry| entry.user_config.clone())
+            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
+        if let Some(entry) = self.plugins.get_mut(plugin_id) {
+            entry.user_config = resolved;
+        }
+        if let Err(error) = self.save_state() {
+            if let Some(entry) = self.plugins.get_mut(plugin_id) {
+                entry.user_config = previous;
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Build the substitution context for a plugin's component files.
+    pub fn variables_for(&self, plugin_id: &str) -> Result<super::PluginVariables, String> {
+        let entry = self
+            .plugins
+            .get(plugin_id)
+            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
+        let project_dir = self
+            .project_root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| entry.root.clone()));
+        Ok(
+            super::PluginVariables::new(&entry.manifest.name, entry.root.clone(), project_dir)
+                .with_plugin_data(self.data_dir_for(plugin_id))
+                .with_json_user_config(&entry.user_config),
+        )
     }
 
     /// List all installed plugins.
@@ -832,8 +915,18 @@ impl PluginRegistry {
         }
         let json = serde_json::to_string_pretty(&state)
             .map_err(|error| format!("Failed to serialize plugin state: {error}"))?;
-        std::fs::write(&self.state_file, json)
-            .map_err(|error| format!("Failed to write plugin state: {error}"))
+        let temporary = self.state_file.with_extension("json.tmp");
+        std::fs::write(&temporary, json)
+            .map_err(|error| format!("Failed to write plugin state: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&temporary, permissions)
+                .map_err(|error| format!("Failed to protect plugin state: {error}"))?;
+        }
+        std::fs::rename(&temporary, &self.state_file)
+            .map_err(|error| format!("Failed to replace plugin state: {error}"))
     }
 
     /// Load persisted state and merge with discovered plugins.
@@ -853,10 +946,23 @@ impl PluginRegistry {
             Err(_) => return,
         };
 
-        // Merge enabled/disabled state from persisted file
+        // Merge enabled/disabled state and validated config from persisted file.
         for (id, saved_entry) in &state.plugins {
             if let Some(entry) = self.plugins.get_mut(id) {
-                entry.enabled = saved_entry.enabled;
+                match entry.manifest.resolve_user_config(&saved_entry.user_config) {
+                    Ok(config) => {
+                        entry.user_config = config;
+                        entry.enabled = saved_entry.enabled;
+                    }
+                    Err(errors) => {
+                        entry.enabled = false;
+                        tracing::warn!(
+                            plugin = %id,
+                            errors = %errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "),
+                            "Plugin disabled because its persisted configuration is invalid"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1131,6 +1237,7 @@ mod tests {
                 root: root_file,
                 scope: PluginScope::User,
                 enabled: true,
+                user_config: HashMap::new(),
                 resolved_components: None,
             },
         );
@@ -1167,6 +1274,7 @@ mod tests {
                     root: tmp.join(name),
                     scope: PluginScope::User,
                     enabled: true,
+                    user_config: HashMap::new(),
                     resolved_components: None,
                 },
             );
@@ -1227,6 +1335,7 @@ mod tests {
                     root: tmp.join(name),
                     scope: PluginScope::User,
                     enabled: true,
+                    user_config: HashMap::new(),
                     resolved_components: None,
                 },
             );
@@ -1259,6 +1368,7 @@ keywords: [data, polars, visualization]
                 root: tmp.join("data-analysis"),
                 scope: PluginScope::User,
                 enabled: true,
+                user_config: HashMap::new(),
                 resolved_components: None,
             },
         );
@@ -1333,6 +1443,84 @@ components:
                 .any(|error| { error.contains("skills") && error.contains("missing-skills") })
         );
         std::fs::remove_dir_all(&tmp).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn plugin_config_persists_and_populates_substitution_variables() -> Result<(), String> {
+        let temporary = std::env::temp_dir().join(format!(
+            "echo-plugin-config-persistence-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temporary);
+        std::fs::create_dir_all(&temporary).map_err(|error| error.to_string())?;
+        let plugins = temporary.join("plugins");
+        let plugin = create_test_plugin(&plugins, "configurable");
+        std::fs::write(
+            plugin.join(".echo-plugin/manifest.yaml"),
+            r#"name: configurable
+version: "1.0.0"
+description: Configurable plugin
+config:
+  endpoint:
+    type: string
+    title: Endpoint
+    required: true
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let state_file = temporary.join("registry.json");
+        let data_dir = temporary.join("plugin-data");
+        let project_dir = temporary.join("project");
+        let mut registry = PluginRegistry::with_paths(
+            state_file.clone(),
+            data_dir.clone(),
+            Some(project_dir.clone()),
+        );
+        registry
+            .scan_scope_dir(PluginScope::User, &plugins)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            registry
+                .get("configurable")
+                .is_some_and(|entry| !entry.enabled)
+        );
+
+        registry.configure(
+            "configurable",
+            HashMap::from([(
+                "endpoint".to_string(),
+                serde_json::Value::String("http://localhost:9000".to_string()),
+            )]),
+        )?;
+        registry.enable("configurable")?;
+        let variables = registry.variables_for("configurable")?;
+        assert_eq!(variables.plugin_data, data_dir.join("configurable"));
+        assert_eq!(variables.project_dir, project_dir);
+        assert_eq!(
+            variables.substitute("${user_config.endpoint}/health"),
+            "http://localhost:9000/health"
+        );
+
+        let mut restored =
+            PluginRegistry::with_paths(state_file, data_dir, Some(temporary.join("project")));
+        restored
+            .scan_scope_dir(PluginScope::User, &plugins)
+            .map_err(|error| error.to_string())?;
+        restored.load_state();
+        assert!(
+            restored
+                .get("configurable")
+                .is_some_and(|entry| entry.enabled)
+        );
+        assert_eq!(
+            restored
+                .get("configurable")
+                .and_then(|entry| entry.user_config.get("endpoint"))
+                .and_then(serde_json::Value::as_str),
+            Some("http://localhost:9000")
+        );
+        std::fs::remove_dir_all(&temporary).map_err(|error| error.to_string())?;
         Ok(())
     }
 }

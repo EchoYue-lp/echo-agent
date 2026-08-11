@@ -35,7 +35,7 @@
 | [20 - Web 工具](20-web-tools.md) | Web 搜索 / 网页获取 | DuckDuckGo / Brave / Tavily 搜索、HTML→文本 |
 | [21 - 常用工具速查](21-common-tools.md) | Tool Guide | Web 搜索、网页抓取、浏览器自动化、数据工具 |
 | [22 - 论文检索工具](22-research-tools.md) | Research | ArXiv 搜索、Semantic Scholar、PDF 下载、BibTeX 生成 |
-| [23 - Hooks 系统](23-hooks.md) | Hooks | Skills hooks（20 个事件）、Task hooks、Subagent hooks |
+| [23 - Hooks 系统](23-hooks.md) | Hooks | Skills hooks（31 个事件、7 种动作）、Task hooks、Subagent hooks |
 | [24 - 评估系统](24-eval-system.md) | Eval | EvalCase、SuccessCriteria、LlmGrader、A/B 对比、回归套件、HTML 报告 |
 | [25 - 自进化系统](25-self-improvement.md) | Improve / Evolution | Analyzer、ImprovementLoop、EvalDrivenImprovement、分层记忆、技能自创建、合并/健康/补丁、规则晋升、变更审计 |
 | [26 - 多 Agent 模式](26-multi-agent.md) | SubAgent / TeamAgent | 父子委托（Sync/Fork/Teammate）、对等协作（ManagerSubagent/Pipeline/Debate/Swarm） |

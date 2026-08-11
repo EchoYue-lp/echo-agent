@@ -1285,6 +1285,72 @@ async fn intent_router_skill_activation_survives_compression_markers() -> Result
 }
 
 #[tokio::test]
+async fn plugin_skill_variables_cover_frontmatter_hooks_and_body() -> Result<(), String> {
+    let base = std::env::temp_dir().join(format!(
+        "echo-agent-plugin-skill-variables-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let skill_dir = base.join("configured-skill");
+    tokio::fs::create_dir_all(&skill_dir)
+        .await
+        .map_err(|error| format!("create skill dir: {error}"))?;
+    tokio::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: configured-skill\ndescription: Configured skill\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: notify ${user_config.endpoint}\n---\nUse ${user_config.endpoint}.\n",
+    )
+    .await
+    .map_err(|error| format!("write skill file: {error}"))?;
+
+    let variables = crate::plugin::PluginVariables::new(
+        "configured-plugin",
+        base.clone(),
+        base.join("project"),
+    )
+    .with_user_config(std::collections::HashMap::from([(
+        "endpoint".to_string(),
+        "http://localhost:9100".to_string(),
+    )]));
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+    agent
+        .load_plugin_skills_from_dir(&base, "plugin:configured-plugin", &variables)
+        .await
+        .map_err(|error| format!("load plugin skill: {error}"))?;
+
+    let descriptor = agent
+        .skill_descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.name == "configured-skill")
+        .ok_or_else(|| "configured plugin skill was not registered".to_string())?;
+    let action = descriptor
+        .hooks
+        .as_ref()
+        .and_then(|definition| definition.rules_for(HookEvent::PreToolUse).first())
+        .and_then(|rule| rule.hooks.first())
+        .ok_or_else(|| "configured frontmatter hook was not registered".to_string())?;
+    match action {
+        HookAction::Command { command, .. } => {
+            assert_eq!(command, "notify http://localhost:9100");
+        }
+        _ => return Err("configured hook is not a command".to_string()),
+    }
+
+    agent
+        .activate_skill("configured-skill")
+        .await
+        .map_err(|error| format!("activate plugin skill: {error}"))?;
+    assert!(agent.get_messages().await.iter().any(|message| {
+        message
+            .content
+            .as_text_ref()
+            .is_some_and(|text| text.contains("Use http://localhost:9100."))
+    }));
+
+    let _ = tokio::fs::remove_dir_all(base).await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
     let config = AgentConfig::minimal("model", "agent");
     let mut agent = ReactAgent::new(config);

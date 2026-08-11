@@ -9,10 +9,11 @@
 | Skills | 已接入 `SkillRegistry` | SKILL.md 文件，支持在线装卸 |
 | Hooks | 已接入 `HookRegistry` | 生命周期和工具钩子，支持在线装卸 |
 | MCP Servers | 已接入 `McpManager` | MCP 服务器及工具，支持在线装卸 |
-| Agents | 仅发现 | 应用层尚未原子构造 definition + executable factory |
-| LSP Servers | 仅发现 | `ReactAgent` 尚未持有 `LspManager` |
-| Monitors | 仅发现 | 尚无运行时消费者 |
-| Themes / Output Styles | 仅发现 | 由应用 UI / 输出层消费，尚未接入 |
+| Agents | EKO 已接通 | 解析后与可执行 subagent factory 一起注册 |
+| LSP Servers | EKO 已接通 | 由应用层 `LspManager` 启停 |
+| Monitors | EKO 已接通 | 与应用调度器进行增量替换 |
+| Themes | EKO GUI 已接通 | 可选择、应用为 CSS 变量并持久化 |
+| Output Styles | EKO 已接通 | 投影到 Agent 上下文并持久化 |
 
 ```
 核心框架:  提供 React Agent 循环、工具执行、上下文管理
@@ -157,9 +158,14 @@ components:
 | `file` | 文件路径（验证存在性） |
 
 配置项通用属性：
-- `sensitive: true` — 遮蔽输入，存入安全存储
+- `sensitive: true` — 在 UI 中遮蔽输入，并在 Hook 命令诊断中持续脱敏替换后的值
 - `required: true` — 必填项
 - `default` — 用户未提供时的默认值
+
+注册表会解析默认值，校验类型、必填项、数值范围和文件路径，再把已验证的
+`user_config` 持久化到应用插件注册表文件。Unix 下 EKO 将该本地文件设置为仅当前用户
+可读写。配置值通过 `${user_config.KEY}` 提供给组件加载器；这里不宣称使用操作系统
+钥匙串。
 
 ---
 
@@ -230,7 +236,7 @@ use echo_agent::plugin::{InstallSource, PluginScope};
 let source = InstallSource::Local(PathBuf::from("/path/to/my-plugin"));
 let plugin_id = registry.install(&source, PluginScope::User)?;
 
-// 从 Git 仓库安装（仅允许 https://）
+// 从 Git 仓库安装（HTTPS 或 SSH）
 let source = InstallSource::parse("https://github.com/echo/data-plugin.git");
 let plugin_id = registry.install(&source, PluginScope::Project)?;
 
@@ -260,6 +266,19 @@ registry.enable("data-analysis-pack")?;
 ```
 
 启停状态会持久化到 `registry.json`，重启后自动恢复。
+已验证的用户配置也持久化在同一注册表中：
+
+```rust
+registry.configure(
+    "data-analysis-pack",
+    HashMap::from([(
+        "api_endpoint".to_string(),
+        serde_json::json!("http://localhost:8080"),
+    )]),
+)?;
+```
+
+缺少必填配置的插件会以禁用状态启动，只有 `configure` 成功后才能启用。
 
 ### 查询
 
@@ -363,6 +382,17 @@ load → init → activate ⇄ deactivate → shutdown
                    └──────────┘  (可循环，如 reload)
 ```
 
+`PluginLifecycleManager` 持有已注册的回调。Native/plugin host 代码通过
+`PluginRuntimeService::register_lifecycle` 注册回调；声明式 manifest 不负责命名或
+动态实例化 Rust 回调类型。EKO 的共享 `PluginRuntimeService` 为 GUI、TUI、CLI
+驱动同一条调用链。
+
+每次候选替换均由生命周期原子包围：先停用所有 active 回调，再拆卸旧组件、装配候选
+组件，最后激活候选启用集合的回调。停用、装配或激活任一步失败都会放弃发布候选，恢复
+原组件/LSP/monitor 集合并重新激活原回调。卸载会在 `deactivate` / `shutdown` 后
+unregister 回调，因此重装可以重新注册。`init` 每次注册只执行一次，而成功重载时
+`activate` / `deactivate` 可以循环。
+
 ---
 
 ## 组件装配
@@ -399,7 +429,16 @@ println!("共装配 {} 个组件", result.total_wired());
 | Skills | `agent.load_skills_from_dir()` |
 | Hooks | `hook_registry.register("plugin:{name}", ...)` |
 | MCP Servers | `agent.load_mcp_from_file()` |
-| Agents / LSP / Monitors / Themes / Output Styles | 仅返回 `*_discovered` 路径，不计入已装配组件 |
+| Agents / LSP / Monitors / Themes / Output Styles | 在框架/应用适配边界返回路径；EKO 的 `PluginRuntimeService` 负责解析并激活 |
+
+`PluginIntegrator::total_wired()` 有意只统计框架拥有的 Skills/Hooks/MCP。EKO 应用在
+同一份 reload summary 中单独报告实际生效的 Agent、LSP、monitor、theme 和
+output-style 数量。
+
+Theme 选择会真正激活并持久化运行时偏好。GUI 和 TUI 都会立即应用所选插件
+Theme；清除、禁用、卸载或重载后 Theme 消失时恢复各自的内置主题。GUI 选择内置主题
+时会先停用插件 Theme 偏好，确保 DOM 变量、前端状态、TUI 渲染和后端持久化状态不会
+分裂。Output Style 使用同一套偏好持久化模型，并刷新可替换的 Agent 上下文投影。
 
 也可以只装配部分组件：
 
@@ -450,6 +489,10 @@ config:
   }
 }
 ```
+
+变量替换发生在所有文本型插件组件解析之前：Hooks、MCP、Agent 定义、LSP、monitor、
+Theme、Output Style，以及插件拥有的完整 `SKILL.md`。因此 Skill YAML frontmatter
+Hook Action 中的变量与 Markdown 指令中的变量具有完全相同的解析结果。
 
 ### 环境变量
 
@@ -506,20 +549,22 @@ export_to_env(&vars);
 
 ### Git 克隆限制
 
-从 Git 安装插件时，仅允许 `https://` 协议：
+EKO 接受本地用户选择的加密 Git 传输：HTTPS、`ssh://` 和
+`git@host:path` 形式；明文 HTTP/Git 和畸形输入会被拒绝：
 
 ```rust
-// ✅ 允许
+// 允许
 InstallSource::parse("https://github.com/echo/plugin.git")
+InstallSource::parse("git@github.com:echo/private-plugin.git")
 
-// ❌ 拒绝
-InstallSource::parse("file:///etc/passwd")        // SSRF 防护
-InstallSource::parse("ssh://git@host/repo")        // 非 HTTPS
-InstallSource::parse("git://host/repo")            // 非 HTTPS
-InstallSource::parse("http://host/repo")           // 非加密 HTTP
+// 拒绝
+InstallSource::parse("file:///path/to/plugin")     // 应改用 Local 来源
+InstallSource::parse("git://host/repo")            // 明文传输
+InstallSource::parse("http://host/repo")           // 明文传输
 ```
 
-此外，私有 IP 地址（`127.x`、`10.x`、`172.16-31.x`、`192.168.x`、`0.x`）也会被拒绝，防止 SSRF 攻击。
+这是本地可信扩展边界，不是公网多租户服务：用户主动配置的私网和 loopback Git
+主机是合法来源。
 
 ### 路径遍历防护
 

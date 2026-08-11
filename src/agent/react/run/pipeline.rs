@@ -8,6 +8,7 @@ use super::context::HookMessageBatches;
 use crate::error::{ReactError, Result};
 use crate::tools::{ToolParameters, ToolResult, ToolStreamEvent, is_write_tool};
 use async_trait::async_trait;
+use echo_core::tools::permission::{PermissionDecision, PermissionMode};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -38,6 +39,10 @@ pub(crate) struct ToolExecutionContext {
     pub duration_ms: u64,
     /// Whether the agent is in plan mode (read-only tools only).
     pub plan_mode: bool,
+    /// Permission decision returned by PreToolUse hooks for this call only.
+    pub permission_decision: Option<PermissionDecision>,
+    /// Permission mode override returned by hooks for this call only.
+    pub permission_mode_override: Option<PermissionMode>,
     /// Incremental tool events, tagged with their stable invocation identity.
     pub stream_tx: Option<mpsc::Sender<(String, String, ToolStreamEvent)>>,
 }
@@ -237,6 +242,8 @@ impl PipelineStage for PreToolUseHookStage {
             )
             .await;
         ctx.hook_messages.pre = hook_result.messages.clone();
+        ctx.permission_decision = hook_result.permission_decision.clone();
+        ctx.permission_mode_override = hook_result.permission_mode_override;
 
         if hook_result.block {
             ctx.blocked = true;
@@ -272,15 +279,61 @@ impl PipelineStage for PermissionStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
+        if let Some(decision) = ctx.permission_decision.take() {
+            match decision {
+                PermissionDecision::Allow => return Ok(()),
+                PermissionDecision::Deny { reason } => {
+                    ctx.blocked = true;
+                    ctx.block_reason = Some(reason);
+                    return Ok(());
+                }
+                PermissionDecision::Ask { .. } | PermissionDecision::RequireApproval => {}
+            }
+        }
+
+        let permission_hook = {
+            let registry = snapshot.tools.hook_registry.read().await.clone();
+            let context = crate::skills::hooks::HookContext::for_permission_request(
+                &ctx.tool_name,
+                &ctx.input,
+                snapshot.config.session_id.as_deref().unwrap_or(""),
+                &snapshot.config.agent_name,
+            );
+            registry.run_lifecycle_hooks(&context).await
+        };
+        ctx.hook_messages.pre.extend(permission_hook.messages);
+        if permission_hook.block {
+            ctx.blocked = true;
+            ctx.block_reason =
+                Some(permission_hook.block_reason.unwrap_or_else(|| {
+                    format!("Tool {} blocked by permission hook", ctx.tool_name)
+                }));
+            return Ok(());
+        }
+        if let Some(mode) = permission_hook.permission_mode_override {
+            ctx.permission_mode_override = Some(mode);
+        }
+        if let Some(decision) = permission_hook.permission_decision {
+            match decision {
+                PermissionDecision::Allow => return Ok(()),
+                PermissionDecision::Deny { reason } => {
+                    ctx.blocked = true;
+                    ctx.block_reason = Some(reason);
+                    return Ok(());
+                }
+                PermissionDecision::Ask { .. } | PermissionDecision::RequireApproval => {}
+            }
+        }
+
         #[cfg(feature = "human-loop")]
         let approval_modified = snapshot
-            .check_tool_approval(&ctx.tool_name, &ctx.input)
+            .check_tool_approval(&ctx.tool_name, &ctx.input, ctx.permission_mode_override)
             .await
             .map_err(|error| ReactError::Other(error.to_string()))?;
 
         #[cfg(not(feature = "human-loop"))]
         let approval_modified = snapshot
-            .check_tool_approval(&ctx.tool_name, &ctx.input)
+            .check_tool_approval(&ctx.tool_name, &ctx.input, ctx.permission_mode_override)
             .await
             .map_err(|_| ReactError::Other("Permission check failed".into()))?;
 
@@ -578,7 +631,7 @@ impl PipelineStage for ExecuteStage {
     }
 }
 
-/// Runs PostToolUse hooks.
+/// Runs PostToolUse or PostToolUseFailure hooks according to the tool result.
 pub struct PostToolUseHookStage;
 
 #[async_trait]
@@ -599,25 +652,33 @@ impl PipelineStage for PostToolUseHookStage {
             }
             guard.clone()
         };
-        let output = ctx
-            .result
-            .as_ref()
-            .map(|r| {
-                if r.output.is_empty() {
-                    r.error.as_deref().unwrap_or("")
-                } else {
-                    r.output.as_str()
-                }
-            })
-            .unwrap_or("");
-        let post_result = hook_reg
-            .run_post_tool_use(
-                &ctx.tool_name,
-                &ctx.input,
-                output,
-                snapshot.config.session_id.as_deref().unwrap_or(""),
-            )
-            .await;
+        let Some(tool_result) = ctx.result.as_ref() else {
+            return Ok(());
+        };
+        let post_result = if tool_result.success {
+            hook_reg
+                .run_post_tool_use(
+                    &ctx.tool_name,
+                    &ctx.input,
+                    &tool_result.output,
+                    snapshot.config.session_id.as_deref().unwrap_or(""),
+                )
+                .await
+        } else {
+            let error = tool_result
+                .error
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&tool_result.output);
+            hook_reg
+                .run_post_tool_use_failure(
+                    &ctx.tool_name,
+                    &ctx.input,
+                    error,
+                    snapshot.config.session_id.as_deref().unwrap_or(""),
+                )
+                .await
+        };
         ctx.hook_messages.post = post_result.messages;
         if post_result.block {
             ctx.blocked = true;
@@ -1026,6 +1087,10 @@ mod tests {
                 ))
             })
         }
+
+        fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+            vec![echo_core::tools::permission::ToolPermission::Execute]
+        }
     }
 
     impl Tool for InterleavingTool {
@@ -1141,6 +1206,8 @@ mod tests {
             block_reason: None,
             duration_ms: 0,
             plan_mode: false,
+            permission_decision: None,
+            permission_mode_override: None,
             stream_tx: Some(stream_tx),
         }
     }
@@ -1158,8 +1225,83 @@ mod tests {
             block_reason: None,
             duration_ms: 0,
             plan_mode: false,
+            permission_decision: None,
+            permission_mode_override: None,
             stream_tx: None,
         }
+    }
+
+    #[tokio::test]
+    async fn unsuccessful_result_runs_failure_hook_instead_of_success_hook() -> Result<()> {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .build()?;
+        let mut definition = HooksDefinition::default();
+        definition.add_rules(
+            HookEvent::PostToolUse,
+            vec![HookRule {
+                matcher: "invalid_result".to_string(),
+                hooks: vec![HookAction::Prompt {
+                    prompt: "success-hook".to_string(),
+                }],
+            }],
+        );
+        definition.add_rules(
+            HookEvent::PostToolUseFailure,
+            vec![HookRule {
+                matcher: "invalid_result".to_string(),
+                hooks: vec![HookAction::Prompt {
+                    prompt: "failure-hook".to_string(),
+                }],
+            }],
+        );
+        agent
+            .hook_registry()
+            .write()
+            .await
+            .register_user_hooks(definition);
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context(String::new());
+        ctx.tool_name = "invalid_result".to_string();
+        ctx.result = Some(ToolResult::failure(
+            crate::tools::ToolFailureCategory::InvalidArguments,
+            "missing query",
+        ));
+
+        PostToolUseHookStage.run(&mut ctx, &snapshot).await?;
+
+        assert_eq!(ctx.hook_messages.post, vec!["failure-hook"]);
+        Ok(())
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn permission_stage_consumes_call_scoped_mode_override() -> Result<()> {
+        let service = Arc::new(
+            crate::human_loop::PermissionService::new()
+                .with_mode(echo_core::tools::permission::PermissionMode::Default),
+        );
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool(Box::new(InvalidResultTool))
+            .permission_service(service.clone())
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context(String::new());
+        ctx.tool_name = "invalid_result".to_string();
+        ctx.permission_mode_override =
+            Some(echo_core::tools::permission::PermissionMode::BypassPermissions);
+
+        PermissionStage.run(&mut ctx, &snapshot).await?;
+
+        assert!(!ctx.blocked);
+        assert_eq!(
+            service.mode().await,
+            echo_core::tools::permission::PermissionMode::Default
+        );
+        Ok(())
     }
 
     #[tokio::test]

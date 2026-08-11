@@ -12,6 +12,7 @@ use echo_state::skill_telemetry::{SkillTelemetry, SkillTelemetryStore};
 use serde::{Deserialize, Serialize};
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
+use super::layer::EvolutionObserver;
 use crate::error::Result;
 
 // Re-export SkillDescriptor for use in this module.
@@ -103,13 +104,23 @@ pub struct SkillHealthReport {
 /// Monitors skill health by analyzing telemetry data.
 pub struct SkillHealthMonitor {
     telemetry_store: SkillTelemetryStore,
+    observer: Option<Arc<dyn EvolutionObserver>>,
 }
 
 impl SkillHealthMonitor {
     /// Create a new health monitor.
     pub fn new(store: Arc<dyn Store>) -> Self {
         let telemetry_store = SkillTelemetryStore::new(store);
-        Self { telemetry_store }
+        Self {
+            telemetry_store,
+            observer: None,
+        }
+    }
+
+    /// Publish completed health reports to the evolution event observer.
+    pub fn with_evolution_observer(mut self, observer: Arc<dyn EvolutionObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Analyze health for a single skill.
@@ -124,14 +135,18 @@ impl SkillHealthMonitor {
         let status = HealthStatus::from_score(health_score);
         let recommendations = self.generate_recommendations(&telemetry, &breakdown, status);
 
-        Ok(Some(SkillHealthReport {
+        let report = SkillHealthReport {
             skill_name: skill_name.to_string(),
             health_score,
             status,
             breakdown,
             recommendations,
             analyzed_at: Utc::now(),
-        }))
+        };
+        if let Some(observer) = &self.observer {
+            observer.on_skill_health_check(skill_name).await;
+        }
+        Ok(Some(report))
     }
 
     /// Analyze health for all skills and return a summary.
@@ -145,14 +160,18 @@ impl SkillHealthMonitor {
             let status = HealthStatus::from_score(health_score);
             let recommendations = self.generate_recommendations(&telemetry, &breakdown, status);
 
-            reports.push(SkillHealthReport {
+            let report = SkillHealthReport {
                 skill_name: telemetry.skill_name.clone(),
                 health_score,
                 status,
                 breakdown,
                 recommendations,
                 analyzed_at: Utc::now(),
-            });
+            };
+            if let Some(observer) = &self.observer {
+                observer.on_skill_health_check(&report.skill_name).await;
+            }
+            reports.push(report);
         }
 
         Ok(reports)
@@ -297,6 +316,23 @@ mod tests {
     use super::*;
     use echo_state::memory::store::InMemoryStore;
     use echo_state::skill_telemetry::SkillExecutionRecord;
+    use futures::future::BoxFuture;
+    use std::sync::Mutex;
+
+    struct HealthObserver {
+        names: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl EvolutionObserver for HealthObserver {
+        fn on_skill_health_check<'a>(&'a self, skill_name: &'a str) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.names
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(skill_name.to_string());
+            })
+        }
+    }
 
     fn make_record(skill_name: &str, success: bool, error: Option<&str>) -> SkillExecutionRecord {
         SkillExecutionRecord {
@@ -314,7 +350,12 @@ mod tests {
     #[tokio::test]
     async fn test_healthy_skill() {
         let store = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let monitor = SkillHealthMonitor::new(store.clone());
+        let observed_names = Arc::new(Mutex::new(Vec::new()));
+        let monitor = SkillHealthMonitor::new(store.clone()).with_evolution_observer(Arc::new(
+            HealthObserver {
+                names: observed_names.clone(),
+            },
+        ));
 
         // Record 10 successful executions
         for _ in 0..10 {
@@ -329,6 +370,12 @@ mod tests {
         assert_eq!(report.status, HealthStatus::Healthy);
         assert!(report.health_score >= 0.7);
         assert!(report.recommendations.is_empty());
+        assert_eq!(
+            *observed_names
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec!["test-skill".to_string()]
+        );
     }
 
     #[tokio::test]

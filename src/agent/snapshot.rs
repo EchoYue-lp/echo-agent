@@ -799,6 +799,7 @@ impl AgentRunSnapshot {
         &self,
         tool_name: &str,
         input: &serde_json::Value,
+        permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
     ) -> std::result::Result<Option<serde_json::Value>, echo_core::error::ReactError> {
         if let Some(ref service) = self.permission_service {
             let permissions = self
@@ -807,7 +808,12 @@ impl AgentRunSnapshot {
                 .get_tool(tool_name)
                 .map(|tool| tool.permissions())
                 .unwrap_or_default();
-            let check = service.check_with_permissions(tool_name, input, &permissions);
+            let check = service.check_with_permissions_in_mode(
+                tool_name,
+                input,
+                &permissions,
+                permission_mode_override,
+            );
             tokio::pin!(check);
             let decision = if let Some(cancel) = self.cancel_token.as_ref() {
                 tokio::select! {
@@ -856,6 +862,7 @@ impl AgentRunSnapshot {
         &self,
         _tool_name: &str,
         _input: &serde_json::Value,
+        _permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
     ) -> std::result::Result<Option<serde_json::Value>, echo_core::error::ReactError> {
         Ok(None)
     }
@@ -1214,6 +1221,8 @@ impl AgentRunSnapshot {
                 block_reason: None,
                 duration_ms: 0,
                 plan_mode: self.config.plan_mode,
+                permission_decision: None,
+                permission_mode_override: None,
                 stream_tx,
             };
 
@@ -1363,7 +1372,7 @@ mod transcript_filter_tests {
         };
         let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
         let input = serde_json::json!({});
-        let approval = snapshot.check_tool_approval("approval_tool", &input);
+        let approval = snapshot.check_tool_approval("approval_tool", &input, None);
         tokio::pin!(approval);
 
         tokio::task::yield_now().await;

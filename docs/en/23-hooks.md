@@ -4,7 +4,7 @@
 
 Hooks allow custom behavior to be injected at key points in the agent lifecycle. There are three independent hook systems:
 
-1. **Skills Hooks** — the main hook system with 20 events and 5 action types
+1. **Skills Hooks** — the main hook system with 31 events and 7 action types
 2. **Task Hooks** — lifecycle callbacks for DAG task execution
 3. **Subagent Hooks** — lifecycle callbacks for subagent dispatch
 
@@ -37,7 +37,22 @@ The primary hook system. Hooks are configured in YAML (via `echo-agent.yaml` or 
 | `SubagentStart` | Before subagent dispatch | Context injection |
 | `SubagentStop` | After subagent completes | Result injection |
 | `TaskCreated` | Task created/scheduled | Context injection |
+| `TaskStarted` | Scheduler claims a task attempt | Context injection |
 | `TaskCompleted` | Task completed | Result injection |
+| `PluginLoaded` | Plugin components become live | Notification/context |
+| `PluginDisabled` | Plugin is disabled or uninstalled | Notification/context |
+| `PostMemoryWrite` | Memory is persisted | Evolution feedback |
+| `MemoryLayerChange` | Memory changes layer | Evolution feedback |
+| `SkillCandidateDetected` | A skill candidate is detected | Evolution feedback |
+| `SkillLifecycleTransition` | A skill changes lifecycle state | Evolution feedback |
+| `SkillHealthCheck` | A skill health check finishes | Evolution feedback |
+| `SkillPatchApplied` | A skill patch is applied | Evolution feedback |
+| `SkillMergeApplied` | Skills are merged | Evolution feedback |
+| `RulePromoted` | Memory is promoted to an AGENTS.md rule | Evolution feedback |
+
+All eight Evolution events above are emitted by their owning write, transition,
+candidate-detection, health-check, patch, merge, and rule-promotion paths. They
+are runtime events rather than reserved enum values.
 
 ### Hook Types
 
@@ -48,6 +63,8 @@ The primary hook system. Hooks are configured in YAML (via `echo-agent.yaml` or 
 | `permission` | Return a permission decision directly (allow/deny/ask) |
 | `http` | POST event data to a URL, parse response |
 | `mcp_tool` | Call an MCP server tool |
+| `agent` | Dispatch a named subagent for the hook action |
+| `activate_skill` | Activate a discovered skill directly, without an LLM round trip |
 
 ### YAML Configuration
 
@@ -89,7 +106,7 @@ hooks:
 The `matcher` field filters which tools/events trigger the hook:
 
 - `"Bash"` — exact match on tool name
-- `"Edit|Write"` — regex alternation (matches Edit or Write)
+- `"Edit|Write"` — pipe-separated alternatives (matches Edit or Write)
 - `"*"` or omit matcher — matches all events
 - `"startup"` — matches SessionStart with context keyword
 
@@ -112,12 +129,34 @@ The command's stdout is parsed as a `HookResult`:
 ```json
 {
   "decision": "allow",
-  "modified_input": { "command": "ls -la --color=never" },
-  "message": "Modified command to disable colors"
+  "updatedInput": { "command": "ls -la --color=never" },
+  "injected_context": "Modified command to disable colors",
+  "permission_mode_override": "auto"
 }
 ```
 
-### Security Limits
+These are the canonical wire names; `modified_input`, `message`, and
+`permission_mode` are not aliases. `permission_mode_override` may be returned
+by `PreToolUse` or `PermissionRequest`. It applies only to that tool call and is
+passed into the permission service without mutating the session's configured
+mode. Canonical values are `default`, `plan`, `auto`, `acceptEdits`,
+`bypassPermissions`, `bubble`, `dontAsk`, and `strict`.
+
+### Sources, Reloading, and Dry Run
+
+User, Skill, and Plugin hooks all use the same registration-time action
+validation. Invalid actions are logged and omitted while valid actions in the
+same rule remain active.
+
+EKO merges inline hooks from `echo-agent.yaml`, global
+`~/.eko/hooks.yaml`, and project `.eko/hooks.yaml`. Its watcher monitors all
+three targets. Create, modify, atomic-replace, and remove events all trigger a
+reload, so deleting a `hooks.yaml` removes its registered hooks without a
+restart. A failed parse keeps the last known good registry. CLI, TUI, and GUI hook tests call
+`HookRegistry::dry_run`: they evaluate event and matcher routing and report the
+source/action list without executing side effects.
+
+### Runtime Limits and Local Extension Policy
 
 | Limit | Value | Purpose |
 |-------|-------|---------|
@@ -125,6 +164,14 @@ The command's stdout is parsed as a `HookResult`:
 | Max timeout | 300 seconds | Hard upper bound |
 | Max command length | 32 KB | Prevents abuse via malformed YAML |
 | Sandbox execution | Optional | Hooks can run inside sandbox |
+
+EKO is a local, user-controlled application. Hook HTTP actions therefore allow
+plain HTTP for loopback, private-network, and link-local IP literals, as well as
+`localhost`, single-label hosts such as `nas`, and names ending in `.local` or
+`.lan`. Remote addresses must use HTTPS. Configured headers and payloads are
+sent unchanged, while sensitive substituted values are redacted from command
+diagnostics. MCP actions may invoke any tool exposed by the user-configured
+server; there is no framework deny-list for locally trusted extensions.
 
 ---
 

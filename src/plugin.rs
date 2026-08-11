@@ -20,9 +20,9 @@
 
 pub use echo_core::plugin::{
     InstallSource, PluginAuthor, PluginCapability, PluginComponents, PluginDependency, PluginEntry,
-    PluginId, PluginLifecycle, PluginManifest, PluginRegistry, PluginScope, PluginUserConfigEntry,
-    PluginUserConfigType, PluginVariables, ResolvedComponents, plugin_data_base_dir,
-    set_plugin_data_base_dir, set_plugin_data_base_dir_name,
+    PluginId, PluginLifecycle, PluginLifecycleManager, PluginManifest, PluginRegistry, PluginScope,
+    PluginUserConfigEntry, PluginUserConfigType, PluginVariables, ResolvedComponents,
+    plugin_data_base_dir, set_plugin_data_base_dir, set_plugin_data_base_dir_name,
 };
 
 use std::collections::HashMap;
@@ -48,18 +48,17 @@ pub struct PluginWiringResult {
     pub hooks_registered: Vec<String>,
     /// Names of MCP servers connected.
     pub mcp_connected: Vec<String>,
-    /// Agent definition files discovered for an application-layer constructor.
-    /// They are not advertised as runnable until an executable instance exists.
+    /// Agent definition files handed to the application-owned constructor.
+    /// EKO registers each definition together with its executable instance.
     pub agents_discovered: Vec<String>,
-    /// LSP config files discovered but not yet wired (TODO: framework
-    /// `ReactAgent` does not hold an `LspManager`; the application layer
-    /// constructs one and feeds it `LspConfig::from_file`).
+    /// LSP config files handed to the application layer. `ReactAgent` does not
+    /// own an `LspManager`; EKO starts and stops them in `PluginRuntimeService`.
     pub lsp_discovered: Vec<String>,
-    /// Monitor config files discovered (TODO: no framework runtime consumer).
+    /// Monitor config files handed to the application scheduler.
     pub monitors_discovered: Vec<String>,
-    /// Theme files discovered (TODO: UI-layer consumer, not framework).
+    /// Theme files handed to the application UI runtime.
     pub themes_discovered: Vec<String>,
-    /// Output-style files discovered (TODO: output-format consumer, not framework).
+    /// Output-style files handed to the application context-projection runtime.
     pub output_styles_discovered: Vec<String>,
     /// Successful live registrations, grouped for exact unload/reload.
     pub components_by_plugin: HashMap<String, WiredPluginComponents>,
@@ -75,8 +74,8 @@ impl PluginWiringResult {
 
     /// Total number of components wired into the agent.
     ///
-    /// Discovery-only categories are excluded because they have no live
-    /// runtime consumer yet.
+    /// Application-owned categories are excluded from this framework-only
+    /// count; EKO reports their live counts in its reload summary.
     pub fn total_wired(&self) -> usize {
         self.skills_loaded.len() + self.hooks_registered.len() + self.mcp_connected.len()
     }
@@ -92,9 +91,9 @@ impl PluginWiringResult {
 /// | Skills | `SkillRegistry` via `ReactAgent::load_skills_from_dir` | assembled |
 /// | Hooks | `HookRegistry` via `HookRegistry::register` | assembled |
 /// | MCP servers | `McpManager` via `ReactAgent::load_mcp_from_file` | assembled |
-/// | Agents | discovered path for an application-owned constructor | discovery only |
-/// | LSP servers | discovered path; `ReactAgent` holds no `LspManager` | TODO |
-/// | Monitors / Themes / Output styles | discovered paths; no framework runtime consumer | TODO |
+/// | Agents | application-owned constructor + executable factory | adapter output |
+/// | LSP servers | application-owned `LspManager` | adapter output |
+/// | Monitors / Themes / Output styles | application scheduler/UI/context projection | adapter output |
 ///
 /// This struct lives in the facade crate because it needs access to
 /// types from multiple workspace crates.
@@ -110,22 +109,22 @@ impl PluginIntegrator {
     /// This is the primary entry point. It:
     /// 1. Scans all plugin scopes and resolves dependencies.
     /// 2. For each enabled plugin, resolves component paths.
-    /// 3. Wires skills, hooks, and MCP servers into the agent; reports
-    ///    discovered-but-unconsumed agent/LSP/monitor/theme/output-style files.
+    /// 3. Wires skills, hooks, and MCP servers into the agent; returns
+    ///    application-owned agent/LSP/monitor/theme/output-style files to the adapter.
     ///
     /// # Subagent definitions (agents)
     ///
-    /// Agent definition files remain discovery-only here. Registering a
+    /// Agent definition files remain an application adapter output here. Registering a
     /// definition without an executable instance makes it appear in
     /// `agent_tool` while every dispatch fails, so the application must parse,
     /// construct, and register the definition and factory atomically.
     ///
-    /// # Discovery-only components
+    /// # Application-owned components
     ///
     /// LSP servers, monitors, themes, and output styles are resolved and
-    /// reported (`*_discovered`) but not assembled: `ReactAgent` holds no
-    /// `LspManager`, and monitors/themes/output styles have no framework
-    /// runtime consumer. See the [`PluginIntegrator`] table for the TODOs.
+    /// reported (`*_discovered`) but not assembled by the generic framework:
+    /// `ReactAgent` holds no UI, scheduler, or `LspManager`. EKO consumes all
+    /// of these outputs in its application-layer `PluginRuntimeService`.
     pub async fn wire_all(
         &self,
         agent: &mut crate::agent::react::ReactAgent,
@@ -145,13 +144,13 @@ impl PluginIntegrator {
         };
 
         // Collect components from all enabled plugins
-        let mut skill_dirs: Vec<(String, PathBuf)> = Vec::new();
+        let mut skill_dirs: Vec<(String, PathBuf, PluginVariables)> = Vec::new();
         let mut hooks_defs: Vec<(
             String,
             String,
             echo_execution::skills::hooks::HooksDefinition,
         )> = Vec::new();
-        let mut mcp_files: Vec<(String, PathBuf)> = Vec::new();
+        let mut mcp_files: Vec<(String, PathBuf, PluginVariables)> = Vec::new();
         let mut agent_files: Vec<(String, PathBuf)> = Vec::new();
         let mut failed_plugins = std::collections::HashSet::new();
 
@@ -164,6 +163,22 @@ impl PluginIntegrator {
             let Some(root_display) = entry_info else {
                 continue;
             };
+
+            let variables = match registry.variables_for(plugin_id) {
+                Ok(variables) => variables,
+                Err(error) => {
+                    failed_plugins.insert(plugin_id.clone());
+                    result.errors.push(error);
+                    continue;
+                }
+            };
+            if let Err(error) = variables.ensure_data_dir() {
+                failed_plugins.insert(plugin_id.clone());
+                result.errors.push(format!(
+                    "Plugin '{plugin_id}' data directory could not be created: {error}"
+                ));
+                continue;
+            }
 
             let resolved = match registry.resolve_components(plugin_id) {
                 Ok(r) => r,
@@ -179,13 +194,14 @@ impl PluginIntegrator {
             // Collect skill dirs, tagged with the owning plugin id so the
             // wiring loop can `tag_source` them for grouped unload (P1-reload).
             for d in &resolved.skill_dirs {
-                skill_dirs.push((plugin_id.clone(), d.clone()));
+                skill_dirs.push((plugin_id.clone(), d.clone(), variables.clone()));
             }
 
             // Collect hooks
             if let Some(ref hooks_file) = resolved.hooks_file {
                 match std::fs::read_to_string(hooks_file) {
                     Ok(content) => {
+                        let content = variables.substitute(&content);
                         match serde_yaml_ng::from_str::<
                             echo_execution::skills::hooks::HooksDefinition,
                         >(&content)
@@ -211,7 +227,7 @@ impl PluginIntegrator {
 
             // Collect MCP files
             if let Some(ref mcp_file) = resolved.mcp_config_file {
-                mcp_files.push((plugin_id.clone(), mcp_file.clone()));
+                mcp_files.push((plugin_id.clone(), mcp_file.clone(), variables.clone()));
             }
 
             // Collect agent definition files for application-owned construction.
@@ -243,11 +259,13 @@ impl PluginIntegrator {
         // Wire skills — load then tag each batch with its owning plugin id so
         // `SkillRegistry::unregister_by_source("plugin:{id}")` can remove them
         // on disable/uninstall (P1-reload).
-        for (plugin_id, dir) in &skill_dirs {
-            match agent.load_skills_from_dir(dir).await {
+        for (plugin_id, dir, variables) in &skill_dirs {
+            let source_tag = format!("plugin:{plugin_id}");
+            match agent
+                .load_plugin_skills_from_dir(dir, &source_tag, variables)
+                .await
+            {
                 Ok(names) => {
-                    let source_tag = format!("plugin:{plugin_id}");
-                    agent.tag_skills_source(&names, &source_tag).await;
                     result
                         .components_by_plugin
                         .entry(plugin_id.clone())
@@ -292,13 +310,14 @@ impl PluginIntegrator {
         // Wire MCP servers
         #[cfg(feature = "mcp")]
         {
-            for (plugin_id, mcp_file) in &mcp_files {
-                let expected_servers = match crate::mcp::McpConfigFile::from_file(mcp_file) {
-                    Ok(config) => {
-                        let mut names = config.mcp_servers.keys().cloned().collect::<Vec<_>>();
-                        names.sort();
-                        names
-                    }
+            for (plugin_id, mcp_file, variables) in &mcp_files {
+                let config = match std::fs::read_to_string(mcp_file)
+                    .map_err(|error| error.to_string())
+                    .and_then(|content| {
+                        crate::mcp::McpConfigFile::parse(&variables.substitute(&content))
+                            .map_err(|error| error.to_string())
+                    }) {
+                    Ok(config) => config,
                     Err(error) => {
                         failed_plugins.insert(plugin_id.clone());
                         result.errors.push(format!(
@@ -308,7 +327,9 @@ impl PluginIntegrator {
                         continue;
                     }
                 };
-                match agent.load_mcp_from_file(mcp_file).await {
+                let mut expected_servers = config.mcp_servers.keys().cloned().collect::<Vec<_>>();
+                expected_servers.sort();
+                match agent.load_mcp_config(config).await {
                     Ok(clients) => {
                         let connected_servers = clients
                             .iter()
@@ -348,7 +369,7 @@ impl PluginIntegrator {
         }
 
         #[cfg(not(feature = "mcp"))]
-        for (plugin_id, mcp_file) in &mcp_files {
+        for (plugin_id, mcp_file, _) in &mcp_files {
             failed_plugins.insert(plugin_id.clone());
             result.errors.push(format!(
                 "Plugin '{plugin_id}' declares MCP config {}, but the framework was built without the 'mcp' feature",

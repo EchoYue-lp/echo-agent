@@ -21,9 +21,11 @@ use echo_core::memory::types::{MemorySource, MemoryType};
 use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryEntry, TypedMemoryStore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
 use super::curator::{Curator, CuratorConfig};
+use super::layer::EvolutionObserver;
 use crate::error::Result;
 
 // ── Constants ──────────────────────────────────────────────────────────
@@ -137,6 +139,7 @@ pub struct SkillCandidateDetector {
     /// Maximum candidates to propose per scan. Default: 5.
     pub max_candidates_per_scan: usize,
     curator: Curator,
+    observer: Option<Arc<dyn EvolutionObserver>>,
 }
 
 impl Default for SkillCandidateDetector {
@@ -145,6 +148,7 @@ impl Default for SkillCandidateDetector {
             min_observations: 3,
             max_candidates_per_scan: 5,
             curator: Curator::default_path(CuratorConfig::default()),
+            observer: None,
         }
     }
 }
@@ -161,12 +165,19 @@ impl SkillCandidateDetector {
             min_observations,
             max_candidates_per_scan,
             curator: Curator::default_path(CuratorConfig::default()),
+            observer: None,
         }
     }
 
     /// Use a consumer-supplied curator state file.
     pub fn with_curator(mut self, curator: Curator) -> Self {
         self.curator = curator;
+        self
+    }
+
+    /// Publish newly persisted candidates to the evolution event observer.
+    pub fn with_evolution_observer(mut self, observer: Arc<dyn EvolutionObserver>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -290,6 +301,10 @@ impl SkillCandidateDetector {
                     .trigger("skill_candidate_detector".to_string())
                     .build(change_log);
                 change_log.record(entry)?;
+
+                if let Some(observer) = &self.observer {
+                    observer.on_skill_candidate_detected(&key).await;
+                }
 
                 report.new_candidates.push(candidate);
                 proposed += 1;
@@ -424,7 +439,24 @@ mod tests {
     use echo_core::memory::store::StoreItem;
     use echo_core::memory::types::MemorySource;
     use echo_state::memory::store::InMemoryStore;
+    use futures::future::BoxFuture;
     use std::sync::Arc;
+    use std::sync::Mutex;
+
+    struct CandidateObserver {
+        names: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl EvolutionObserver for CandidateObserver {
+        fn on_skill_candidate_detected<'a>(&'a self, skill_name: &'a str) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.names
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(skill_name.to_string());
+            })
+        }
+    }
 
     /// A no-op ChangeLog for testing.
     struct NullChangeLog;
@@ -508,7 +540,11 @@ mod tests {
                 .unwrap();
         }
 
-        let detector = SkillCandidateDetector::new();
+        let observed_names = Arc::new(Mutex::new(Vec::new()));
+        let detector =
+            SkillCandidateDetector::new().with_evolution_observer(Arc::new(CandidateObserver {
+                names: observed_names.clone(),
+            }));
         let report = detector.detect(&typed, &log).await.unwrap();
 
         assert_eq!(report.new_candidates.len(), 1);
@@ -517,6 +553,12 @@ mod tests {
         assert_eq!(
             report.new_candidates[0].source_type,
             MemoryType::WorkflowPattern
+        );
+        assert_eq!(
+            *observed_names
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec!["cargo-build".to_string()]
         );
     }
 

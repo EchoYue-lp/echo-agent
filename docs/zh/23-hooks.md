@@ -4,7 +4,7 @@
 
 Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架提供三套独立的 Hook 系统：
 
-1. **Skills Hooks** — 主 Hook 系统，支持 33 个事件和 7 种动作类型
+1. **Skills Hooks** — 主 Hook 系统，支持 31 个事件和 7 种动作类型
 2. **Task Hooks** — DAG 任务执行的生命周期回调
 3. **Subagent Hooks** — 子代理调度的生命周期回调
 
@@ -92,7 +92,9 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 | `SkillMergeApplied` | 两个或更多技能合并后 |
 | `RulePromoted` | 记忆提升为 AGENTS.md 规则后 |
 
-> 注：部分 Evolution 事件目前尚无生产触发点。已接入主路径的事件包括：工具类、会话类、Task 三段式事件（`TaskCreated` / `TaskStarted` / `TaskCompleted`）、Subagent 两段式事件（`SubagentStart` / `SubagentStop`）、Plugin 生命周期事件和 `StopFailure`。Task/Subagent 的取消与超时由对应终态事件的结构化 status 表达，不再使用独立事件。
+上述 8 个 Evolution 事件均由对应的记忆写入/层级迁移、候选检测、生命周期转换、
+健康检查、补丁、合并和规则提升主路径真实发射，不是只保留在枚举中的占位事件。
+Task/Subagent 的取消与超时由对应终态事件的结构化 status 表达，不再使用独立事件。
 
 ### Hook 动作类型
 
@@ -101,8 +103,8 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 | `command` | 执行 shell 命令；stdin 接收 JSON 上下文 |
 | `prompt` | 为 LLM 注入提示消息 |
 | `permission` | 直接返回权限决策（allow/deny/ask） |
-| `http` | POST 事件数据到 URL，解析响应（经 SSRF 安全管线 + 密钥脱敏） |
-| `mcp_tool` | 调用 MCP 服务器工具（执行类工具在 deny-list 中） |
+| `http` | 向 URL 发送事件数据并解析响应 |
+| `mcp_tool` | 调用用户配置的 MCP 服务器工具 |
 | `agent` | 派发一个 subagent 处理该 hook 动作 |
 | `activate_skill` | 直接激活一个技能（不经 LLM），reason 作为系统说明呈现给模型 |
 
@@ -158,7 +160,7 @@ hooks:
 `matcher` 字段过滤哪些工具/事件触发 Hook：
 
 - `"Bash"` — 精确匹配工具名
-- `"Edit|Write"` — 正则交替（匹配 Edit 或 Write）
+- `"Edit|Write"` — 管道符分隔的候选项（匹配 Edit 或 Write）
 - `"*"` 或省略 matcher — 匹配所有事件
 - `"startup"` — 匹配 SessionStart 中的上下文关键词
 
@@ -184,13 +186,31 @@ Command Hook 通过 stdin 接收完整的 `HookContext` JSON（含 `hook_event_n
 {
   "decision": "allow",
   "updatedInput": { "command": "ls -la --color=never" },
-  "injected_context": "已修改命令以禁用颜色"
+  "injected_context": "已修改命令以禁用颜色",
+  "permission_mode_override": "auto"
 }
 ```
 
 退出码语义（对齐 Claude Code 约定）：`0`/`1` 不阻塞，`2` 显式阻塞，其它非零仅告警不阻塞。
 
-### 安全限制
+以上是规范 wire 字段名，`modified_input`、`message` 和 `permission_mode` 不是别名。
+`PreToolUse` 或 `PermissionRequest` 可以返回 `permission_mode_override`。该值只作用于
+当前工具调用，由主执行 Pipeline 传入权限服务，不会修改会话级权限模式，也不会污染
+并发调用。规范值为 `default`、`plan`、`auto`、`acceptEdits`、
+`bypassPermissions`、`bubble`、`dontAsk` 和 `strict`。
+
+### 来源、热更新与 Dry Run
+
+User、Skill、Plugin 三种来源统一使用同一套注册期 Action 校验：无效 Action
+会被记录并过滤，同一规则中的有效 Action 仍正常注册。
+
+EKO 会合并 `echo-agent.yaml` 内嵌 Hooks、全局 `~/.eko/hooks.yaml` 和项目
+`.eko/hooks.yaml`。监听器同时监控这三个目标；创建、修改、原子替换和删除都会触发重载，
+因此删除 `hooks.yaml` 会立即移除其 Hook，无需重启。解析失败时保留 last-known-good
+注册表。CLI、TUI、GUI 的 Hook 测试均调用
+`HookRegistry::dry_run`，真实计算事件、matcher、来源和 Action，但不执行任何副作用。
+
+### 运行限制与本地扩展模型
 
 | 限制 | 值 | 目的 |
 |------|-----|------|
@@ -198,6 +218,12 @@ Command Hook 通过 stdin 接收完整的 `HookContext` JSON（含 `hook_event_n
 | 最大超时 | 300 秒 | 硬上限 |
 | 最大命令长度 | 32 KB | 防止畸形 YAML 滥用 |
 | 沙箱执行 | 可选 | Hook 可在沙箱内运行 |
+
+EKO 是用户本机上的可信个人助理。HTTP Hook 允许 loopback、私网和 link-local IP
+字面量，以及 `localhost`、`nas` 这类单标签主机和以 `.local` / `.lan` 结尾的域名使用
+明文 HTTP；远程地址仍要求 HTTPS。用户配置的 headers 与 payload 会原样发送，命令
+诊断会对已替换的敏感值脱敏。MCP Hook 可调用用户所配置服务器暴露的任意工具，框架
+不再维护针对本地可信扩展的工具 deny-list。
 
 ---
 

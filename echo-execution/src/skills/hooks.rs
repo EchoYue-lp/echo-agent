@@ -6,20 +6,23 @@
 //!
 //! ## Architecture role
 //!
-//! This module provides the **tool execution security layer** (Phase 3 "Hook 拦截与安全增强").
-//! It serves as the functional equivalent of a `ToolExecutionEngine` with `ToolHook` trait:
+//! This module provides the shared hook dispatch and extension layer. EKO is a
+//! local, user-controlled application, so user-configured commands, local HTTP
+//! endpoints, and MCP tools are treated as trusted extensions. Registration
+//! still rejects malformed configuration and accidental runaway timeouts.
 //!
 //! | Design concept | Implementation in this module |
 //! |---------------|-------------------------------|
 //! | `ToolExecutionEngine` | [`HookRegistry`] — central dispatch for all hook events |
-//! | `ToolHook` trait | [`HookAction`] enum — Command, Prompt, Permission, Http, McpTool, Agent |
+//! | `ToolHook` trait | [`HookAction`] enum — Command, Prompt, Permission, Http, McpTool, Agent, ActivateSkill |
 //! | `HookDecision` (Allow/Deny/Modify) | [`HookResult`] — `block`, `updated_input`, `permission_decision` |
 //! | `ToolPolicy` | [`HooksDefinition`] + [`HookRule`] — matcher → actions mapping (YAML-configurable) |
 //!
-//! The hook system is wired into the tool execution pipeline at three code paths:
-//! - [`PreToolUseHookStage`](crate::tools::pipeline::PreToolUseHookStage) (stage 4 of 13)
-//! - [`PostToolUseHookStage`](crate::tools::pipeline::PostToolUseHookStage) (stage 10 of 13)
-//! - Direct calls in `execution.rs` and `stream_channel.rs` for non-pipeline paths
+//! Tool hooks are wired through the shared tool execution pipeline:
+//! - [`PreToolUseHookStage`](crate::tools::pipeline::PreToolUseHookStage)
+//! - the permission stage for `PermissionRequest`
+//! - [`PostToolUseHookStage`](crate::tools::pipeline::PostToolUseHookStage), which routes
+//!   successful and unsuccessful results to their distinct events
 //!
 //! ## Hook events
 //!
@@ -46,6 +49,16 @@
 //! | `TaskCreated` | Task node enters an executable graph | Context injection |
 //! | `TaskStarted` | Scheduler claims a task for execution | Context injection |
 //! | `TaskCompleted` | Task reaches a terminal status | Result injection |
+//! | `PluginLoaded` | Plugin components become active | Post-load integration |
+//! | `PluginDisabled` | Plugin components are deactivated | Cleanup |
+//! | `PostMemoryWrite` | Memory is persisted | Follow-up processing |
+//! | `MemoryLayerChange` | Memory changes layer | Follow-up processing |
+//! | `SkillCandidateDetected` | A skill candidate is detected | Review/notification |
+//! | `SkillLifecycleTransition` | A skill changes lifecycle state | Follow-up processing |
+//! | `SkillHealthCheck` | A skill health check completes | Follow-up processing |
+//! | `SkillPatchApplied` | A skill patch is applied | Follow-up processing |
+//! | `SkillMergeApplied` | Skills are merged | Follow-up processing |
+//! | `RulePromoted` | Memory is promoted to an AGENTS.md rule | Follow-up processing |
 //!
 //! ## Hook types
 //!
@@ -56,6 +69,8 @@
 //! | `permission` | Return a permission decision directly (allow/deny/ask) |
 //! | `http` | POST event data to a URL, parse response |
 //! | `mcp_tool` | Call an MCP server tool |
+//! | `agent` | Invoke a configured subagent |
+//! | `activate_skill` | Activate a discovered skill directly |
 //!
 //! ## YAML format (SKILL.md frontmatter or echo-agent.yaml)
 //!
@@ -108,7 +123,6 @@ use tracing::{debug, info, warn};
 
 use crate::sandbox::{SandboxCommand, SandboxManager};
 use crate::skills::minimal_hook_env_with_context;
-use echo_tools::security::ssrf_safe_request_with_body;
 
 // ── (HookEvent, HookContext, HookResult, CompressHookStats, HookSource are now in echo-core) ──
 
@@ -119,10 +133,10 @@ const fn default_hook_timeout() -> u64 {
     10
 }
 
-/// Maximum allowed hook timeout (seconds). Prevents runaway hooks.
+/// Maximum allowed hook timeout (seconds). Prevents accidental runaway hooks.
 const MAX_HOOK_TIMEOUT: u64 = 300;
 
-/// Maximum allowed command string length (bytes). Prevents abuse via malformed YAML.
+/// Maximum command string length (bytes). Rejects obviously malformed YAML early.
 const MAX_COMMAND_LENGTH: usize = 32 * 1024; // 32 KB
 
 /// A single hook action.
@@ -239,6 +253,22 @@ impl HookAction {
                 if url.is_empty() {
                     return Err("Http hook has empty url".into());
                 }
+                let parsed = reqwest::Url::parse(url)
+                    .map_err(|error| format!("Http hook has invalid url: {error}"))?;
+                match parsed.scheme() {
+                    "https" => {}
+                    "http" if is_local_http_url(&parsed) => {}
+                    "http" => {
+                        return Err(
+                            "Http hook must use https unless it targets a local address".into()
+                        );
+                    }
+                    scheme => {
+                        return Err(format!(
+                            "Http hook has unsupported url scheme '{scheme}' (expected http or https)"
+                        ));
+                    }
+                }
                 if *timeout > MAX_HOOK_TIMEOUT {
                     return Err(format!(
                         "Http hook timeout {}s exceeds maximum {}s",
@@ -284,6 +314,52 @@ impl HookAction {
         }
         Ok(())
     }
+
+    /// Stable action name used by diagnostics and dry-run output.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Command { .. } => "command",
+            Self::Prompt { .. } => "prompt",
+            Self::Permission { .. } => "permission",
+            Self::Http { .. } => "http",
+            Self::McpTool { .. } => "mcp_tool",
+            Self::Agent { .. } => "agent",
+            Self::ActivateSkill { .. } => "activate_skill",
+        }
+    }
+}
+
+fn is_local_http_url(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let ip_literal = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = ip_literal.parse::<std::net::IpAddr>() {
+        return match address {
+            std::net::IpAddr::V4(address) => {
+                address.is_loopback()
+                    || address.is_private()
+                    || address.is_link_local()
+                    || address.is_unspecified()
+            }
+            std::net::IpAddr::V6(address) => {
+                address.is_loopback()
+                    || address.is_unique_local()
+                    || address.is_unicast_link_local()
+                    || address.is_unspecified()
+            }
+        };
+    }
+
+    let normalized_host = host.to_ascii_lowercase();
+    normalized_host == "localhost"
+        || normalized_host.ends_with(".localhost")
+        || !normalized_host.contains('.')
+        || normalized_host.ends_with(".local")
+        || normalized_host.ends_with(".lan")
 }
 
 // ── Hook Rule ──────────────────────────────────────────────────────────
@@ -328,18 +404,10 @@ impl HooksDefinition {
 
     /// Add rules for a specific event.
     pub fn add_rules(&mut self, event: HookEvent, rules: Vec<HookRule>) {
-        if rules.is_empty() {
-            return;
+        let (rules, _) = validate_hook_rules(event, rules, "definition");
+        if !rules.is_empty() {
+            self.rules.entry(event).or_default().extend(rules);
         }
-        // Validate all hook actions before accepting the rules
-        for rule in &rules {
-            for action in &rule.hooks {
-                if let Err(e) = action.validate() {
-                    warn!(?event, error = %e, "Invalid hook action skipped");
-                }
-            }
-        }
-        self.rules.entry(event).or_default().extend(rules);
     }
 
     /// Merge another definition into this one.
@@ -348,6 +416,47 @@ impl HooksDefinition {
             self.add_rules(event, rules);
         }
     }
+}
+
+fn validate_hook_rules(
+    event: HookEvent,
+    rules: Vec<HookRule>,
+    source: &str,
+) -> (Vec<HookRule>, usize) {
+    let mut kept_rules = Vec::with_capacity(rules.len());
+    let mut skipped = 0usize;
+    for mut rule in rules {
+        rule.hooks.retain(|action| match action.validate() {
+            Ok(()) => true,
+            Err(_) => {
+                warn!(
+                    source,
+                    ?event,
+                    action = action.kind(),
+                    "Invalid hook action skipped"
+                );
+                skipped = skipped.saturating_add(1);
+                false
+            }
+        });
+        if !rule.hooks.is_empty() {
+            kept_rules.push(rule);
+        }
+    }
+    (kept_rules, skipped)
+}
+
+fn validate_hook_definition(definition: HooksDefinition, source: &str) -> (HooksDefinition, usize) {
+    let mut clean = HooksDefinition::default();
+    let mut skipped = 0usize;
+    for (event, rules) in definition.rules {
+        let (rules, event_skipped) = validate_hook_rules(event, rules, source);
+        skipped = skipped.saturating_add(event_skipped);
+        if !rules.is_empty() {
+            clean.rules.insert(event, rules);
+        }
+    }
+    (clean, skipped)
 }
 
 // ── MCP Tool Executor ─────────────────────────────────────────────────
@@ -411,6 +520,21 @@ struct RegisteredHook {
     source_dir: String,
 }
 
+/// One action that would execute for a hook context, without side effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookDryRunMatch {
+    pub source: String,
+    pub matcher: String,
+    pub action: String,
+}
+
+/// Result of matching a hook context without executing any action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookDryRunResult {
+    pub event: HookEvent,
+    pub matches: Vec<HookDryRunMatch>,
+}
+
 impl HookRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -429,12 +553,15 @@ impl HookRegistry {
 
     /// Register hooks from a skill.
     pub fn register(&mut self, skill_name: &str, skill_dir: &str, definition: HooksDefinition) {
+        let source = format!("skill:{skill_name}");
+        let (definition, skipped) = validate_hook_definition(definition, &source);
         if definition.is_empty() {
             return;
         }
         info!(
             skill = skill_name,
             rule_count = definition.rules.values().map(|v| v.len()).sum::<usize>(),
+            skipped,
             "Registered skill hooks"
         );
         self.sources.insert(
@@ -448,12 +575,13 @@ impl HookRegistry {
 
     /// Register hooks from user configuration.
     pub fn register_user_hooks(&mut self, definition: HooksDefinition) {
+        let (definition, skipped) = validate_hook_definition(definition, "user_config");
         if definition.is_empty() {
             return;
         }
         info!(
             rule_count = definition.rules.values().map(|v| v.len()).sum::<usize>(),
-            "Registered user hooks from config"
+            skipped, "Registered user hooks from config"
         );
         self.sources.insert(
             HookSource::UserConfig,
@@ -488,38 +616,9 @@ impl HookRegistry {
         if definition.is_empty() {
             return false;
         }
-        // Validate every action; collect a clean definition containing only
-        // valid actions (mirrors the per-action leniency of `add_rules`).
-        let mut clean = HooksDefinition::default();
-        let mut skipped = 0usize;
+        let source = format!("plugin:{plugin_name}");
         let total = definition.rules.values().map(|v| v.len()).sum::<usize>();
-        for (event, rules) in definition.rules {
-            let mut kept_rules = Vec::with_capacity(rules.len());
-            for mut rule in rules {
-                let mut kept_actions = Vec::with_capacity(rule.hooks.len());
-                for action in rule.hooks.drain(..) {
-                    match action.validate() {
-                        Ok(()) => kept_actions.push(action),
-                        Err(e) => {
-                            warn!(
-                                plugin = plugin_name,
-                                ?event,
-                                error = %e,
-                                "Invalid plugin hook action skipped"
-                            );
-                            skipped += 1;
-                        }
-                    }
-                }
-                if !kept_actions.is_empty() {
-                    rule.hooks = kept_actions;
-                    kept_rules.push(rule);
-                }
-            }
-            if !kept_rules.is_empty() {
-                clean.rules.insert(event, kept_rules);
-            }
-        }
+        let (clean, skipped) = validate_hook_definition(definition, &source);
         if clean.is_empty() {
             warn!(
                 plugin = plugin_name,
@@ -581,6 +680,45 @@ impl HookRegistry {
         self.sources
             .values()
             .any(|r| !r.definition.rules_for(event).is_empty())
+    }
+
+    /// Match hooks for a concrete context without executing any action.
+    pub fn dry_run(&self, context: &HookContext) -> HookDryRunResult {
+        let mut matches = Vec::new();
+        for source in self.sorted_sources() {
+            let Some(registered) = self.sources.get(source) else {
+                continue;
+            };
+            for rule in registered.definition.rules_for(context.event) {
+                if !matches_hook(&rule.matcher, context) {
+                    continue;
+                }
+                for action in &rule.hooks {
+                    matches.push(HookDryRunMatch {
+                        source: source.to_string(),
+                        matcher: rule.matcher.clone(),
+                        action: action.kind().to_string(),
+                    });
+                }
+            }
+        }
+        HookDryRunResult {
+            event: context.event,
+            matches,
+        }
+    }
+
+    fn sorted_sources(&self) -> Vec<&HookSource> {
+        let mut sources: Vec<&HookSource> = self.sources.keys().collect();
+        sources.sort_by(|a, b| match (a, b) {
+            (HookSource::UserConfig, _) => std::cmp::Ordering::Less,
+            (_, HookSource::UserConfig) => std::cmp::Ordering::Greater,
+            (HookSource::Plugin(a), HookSource::Plugin(b)) => a.cmp(b),
+            (HookSource::Plugin(_), _) => std::cmp::Ordering::Less,
+            (_, HookSource::Plugin(_)) => std::cmp::Ordering::Greater,
+            (HookSource::Skill(a), HookSource::Skill(b)) => a.cmp(b),
+        });
+        sources
     }
 
     /// Set the HTTP client for Http hook actions.
@@ -656,17 +794,7 @@ impl HookRegistry {
         let mut combined = HookResult::default();
 
         // Sort sources: UserConfig first, then skills alphabetically
-        let mut sorted_sources: Vec<&HookSource> = self.sources.keys().collect();
-        sorted_sources.sort_by(|a, b| match (a, b) {
-            (HookSource::UserConfig, _) => std::cmp::Ordering::Less,
-            (_, HookSource::UserConfig) => std::cmp::Ordering::Greater,
-            (HookSource::Plugin(a), HookSource::Plugin(b)) => a.cmp(b),
-            (HookSource::Plugin(_), _) => std::cmp::Ordering::Less,
-            (_, HookSource::Plugin(_)) => std::cmp::Ordering::Greater,
-            (HookSource::Skill(a), HookSource::Skill(b)) => a.cmp(b),
-        });
-
-        for source in sorted_sources {
+        for source in self.sorted_sources() {
             let Some(registered) = self.sources.get(source) else {
                 continue;
             };
@@ -680,7 +808,6 @@ impl HookRegistry {
                 debug!(
                     source = %source,
                     event = ?event,
-                    matcher = &rule.matcher,
                     "Hook matched"
                 );
 
@@ -839,7 +966,11 @@ async fn execute_action(
                     });
                 }
                 _ => {
-                    warn!(decision = %decision, "Unknown permission decision from hook");
+                    warn!(
+                        event = %context.event.as_str(),
+                        action = "permission",
+                        "Unknown permission decision from hook"
+                    );
                 }
             }
             result.stop_propagation = true;
@@ -866,58 +997,35 @@ async fn execute_action(
             tool,
             arguments,
             timeout,
-        } => {
-            // Blocklist for dangerous MCP tools that hooks must not call
-            // (P1 — MCP tool execution without allowlist in execution layer).
-            const BLOCKED_MCP_TOOLS: &[&str] = &[
-                "execute_command",
-                "shell",
-                "bash",
-                "sh",
-                "write_file",
-                "delete_file",
-                "remove_file",
-                "run_script",
-                "spawn_task",
-            ];
-            if BLOCKED_MCP_TOOLS.contains(&tool.as_str()) {
-                warn!(
-                    server = %server,
-                    tool = %tool,
-                    "McpTool hook blocked: tool is on the execution deny-list"
-                );
-                return HookResult::default();
-            }
-            match mcp_executor {
-                Some(executor) => {
-                    let fut = executor(server.clone(), tool.clone(), arguments.clone());
-                    if *timeout > 0 {
-                        match tokio::time::timeout(Duration::from_secs(*timeout), fut).await {
-                            Ok(result) => result,
-                            Err(_) => {
-                                warn!(
-                                    server = %server,
-                                    tool = %tool,
-                                    timeout_secs = *timeout,
-                                    "McpTool hook timed out"
-                                );
-                                HookResult::default()
-                            }
+        } => match mcp_executor {
+            Some(executor) => {
+                let fut = executor(server.clone(), tool.clone(), arguments.clone());
+                if *timeout > 0 {
+                    match tokio::time::timeout(Duration::from_secs(*timeout), fut).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(
+                                event = %context.event.as_str(),
+                                action = "mcp_tool",
+                                timeout_secs = *timeout,
+                                "McpTool hook timed out"
+                            );
+                            HookResult::default()
                         }
-                    } else {
-                        fut.await
                     }
-                }
-                None => {
-                    warn!(
-                        server = %server,
-                        tool = %tool,
-                        "McpTool hook action configured but no mcp_executor registered"
-                    );
-                    HookResult::default()
+                } else {
+                    fut.await
                 }
             }
-        }
+            None => {
+                warn!(
+                    event = %context.event.as_str(),
+                    action = "mcp_tool",
+                    "McpTool hook action configured but no mcp_executor registered"
+                );
+                HookResult::default()
+            }
+        },
         HookAction::Agent {
             name,
             task,
@@ -948,7 +1056,11 @@ async fn execute_action(
                             hr
                         }
                         Err(e) => {
-                            warn!(agent = %name, error = %e, "Agent hook failed");
+                            warn!(
+                                event = %context.event.as_str(),
+                                action = "agent",
+                                "Agent hook failed"
+                            );
                             let mut hr = HookResult::default();
                             hr.messages.push(format!("Agent hook '{name}' error: {e}"));
                             hr
@@ -957,8 +1069,8 @@ async fn execute_action(
                 }
                 None => {
                     warn!(
-                        agent = %name,
-                        task = ?task,
+                        event = %context.event.as_str(),
+                        action = "agent",
                         "Agent hook action triggered but no agent_executor registered"
                     );
                     let mut result = HookResult::default();
@@ -1037,15 +1149,21 @@ async fn execute_command_hook(
             Ok(result) => {
                 if !result.stderr.is_empty() {
                     debug!(
-                        command = %command,
-                        stderr = %result.stderr.trim(),
+                        event = %context.event.as_str(),
+                        action = "command",
+                        stderr_bytes = result.stderr.len(),
                         "Hook stderr (sandboxed)"
                     );
                 }
                 parse_hook_output(&result.stdout, result.exit_code)
             }
-            Err(e) => {
-                warn!(command = %command, error = %e, "Hook sandbox error");
+            Err(_) => {
+                warn!(
+                    event = %context.event.as_str(),
+                    action = "command",
+                    sandboxed = true,
+                    "Hook sandbox error"
+                );
                 HookResult::default()
             }
         };
@@ -1082,7 +1200,12 @@ async fn execute_command_hook(
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            warn!(command = %command, error = %e, "Failed to spawn hook command");
+            warn!(
+                event = %context.event.as_str(),
+                action = "command",
+                error_kind = ?e.kind(),
+                "Failed to spawn hook command"
+            );
             return HookResult::default();
         }
     };
@@ -1099,21 +1222,31 @@ async fn execute_command_hook(
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-            if !stderr.is_empty() {
-                debug!(command = %command, stderr = %stderr.trim(), "Hook stderr");
+            if !output.stderr.is_empty() {
+                debug!(
+                    event = %context.event.as_str(),
+                    action = "command",
+                    stderr_bytes = output.stderr.len(),
+                    "Hook stderr"
+                );
             }
 
             parse_hook_output(&stdout, output.status.code().unwrap_or(-1))
         }
         Ok(Err(e)) => {
-            warn!(command = %command, error = %e, "Hook command execution error");
+            warn!(
+                event = %context.event.as_str(),
+                action = "command",
+                error_kind = ?e.kind(),
+                "Hook command execution error"
+            );
             HookResult::default()
         }
         Err(_) => {
             warn!(
-                command = %command,
+                event = %context.event.as_str(),
+                action = "command",
                 timeout_secs = timeout_secs,
                 "Hook command timed out"
             );
@@ -1124,83 +1257,6 @@ async fn execute_command_hook(
 
 // -- HTTP hook execution --
 
-/// Minimal secret-redaction applied to a hook payload before it leaves the
-/// process. Covers the highest-risk token shapes (API keys, bearer tokens,
-/// connection strings). The full scanner lives in `echo_agent::security`, but
-/// `echo-execution` cannot depend on the root crate (cycle); this local guard
-/// is defense-in-depth on top of the operator's responsibility to configure
-/// hook URLs responsibly.
-fn redact_hook_payload(value: &mut Value) {
-    // Recursively walk the JSON and redact string leaves that look like
-    // secrets, plus the VALUES of map entries whose KEY names a secret field.
-    match value {
-        Value::Object(map) => {
-            // Collect keys first to avoid borrow issues while mutating.
-            let keys: Vec<String> = map.keys().cloned().collect();
-            for k in keys {
-                let is_secret_key = {
-                    let lk = k.to_ascii_lowercase();
-                    lk.contains("secret")
-                        || lk.contains("token")
-                        || lk.contains("password")
-                        || lk.contains("passwd")
-                        || lk.contains("api_key")
-                        || lk.contains("apikey")
-                        || lk.contains("auth")
-                        || lk.contains("credential")
-                };
-                if let Some(v) = map.get_mut(&k) {
-                    if is_secret_key && v.is_string() {
-                        *v = Value::String("[REDACTED]".to_string());
-                    } else {
-                        redact_hook_payload(v);
-                    }
-                }
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr {
-                redact_hook_payload(v);
-            }
-        }
-        Value::String(s) => {
-            *s = redact_string_secrets(s);
-        }
-        _ => {}
-    }
-}
-
-/// Redact well-known secret patterns within a single string.
-fn redact_string_secrets(s: &str) -> String {
-    use std::sync::OnceLock;
-    // Possessive quantifiers prevent ReDoS backtracking.
-    static PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
-    let patterns = PATTERNS.get_or_init(|| {
-        [
-            // Bearer tokens
-            r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+",
-            // OpenAI keys
-            r"sk-(?:proj-|ant-)?[A-Za-z0-9]{20,}",
-            // GitHub tokens
-            r"gh[posur]_[A-Za-z0-9]{20,}",
-            // HuggingFace tokens
-            r"hf_[A-Za-z0-9]{20,}",
-            // Anthropic keys
-            r"sk-ant-[A-Za-z0-9\-_]{20,}",
-            // DB connection strings with embedded creds
-            r"(?i)(postgres|mysql|mongodb|redis)://[^@\s]+:[^@\s]+@",
-        ]
-        .into_iter()
-        .filter_map(|pattern| regex::Regex::new(pattern).ok())
-        .collect()
-    });
-    let mut out = s.to_string();
-    for p in patterns {
-        out = p.replace_all(&out, "[REDACTED]").to_string();
-    }
-    out
-}
-
 async fn execute_http_hook(
     url: &str,
     method: Option<&str>,
@@ -1209,43 +1265,31 @@ async fn execute_http_hook(
     context: &HookContext,
     client: Option<&reqwest::Client>,
 ) -> HookResult {
-    // P0-6: route every HTTP hook through the SSRF-safe pipeline. The hook URL
-    // is operator/SKILL.md-controlled and previously POSTed the full HookContext
-    // (tool inputs/outputs, prompts, session id) to an arbitrary address with
-    // NO validation and NO allowlist — a clean SSRF + data-exfil primitive.
-    // `ssrf_safe_request_with_body` resolves once, pins the IP, and re-validates
-    // each redirect hop, closing both the DNS-rebinding window and the
-    // `302 → 169.254.169.254` redirect bypass. An externally-supplied `client`
-    // is ignored for SSRF purposes (it cannot be trusted to carry the policy).
-    let _ = client; // intentionally unused; SSRF safety must not be optional.
-
     let method = reqwest::Method::from_bytes(method.unwrap_or("POST").as_bytes())
         .unwrap_or(reqwest::Method::POST);
-
-    // Serialize the context, then redact secrets before it leaves the process.
-    // The hook receiver gets the structure minus any obvious secret values.
-    let mut payload = serde_json::to_value(context).unwrap_or_else(|_| json!({}));
-    redact_hook_payload(&mut payload);
-
-    // Redact the same patterns from any caller-supplied headers (e.g. an
-    // `Authorization` header set by config).
-    let safe_headers: Option<HashMap<String, String>> = headers.map(|h| {
-        h.iter()
-            .map(|(k, v)| (k.clone(), redact_string_secrets(v)))
-            .collect()
-    });
-
-    let timeout = Duration::from_secs(timeout_secs.max(1));
-    let result =
-        match ssrf_safe_request_with_body(url, timeout, 5, method, &payload, safe_headers.as_ref())
-            .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                warn!(url = %url, error = %e, "Http hook SSRF-safe request rejected/failed");
-                return HookResult::default();
-            }
-        };
+    let payload = serde_json::to_value(context).unwrap_or_else(|_| json!({}));
+    let client = client.cloned().unwrap_or_default();
+    let mut request = client
+        .request(method, url)
+        .timeout(Duration::from_secs(timeout_secs.max(1)))
+        .json(&payload);
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+    }
+    let result = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(
+                action = "http",
+                timeout = error.is_timeout(),
+                connect = error.is_connect(),
+                "Http hook request failed"
+            );
+            return HookResult::default();
+        }
+    };
 
     match result.status().is_success() {
         true => {
@@ -1253,7 +1297,7 @@ async fn execute_http_hook(
             parse_hook_output(&text, 0)
         }
         false => {
-            warn!(status = %result.status(), url = %url, "Http hook non-2xx response");
+            warn!(status = %result.status(), "Http hook non-2xx response");
             HookResult::default()
         }
     }
@@ -1353,25 +1397,22 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
             }
         }
 
-        // Parse permission_mode_override field.
-        // Security: hooks (which can live inside a SKILL.md file) must NEVER be
-        // able to escalate to BypassPermissions — that would let a malicious
-        // skill disable all per-tool approval for itself. We explicitly drop
-        // that directive and warn.
-        if let Some(mode) = json.get("permission_mode").and_then(|v| v.as_str()) {
+        // Parse the canonical call-scoped permission mode override. Hooks are
+        // user-installed local extensions; shared/managed deployments can still
+        // disable BypassPermissions through PermissionService::bypass_disabled.
+        if let Some(mode) = json
+            .get("permission_mode_override")
+            .and_then(|v| v.as_str())
+        {
             result.permission_mode_override = match mode {
                 "default" => Some(PermissionMode::Default),
                 "plan" => Some(PermissionMode::Plan),
                 "auto" => Some(PermissionMode::Auto),
                 "acceptEdits" => Some(PermissionMode::AcceptEdits),
+                "bypassPermissions" => Some(PermissionMode::BypassPermissions),
+                "bubble" => Some(PermissionMode::Bubble),
+                "dontAsk" => Some(PermissionMode::DontAsk),
                 "strict" => Some(PermissionMode::StrictConfirm),
-                "bypassPermissions" => {
-                    warn!(
-                        "Hook attempted to set permission_mode to bypassPermissions; \
-                         rejected (hooks cannot escalate privileges)"
-                    );
-                    None
-                }
                 _ => None,
             };
         }
@@ -2126,9 +2167,27 @@ Notification:
     }
 
     #[test]
-    fn test_parse_hook_output_permission_mode() {
+    fn test_parse_hook_output_permission_mode_override() {
+        for (wire_value, expected) in [
+            ("default", PermissionMode::Default),
+            ("plan", PermissionMode::Plan),
+            ("auto", PermissionMode::Auto),
+            ("acceptEdits", PermissionMode::AcceptEdits),
+            ("bypassPermissions", PermissionMode::BypassPermissions),
+            ("bubble", PermissionMode::Bubble),
+            ("dontAsk", PermissionMode::DontAsk),
+            ("strict", PermissionMode::StrictConfirm),
+        ] {
+            let output = format!(r#"{{"permission_mode_override":"{wire_value}"}}"#);
+            let result = parse_hook_output(&output, 0);
+            assert_eq!(result.permission_mode_override, Some(expected));
+        }
+    }
+
+    #[test]
+    fn test_parse_hook_output_ignores_legacy_permission_mode() {
         let result = parse_hook_output(r#"{"permission_mode": "auto"}"#, 0);
-        assert_eq!(result.permission_mode_override, Some(PermissionMode::Auto));
+        assert_eq!(result.permission_mode_override, None);
     }
 
     // -- merge_result tests --
@@ -2340,6 +2399,50 @@ Notification:
         assert!(!registry.is_empty());
         assert!(registry.has_hooks_for(HookEvent::Stop));
         assert!(!registry.has_hooks_for(HookEvent::PreToolUse));
+    }
+
+    #[test]
+    fn all_hook_sources_filter_invalid_actions_and_support_dry_run() {
+        fn definition() -> HooksDefinition {
+            HooksDefinition {
+                rules: HashMap::from([(
+                    HookEvent::PreToolUse,
+                    vec![HookRule {
+                        matcher: "Bash".to_string(),
+                        hooks: vec![
+                            HookAction::Prompt {
+                                prompt: String::new(),
+                            },
+                            HookAction::Prompt {
+                                prompt: "valid".to_string(),
+                            },
+                        ],
+                    }],
+                )]),
+            }
+        }
+
+        let mut registry = HookRegistry::new();
+        registry.register_user_hooks(definition());
+        registry.register("formatting", "/tmp/skill", definition());
+        assert!(registry.register_plugin_hooks("local-tools", "/tmp/plugin", definition()));
+
+        let result = registry.dry_run(&HookContext::for_dry_run(HookEvent::PreToolUse, "Bash"));
+        assert_eq!(result.matches.len(), 3);
+        assert!(
+            result
+                .matches
+                .iter()
+                .all(|matched| matched.action == "prompt")
+        );
+        assert_eq!(
+            result
+                .matches
+                .iter()
+                .map(|matched| matched.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user_config", "plugin:local-tools", "skill:formatting"]
+        );
     }
 
     #[test]
@@ -2689,6 +2792,67 @@ Notification:
             timeout: 99999,
         };
         assert!(action.validate().is_err());
+    }
+
+    #[test]
+    fn http_hooks_allow_local_cleartext_but_reject_remote_cleartext() {
+        for url in [
+            "http://localhost:3000/hooks",
+            "http://printer/hooks",
+            "http://eko.local/hooks",
+            "http://service.lan/hooks",
+            "http://127.0.0.1:8080/hooks",
+            "http://192.168.1.20/hooks",
+            "http://[::1]:8080/hooks",
+        ] {
+            let action = HookAction::Http {
+                url: url.to_string(),
+                method: None,
+                headers: None,
+                timeout: 10,
+            };
+            assert!(
+                action.validate().is_ok(),
+                "local URL should be valid: {url}"
+            );
+        }
+        let remote = HookAction::Http {
+            url: "http://example.com/hooks".to_string(),
+            method: None,
+            headers: None,
+            timeout: 10,
+        };
+        assert!(remote.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn mcp_hooks_allow_user_configured_tool_names() {
+        let mut registry = HookRegistry::new();
+        registry.set_mcp_executor(Arc::new(|server, tool, _arguments| {
+            Box::pin(async move {
+                let mut result = HookResult::default();
+                result.messages.push(format!("{server}:{tool}"));
+                result
+            })
+        }));
+        let mut definition = HooksDefinition::default();
+        definition.add_rules(
+            HookEvent::PreToolUse,
+            vec![HookRule {
+                matcher: "Bash".to_string(),
+                hooks: vec![HookAction::McpTool {
+                    server: "local-dev".to_string(),
+                    tool: "bash".to_string(),
+                    arguments: None,
+                    timeout: 10,
+                }],
+            }],
+        );
+        registry.register_user_hooks(definition);
+
+        let result = registry.run_pre_tool_use("Bash", &json!({}), "").await;
+
+        assert_eq!(result.messages, vec!["local-dev:bash"]);
     }
 
     #[test]

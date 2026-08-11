@@ -176,7 +176,7 @@ Defined in `echo-agent/echo-execution/src/skills/external/types.rs` (`SkillDescr
 | `triggers` | | User-phrase triggers consumed by `KeywordClassifier` (see [Two activation paths](#two-skill-activation-paths)) |
 | `allowed-tools` (alias `allowed_tools`) | | Whitelist of pre-registered tools this skill is allowed to use — **not** a list of tools to register |
 | `depends_on` | | Other skills auto-activated first; cycles are detected and warned (`loader.rs:387-446`) |
-| `hooks` | | `PreToolUse` / `PostToolUse` hook definitions |
+| `hooks` | | Rules for any of the 31 main Hook events; see [Hooks System](./23-hooks.md) |
 | `sandbox` | | Per-skill sandbox policy: `isolation`, `network`, `allowed_paths`, `denied_paths`, `timeout` |
 | `metadata` | | Arbitrary key-value pairs |
 
@@ -323,14 +323,23 @@ It does **not** call `to_prompt_block()`, so the resulting message lacks the `<s
 
 ## Hooks System
 
-Skills can intercept tool calls via Hooks for security auditing, logging, input/output modification, and more.
+Skills participate in the same 31-event Hook system as user and plugin Hook
+files. This covers tool execution, sessions, Subagents, tasks, plugins, and
+self-evolution; it is not limited to successful tool calls.
 
 ### Hook Events
 
-| Event | When | Capabilities |
-|-------|------|-------------|
-| `PreToolUse` | Before tool execution | Block execution, modify input, inject prompts |
-| `PostToolUse` | After tool execution | Inspect output, trigger follow-up actions |
+| Category | Events |
+|----------|--------|
+| Tool (5) | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` |
+| Session/run (11) | `SessionStart`, `SessionEnd`, `Stop`, `StopFailure`, `Notification`, `UserPromptSubmit`, `PreCompact`, `PostCompact`, `ConfigChange`, `InstructionsLoaded`, `PostToolBatch` |
+| Subagent (2) | `SubagentStart`, `SubagentStop` |
+| Task (3) | `TaskCreated`, `TaskStarted`, `TaskCompleted` |
+| Plugin (2) | `PluginLoaded`, `PluginDisabled` |
+| Evolution (8) | `PostMemoryWrite`, `MemoryLayerChange`, `SkillCandidateDetected`, `SkillLifecycleTransition`, `SkillHealthCheck`, `SkillPatchApplied`, `SkillMergeApplied`, `RulePromoted` |
+
+The authoritative trigger and matcher semantics are documented in
+[Hooks System](./23-hooks.md).
 
 ### Hook Types
 
@@ -338,6 +347,11 @@ Skills can intercept tool calls via Hooks for security auditing, logging, input/
 |------|----------|
 | `command` | Execute a shell command; stdin receives JSON context, stdout returns JSON control directives |
 | `prompt` | Inject a prompt message for the LLM |
+| `permission` | Return `allow`, `deny`, or `ask` directly |
+| `http` | POST the event context and parse the response |
+| `mcp_tool` | Invoke a tool exposed by a user-configured MCP server |
+| `agent` | Dispatch a named Subagent |
+| `activate_skill` | Activate a discovered skill without another LLM round trip |
 
 ### Command Hook Input (stdin JSON)
 
@@ -357,6 +371,8 @@ Skills can intercept tool calls via Hooks for security auditing, logging, input/
   "decision": "block",
   "reason": "Unsafe command detected",
   "updatedInput": {"command": "git status --short"},
+  "injected_context": "Use the normalized command",
+  "permission_mode_override": "auto",
   "continue": false
 }
 ```
@@ -366,11 +382,22 @@ Skills can intercept tool calls via Hooks for security auditing, logging, input/
 | `decision` | `"allow"` to proceed / `"block"` to stop |
 | `reason` | Reason for blocking |
 | `updatedInput` | Modified tool input (PreToolUse only) |
+| `injected_context` | Context appended for the current run |
+| `permission_mode_override` | Call-scoped permission mode override |
 | `continue` | `false` to stop further hooks |
+
+These canonical wire names are case-sensitive. `modified_input`, `message`, and
+`permission_mode` are not aliases.
 
 If multiple matching hooks emit a `permission_mode_override`, the runtime keeps the
 last non-empty override. Permission decisions themselves still follow the stricter
 priority order (`deny > ask > allow`).
+
+For a plugin-owned Skill, `PluginVariables` substitution is applied to the
+complete `SKILL.md` before frontmatter parsing. `${ECHO_PLUGIN_ROOT}`,
+`${ECHO_PLUGIN_DATA}`, `${ECHO_PROJECT_DIR}`, `${user_config.KEY}`, and supported
+environment placeholders therefore work in Skill metadata, instructions, and
+frontmatter Hook actions alike.
 
 ### Matcher Rules
 
@@ -476,7 +503,7 @@ These are **two completely different concepts** and they coexist in the codebase
 | Frontmatter parser | Full `serde_yaml_ng` (`loader.rs`) | Hand-rolled tiny key-value parser (no full YAML) |
 | State | Activation set, sandbox policies, code-based skills, session_id | Just a list of locally-installed skill metadata |
 | Used by | Every `ReactAgent` turn | The CLI `/skills` slash command (list / search / install / uninstall) |
-| Install/uninstall | None — discovery only | `git clone https-only` + local copy + uninstall |
+| Install/uninstall | Not responsible for installation; discovers runtime Skills | `git clone https-only` + local copy + uninstall |
 
 The `SkillsHub` does **not** load skills into agents. Built-in skills under `echo-agent-cli/skills/` are loaded into the agent through the framework's `discover_skills` path at boot (`echo-agent-cli/echo-agent-app-core/src/runtime.rs:133-153`), independent of the hub.
 

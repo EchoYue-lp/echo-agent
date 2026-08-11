@@ -629,10 +629,21 @@ impl ReactAgent {
     ///
     /// The LLM can then decide which skills to activate on demand.
     pub async fn discover_skills(&mut self, scopes: &[DiscoveryScope]) -> Result<Vec<String>> {
+        self.discover_skills_inner(scopes, None).await
+    }
+
+    async fn discover_skills_inner(
+        &mut self,
+        scopes: &[DiscoveryScope],
+        plugin: Option<(&str, &crate::plugin::PluginVariables)>,
+    ) -> Result<Vec<String>> {
         let mut loader = match &self.skill_load_policy {
             Some(policy) => SkillLoader::new().with_policy(policy.clone()),
             None => SkillLoader::new(),
         };
+        if let Some((_, variables)) = plugin {
+            loader = loader.with_plugin_variables(variables.clone());
+        }
         let descriptors = loader.discover(scopes).await?;
 
         if descriptors.is_empty() {
@@ -673,7 +684,7 @@ impl ReactAgent {
                     .skill_registry
                     .set_sandbox_manager(manager.clone());
             }
-            for desc in descriptors {
+            for mut desc in descriptors {
                 if self.tools.skill_registry.is_installed(&desc.name) {
                     warn!(
                         agent = %self.config.agent_name,
@@ -684,6 +695,9 @@ impl ReactAgent {
                 }
 
                 let legacy = loader.get_legacy_instructions(&desc.name).cloned();
+                if let Some((source, _)) = plugin {
+                    desc.source = Some(source.to_string());
+                }
 
                 // Register hooks from frontmatter if present
                 if let Some(hooks_def) = &desc.hooks {
@@ -696,11 +710,24 @@ impl ReactAgent {
                     hook_reg.register(&desc.name, &skill_dir, hooks_def.clone());
                 }
 
-                names.push(desc.name.clone());
+                let name = desc.name.clone();
+                names.push(name.clone());
                 self.tools
                     .skill_registry
                     .register_descriptor_with_legacy(desc.clone(), legacy.clone());
                 reg.register_descriptor_with_legacy(desc, legacy);
+                if let Some((source, variables)) = plugin {
+                    self.tools.skill_registry.tag_source_with_variables(
+                        std::slice::from_ref(&name),
+                        source,
+                        Some(variables),
+                    );
+                    reg.tag_source_with_variables(
+                        std::slice::from_ref(&name),
+                        source,
+                        Some(variables),
+                    );
+                }
             }
         }
 
@@ -856,6 +883,21 @@ impl ReactAgent {
     ) -> Result<Vec<String>> {
         self.discover_skills(&[DiscoveryScope::Custom(skills_dir.into())])
             .await
+    }
+
+    /// Discover plugin-owned skills with variable substitution applied before
+    /// frontmatter hooks are parsed and registered.
+    pub async fn load_plugin_skills_from_dir(
+        &mut self,
+        skills_dir: impl Into<std::path::PathBuf>,
+        source: &str,
+        variables: &crate::plugin::PluginVariables,
+    ) -> Result<Vec<String>> {
+        self.discover_skills_inner(
+            &[DiscoveryScope::Custom(skills_dir.into())],
+            Some((source, variables)),
+        )
+        .await
     }
 
     /// Mark newly discovered skills with one component source in both live
@@ -1201,6 +1243,15 @@ impl ReactAgent {
         path: impl AsRef<std::path::Path>,
     ) -> crate::error::Result<Vec<Arc<McpClient>>> {
         let config = McpConfigFile::from_file(path)?;
+        self.load_mcp_config(config).await
+    }
+
+    /// Connect every enabled server from an already parsed MCP config.
+    #[cfg(feature = "mcp")]
+    pub async fn load_mcp_config(
+        &mut self,
+        config: McpConfigFile,
+    ) -> crate::error::Result<Vec<Arc<McpClient>>> {
         let server_configs = config.to_server_configs()?;
         let mut clients = Vec::new();
         for server_config in server_configs {

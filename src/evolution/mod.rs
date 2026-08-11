@@ -56,8 +56,8 @@ pub use draft::{DraftResult, SkillDraftGenerator};
 pub use dreaming::{Dreaming, DreamingAction, DreamingConfig, DreamingDecision, DreamingReport};
 pub use health::{HealthBreakdown, HealthStatus, SkillHealthMonitor, SkillHealthReport};
 pub use layer::{
-    HotEntryMeta, LayerChangeResult, MemoryFile, MemoryLayer, MemoryLayerManager,
-    MemoryWriteObserver, is_stale_memory_proposal_error,
+    EvolutionObserver, HotEntryMeta, LayerChangeResult, MemoryFile, MemoryLayer,
+    MemoryLayerManager, is_stale_memory_proposal_error,
 };
 pub use merge::{SimilarityBreakdown, SkillMergeProposal, SkillMerger, SkillSimilarityDetector};
 pub use patch::{PatchType, SkillPatch, SkillPatcher};
@@ -67,7 +67,7 @@ pub use review::{
     MemoryConflictProposal, MemoryMergeSnapshot, MemoryMerger, MemoryReviewer, MergeResult,
     ReviewChange, ReviewConfig, ReviewReport, StalenessReport, StalenessScorer,
 };
-pub use runtime_integration::MemoryRuntimeIntegrationBuilder;
+pub use runtime_integration::{HookEvolutionObserver, MemoryRuntimeIntegrationBuilder};
 pub use security::{
     EvolutionSecurityGuard, InputTrustLevel, PromptInjectionDetector, ScanResult, SecretScanner,
     SecurityConfig, SecurityVerdict,

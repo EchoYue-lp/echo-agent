@@ -61,6 +61,9 @@ pub struct SkillRegistry {
     /// exactly one plugin's skills on disable/uninstall without scanning all
     /// descriptors. Skills without a `source` are absent from this map.
     by_source: HashMap<String, HashSet<String>>,
+
+    /// Plugin variable context keyed by skill name.
+    plugin_variables: HashMap<String, echo_core::plugin::PluginVariables>,
 }
 
 impl SkillRegistry {
@@ -82,6 +85,7 @@ impl SkillRegistry {
             sandbox: None,
             active_sandbox_policies: std::sync::Mutex::new(HashMap::new()),
             by_source: HashMap::new(),
+            plugin_variables: HashMap::new(),
         }
     }
 
@@ -155,6 +159,16 @@ impl SkillRegistry {
     /// source. Skills already tagged under a different source are skipped to
     /// avoid cross-plugin contamination.
     pub fn tag_source(&mut self, names: &[String], source: &str) {
+        self.tag_source_with_variables(names, source, None);
+    }
+
+    /// Tag skills with their source and plugin substitution context.
+    pub fn tag_source_with_variables(
+        &mut self,
+        names: &[String],
+        source: &str,
+        variables: Option<&echo_core::plugin::PluginVariables>,
+    ) {
         for name in names {
             if let Some(desc) = self.descriptors.get_mut(name) {
                 // Only tag if not already owned by another source.
@@ -164,6 +178,12 @@ impl SkillRegistry {
                         .entry(source.to_string())
                         .or_default()
                         .insert(name.clone());
+                }
+                if desc.source.as_deref() == Some(source)
+                    && let Some(variables) = variables
+                {
+                    self.plugin_variables
+                        .insert(name.clone(), variables.clone());
                 }
             }
         }
@@ -199,6 +219,7 @@ impl SkillRegistry {
             }
         }
         self.legacy_instructions.remove(name);
+        self.plugin_variables.remove(name);
         self.activated
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -387,6 +408,9 @@ impl SkillRegistry {
                 name
             );
             raw_instructions = legacy.clone();
+        }
+        if let Some(variables) = self.plugin_variables.get(name) {
+            raw_instructions = variables.substitute(&raw_instructions);
         }
 
         // Process inline commands and variable substitution
@@ -605,7 +629,14 @@ impl SkillRegistry {
             let Ok(content) = std::fs::read_to_string(&skill_file) else {
                 continue;
             };
-            let body = strip_frontmatter(&content).unwrap_or(&content).trim();
+            let raw_body = strip_frontmatter(&content).unwrap_or(&content).trim();
+            let substituted;
+            let body = if let Some(variables) = self.plugin_variables.get(&desc.name) {
+                substituted = variables.substitute(raw_body);
+                substituted.trim()
+            } else {
+                raw_body
+            };
             if body.is_empty() {
                 continue;
             }

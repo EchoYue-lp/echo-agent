@@ -37,7 +37,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [20 - Web Tools](./20-web-tools.md) | Web Search / Fetch | DuckDuckGo / Brave / Tavily search, HTML→text |
 | [21 - Common Tools](./21-common-tools.md) | Tool Guide | Web search, web fetch, browser automation, data tools |
 | [22 - Research Tools](./22-research-tools.md) | Research | ArXiv search, Semantic Scholar, PDF fetch, BibTeX generation |
-| [23 - Hooks System](./23-hooks.md) | Hooks | Skills hooks (20 events), Task hooks, Subagent hooks |
+| [23 - Hooks System](./23-hooks.md) | Hooks | Skills hooks (31 events, 7 actions), Task hooks, Subagent hooks |
 | [24 - Eval System](./24-eval-system.md) | Eval | EvalCase, SuccessCriteria, LlmGrader, A/B comparison, regression, HTML reports |
 | [25 - Self-Evolution](./25-self-improvement.md) | Improve / Evolution | Analyzer, ImprovementLoop, EvalDrivenImprovement, tiered memory, skill auto-creation, merge/health/patch, rule promotion, change audit |
 | [26 - Multi-Agent Patterns](./26-multi-agent.md) | SubAgent / TeamAgent | Parent-child delegation (Sync/Fork/Teammate), peer collaboration (ManagerSubagent/Pipeline/Debate/Swarm) |

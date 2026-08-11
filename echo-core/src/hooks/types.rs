@@ -612,6 +612,20 @@ impl HookContext {
             .unwrap_or_default()
     }
 
+    /// Build a matcher-only context for side-effect-free hook dry runs.
+    pub fn for_dry_run(event: HookEvent, matcher: &str) -> Self {
+        if event.is_tool_event() {
+            Self {
+                event,
+                tool_name: Some(matcher.to_string()),
+                tool_input: Some(serde_json::json!({})),
+                ..Self::default()
+            }
+        } else {
+            Self::for_lifecycle(event, matcher, "dry-run", "dry-run")
+        }
+    }
+
     // ── Factory methods for tool events ──
 
     pub fn for_pre_tool_use(

@@ -473,8 +473,24 @@ impl PermissionService {
         tool_input: &Value,
         permissions: &[ToolPermission],
     ) -> Result<PermissionDecision> {
+        self.check_with_permissions_in_mode(tool_name, tool_input, permissions, None)
+            .await
+    }
+
+    /// Check permissions with an optional call-scoped mode override.
+    ///
+    /// The override is not written into the service configuration, so
+    /// concurrent tool calls cannot leak a hook-selected mode into each other.
+    pub async fn check_with_permissions_in_mode(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        permissions: &[ToolPermission],
+        mode_override: Option<PermissionMode>,
+    ) -> Result<PermissionDecision> {
         let pipeline_start = std::time::Instant::now();
         let config = self.config.read().await;
+        let effective_mode = mode_override.unwrap_or(config.mode);
 
         // 辅助闭包：审计 + 返回
         macro_rules! audit_return {
@@ -512,7 +528,7 @@ impl PermissionService {
         }
 
         // 1. Bypass 模式（可被管理员禁用）
-        if config.mode == PermissionMode::BypassPermissions {
+        if effective_mode == PermissionMode::BypassPermissions {
             if config.bypass_disabled {
                 audit_return!(
                     PermissionDecision::Deny {
@@ -526,7 +542,7 @@ impl PermissionService {
         }
 
         // 2. Plan 模式检查
-        if config.mode == PermissionMode::Plan {
+        if effective_mode == PermissionMode::Plan {
             if permissions.contains(&ToolPermission::Write)
                 || permissions.contains(&ToolPermission::Execute)
                 || permissions.contains(&ToolPermission::Sensitive)
@@ -569,7 +585,7 @@ impl PermissionService {
         }
 
         // 5.5 未配置 handler 时直接返回 RequireApproval（而非静默拒绝）
-        let needs_handler = match config.mode {
+        let needs_handler = match effective_mode {
             PermissionMode::Default => Self::default_confirmation_required(permissions),
             PermissionMode::AcceptEdits => Self::accept_edits_confirmation_required(permissions),
             PermissionMode::StrictConfirm => Self::strict_confirmation_required(permissions),
@@ -584,7 +600,7 @@ impl PermissionService {
         }
 
         // 6. 模式分发
-        let decision = match config.mode {
+        let decision = match effective_mode {
             PermissionMode::Auto => self.check_with_classifier(tool_name, tool_input).await?,
             PermissionMode::Default => {
                 if Self::default_confirmation_required(permissions) {
@@ -1048,6 +1064,24 @@ mod tests {
             .await
             .unwrap();
         assert!(decision.is_denied());
+    }
+
+    #[tokio::test]
+    async fn call_scoped_mode_override_does_not_mutate_service_mode() -> EchoResult<()> {
+        let service = PermissionService::new().with_mode(PermissionMode::Default);
+
+        let decision = service
+            .check_with_permissions_in_mode(
+                "Write",
+                &serde_json::json!({}),
+                &[ToolPermission::Write],
+                Some(PermissionMode::Plan),
+            )
+            .await?;
+
+        assert!(decision.is_denied());
+        assert_eq!(service.mode().await, PermissionMode::Default);
+        Ok(())
     }
 
     #[tokio::test]

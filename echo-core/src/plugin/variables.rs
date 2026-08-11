@@ -45,6 +45,29 @@ impl PluginVariables {
         self
     }
 
+    /// Set user configuration from persisted JSON values.
+    pub fn with_json_user_config(mut self, config: &HashMap<String, serde_json::Value>) -> Self {
+        self.user_config = config
+            .iter()
+            .map(|(key, value)| {
+                let text = match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                };
+                (key.clone(), text)
+            })
+            .collect();
+        self
+    }
+
+    /// Override the persistent data directory selected by the default plugin
+    /// base path. Embedded runtimes use this to keep variables aligned with
+    /// their configured registry data directory.
+    pub fn with_plugin_data(mut self, plugin_data: PathBuf) -> Self {
+        self.plugin_data = plugin_data;
+        self
+    }
+
     /// Get the persistent data directory path for a named plugin.
     ///
     /// Located at `<plugin_base>/plugins/data/{plugin-name}/` (default

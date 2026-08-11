@@ -191,45 +191,6 @@ impl ReactAgent {
         })
     }
 
-    /// Run the PostToolUseFailure hook and check for block.
-    ///
-    ///
-    /// Returns `Err(ToolExecutionFailure)` if a hook blocks the error output.
-    #[allow(dead_code)]
-    async fn run_post_failure_hook(
-        &self,
-        agent: &str,
-        tool_name: &str,
-        input: &Value,
-        error_msg: &str,
-        hook_messages: &mut HookMessageBatches,
-    ) -> std::result::Result<(), ToolExecutionFailure> {
-        let hook_reg = {
-            let guard = self.tools.hook_registry.read().await;
-            guard.clone()
-        };
-        let failure_result = hook_reg
-            .run_post_tool_use_failure(
-                tool_name,
-                input,
-                error_msg,
-                self.config.get_session_id().unwrap_or(""),
-            )
-            .await;
-        hook_messages.post = failure_result.messages;
-        if failure_result.block {
-            info!(agent = %agent, tool = %tool_name, reason = ?failure_result.block_reason, "PostToolUseFailure hook blocked error output");
-            let blocked_msg = failure_result
-                .block_reason
-                .unwrap_or_else(|| format!("Tool {} error output blocked by hook", tool_name));
-            return Err(ToolExecutionFailure {
-                error: ReactError::Other(blocked_msg),
-                hook_messages: hook_messages.clone(),
-            });
-        }
-        Ok(())
-    }
-
     /// Execute tool, preserving the real error information returned by the tool
     #[allow(dead_code)]
     pub(crate) async fn execute_tool(&self, tool_name: &str, input: &Value) -> Result<String> {
@@ -330,6 +291,8 @@ impl ReactAgent {
             block_reason: None,
             duration_ms: 0,
             plan_mode: self.config.plan_mode,
+            permission_decision: None,
+            permission_mode_override: None,
             stream_tx: None,
         };
 

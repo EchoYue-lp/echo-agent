@@ -9,10 +9,11 @@ The plugin system extends Agent capabilities through declarative `manifest.yaml`
 | Skills | Wired to `SkillRegistry` | SKILL.md files with live load/unload |
 | Hooks | Wired to `HookRegistry` | Lifecycle and tool hooks with live load/unload |
 | MCP Servers | Wired to `McpManager` | MCP servers and tools with live load/unload |
-| Agents | Discovery only | The application does not yet construct a definition + executable factory atomically |
-| LSP Servers | Discovery only | `ReactAgent` does not hold an `LspManager` |
-| Monitors | Discovery only | No runtime consumer exists yet |
-| Themes / Output Styles | Discovery only | Reserved for application UI/output consumers |
+| Agents | Live in EKO | Parsed and registered with an executable subagent factory |
+| LSP Servers | Live in EKO | Started and stopped by the application-owned `LspManager` |
+| Monitors | Live in EKO | Reconciled with the application scheduler |
+| Themes | Live in EKO GUI | Selectable, applied as CSS variables, and persisted |
+| Output Styles | Live in EKO | Projected into agent context and persisted |
 
 ```
 Core framework:  React Agent loop, tool execution, context management
@@ -157,9 +158,16 @@ When omitted, some components use default paths:
 | `file` | File path (validated for existence) |
 
 Common config entry properties:
-- `sensitive: true` — masks input, stores in secure storage
+- `sensitive: true` — masks the UI input and keeps the resolved value redacted
+  from Hook command diagnostics
 - `required: true` — field must be provided
 - `default` — default value when the user provides nothing
+
+The registry resolves defaults, validates types/required values/ranges and
+file paths, then persists the validated `user_config` in the application plugin
+registry file. EKO protects that local file with owner-only permissions on Unix.
+Values are exposed to component loaders as `${user_config.KEY}`; they are not
+advertised as an operating-system keychain.
 
 ---
 
@@ -230,7 +238,7 @@ use echo_agent::plugin::{InstallSource, PluginScope};
 let source = InstallSource::Local(PathBuf::from("/path/to/my-plugin"));
 let plugin_id = registry.install(&source, PluginScope::User)?;
 
-// Install from a Git repository (https:// only)
+// Install from a Git repository (HTTPS or SSH)
 let source = InstallSource::parse("https://github.com/echo/data-plugin.git");
 let plugin_id = registry.install(&source, PluginScope::Project)?;
 
@@ -260,6 +268,20 @@ registry.enable("data-analysis-pack")?;
 ```
 
 Enable/disable state is persisted to `registry.json` and restored on restart.
+Validated user configuration is persisted in the same registry:
+
+```rust
+registry.configure(
+    "data-analysis-pack",
+    HashMap::from([(
+        "api_endpoint".to_string(),
+        serde_json::json!("http://localhost:8080"),
+    )]),
+)?;
+```
+
+A plugin with missing required configuration starts disabled and cannot be
+enabled until `configure` succeeds.
 
 ### Querying
 
@@ -363,6 +385,21 @@ load → init → activate ⇄ deactivate → shutdown
                    └──────────┘  (can cycle on reload)
 ```
 
+`PluginLifecycleManager` owns registered callbacks. Native/plugin-host code
+registers its callback through `PluginRuntimeService::register_lifecycle`; a
+declarative manifest does not name or dynamically instantiate Rust callback
+types. EKO's shared `PluginRuntimeService` drives the manager for GUI, TUI, and
+CLI alike.
+
+Every candidate replacement is bracketed atomically: active callbacks are
+deactivated before old components are unwired, candidate components are wired,
+then callbacks for the candidate enabled set are activated. A deactivation,
+wiring, or activation failure aborts publication, restores the previous
+component/LSP/monitor set, and reactivates its callbacks. Uninstall unregisters
+the callback after `deactivate`/`shutdown`, so reinstall can register it again.
+`init` runs once per registration, while `activate`/`deactivate` may cycle on
+successful reloads.
+
 ---
 
 ## Component Wiring
@@ -399,7 +436,19 @@ Wiring order:
 | Skills | `agent.load_skills_from_dir()` |
 | Hooks | `hook_registry.register("plugin:{name}", ...)` |
 | MCP Servers | `agent.load_mcp_from_file()` |
-| Agents / LSP / Monitors / Themes / Output Styles | Returned as `*_discovered` paths only; excluded from wired totals |
+| Agents / LSP / Monitors / Themes / Output Styles | Returned at the framework/application adapter boundary; EKO parses and activates them in `PluginRuntimeService` |
+
+`PluginIntegrator::total_wired()` intentionally counts only framework-owned
+Skills/Hooks/MCP components. The EKO application reports its own live Agent,
+LSP, monitor, theme, and output-style counts in the same reload summary.
+
+Theme selection activates and persists a runtime preference.
+GUI and TUI both apply the selected plugin theme immediately and return to their
+built-in theme when it is cleared, disabled, uninstalled, or disappears during
+reload. Selecting a built-in GUI theme first deactivates the plugin preference,
+so DOM variables, frontend state, TUI rendering, and persisted backend state do
+not diverge. Output-style activation follows the same persisted preference
+model and updates the replaceable Agent context projection.
 
 You can also wire only specific component types:
 
@@ -450,6 +499,12 @@ Use in component configs:
   }
 }
 ```
+
+Substitution runs before parsing every text-based plugin component: Hooks, MCP,
+Agent definitions, LSP, monitors, themes, output styles, and the complete
+contents of plugin-owned `SKILL.md` files. This ordering means variables in a
+Skill's YAML frontmatter Hook actions resolve exactly like variables in its
+Markdown instructions.
 
 ### Environment Variables
 
@@ -506,20 +561,23 @@ export_to_env(&vars);
 
 ### Git Clone Restrictions
 
-When installing from Git, only `https://` protocol is allowed:
+EKO accepts encrypted Git transports chosen by the local user: HTTPS, `ssh://`,
+and SCP-style `git@host:path` URLs. It rejects cleartext HTTP/Git and malformed
+inputs:
 
 ```rust
-// ✅ Allowed
+// Allowed
 InstallSource::parse("https://github.com/echo/plugin.git")
+InstallSource::parse("git@github.com:echo/private-plugin.git")
 
-// ❌ Rejected
-InstallSource::parse("file:///etc/passwd")        // SSRF protection
-InstallSource::parse("ssh://git@host/repo")        // non-HTTPS
-InstallSource::parse("git://host/repo")            // non-HTTPS
-InstallSource::parse("http://host/repo")           // unencrypted HTTP
+// Rejected
+InstallSource::parse("file:///path/to/plugin")     // use Local instead
+InstallSource::parse("git://host/repo")            // cleartext transport
+InstallSource::parse("http://host/repo")           // cleartext transport
 ```
 
-Additionally, private IP addresses (`127.x`, `10.x`, `172.16-31.x`, `192.168.x`, `0.x`) are rejected to prevent SSRF attacks.
+This is a local trusted-extension boundary, not a public multi-tenant service:
+private and loopback Git hosts are valid when the user configures them.
 
 ### Path Traversal Protection
 

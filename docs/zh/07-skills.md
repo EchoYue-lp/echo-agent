@@ -175,7 +175,7 @@ Skill 目录: ${SKILL_DIR}
 | `triggers` | | 用户语句触发词，由 `KeywordClassifier` 消费（参见 [两条激活路径](#两条-skill-激活路径)） |
 | `allowed-tools`（别名 `allowed_tools`） | | 已注册工具的白名单 —— **不**是要注册的工具列表 |
 | `depends_on` | | 自动先行激活的其他 skill；DFS 检测循环并 warn（`loader.rs:387-446`） |
-| `hooks` | | `PreToolUse` / `PostToolUse` hook 定义 |
+| `hooks` | | 31 个主 Hook 事件中的任意事件规则；见 [Hooks 系统](./23-hooks.md) |
 | `sandbox` | | 单 skill 沙箱策略：`isolation`、`network`、`allowed_paths`、`denied_paths`、`timeout` |
 | `metadata` | | 任意键值对 |
 
@@ -320,14 +320,21 @@ self.memory.context.lock().await
 
 ## Hooks 系统
 
-Skill 可通过 Hooks 拦截工具调用，用于安全审计、日志记录、输入输出修改等。
+Skill 与用户和插件 Hook 文件使用同一套 31 事件系统，覆盖工具、会话、Subagent、Task、
+插件和自演化生命周期，并不局限于成功的工具调用。
 
 ### Hook 事件
 
-| 事件 | 时机 | 能力 |
-|------|------|------|
-| `PreToolUse` | 工具执行前 | 阻止执行、修改输入、注入提示 |
-| `PostToolUse` | 工具执行后 | 检查输出、触发后续动作 |
+| 类别 | 事件 |
+|------|------|
+| 工具（5） | `PreToolUse`、`PostToolUse`、`PostToolUseFailure`、`PermissionRequest`、`PermissionDenied` |
+| 会话/运行（11） | `SessionStart`、`SessionEnd`、`Stop`、`StopFailure`、`Notification`、`UserPromptSubmit`、`PreCompact`、`PostCompact`、`ConfigChange`、`InstructionsLoaded`、`PostToolBatch` |
+| Subagent（2） | `SubagentStart`、`SubagentStop` |
+| Task（3） | `TaskCreated`、`TaskStarted`、`TaskCompleted` |
+| Plugin（2） | `PluginLoaded`、`PluginDisabled` |
+| Evolution（8） | `PostMemoryWrite`、`MemoryLayerChange`、`SkillCandidateDetected`、`SkillLifecycleTransition`、`SkillHealthCheck`、`SkillPatchApplied`、`SkillMergeApplied`、`RulePromoted` |
+
+各事件的触发点和 matcher 语义以 [Hooks 系统](./23-hooks.md) 为准。
 
 ### Hook 类型
 
@@ -335,6 +342,11 @@ Skill 可通过 Hooks 拦截工具调用，用于安全审计、日志记录、�
 |------|------|
 | `command` | 执行 shell 命令；stdin 接收 JSON 上下文，stdout 返回 JSON 控制指令 |
 | `prompt` | 注入提示消息给 LLM |
+| `permission` | 直接返回 `allow`、`deny` 或 `ask` |
+| `http` | POST 事件上下文并解析响应 |
+| `mcp_tool` | 调用用户所配置 MCP 服务器暴露的工具 |
+| `agent` | 派发指定 Subagent |
+| `activate_skill` | 不经额外 LLM 往返直接激活已发现 Skill |
 
 ### 命令 Hook 输入（stdin JSON）
 
@@ -354,6 +366,8 @@ Skill 可通过 Hooks 拦截工具调用，用于安全审计、日志记录、�
   "decision": "block",
   "reason": "检测到不安全命令",
   "updatedInput": {"command": "git status --short"},
+  "injected_context": "使用规范化后的命令",
+  "permission_mode_override": "auto",
   "continue": false
 }
 ```
@@ -363,9 +377,18 @@ Skill 可通过 Hooks 拦截工具调用，用于安全审计、日志记录、�
 | `decision` | `"allow"` 继续 / `"block"` 阻止 |
 | `reason` | 阻止原因 |
 | `updatedInput` | 修改后的工具输入（仅 PreToolUse） |
+| `injected_context` | 注入当前运行的上下文 |
+| `permission_mode_override` | 仅作用于当前工具调用的权限模式覆盖 |
 | `continue` | `false` 停止执行后续 hooks |
 
+这些规范 wire 字段名区分大小写；`modified_input`、`message` 和 `permission_mode` 不是别名。
+
 若多个匹配 hook 都返回 `permission_mode_override`，运行时仅保留最后一个非空覆盖值。权限决策本身仍按更严格的优先级处理：`deny > ask > allow`。
+
+插件拥有的 Skill 会在解析 frontmatter 前，对完整 `SKILL.md` 应用 `PluginVariables`
+替换。因此 `${ECHO_PLUGIN_ROOT}`、`${ECHO_PLUGIN_DATA}`、`${ECHO_PROJECT_DIR}`、
+`${user_config.KEY}` 及支持的环境变量占位符，在 Skill metadata、正文和 frontmatter
+Hook Action 中均生效。
 
 ### Matcher 规则
 
@@ -469,7 +492,7 @@ ctx.add_protected_marker("<skill_content".to_string());
 | Frontmatter 解析 | 完整 `serde_yaml_ng`（`loader.rs`） | 手写 mini key-value 解析器（无完整 YAML） |
 | 状态 | 已激活集合、沙箱策略、code-based skill、session_id | 仅本地已安装 skill 元数据列表 |
 | 谁在用 | 每一轮 `ReactAgent` 都会调用 | CLI `/skills` 命令（list / search / install / uninstall） |
-| 安装/卸载 | 不提供 —— 仅发现 | `git clone https-only` + 本地拷贝 + uninstall |
+| 安装/卸载 | 不负责安装；只负责运行时发现 | `git clone https-only` + 本地拷贝 + uninstall |
 
 `SkillsHub` 不会把 skill 装载进 agent。`echo-agent-cli/skills/` 下的内置 skill 由框架的 `discover_skills` 路径在启动时载入（`echo-agent-cli/echo-agent-app-core/src/runtime.rs:133-153`），与 hub 无关。
 
