@@ -962,8 +962,10 @@ mod tests {
     // straight through to run_core_loop.
 
     use crate::agent::react::builder::ReactAgentBuilder;
+    use crate::error::{LlmError, ReactError};
+    use crate::llm::types::{DeltaMessage, FunctionCall, ToolCall};
     use crate::state::RuntimeStateStore;
-    use crate::testing::{MockLlmClient, MockTool};
+    use crate::testing::{MockLlmClient, MockTool, StreamChunk};
 
     struct DelayedTerminalTool {
         finished: Arc<std::sync::atomic::AtomicBool>,
@@ -2157,5 +2159,188 @@ mod tests {
             })
         );
         Ok(())
+    }
+
+    // ── M1: test-credibility re-basing (mock 隐身衣 removal) ────────────────
+    // New fixtures drive the mock through the real provider wire shape:
+    // content deltas followed by a separate terminal chunk carrying
+    // finish_reason and usage (F-TST-01-P1-01), and concurrent batch results
+    // emitted in call order (F-RCT-04-P1-01). Each fixture fails before its
+    // fix and passes after.
+
+    #[tokio::test]
+    async fn stream_script_terminal_chunk_reports_usage() {
+        // Real providers report usage on a separate terminal chunk; the
+        // loop-level `usage_reported` must be true only in that shape.
+        let usage = crate::llm::types::Usage {
+            prompt_tokens: Some(11),
+            completion_tokens: Some(7),
+            ..Default::default()
+        };
+        let llm = MockLlmClient::new().with_stream_script(vec![
+            StreamChunk::Delta(DeltaMessage {
+                role: Some("assistant".to_string()),
+                content: Some("Hello world".to_string()),
+                reasoning_content: None,
+                tool_calls: None,
+            }),
+            StreamChunk::Terminal {
+                finish_reason: Some("stop".to_string()),
+                usage: Some(usage),
+            },
+        ]);
+        let agent = agent_with_mock_llm(llm);
+        let events = collect_events(&agent, "Hi").await;
+
+        let usage_event = events
+            .iter()
+            .find(|event| matches!(event, AgentEvent::LlmUsage { .. }))
+            .expect("LlmUsage event must be emitted");
+        match usage_event {
+            AgentEvent::LlmUsage {
+                prompt_tokens,
+                completion_tokens,
+                usage_reported,
+                ..
+            } => {
+                assert!(usage_reported, "usage_reported must be true");
+                assert_eq!(*prompt_tokens, 11);
+                assert_eq!(*completion_tokens, 7);
+            }
+            _ => unreachable!("matched LlmUsage above"),
+        }
+        let last = events.last().expect("terminal event");
+        assert!(matches!(last, AgentEvent::FinalAnswer(t) if t == "Hello world"));
+    }
+
+    #[tokio::test]
+    async fn stream_script_without_usage_reports_false() {
+        // The provider streamed content but never reported usage — the loop
+        // must not fabricate a positive accounting (F-TST-01-P1-01's
+        // single-chunk mock certified the impossible; this fixture pins the
+        // honest negative).
+        let llm = MockLlmClient::new().with_stream_script(vec![
+            StreamChunk::Delta(DeltaMessage {
+                role: Some("assistant".to_string()),
+                content: Some("No usage here".to_string()),
+                reasoning_content: None,
+                tool_calls: None,
+            }),
+            StreamChunk::Terminal {
+                finish_reason: Some("stop".to_string()),
+                usage: None,
+            },
+        ]);
+        let agent = agent_with_mock_llm(llm);
+        let events = collect_events(&agent, "Hi").await;
+
+        let usage_event = events
+            .iter()
+            .find(|event| matches!(event, AgentEvent::LlmUsage { .. }))
+            .expect("LlmUsage event must be emitted");
+        match usage_event {
+            AgentEvent::LlmUsage { usage_reported, .. } => {
+                assert!(!usage_reported, "usage_reported must be false");
+            }
+            _ => unreachable!("matched LlmUsage above"),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_batch_results_follow_call_order() {
+        // Two concurrent tool calls: call_1 is slow, call_2 is fast. Results
+        // must be emitted and inserted into context in CALL order (stream
+        // index order), not completion order — strict providers reject
+        // misordered tool results with HTTP 400 (F-RCT-04-P1-01). Before the
+        // fix the second request carried [call_2, call_1] results.
+        let llm = MockLlmClient::new()
+            .then_tool_calls(vec![
+                ToolCall {
+                    id: "call_1".to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "slow_tool".to_string(),
+                        arguments: r#"{}"#.to_string(),
+                    },
+                },
+                ToolCall {
+                    id: "call_2".to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "fast_tool".to_string(),
+                        arguments: r#"{}"#.to_string(),
+                    },
+                },
+            ])
+            .with_response("The result is 42.");
+
+        let slow_tool = MockTool::new("slow_tool")
+            .with_response("slow result")
+            .with_delay(std::time::Duration::from_millis(60));
+        let fast_tool = MockTool::new("fast_tool").with_response("fast result");
+
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("You are a test assistant. Use tools when asked.")
+            .tool(Box::new(slow_tool))
+            .tool(Box::new(fast_tool))
+            .build()
+            .expect("agent builds");
+
+        let events = collect_events(&agent, "Run both tools.").await;
+
+        // The ToolResult events must arrive in call order.
+        let result_ids: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            result_ids,
+            vec!["call_1", "call_2"],
+            "batch results must be emitted in call order, got {result_ids:?}"
+        );
+        // And the final answer still arrives.
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(t) if t.contains("42")))
+        );
+    }
+
+    // Truncated / clean-disconnect stream: the loop must NOT accept the
+    // partial output as a complete final answer (Q-FLT-01-P1-01). This
+    // fixture is red until M3 lands the finish_reason/terminal check; it is
+    // pinned here so the fix lands with a failing-then-passing test.
+    #[tokio::test]
+    #[ignore = "M3: truncated stream terminal check (Q-FLT-01-P1-01); red until the fix lands"]
+    async fn truncated_stream_is_not_accepted_as_complete() {
+        let llm = MockLlmClient::new().with_stream_script(vec![
+            StreamChunk::Delta(DeltaMessage {
+                role: Some("assistant".to_string()),
+                content: Some("Partial answer that never finished".to_string()),
+                reasoning_content: None,
+                tool_calls: None,
+            }),
+            StreamChunk::Err(ReactError::Llm(Box::new(LlmError::NetworkError(
+                "connection closed mid-stream".to_string(),
+            )))),
+        ]);
+        let agent = agent_with_mock_llm(llm);
+        let events = collect_events(&agent, "Hi").await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_))),
+            "truncated stream must not produce a FinalAnswer"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. })),
+            "truncated stream must surface an error terminal"
+        );
     }
 }

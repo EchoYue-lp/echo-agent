@@ -1630,6 +1630,13 @@ mod tests {
         Ok(())
     }
 
+    /// Two single-tool ExecuteStage instances run concurrently; this test
+    /// pins per-stream identity and that terminal events reflect actual
+    /// completion order (execution fact). This is NOT the batch-contract
+    /// test: the concurrent batch path (multiple tool calls in one turn)
+    /// emits results in CALL order and is covered by
+    /// `concurrent_batch_results_follow_call_order` in stream_channel.rs
+    /// (F-RCT-04-P1-01).
     #[tokio::test]
     async fn multiplexed_streams_preserve_identity_and_terminal_order() {
         let agent = crate::agent::ReactAgentBuilder::new()

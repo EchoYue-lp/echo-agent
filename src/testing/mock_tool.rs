@@ -52,6 +52,9 @@ pub struct MockTool {
     responses: Arc<Mutex<VecDeque<MockToolResponse>>>,
     /// The parameters received on each call, recorded in order
     calls: Arc<Mutex<Vec<HashMap<String, Value>>>>,
+    /// Optional delay before each execution (lets tests control completion
+    /// order in concurrent batches).
+    delay: Option<std::time::Duration>,
 }
 
 impl MockTool {
@@ -67,6 +70,7 @@ impl MockTool {
             }),
             responses: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::<HashMap<String, Value>>::new())),
+            delay: None,
         }
     }
 
@@ -108,6 +112,14 @@ impl MockTool {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(MockToolResponse::Failure(msg.into()));
+        self
+    }
+
+    /// Sleep for this duration before each execution. Use to control
+    /// completion order in concurrent batch tests (e.g. a slow peer that
+    /// finishes after a fast one).
+    pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
+        self.delay = Some(delay);
         self
     }
 
@@ -156,6 +168,10 @@ impl Tool for MockTool {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(params.clone());
+
+            if let Some(d) = self.delay {
+                tokio::time::sleep(d).await;
+            }
 
             let response = self
                 .responses

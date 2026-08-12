@@ -126,6 +126,17 @@ pub(crate) async fn run_tools(
     };
 
     let mut finish_output = None;
+    // Concurrent results are collected keyed by call id and emitted in call
+    // order (`conc` order) below, so the context's tool results pair with
+    // the assistant message's `tool_calls` (F-RCT-04-P1-01: strict providers
+    // reject misordered results with HTTP 400).
+    let mut completed: HashMap<
+        String,
+        (
+            String,
+            std::result::Result<String, crate::agent::snapshot::ToolCallFailure>,
+        ),
+    > = HashMap::new();
 
     if !conc.is_empty() {
         let mc = snap.tools.tool_manager.max_concurrency();
@@ -140,7 +151,8 @@ pub(crate) async fn run_tools(
         let tool_count = conc.len();
         let (stream_tx, mut stream_rx) = mpsc::channel(64);
         let mut futs = FuturesUnordered::new();
-        for (id, name, args) in conc {
+        // Clone to keep `conc` for the call-order emission loop below.
+        for (id, name, args) in conc.clone() {
             let snapshot = snapshot.clone();
             let event_tx = stream_tx.clone();
             futs.push(
@@ -212,56 +224,7 @@ pub(crate) async fn run_tools(
                             IterOutcome::Abandoned
                         );
                     }
-                    match result {
-                        Ok(output) => {
-                            yield_event_or!(
-                                tx,
-                                AgentEvent::ToolResult {
-                                    call_id: id.clone(),
-                                    name: fname.clone(),
-                                    output: output.clone(),
-                                },
-                                IterOutcome::Abandoned
-                            );
-                            context.lock().await.push(Message::tool_result(
-                                id,
-                                fname.clone(),
-                                output.clone(),
-                            ));
-                            if fname == TOOL_FINAL_ANSWER {
-                                // Verify answer before accepting
-                                if verify_answer(snap, context, &output, state.verifier_retry_count).await {
-                                    finish_output = Some(output);
-                                } else {
-                                    // Verifier failed — continue loop for self-correction
-                                    state.verifier_retry_count += 1;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            yield_event_or!(
-                                tx,
-                                AgentEvent::ToolError {
-                                    call_id: id.clone(),
-                                    name: fname.clone(),
-                                    error: error.error.to_string(),
-                                    failure: error.failure.clone(),
-                                },
-                                IterOutcome::Abandoned
-                            );
-                            context.lock().await.push(Message::tool_result(
-                                id,
-                                fname.clone(),
-                                format!("[Error] {}", error.error),
-                            ));
-                            // Checkpoint on tool error for recovery
-                            snap.save_runtime_checkpoint(
-                                context,
-                                Some(format!("Tool error: {fname}")),
-                            )
-                            .await;
-                        }
-                    }
+                    completed.insert(id, (fname, result));
                 },
                 event = stream_rx.recv(), if stream_open => {
                     match event {
@@ -297,6 +260,63 @@ pub(crate) async fn run_tools(
                 .await;
             yield_final_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
             return Ok(IterOutcome::Abandoned);
+        }
+
+        // Emit results and push them into context in call order (`conc`
+        // order), not completion order — the assistant message already
+        // carries the tool calls in call order, and strict providers reject
+        // misordered tool results with HTTP 400 (F-RCT-04-P1-01).
+        for (id, _fname, _args) in &conc {
+            let Some((fname, result)) = completed.remove(id) else {
+                continue;
+            };
+            match result {
+                Ok(output) => {
+                    yield_event_or!(
+                        tx,
+                        AgentEvent::ToolResult {
+                            call_id: id.clone(),
+                            name: fname.clone(),
+                            output: output.clone(),
+                        },
+                        IterOutcome::Abandoned
+                    );
+                    context.lock().await.push(Message::tool_result(
+                        id.clone(),
+                        fname.clone(),
+                        output.clone(),
+                    ));
+                    if fname == TOOL_FINAL_ANSWER {
+                        // Verify answer before accepting
+                        if verify_answer(snap, context, &output, state.verifier_retry_count).await {
+                            finish_output = Some(output);
+                        } else {
+                            // Verifier failed — continue loop for self-correction
+                            state.verifier_retry_count += 1;
+                        }
+                    }
+                }
+                Err(error) => {
+                    yield_event_or!(
+                        tx,
+                        AgentEvent::ToolError {
+                            call_id: id.clone(),
+                            name: fname.clone(),
+                            error: error.error.to_string(),
+                            failure: error.failure.clone(),
+                        },
+                        IterOutcome::Abandoned
+                    );
+                    context.lock().await.push(Message::tool_result(
+                        id.clone(),
+                        fname.clone(),
+                        format!("[Error] {}", error.error),
+                    ));
+                    // Checkpoint on tool error for recovery
+                    snap.save_runtime_checkpoint(context, Some(format!("Tool error: {fname}")))
+                        .await;
+                }
+            }
         }
     }
 

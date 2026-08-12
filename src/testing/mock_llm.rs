@@ -39,10 +39,31 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Enum of preset responses (text, tool calls, or errors)
+/// Enum of preset responses (text, tool calls, scripted streams, or errors)
 enum MockLlmResponse {
     Content(String, Option<crate::llm::types::Usage>),
     ToolCalls(Message, Option<crate::llm::types::Usage>),
+    Stream(Vec<StreamChunk>),
+    Err(ReactError),
+}
+
+/// One chunk of a scripted streaming turn.
+///
+/// Real providers never merge content and usage into a single chunk:
+/// content arrives as deltas and the terminal chunk carries `finish_reason`
+/// plus usage (Anthropic `message_delta.usage` carries only `output_tokens`;
+/// OpenAI streams usage on a separate final chunk). `StreamChunk` lets tests
+/// reproduce that wire shape instead of certifying the impossible
+/// single-chunk shape the old mock emitted (F-TST-01-P1-01).
+pub enum StreamChunk {
+    /// A content or tool-call delta without terminal information.
+    Delta(DeltaMessage),
+    /// Terminal chunk: finish reason + provider-reported usage.
+    Terminal {
+        finish_reason: Option<String>,
+        usage: Option<crate::llm::types::Usage>,
+    },
+    /// Mid-stream error (provider disconnect, malformed event, timeout).
     Err(ReactError),
 }
 
@@ -256,6 +277,46 @@ impl MockLlmClient {
         })))
     }
 
+    /// Append a scripted streaming turn. `chat_stream` emits the chunks in
+    /// order; a `StreamChunk::Err` ends the stream with that error.
+    ///
+    /// Use this to reproduce the real provider wire shape: content deltas
+    /// first, then a separate terminal chunk carrying `finish_reason` and
+    /// usage (the single-chunk shape the plain builders emit is
+    /// intentionally reserved for non-streaming tests).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use echo_agent::testing::{MockLlmClient, StreamChunk};
+    /// use echo_agent::llm::types::{DeltaMessage, Usage};
+    ///
+    /// let usage = Usage {
+    ///     prompt_tokens: Some(10),
+    ///     completion_tokens: Some(5),
+    ///     ..Default::default()
+    /// };
+    /// let mock = MockLlmClient::new().with_stream_script(vec![
+    ///     StreamChunk::Delta(DeltaMessage {
+    ///         role: Some("assistant".to_string()),
+    ///         content: Some("Hello".to_string()),
+    ///         reasoning_content: None,
+    ///         tool_calls: None,
+    ///     }),
+    ///     StreamChunk::Terminal {
+    ///         finish_reason: Some("stop".to_string()),
+    ///         usage: Some(usage),
+    ///     },
+    /// ]);
+    /// ```
+    pub fn with_stream_script(self, chunks: Vec<StreamChunk>) -> Self {
+        self.responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(MockLlmResponse::Stream(chunks));
+        self
+    }
+
     /// Total number of calls that have occurred
     pub fn call_count(&self) -> usize {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).len()
@@ -316,6 +377,7 @@ impl MockLlmClient {
             Some(MockLlmResponse::ToolCalls(message, usage)) => {
                 Ok(PopResult::ToolCalls(message, usage))
             }
+            Some(MockLlmResponse::Stream(chunks)) => Ok(PopResult::Stream(chunks)),
             Some(MockLlmResponse::Err(e)) => Err(e),
             None => Err(ReactError::Llm(Box::new(LlmError::EmptyResponse))),
         }
@@ -325,6 +387,7 @@ impl MockLlmClient {
 enum PopResult {
     Content(String, Option<crate::llm::types::Usage>),
     ToolCalls(Message, Option<crate::llm::types::Usage>),
+    Stream(Vec<StreamChunk>),
 }
 
 impl LlmClient for MockLlmClient {
@@ -373,6 +436,39 @@ impl LlmClient for MockLlmClient {
                         ..crate::llm::types::ChatCompletionResponse::default()
                     },
                 }),
+                // A scripted stream used through the non-streaming entry:
+                // fold the deltas into a single assistant message and take
+                // the last terminal's finish reason / usage.
+                PopResult::Stream(chunks) => {
+                    let mut text = String::new();
+                    let mut finish_reason = None;
+                    let mut usage = None;
+                    for chunk in chunks {
+                        match chunk {
+                            StreamChunk::Delta(delta) => {
+                                if let Some(t) = delta.content {
+                                    text.push_str(&t);
+                                }
+                            }
+                            StreamChunk::Terminal {
+                                finish_reason: fr,
+                                usage: u,
+                            } => {
+                                finish_reason = fr;
+                                usage = u;
+                            }
+                            StreamChunk::Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(ChatResponse {
+                        message: Message::assistant(text),
+                        finish_reason,
+                        raw: crate::llm::types::ChatCompletionResponse {
+                            usage,
+                            ..crate::llm::types::ChatCompletionResponse::default()
+                        },
+                    })
+                }
             }
         })
     }
@@ -407,9 +503,12 @@ impl LlmClient for MockLlmClient {
                 }
             }
 
+            // Real providers stream content as deltas and report usage on a
+            // separate terminal chunk; emit that shape instead of the
+            // impossible single-chunk merge (F-TST-01-P1-01).
             match self.pop_response()? {
                 PopResult::Content(text, usage) => {
-                    let stream = futures::stream::once(async move {
+                    let stream = futures::stream::iter([
                         Ok(ChatChunk {
                             delta: DeltaMessage {
                                 role: Some("assistant".to_string()),
@@ -417,10 +516,20 @@ impl LlmClient for MockLlmClient {
                                 reasoning_content: None,
                                 tool_calls: None,
                             },
+                            finish_reason: None,
+                            usage: None,
+                        }),
+                        Ok(ChatChunk {
+                            delta: DeltaMessage {
+                                role: None,
+                                content: None,
+                                reasoning_content: None,
+                                tool_calls: None,
+                            },
                             finish_reason: Some("stop".to_string()),
                             usage,
-                        })
-                    });
+                        }),
+                    ]);
                     Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
                 }
                 PopResult::ToolCalls(message, usage) => {
@@ -442,7 +551,7 @@ impl LlmClient for MockLlmClient {
                         .collect();
                     let content = message.content.as_text();
                     let reasoning_content = message.reasoning_content;
-                    let stream = futures::stream::once(async move {
+                    let stream = futures::stream::iter([
                         Ok(ChatChunk {
                             delta: DeltaMessage {
                                 role: Some("assistant".to_string()),
@@ -450,10 +559,45 @@ impl LlmClient for MockLlmClient {
                                 reasoning_content,
                                 tool_calls: Some(delta_calls),
                             },
+                            finish_reason: None,
+                            usage: None,
+                        }),
+                        Ok(ChatChunk {
+                            delta: DeltaMessage {
+                                role: None,
+                                content: None,
+                                reasoning_content: None,
+                                tool_calls: None,
+                            },
                             finish_reason: Some("tool_calls".to_string()),
                             usage,
-                        })
-                    });
+                        }),
+                    ]);
+                    Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
+                }
+                PopResult::Stream(chunks) => {
+                    let stream =
+                        futures::stream::iter(chunks.into_iter().map(|chunk| match chunk {
+                            StreamChunk::Delta(delta) => Ok(ChatChunk {
+                                delta,
+                                finish_reason: None,
+                                usage: None,
+                            }),
+                            StreamChunk::Terminal {
+                                finish_reason,
+                                usage,
+                            } => Ok(ChatChunk {
+                                delta: DeltaMessage {
+                                    role: None,
+                                    content: None,
+                                    reasoning_content: None,
+                                    tool_calls: None,
+                                },
+                                finish_reason,
+                                usage,
+                            }),
+                            StreamChunk::Err(e) => Err(e),
+                        }));
                     Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
                 }
             }

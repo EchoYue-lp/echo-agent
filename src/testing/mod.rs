@@ -45,6 +45,7 @@
 //!     ],
 //!     token_limit: 100,
 //!     current_query: None,
+//!     focus_instructions: None,
 //! };
 //!
 //! let output = compressor.compress(input).await?;
@@ -101,5 +102,5 @@ mod mock_tool;
 
 pub use mock_agent::{FailingMockAgent, MockAgent};
 pub use mock_embedder::MockEmbedder;
-pub use mock_llm::MockLlmClient;
+pub use mock_llm::{MockLlmClient, StreamChunk};
 pub use mock_tool::MockTool;
