@@ -9,18 +9,27 @@ use super::super::is_retryable_llm_error;
 /// Unified LLM retry logic: exponential backoff + jitter + circuit breaker update
 ///
 /// Shared by `think` and `create_llm_stream` to avoid code duplication.
-#[tracing::instrument(skip(agent_name, max_retries, retry_delay_ms, circuit_breaker, call_fn), fields(agent = %agent_name))]
+#[tracing::instrument(skip(agent_name, max_retries, retry_delay_ms, circuit_breaker, cancel, call_fn), fields(agent = %agent_name))]
 pub(crate) async fn retry_llm_call<F, Fut, T>(
     agent_name: &str,
     max_retries: usize,
     retry_delay_ms: u64,
     circuit_breaker: &Option<std::sync::Arc<echo_core::circuit_breaker::CircuitBreaker>>,
+    cancel: Option<&crate::agent::CancellationToken>,
     call_fn: F,
 ) -> Result<T>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
+    let permit = match circuit_breaker {
+        Some(breaker) => Some(
+            breaker
+                .acquire()
+                .ok_or_else(|| ReactError::Other("LLM circuit breaker is open".to_string()))?,
+        ),
+        None => None,
+    };
     let mut result: Result<T> = Err(ReactError::Agent(Box::new(AgentError::NoResponse {
         model: "unknown".to_string(),
         agent: agent_name.to_string(),
@@ -28,9 +37,9 @@ where
     for attempt in 0..=max_retries {
         if attempt > 0 {
             // Exponential backoff with jitter: base * 2^(attempt-1) + rand(0..base/2)
-            let base_delay = retry_delay_ms * (1u64 << (attempt - 1).min(5));
+            let base_delay = retry_delay_ms.saturating_mul(1u64 << (attempt - 1).min(5));
             let jitter = fastrand::u64(0..=base_delay / 2);
-            let delay_ms = base_delay + jitter;
+            let delay_ms = base_delay.saturating_add(jitter);
             warn!(
                 agent = %agent_name,
                 attempt = attempt,
@@ -38,7 +47,25 @@ where
                 delay_ms = delay_ms,
                 "⚠️ LLM request failed, retrying in {delay_ms}ms ({attempt}/{max_retries})"
             );
-            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            let delay = tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms));
+            tokio::pin!(delay);
+            if let Some(cancel) = cancel {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                            "LLM retry backoff".to_string(),
+                        ))));
+                    }
+                    _ = &mut delay => {}
+                }
+            } else {
+                delay.await;
+            }
+        }
+        if cancel.is_some_and(crate::agent::CancellationToken::is_cancelled) {
+            return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                "LLM request".to_string(),
+            ))));
         }
         result = call_fn().await;
         match &result {
@@ -55,12 +82,11 @@ where
         }
     }
 
-    // Update circuit breaker state
-    if let Some(cb) = circuit_breaker {
+    if let Some(permit) = permit {
         if result.is_ok() {
-            cb.record_success();
+            permit.success();
         } else {
-            cb.record_failure();
+            permit.failure();
         }
     }
 
@@ -77,15 +103,19 @@ pub(crate) fn compute_concurrent_tool_batch_timeout(
     }
 
     let attempts_per_tool = if config.retry_on_fail {
-        u64::from(config.max_retries) + 1
+        u64::from(config.max_retries).saturating_add(1)
     } else {
         1
     };
 
     let retry_delay_total_ms = if config.retry_on_fail {
-        (1..=config.max_retries)
-            .map(|attempt| config.retry_delay_ms * (1u64 << u64::from((attempt - 1).min(5))))
-            .sum::<u64>()
+        (1..=config.max_retries).fold(0u64, |total, attempt| {
+            total.saturating_add(
+                config
+                    .retry_delay_ms
+                    .saturating_mul(1u64 << u64::from((attempt - 1).min(5))),
+            )
+        })
     } else {
         0
     };
@@ -110,8 +140,13 @@ pub(crate) fn compute_concurrent_tool_batch_timeout(
 
 #[cfg(test)]
 mod tests {
-    use super::compute_concurrent_tool_batch_timeout;
+    use super::{compute_concurrent_tool_batch_timeout, retry_llm_call};
+    use crate::agent::CancellationToken;
+    use crate::error::{LlmError, ReactError, Result};
     use crate::tools::ToolExecutionConfig;
+    use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     #[test]
@@ -147,5 +182,59 @@ mod tests {
             compute_concurrent_tool_batch_timeout(&config, 8, config.max_concurrency),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn open_circuit_rejects_before_calling_provider() -> Result<()> {
+        let breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            success_threshold: 1,
+            timeout: Duration::from_secs(60),
+        }));
+        breaker.record_failure();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let result = retry_llm_call("test", 0, 0, &Some(breaker.clone()), None, || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ReactError>(())
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(breaker.rejected_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_backoff_starts_no_next_attempt() -> Result<()> {
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cancel_task = cancel.clone();
+        let cancellation = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel_task.cancel();
+        });
+        let result = retry_llm_call("test", 3, 250, &None, Some(&cancel), || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(ReactError::Llm(Box::new(LlmError::ApiError {
+                    status: 429,
+                    message: "retry".to_string(),
+                })))
+            }
+        })
+        .await;
+        cancellation
+            .await
+            .map_err(|error| ReactError::Other(format!("cancellation task failed: {error}")))?;
+        assert!(matches!(
+            result,
+            Err(ReactError::Agent(error)) if matches!(*error, crate::error::AgentError::Cancelled(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 }

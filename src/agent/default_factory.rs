@@ -2,7 +2,7 @@
 //!
 //! This module provides the facade-level implementation of the [`AgentFactory`] trait
 //! defined in `echo_core::agent::factory`. It reads the [`AgentFactoryConfig`] and
-//! creates a configured [`ReactAgent`].
+//! creates a configured [`crate::agent::ReactAgent`].
 //!
 //! # Example
 //!
@@ -51,7 +51,6 @@ impl AgentFactory for DefaultAgentFactory {
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
-pub use echo_core::agent::factory::DefaultAgentFactory as CoreDefaultAgentFactory;
 pub use echo_core::agent::factory::{AgentFactory, AgentFactoryConfig};
 
 #[cfg(test)]

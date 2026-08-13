@@ -55,12 +55,6 @@ pub(crate) struct ToolExecutionSubsystem {
 }
 
 impl ToolExecutionSubsystem {
-    /// Return a clone of the tool manager Arc (for StreamRunner construction).
-    #[allow(dead_code)]
-    pub(crate) fn tool_manager_arc(&self) -> Arc<ToolManager> {
-        Arc::clone(&self.tool_manager)
-    }
-
     /// Set agent-level default disabled tools for subsequent runs.
     ///
     /// Existing snapshots are immutable and are not affected.
@@ -68,22 +62,5 @@ impl ToolExecutionSubsystem {
         if let Ok(mut guard) = self.disabled_tools.write() {
             *guard = names;
         }
-    }
-
-    #[cfg(feature = "mcp")]
-    #[allow(dead_code)]
-    pub(crate) fn mcp_manager_arc(&self) -> Option<Arc<McpManager>> {
-        None // McpManager is not Arc-wrapped; use shared registry instead
-    }
-
-    #[cfg(feature = "subagent")]
-    #[allow(dead_code)]
-    pub(crate) fn subagent_registry(&self) -> Option<Arc<SubagentRegistry>> {
-        Some(Arc::clone(&self.subagent_registry))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn progressive_skill_registry(&self) -> Option<SharedRegistry> {
-        self.progressive_skill_registry.clone()
     }
 }

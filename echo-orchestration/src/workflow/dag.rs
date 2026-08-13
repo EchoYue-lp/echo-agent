@@ -108,7 +108,12 @@ impl Workflow for DagWorkflow {
             let mut ready: VecDeque<String> = VecDeque::new();
 
             for node_id in &self.node_order {
-                if remaining_in_degree[node_id.as_str()] == 0 {
+                if remaining_in_degree
+                    .get(node_id.as_str())
+                    .copied()
+                    .unwrap_or_default()
+                    == 0
+                {
                     ready.push_back(node_id.clone());
                 }
             }
@@ -134,7 +139,9 @@ impl Workflow for DagWorkflow {
                 let mut handles = Vec::with_capacity(batch.len());
 
                 for node_id in &batch {
-                    let agent_handle = self.nodes[node_id].clone();
+                    let agent_handle = self.nodes.get(node_id).cloned().ok_or_else(|| {
+                        ReactError::Other(format!("DAG node {node_id:?} has no registered agent"))
+                    })?;
                     let preds = predecessors
                         .get(node_id.as_str())
                         .cloned()
@@ -162,12 +169,24 @@ impl Workflow for DagWorkflow {
                     }));
                 }
 
-                for handle in handles {
-                    let (node_id, agent_name, node_input, result, elapsed) = handle
-                        .await
-                        .map_err(|e| ReactError::Other(format!("task join error: {e}")))?;
-
-                    let output = result?;
+                let mut first_error = None;
+                for handle in &mut handles {
+                    let (node_id, agent_name, node_input, result, elapsed) = match handle.await {
+                        Ok(value) => value,
+                        Err(error) => {
+                            first_error.get_or_insert_with(|| {
+                                ReactError::Other(format!("task join error: {error}"))
+                            });
+                            continue;
+                        }
+                    };
+                    let output = match result {
+                        Ok(output) => output,
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                            continue;
+                        }
+                    };
 
                     info!(
                         workflow = "dag",
@@ -189,13 +208,21 @@ impl Workflow for DagWorkflow {
                     if let Some(succs) = successors.get(node_id.as_str()) {
                         for succ in succs {
                             if let Some(deg) = remaining_in_degree.get_mut(succ.as_str()) {
-                                *deg -= 1;
+                                *deg = deg.saturating_sub(1);
                                 if *deg == 0 {
                                     ready.push_back(succ.clone());
                                 }
                             }
                         }
                     }
+                }
+                if let Some(error) = first_error {
+                    for handle in &handles {
+                        if !handle.is_finished() {
+                            handle.abort();
+                        }
+                    }
+                    return Err(error);
                 }
             }
 
@@ -254,6 +281,11 @@ impl DagWorkflowBuilder {
     /// Build the DAG workflow, validate acyclicity, and compute topological order
     pub fn build(self) -> Result<DagWorkflow> {
         let node_ids: HashSet<&str> = self.nodes.iter().map(|(id, _)| id.as_str()).collect();
+        if node_ids.len() != self.nodes.len() {
+            return Err(ReactError::Agent(Box::new(
+                AgentError::InitializationFailed("DAG contains duplicate node IDs".to_string()),
+            )));
+        }
 
         for edge in &self.edges {
             if !node_ids.contains(edge.from.as_str()) {
@@ -324,7 +356,7 @@ fn compute_in_degree<'a>(nodes: &'a [String], edges: &[DagEdge]) -> HashMap<&'a 
     let mut deg: HashMap<&str, usize> = nodes.iter().map(|id| (id.as_str(), 0)).collect();
     for edge in edges {
         if let Some(d) = deg.get_mut(edge.to.as_str()) {
-            *d += 1;
+            *d = d.saturating_add(1);
         }
     }
     deg
@@ -337,7 +369,7 @@ fn topological_sort(nodes: &[String], edges: &[DagEdge]) -> Result<Vec<String>> 
 
     let mut queue: VecDeque<String> = nodes
         .iter()
-        .filter(|id| in_deg[id.as_str()] == 0)
+        .filter(|id| in_deg.get(id.as_str()).copied().unwrap_or_default() == 0)
         .cloned()
         .collect();
 

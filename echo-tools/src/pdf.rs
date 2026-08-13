@@ -219,13 +219,22 @@ fn extract_pdf_metadata(pdf: &lopdf::Document) -> Result<String> {
 fn parse_pdf_date(date: &[u8]) -> String {
     // PDF date format: D:YYYYMMDDHHmmSS
     let date_str = String::from_utf8_lossy(date);
-    if let Some(rest) = date_str.strip_prefix("D:")
-        && rest.len() >= 8
-    {
-        let year = &rest[0..4];
-        let month = &rest[4..6];
-        let day = &rest[6..8];
-        return format!("{}-{}-{}", year, month, day);
+    if let Some(rest) = date_str.strip_prefix("D:") {
+        let mut chars = rest.chars();
+        let year = chars.by_ref().take(4).collect::<String>();
+        let month = chars.by_ref().take(2).collect::<String>();
+        let day = chars.by_ref().take(2).collect::<String>();
+        if year.chars().count() == 4
+            && month.chars().count() == 2
+            && day.chars().count() == 2
+            && year
+                .chars()
+                .chain(month.chars())
+                .chain(day.chars())
+                .all(|ch| ch.is_ascii_digit())
+        {
+            return format!("{}-{}-{}", year, month, day);
+        }
     }
     date_str.to_string()
 }
@@ -453,10 +462,29 @@ fn extract_text_from_stream(content: &[u8], limits: &ResourceLimits) -> String {
 
 /// Decode PDF hexadecimal string
 fn hex_decode(hex: &str) -> Result<String> {
-    let bytes: Vec<u8> = (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i.min(i + 2)], 16).unwrap_or(0))
-        .collect();
+    if !hex.is_ascii() {
+        return Err(ToolError::InvalidParameter {
+            name: "hex".to_string(),
+            message: "PDF hexadecimal string must be ASCII".to_string(),
+        }
+        .into());
+    }
+    let mut bytes = Vec::with_capacity(hex.len().div_ceil(2));
+    for pair in hex.as_bytes().chunks(2) {
+        let high = (pair.first().copied().unwrap_or(b'0') as char)
+            .to_digit(16)
+            .ok_or_else(|| ToolError::InvalidParameter {
+                name: "hex".to_string(),
+                message: "PDF hexadecimal string contains a non-hex digit".to_string(),
+            })?;
+        let low = (pair.get(1).copied().unwrap_or(b'0') as char)
+            .to_digit(16)
+            .ok_or_else(|| ToolError::InvalidParameter {
+                name: "hex".to_string(),
+                message: "PDF hexadecimal string contains a non-hex digit".to_string(),
+            })?;
+        bytes.push(((high << 4) | low) as u8);
+    }
 
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }

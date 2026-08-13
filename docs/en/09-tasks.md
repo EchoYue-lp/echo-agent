@@ -181,7 +181,7 @@ See: `examples/demo02_tasks.rs`
 
 ## Composite Task Execution (CompositePlan)
 
-> Module: `echo_orchestration::tasks::composite` (feature = `tasks`)
+> Module: `echo_agent::tasks::composite` (feature = `tasks`)
 
 Composite tasks chain multiple heterogeneous steps in sequential or parallel execution, with upstream result passing between steps — ideal for multi-stage pipelines like "search → summarize → report".
 

@@ -42,7 +42,7 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// 连接到 MCP 服务端，完成握手和能力发现后返回 Arc<McpClient>
+    /// 连接到 MCP 服务端，完成握手和能力发现后返回 `Arc<McpClient>`
     pub async fn new(config: McpServerConfig) -> Result<Arc<Self>> {
         let transport: Arc<dyn McpTransport> = match config.transport {
             TransportConfig::Stdio { command, args, env } => {

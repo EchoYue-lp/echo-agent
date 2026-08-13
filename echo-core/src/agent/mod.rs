@@ -8,14 +8,15 @@ pub mod intervention;
 pub mod prompt_template;
 mod types;
 
-pub use factory::{AgentFactory, AgentFactoryConfig, DefaultAgentFactory};
+pub use factory::{AgentFactory, AgentFactoryConfig};
 pub use intervention::{CallbackBridge, InterventionCallback, InterventionResult};
 pub use prompt_template::PromptTemplateManager;
 
 pub use critic::{CompositeCritic, CompositeStrategy, Critic, StaticCritic, ThresholdCritic};
 pub use event_envelope::{
-    AGENT_EVENT_SCHEMA_VERSION, EventEnvelope, EventIdentity, envelope_event_stream,
-    envelope_event_stream_after, validate_event_trajectory,
+    AGENT_EVENT_SCHEMA_VERSION, ConversationId, EventEnvelope, EventId, EventIdentity, ExecutionId,
+    MessageId, RunId, StreamId, TurnId, envelope_event_stream, envelope_event_stream_after,
+    validate_event_trajectory,
 };
 pub use types::{Critique, CritiqueOutput, critique_output_schema};
 
@@ -276,6 +277,8 @@ pub enum AgentEvent {
         source: String,
         /// Error message
         message: String,
+        /// Stable classification used by retry, lifecycle, and UI adapters.
+        failure: crate::error::AgentFailure,
     },
 
     /// Safety notice: the agent is about to perform an action that needs user awareness.
@@ -327,6 +330,27 @@ pub enum AgentPhase {
 }
 
 impl AgentEvent {
+    /// Build a terminal event while preserving the typed framework failure.
+    pub fn from_error(source: impl Into<String>, error: &ReactError) -> Self {
+        let failure = crate::error::AgentFailure::from_react_error(error);
+        Self::Error {
+            source: source.into(),
+            message: failure.message.clone(),
+            failure,
+        }
+    }
+
+    /// Build an unclassified terminal failure for boundaries that have no typed error.
+    pub fn error_message(source: impl Into<String>, message: impl Into<String>) -> Self {
+        let source = source.into();
+        let failure = crate::error::AgentFailure::message(&source, message);
+        Self::Error {
+            source,
+            message: failure.message.clone(),
+            failure,
+        }
+    }
+
     /// Whether this event ends the invocation event stream.
     pub fn is_terminal(&self) -> bool {
         matches!(
@@ -363,7 +387,7 @@ impl AgentEvent {
             AgentEvent::ThinkEnd {
                 prompt_tokens,
                 completion_tokens,
-            } => Some(prompt_tokens + completion_tokens),
+            } => Some(prompt_tokens.saturating_add(*completion_tokens)),
             AgentEvent::LlmUsage { total_tokens, .. } => Some(*total_tokens),
             _ => None,
         }
@@ -442,6 +466,21 @@ impl AgentEvent {
                 | AgentEvent::Cancelled
                 | AgentEvent::Error { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod accounting_tests {
+    use super::AgentEvent;
+
+    #[test]
+    fn total_tokens_saturates_without_panicking() {
+        let event = AgentEvent::ThinkEnd {
+            prompt_tokens: usize::MAX,
+            completion_tokens: 1,
+        };
+        assert_eq!(event.total_tokens(), Some(usize::MAX));
+        assert_eq!(event.tokens_used(), Some(usize::MAX));
     }
 }
 

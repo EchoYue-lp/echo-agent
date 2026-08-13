@@ -741,7 +741,7 @@ impl ManagedTask {
     ///
     /// Stores both the typed value (for zero-cost downcast access) and its
     /// JSON serialization (for persistence). After deserialization from a
-    /// store, only `metadata_json` survives — call [`get_metadata`] to
+    /// store, only `metadata_json` survives — call [`Self::get_metadata`] to
     /// attempt a typed read, or re-register with `with_metadata`.
     ///
     /// # Example

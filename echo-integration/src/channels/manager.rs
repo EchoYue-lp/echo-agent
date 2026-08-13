@@ -6,6 +6,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+/// Identity-bearing lifecycle result for one channel.
+pub struct ChannelLifecycleResult {
+    pub channel_id: String,
+    pub result: Result<()>,
+}
+
 /// Manage startup, shutdown, and querying of multiple IM channels.
 ///
 /// Supports:
@@ -31,10 +37,18 @@ impl ChannelManager {
     }
 
     /// Register a channel plugin
-    pub fn register(&mut self, plugin: Box<dyn ChannelPlugin>) {
+    pub fn register(&mut self, plugin: Box<dyn ChannelPlugin>) -> Result<()> {
         let id = plugin.id().to_string();
+        if self.channels.contains_key(&id) {
+            return Err(echo_core::error::ReactError::Channel(Box::new(
+                echo_core::error::ChannelError::Other(format!(
+                    "Channel '{id}' is already registered"
+                )),
+            )));
+        }
         info!("Registering channel: {}", id);
         self.channels.insert(id, plugin);
+        Ok(())
     }
 
     /// Get the number of channels
@@ -53,7 +67,7 @@ impl ChannelManager {
     pub async fn start_all(
         &mut self,
         handler_factory: impl Fn(&str) -> Arc<dyn MessageHandler> + Sync,
-    ) -> Vec<Result<()>> {
+    ) -> Vec<ChannelLifecycleResult> {
         info!("Starting all channels (count: {})", self.channels.len());
 
         let mut results = Vec::with_capacity(self.channels.len());
@@ -63,11 +77,17 @@ impl ChannelManager {
             match plugin.start(handler).await {
                 Ok(()) => {
                     info!("Channel '{}' started successfully", id);
-                    results.push(Ok(()));
+                    results.push(ChannelLifecycleResult {
+                        channel_id: id.clone(),
+                        result: Ok(()),
+                    });
                 }
                 Err(e) => {
                     warn!("Failed to start channel '{}': {}", id, e);
-                    results.push(Err(e));
+                    results.push(ChannelLifecycleResult {
+                        channel_id: id.clone(),
+                        result: Err(e),
+                    });
                 }
             }
         }
@@ -96,14 +116,26 @@ impl ChannelManager {
     pub async fn stop_all(&mut self) -> Result<()> {
         info!("Stopping all channels...");
 
+        let mut failures = Vec::new();
         for (id, plugin) in self.channels.iter_mut() {
             match plugin.stop().await {
                 Ok(()) => info!("Channel '{}' stopped", id),
-                Err(e) => warn!("Failed to stop channel '{}': {}", id, e),
+                Err(e) => {
+                    warn!("Failed to stop channel '{}': {}", id, e);
+                    failures.push(format!("{id}: {e}"));
+                }
             }
         }
-
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(echo_core::error::ReactError::Channel(Box::new(
+                echo_core::error::ChannelError::Other(format!(
+                    "failed to stop channels: {}",
+                    failures.join("; ")
+                )),
+            )))
+        }
     }
 
     /// Get a channel reference by ID

@@ -16,22 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Truncate a string at a byte boundary without splitting multi-byte UTF-8 characters.
-///
-/// Returns the longest prefix of `s` whose byte length is ≤ `max_bytes`
-/// and ends on a valid char boundary.
-fn safe_truncate(s: &str, max_bytes: usize) -> &str {
-    if max_bytes >= s.len() {
-        return s;
-    }
-    // Walk backwards from max_bytes to find the nearest char boundary
-    let end = s
-        .char_indices()
-        .map(|(i, c)| i + c.len_utf8())
-        .take_while(|&end| end <= max_bytes)
-        .last()
-        .unwrap_or(0);
-    &s[..end]
+/// Truncate by Unicode scalar values; never byte-slice external content.
+fn safe_truncate(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,10 +93,10 @@ impl Default for AdaptiveCompressionConfig {
 /// ```
 pub fn tune_for_model(config: &mut AdaptiveCompressionConfig, context_window: usize) {
     let w = context_window;
-    config.l1_snip_threshold_tokens = w * 60 / 100;
-    config.l2_micro_threshold_tokens = w * 75 / 100;
-    config.l3_collapse_threshold_tokens = w * 85 / 100;
-    config.l4_compact_threshold_tokens = w * 90 / 100;
+    config.l1_snip_threshold_tokens = w.saturating_mul(60) / 100;
+    config.l2_micro_threshold_tokens = w.saturating_mul(75) / 100;
+    config.l3_collapse_threshold_tokens = w.saturating_mul(85) / 100;
+    config.l4_compact_threshold_tokens = w.saturating_mul(90) / 100;
     // L5 triggers at tokens > target * 2, so it's automatically adapted
 }
 
@@ -131,7 +118,7 @@ pub struct AdaptiveCompressionResult {
 /// (emergency) activates when needed.
 pub struct AdaptiveCompressor {
     config: AdaptiveCompressionConfig,
-    tokenizer: HeuristicTokenizer,
+    tokenizer: Arc<dyn Tokenizer>,
     /// Optional LLM client for L4 auto-compact.
     llm: Option<Arc<dyn LlmClient>>,
 }
@@ -140,7 +127,7 @@ impl AdaptiveCompressor {
     pub fn new(config: AdaptiveCompressionConfig) -> Self {
         Self {
             config,
-            tokenizer: HeuristicTokenizer,
+            tokenizer: Arc::new(HeuristicTokenizer),
             llm: None,
         }
     }
@@ -151,6 +138,12 @@ impl AdaptiveCompressor {
     /// through to L5 (emergency) when tokens remain above threshold after L3.
     pub fn with_llm(mut self, llm: Arc<dyn LlmClient>) -> Self {
         self.llm = Some(llm);
+        self
+    }
+
+    /// Set the tokenizer used by the low-level in-place API.
+    pub fn with_tokenizer(mut self, tokenizer: Arc<dyn Tokenizer>) -> Self {
+        self.tokenizer = tokenizer;
         self
     }
 
@@ -223,7 +216,9 @@ impl AdaptiveCompressor {
         }
 
         // L5: Reactive — emergency (L4 requires LLM, handled externally)
-        if tokens > target_tokens * 2 && tokens > self.config.l4_compact_threshold_tokens {
+        if tokens > target_tokens.saturating_mul(2)
+            && tokens > self.config.l4_compact_threshold_tokens
+        {
             let (saved, evicted) = self.apply_l5_reactive(messages);
             tokens = tokens.saturating_sub(saved);
             if saved > 0 {
@@ -252,6 +247,7 @@ impl AdaptiveCompressor {
         current_tokens: usize,
         target_tokens: usize,
         focus: Option<&str>,
+        cancel_token: Option<echo_core::compression::CancellationToken>,
     ) -> (AdaptiveCompressionResult, Vec<Message>, Option<String>) {
         let tokens_before = current_tokens;
         let mut levels_applied = Vec::new();
@@ -302,8 +298,9 @@ impl AdaptiveCompressor {
             && tokens > target_tokens
             && let Some(llm) = &self.llm
         {
-            let (saved, evicted, summary) =
-                self.apply_l4_compact(messages, llm.as_ref(), focus).await;
+            let (saved, evicted, summary) = self
+                .apply_l4_compact(messages, llm.as_ref(), focus, cancel_token.clone())
+                .await;
             tokens = tokens.saturating_sub(saved);
             if saved > 0 {
                 levels_applied.push("L4:Compact".to_string());
@@ -313,7 +310,9 @@ impl AdaptiveCompressor {
         }
 
         // L5: Reactive — emergency
-        if tokens > target_tokens * 2 && tokens > self.config.l4_compact_threshold_tokens {
+        if tokens > target_tokens.saturating_mul(2)
+            && tokens > self.config.l4_compact_threshold_tokens
+        {
             let (saved, evicted) = self.apply_l5_reactive(messages);
             tokens = tokens.saturating_sub(saved);
             if saved > 0 {
@@ -335,7 +334,7 @@ impl AdaptiveCompressor {
 
     /// L1: Remove tool outputs that exceed max_output_tokens.
     fn apply_l1_snip(&self, messages: &mut [Message]) -> usize {
-        let mut saved = 0;
+        let mut saved: usize = 0;
         let max_tokens = self.config.l1_max_output_tokens;
 
         for msg in messages.iter_mut() {
@@ -345,7 +344,7 @@ impl AdaptiveCompressor {
             let text = msg.content.as_text_ref().unwrap_or("");
             let tokens = self.tokenizer.count_tokens(text);
             if tokens > max_tokens {
-                let char_limit = max_tokens * 4; // ~4 chars per token
+                let char_limit = max_tokens.saturating_mul(4); // ~4 chars per token
                 let truncated = format!(
                     "{}\n...[output truncated: {} tokens, kept first {}]...",
                     safe_truncate(text, char_limit),
@@ -359,11 +358,11 @@ impl AdaptiveCompressor {
         saved
     }
 
-    /// L1 Fold: Collapse consecutive tool result messages, keeping only the latest N per run.
+    /// L1 Fold: Compact older tool result payloads while preserving every result envelope.
     /// Returns (tokens_saved, evicted_messages).
-    fn apply_l1_fold_tools(&self, messages: &mut Vec<Message>) -> (usize, Vec<Message>) {
+    fn apply_l1_fold_tools(&self, messages: &mut [Message]) -> (usize, Vec<Message>) {
         let keep = self.config.l1_fold_keep_latest;
-        let mut saved = 0;
+        let mut saved: usize = 0;
         let mut evicted = Vec::new();
         let mut i = 0;
 
@@ -379,23 +378,20 @@ impl AdaptiveCompressor {
             }
             let count = i - start;
             if count > keep {
-                let to_remove = count - keep;
-                // Collect evicted messages and their tokens
-                for msg in &messages[start..start + to_remove] {
+                let to_compact = count.saturating_sub(keep);
+                for offset in 0..to_compact {
+                    let Some(msg) = messages.get_mut(start.saturating_add(offset)) else {
+                        break;
+                    };
                     let tokens = self
                         .tokenizer
                         .count_tokens(msg.content.as_text_ref().unwrap_or(""));
-                    saved += tokens;
+                    saved = saved.saturating_add(tokens.saturating_sub(12));
                     evicted.push(msg.clone());
+                    msg.content = MessageContent::Text(format!(
+                        "[L1 fold: tool result payload compacted; original ~{tokens} tokens]"
+                    ));
                 }
-                // Replace removed messages with a fold summary
-                let fold_msg = Message::user(format!(
-                    "[L1 fold: {to_remove} consecutive tool results collapsed]"
-                ));
-                messages.drain(start..start + to_remove);
-                messages.insert(start, fold_msg);
-                // Adjust index: removed `to_remove`, inserted 1
-                i = start + 1 + keep;
             }
         }
 
@@ -413,13 +409,28 @@ impl AdaptiveCompressor {
             }
             let text = msg.content.as_text_ref().unwrap_or("");
             let lines: Vec<&str> = text.lines().collect();
-            if lines.len() > keep * 2 {
-                let head: String = lines[..keep].join("\n");
-                let tail: String = lines[lines.len() - keep..].join("\n");
+            let retained_lines = keep.saturating_mul(2);
+            if lines.len() > retained_lines {
+                let head: String = lines
+                    .iter()
+                    .take(keep)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let tail: String = lines
+                    .iter()
+                    .rev()
+                    .take(keep)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let new_text = format!(
                     "{}\n...[{} lines truncated]...\n{}",
                     head,
-                    lines.len() - keep * 2,
+                    lines.len().saturating_sub(retained_lines),
                     tail
                 );
                 let old_tokens = self.tokenizer.count_tokens(text);
@@ -484,6 +495,7 @@ impl AdaptiveCompressor {
         messages: &mut Vec<Message>,
         llm: &dyn LlmClient,
         focus: Option<&str>,
+        cancel_token: Option<echo_core::compression::CancellationToken>,
     ) -> (usize, Vec<Message>, Option<String>) {
         let keep = self.config.l4_keep_recent;
 
@@ -520,7 +532,7 @@ impl AdaptiveCompressor {
                     tool_choice: None,
                     response_format: Some(echo_core::llm::types::ResponseFormat::JsonObject),
                     thinking: None,
-                    cancel_token: None,
+                    cancel_token: cancel_token.clone(),
                     user_id: None,
                     cache_hints: None,
                 })
@@ -551,8 +563,22 @@ impl AdaptiveCompressor {
                 to_summarize,
                 focus,
             );
-            match llm.chat_simple(vec![Message::user(prompt)]).await {
-                Ok(s) => s,
+            match llm
+                .chat(echo_core::llm::ChatRequest {
+                    messages: vec![Message::user(prompt)],
+                    temperature: None,
+                    max_tokens: None,
+                    tools: None,
+                    tool_choice: None,
+                    response_format: None,
+                    thinking: None,
+                    cancel_token,
+                    user_id: None,
+                    cache_hints: None,
+                })
+                .await
+            {
+                Ok(response) => response.content().unwrap_or_default().to_string(),
                 Err(e) => {
                     tracing::warn!(error = %e, "L4 Auto-Compact: LLM summarization failed, falling through to L5");
                     return (0, vec![], None);
@@ -648,30 +674,39 @@ impl super::ContextCompressor for AdaptiveCompressor {
     ) -> BoxFuture<'_, echo_core::error::Result<super::CompressionOutput>> {
         Box::pin(async move {
             let start = Instant::now();
+            let compressor = AdaptiveCompressor {
+                config: self.config.clone(),
+                tokenizer: input.tokenizer(),
+                llm: self.llm.clone(),
+            };
             let mut messages = input.messages;
             let target_tokens = input.token_limit;
-            let focus = input.focus_instructions.clone();
+            let focus = input
+                .focus_instructions
+                .clone()
+                .or(input.current_query.clone());
 
             // Estimate current token count from the input messages
             let current_tokens: usize = messages
                 .iter()
                 .filter_map(|m| m.content.as_text())
-                .map(|c| self.tokenizer.count_tokens(&c))
+                .map(|c| compressor.tokenizer.count_tokens(&c))
                 .sum();
 
-            let (result, evicted, l4_summary) = self
+            let (result, evicted, l4_summary) = compressor
                 .compress_async(
                     &mut messages,
                     current_tokens,
                     target_tokens,
                     focus.as_deref(),
+                    input.cancel_token.clone(),
                 )
                 .await;
 
             let tokens_after: usize = messages
                 .iter()
                 .filter_map(|m| m.content.as_text())
-                .map(|c| self.tokenizer.count_tokens(&c))
+                .map(|c| compressor.tokenizer.count_tokens(&c))
                 .sum();
 
             let mut checkpoint = CompressionCheckpoint::new(self.name())
@@ -761,19 +796,14 @@ mod tests {
 
     #[test]
     fn test_safe_truncate_cjk_no_panic() {
-        // "你好世界" = 4 CJK chars, each 3 bytes = 12 bytes total
         let s = "你好世界";
-        // max_bytes=4 falls in the middle of the second char (byte 3..6)
-        // Should return only "你" (3 bytes), not panic
         let result = safe_truncate(s, 4);
+        assert_eq!(result, "你好世界");
+
+        let result = safe_truncate(s, 1);
         assert_eq!(result, "你");
 
-        // max_bytes=1 falls inside the first char
-        let result = safe_truncate(s, 1);
-        assert_eq!(result, "");
-
-        // max_bytes=6 covers exactly "你好"
-        let result = safe_truncate(s, 6);
+        let result = safe_truncate(s, 2);
         assert_eq!(result, "你好");
     }
 
@@ -818,14 +848,19 @@ mod tests {
         // 5 tool messages with keep=2 should fold 3
         let result = compressor.compress_in_place(&mut messages, 500, 50);
         assert!(result.levels_applied.contains(&"L1:Fold".to_string()));
-        // Original: 7 messages. Fold removes 3 tool msgs, inserts 1 fold msg => 7 - 3 + 1 = 5
-        assert_eq!(messages.len(), 5);
-        // The fold summary should be present
-        assert!(
-            messages
-                .iter()
-                .any(|m| m.content.as_text_ref().unwrap_or("").contains("L1 fold"))
-        );
+        // Every result envelope remains contiguous; only the older payloads are compacted.
+        assert_eq!(messages.len(), 7);
+        let folded = messages
+            .iter()
+            .filter(|message| {
+                message
+                    .content
+                    .as_text_ref()
+                    .unwrap_or("")
+                    .contains("L1 fold")
+            })
+            .count();
+        assert_eq!(folded, 3);
     }
 
     #[test]
@@ -860,14 +895,12 @@ mod tests {
         let compressor = AdaptiveCompressor::new(config);
 
         // Use AdaptiveCompressor through ContextManager via ContextCompressor trait
-        let mut ctx = ContextManager::builder(10) // very low token limit to trigger compression
-            .compressor(compressor)
-            .build();
+        let mut ctx = ContextManager::builder(128).compressor(compressor).build();
 
         ctx.push(Message::system("system prompt".to_string()));
         for i in 0..10 {
-            ctx.push(Message::user(format!("question {}", i)));
-            ctx.push(Message::assistant(format!("answer {}", i)));
+            ctx.push(Message::user(format!("question {i} ").repeat(12)));
+            ctx.push(Message::assistant(format!("answer {i} ").repeat(12)));
         }
 
         // prepare() should trigger auto-compression via the ContextCompressor trait
@@ -910,6 +943,8 @@ mod tests {
             token_limit: 0, // force compression
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
 
         let output: CompressionOutput = compressor.compress(input).await.unwrap();

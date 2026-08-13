@@ -105,7 +105,7 @@ let cache = SessionApprovalCache::new();
 三种缓存范围：
 - `Once` — 不缓存
 - `Session` — 按 tool_name + args_hash 缓存
-- `SessionAllTools` — 按 tool_name 缓存（所有参数匹配）
+- `SessionTool` — 按 tool_name 缓存（所有参数匹配）
 
 ---
 

@@ -5,7 +5,7 @@
 //! | File | Responsibility |
 //! |------|----------------|
 //! | `mod.rs` | Struct definition, `new()`, `impl Agent` trait |
-//! | `run.rs` | Execution engine (`think` / `process_steps` / `run_react_loop`) |
+//! | `run.rs` | Canonical ReAct execution engine |
 //! | `capabilities.rs` | Capability configuration (tool / skill / MCP / subagent registration) |
 //! | `extract.rs` | Structured JSON extraction (`extract_json` / `extract`) |
 
@@ -54,6 +54,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tracing::{Instrument, info, info_span};
 
+#[cfg(feature = "human-loop")]
 use crate::agent::react::subsystems::approval::ApprovalSubsystem;
 use crate::agent::react::subsystems::guard::GuardSubsystem;
 use crate::agent::react::subsystems::memory::MemorySubsystem;
@@ -62,7 +63,6 @@ use crate::agent::react::subsystems::tool_exec::ToolExecutionSubsystem;
 pub mod builder;
 mod capabilities;
 mod extract;
-pub mod loop_detector;
 pub mod run;
 pub mod structured;
 pub(crate) mod subsystems;
@@ -116,7 +116,7 @@ pub struct ReactAgent {
     pub(crate) pre_model_context_projector:
         std::sync::RwLock<Option<Arc<dyn crate::compression::PreModelContextProjector>>>,
     /// Human-in-the-loop approval subsystem
-    #[allow(dead_code)]
+    #[cfg(feature = "human-loop")]
     pub(crate) approval: ApprovalSubsystem,
     client: Arc<Client>,
     llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
@@ -143,10 +143,6 @@ pub struct ReactAgent {
     /// run is. Updated alongside `cancel_token` at run start. `None` when
     /// subagents are disabled (`AgentDispatchTool` never registered).
     pub(crate) dispatch_cancel_handle: Option<Arc<tokio::sync::Mutex<Option<CancellationToken>>>>,
-    #[cfg(feature = "subagent")]
-    pub(crate) dispatch_catalog_handle: Option<
-        Arc<std::sync::RwLock<Vec<crate::tools::builtin::agent_dispatch::SubagentCatalogEntry>>>,
-    >,
 
     /// Optional run store for persisting execution traces.
     /// When set, each streaming execution records a [`Run`](crate::trace::Run)
@@ -184,17 +180,8 @@ pub struct ReactAgent {
     /// subagent stream to the right chat message block.
     pub external_message_id: std::sync::Mutex<Option<String>>,
 
-    /// Optional tool execution pipeline. When set, `execute_tool_feedback_raw`
-    /// delegates to this pipeline instead of the inline implementation.
+    /// Optional tool execution pipeline. When absent, the standard pipeline is used.
     pub(crate) tool_execution_pipeline: Option<Arc<run::pipeline::ToolExecutionPipeline>>,
-
-    /// Optional prompt template engine for variable substitution.
-    /// When set, system prompts can use template syntax (`{{variable}}`)
-    /// and the engine resolves them dynamically.
-    pub(crate) prompt_template_engine: Option<Arc<echo_core::agent::PromptTemplateManager>>,
-
-    /// Current agent turn (if one is in progress).
-    pub(crate) current_turn: std::sync::Mutex<Option<crate::agent::turn::AgentTurn>>,
 
     /// Tracks absolute file paths that have been successfully read during the
     /// current conversation turn, along with the instant of the read.
@@ -297,7 +284,7 @@ impl ReactAgent {
     /// - Skill registry
     /// - Hook system
     ///
-    /// Prefer [`ReactAgentBuilder`] for construction — it handles subsystem
+    /// Prefer [`crate::agent::ReactAgentBuilder`] for construction — it handles subsystem
     /// initialization and provides sensible defaults. Direct construction with
     /// [`new`](Self::new) initialises every subsystem eagerly.
     pub fn new(config: AgentConfig) -> Self {
@@ -320,9 +307,18 @@ impl ReactAgent {
     }
 
     fn new_inner(
-        config: AgentConfig,
+        mut config: AgentConfig,
         #[cfg(feature = "subagent")] provided_subagent_registry: Option<Arc<SubagentRegistry>>,
     ) -> Self {
+        if !config.token_limit_explicit
+            && let Some(profile_window) = config
+                .model_profile
+                .as_ref()
+                .and_then(|profile| profile.context_window)
+                .and_then(|window| usize::try_from(window).ok())
+        {
+            config.token_limit = profile_window;
+        }
         let system_prompt = Self::build_system_prompt(&config);
 
         let sp_for_canonical = system_prompt.clone();
@@ -338,8 +334,9 @@ impl ReactAgent {
             .tokenizer(calibrated_tokenizer.clone() as Arc<dyn echo_core::tokenizer::Tokenizer>);
 
         // Wire TokenBudget if configured
-        if config.token_budget_config.enabled {
-            let budget = config.token_budget_config.build(config.token_limit);
+        if config.token_budget_config.enabled
+            && let Ok(budget) = config.token_budget_config.build(config.token_limit)
+        {
             ctx_builder = ctx_builder.budget(budget);
         }
 
@@ -469,12 +466,6 @@ impl ReactAgent {
             Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
         > = None;
         #[cfg(feature = "subagent")]
-        let mut dispatch_catalog_handle: Option<
-            Arc<
-                std::sync::RwLock<Vec<crate::tools::builtin::agent_dispatch::SubagentCatalogEntry>>,
-            >,
-        > = None;
-        #[cfg(feature = "subagent")]
         if config.register_agent_dispatch_tool {
             let factory = Arc::new(
                 crate::tools::builtin::agent_dispatch::ParentContextFactory {
@@ -492,7 +483,6 @@ impl ReactAgent {
             // Capture the shared handle before the tool is moved into the
             // tool_manager, so the agent can update it at run start.
             dispatch_cancel_handle = Some(dispatch_tool.cancel_handle());
-            dispatch_catalog_handle = Some(dispatch_tool.catalog_handle());
             tool_manager.register(Box::new(dispatch_tool));
         }
 
@@ -528,12 +518,10 @@ impl ReactAgent {
                 state_store: None,
             },
             pre_model_context_projector: std::sync::RwLock::new(None),
+            #[cfg(feature = "human-loop")]
             approval: ApprovalSubsystem {
-                #[cfg(feature = "human-loop")]
                 approval_provider,
-                #[cfg(feature = "human-loop")]
                 permission_service: None,
-                #[cfg(feature = "human-loop")]
                 pending_permission_rules: std::sync::Mutex::new(Vec::new()),
             },
             client: Arc::new(client),
@@ -546,8 +534,6 @@ impl ReactAgent {
             dispatch_cancel_handle,
             #[cfg(not(feature = "subagent"))]
             dispatch_cancel_handle: None,
-            #[cfg(feature = "subagent")]
-            dispatch_catalog_handle,
             run_store: None,
             current_run_id: std::sync::Mutex::new(None),
             current_trace_run_id: std::sync::Mutex::new(None),
@@ -559,8 +545,6 @@ impl ReactAgent {
             external_turn_id: std::sync::Mutex::new(None),
             external_message_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
-            prompt_template_engine: None,
-            current_turn: std::sync::Mutex::new(None),
             recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mutable_system_prompt: std::sync::RwLock::new(None),
             execution_mutex: Arc::new(tokio::sync::Mutex::new(())),
@@ -602,7 +586,17 @@ impl ReactAgent {
         self.tools
             .tool_manager
             .register(Box::new(LayeredForgetTool::new(layer_manager.clone())));
-        self.memory_layer_manager = Some(layer_manager);
+        self.memory_layer_manager = Some(layer_manager.clone());
+        if let Ok(mut context) = self.memory.context.try_lock() {
+            context.set_memory_promoter(Arc::new(
+                crate::memory_promoter::StoreMemoryPromoter::new(layer_manager),
+            ));
+        } else {
+            tracing::warn!(
+                "Could not acquire ContextManager lock to install layered memory promoter; \
+                 install the memory layer manager before running the agent"
+            );
+        }
     }
 
     /// Whether this agent has the layered memory runtime installed.
@@ -619,13 +613,6 @@ impl ReactAgent {
             .pre_model_context_projector
             .write()
             .unwrap_or_else(|error| error.into_inner()) = projector;
-    }
-
-    pub(crate) fn allows_direct_answer_shortcut(&self) -> bool {
-        self.pre_model_context_projector
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_none()
     }
 
     /// (stage4 F1) Access the shared layer manager so app-side write paths
@@ -1030,8 +1017,13 @@ impl ReactAgent {
     pub fn set_store(&mut self, store: Arc<dyn Store>) {
         self.memory.store = Some(store.clone());
         if let Ok(mut ctx) = self.memory.context.try_lock() {
-            let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));
-            ctx.set_memory_promoter(promoter);
+            if let Some(layer_manager) = &self.memory_layer_manager {
+                ctx.set_memory_promoter(Arc::new(
+                    crate::memory_promoter::StoreMemoryPromoter::new(layer_manager.clone()),
+                ));
+            } else {
+                ctx.remove_memory_promoter();
+            }
         } else {
             tracing::warn!(
                 "Could not acquire ContextManager lock to set memory promoter; \
@@ -1044,12 +1036,14 @@ impl ReactAgent {
     /// after the agent has started running.
     pub async fn install_store(&mut self, store: Arc<dyn Store>) {
         self.memory.store = Some(store.clone());
-        let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));
-        self.memory
-            .context
-            .lock()
-            .await
-            .set_memory_promoter(promoter);
+        let mut context = self.memory.context.lock().await;
+        if let Some(layer_manager) = &self.memory_layer_manager {
+            context.set_memory_promoter(Arc::new(
+                crate::memory_promoter::StoreMemoryPromoter::new(layer_manager.clone()),
+            ));
+        } else {
+            context.remove_memory_promoter();
+        }
     }
 
     /// Replace the long-term memory Store and re-register `remember` / `recall` / `forget` tools.
@@ -1120,8 +1114,13 @@ impl ReactAgent {
         // agent has already started running, callers should use
         // [`Self::install_memory_store`] instead, which awaits the lock.
         if let Ok(mut ctx) = self.memory.context.try_lock() {
-            let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));
-            ctx.set_memory_promoter(promoter);
+            if let Some(layer_manager) = &self.memory_layer_manager {
+                ctx.set_memory_promoter(Arc::new(
+                    crate::memory_promoter::StoreMemoryPromoter::new(layer_manager.clone()),
+                ));
+            } else {
+                ctx.remove_memory_promoter();
+            }
         } else {
             tracing::warn!(
                 "Could not acquire ContextManager lock to set memory promoter; \
@@ -1174,12 +1173,14 @@ impl ReactAgent {
         }
         self.memory.store = Some(store.clone());
 
-        let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));
-        self.memory
-            .context
-            .lock()
-            .await
-            .set_memory_promoter(promoter);
+        let mut context = self.memory.context.lock().await;
+        if let Some(layer_manager) = &self.memory_layer_manager {
+            context.set_memory_promoter(Arc::new(
+                crate::memory_promoter::StoreMemoryPromoter::new(layer_manager.clone()),
+            ));
+        } else {
+            context.remove_memory_promoter();
+        }
     }
 
     /// Set canonical context sources for re-injection after compression.
@@ -1278,7 +1279,7 @@ impl ReactAgent {
 
     /// Get all registered file-based skill descriptors.
     ///
-    /// Returns the full [`SkillDescriptor`] list including triggers,
+    /// Returns the full [`echo_execution::skills::external::types::SkillDescriptor`] list including triggers,
     /// allowed-tools, and other frontmatter metadata.
     pub fn skill_descriptors(
         &self,
@@ -1365,17 +1366,6 @@ impl ReactAgent {
     /// then probes for recovery after the configured timeout.
     pub fn set_circuit_breaker(&mut self, config: CircuitBreakerConfig) {
         self.guard.circuit_breaker = Some(Arc::new(CircuitBreaker::new(config)));
-    }
-
-    /// Set the prompt template engine for dynamic prompt variable substitution.
-    ///
-    /// When set, the agent can use template syntax (`{{variable}}`) in system
-    /// prompts and the engine resolves them dynamically at render time.
-    pub fn set_prompt_template_engine(
-        &mut self,
-        engine: Arc<echo_core::agent::PromptTemplateManager>,
-    ) {
-        self.prompt_template_engine = Some(engine);
     }
 
     /// Set the guard manager.
@@ -1755,65 +1745,11 @@ impl ReactAgent {
     ///
     /// Useful for user-initiated checkpoint saves (e.g., `/checkpoint` command).
     /// Silently no-ops if no state store or conversation_id is configured.
-    pub async fn force_checkpoint(&self) {
+    pub async fn force_checkpoint(&self) -> Result<()> {
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
         snapshot
             .save_runtime_checkpoint(&self.memory.context, None)
-            .await;
-    }
-
-    #[allow(dead_code)]
-    const MAX_READ_FILES: usize = 1024;
-    /// TTL for recently-read-file entries (30 minutes).
-    #[allow(dead_code)]
-    const READ_FILES_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
-    /// Record that a file was successfully read (for read-before-edit enforcement).
-    /// Caps at MAX_READ_FILES entries to prevent unbounded growth in long sessions.
-    /// Entries exceeding the TTL are lazily evicted.
-    #[allow(dead_code)]
-    pub(crate) fn record_file_read(&self, path: &str) {
-        if self.config.force_read_before_edit {
-            let mut files = self
-                .recently_read_files
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            files.insert(path.to_string(), std::time::Instant::now());
-            // Evict expired entries first
-            let ttl = Self::READ_FILES_TTL;
-            files.retain(|_, instant| instant.elapsed() < ttl);
-            // Cap: if still over limit, remove oldest entries
-            if files.len() > Self::MAX_READ_FILES {
-                let mut entries: Vec<(String, std::time::Instant)> = files.drain().collect();
-                entries.sort_by_key(|(_, t)| *t);
-                let keep = entries.into_iter().rev().take(Self::MAX_READ_FILES);
-                files.extend(keep);
-            }
-        }
-    }
-
-    /// Check whether a file was read in the current conversation turn and is
-    /// still within the TTL window.
-    /// Returns `true` if read-before-edit is disabled, or if the path was
-    /// previously recorded via [`record_file_read`] and hasn't expired.
-    #[allow(dead_code)]
-    pub(crate) fn was_file_read(&self, path: &str) -> bool {
-        if !self.config.force_read_before_edit {
-            return true; // enforcement disabled — allow all
-        }
-        let mut files = self
-            .recently_read_files
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        match files.get(path) {
-            Some(instant) if instant.elapsed() < Self::READ_FILES_TTL => true,
-            Some(_) => {
-                // Expired — remove it
-                files.remove(path);
-                false
-            }
-            None => false,
-        }
+            .await
     }
 
     /// Clear the read-files set at the start of a new conversation turn.
@@ -1970,31 +1906,6 @@ impl ReactAgent {
         }
     }
 
-    /// Finalize the current trace run (completed or failed).
-    pub(crate) async fn finalize_trace_run(
-        &self,
-        status: crate::trace::RunStatus,
-        output: Option<&str>,
-        error: Option<&str>,
-    ) {
-        let run_id = self
-            .current_trace_run_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let (Some(store), Some(run_id)) = (&self.run_store, run_id)
-            && let Ok(Some(mut run)) = store.load(&run_id).await
-        {
-            run.status = status;
-            run.final_output = output.map(|s| s.to_string());
-            run.error = error.map(|s| s.to_string());
-            run.finished_at = Some(chrono::Utc::now());
-            if let Err(e) = store.save(run).await {
-                tracing::warn!(error = %e, "Failed to save trace run on finalize");
-            }
-        }
-    }
-
     /// Shut down the agent and release all resources.
     ///
     /// Closes MCP connections, cancels background tasks, and shuts down WebSocket servers.
@@ -2101,7 +2012,7 @@ impl ReactAgent {
         self.delegate_task_with_depth(task, 0).await
     }
 
-    /// Like [`delegate_task`] but with an explicit delegation depth.
+    /// Like [`Self::delegate_task`] but with an explicit delegation depth.
     /// Called by the ReAct loop when processing internal delegate markers.
     /// Top-level calls pass 0; nested subagent ReAct loops increment.
     #[cfg(feature = "subagent")]
@@ -2170,7 +2081,7 @@ impl ReactAgent {
         self.delegate_to_agent_with_depth(target, task, 0).await
     }
 
-    /// Like [`delegate_to_agent`] but with an explicit delegation depth.
+    /// Like [`Self::delegate_to_agent`] but with an explicit delegation depth.
     #[cfg(feature = "subagent")]
     pub async fn delegate_to_agent_with_depth(
         &self,
@@ -2234,7 +2145,7 @@ impl ReactAgent {
     /// (`parent_cancel.child_token()`); cancelling the parent then cancels
     /// every subagent dispatched via this method.
     ///
-    /// Returns the subagent's full [`SubagentResult`] (including usage data),
+    /// Returns the subagent's full [`crate::agent::subagent::SubagentResult`] (including usage data),
     /// or an error if the target agent is not registered.
     #[cfg(feature = "subagent")]
     pub async fn delegate_to_agent_with_cancel(
@@ -2397,7 +2308,7 @@ impl ReactAgent {
     /// Delegate a multimodal task to a subagent (images/files included).
     ///
     /// Like [`delegate_to_agent_with_parent_and_cancel`](Self::delegate_to_agent_with_parent_and_cancel)
-    /// but carries a [`Message`] so the subagent sees user-uploaded attachments.
+    /// but carries a [`crate::llm::types::Message`] so the subagent sees user-uploaded attachments.
     /// The `task` text is also kept (used for hooks/events/fallback).
     #[cfg(feature = "subagent")]
     pub async fn delegate_to_agent_with_parent_cancel_and_message(
@@ -2423,7 +2334,7 @@ impl ReactAgent {
 
     /// Delegate a multimodal task with an explicit runtime context.
     ///
-    /// See [`delegate_to_agent_with_parent_context_and_cancel`] for why
+    /// See [`Self::delegate_to_agent_with_parent_context_and_cancel`] for why
     /// product runtimes should prefer value-passing the context for parallel
     /// dispatches.
     #[cfg(feature = "subagent")]
@@ -3168,75 +3079,31 @@ impl ReactAgent {
     /// # }
     /// ```
     pub async fn chat_multimodal(&self, message: crate::llm::types::Message) -> Result<String> {
-        use crate::llm::{ChatRequest, chat};
+        use futures::StreamExt;
 
-        // ★ Serialize execution — multimodal mutates context and calls LLM
-        let _execution_guard = self.execution_mutex.lock().await;
-
-        // Ensure context is initialized (includes system prompt)
-        {
-            let mut ctx = self.memory.context.lock().await;
-            if ctx.messages().is_empty() {
-                ctx.push(crate::llm::types::Message::system(
-                    self.config.system_prompt.clone(),
-                ));
+        let mut stream = self.chat_stream_message(message).await?;
+        let mut final_content = None;
+        while let Some(event) = stream.next().await {
+            match event? {
+                AgentEvent::FinalAnswer(content) => final_content = Some(content),
+                AgentEvent::Cancelled => {
+                    return Err(
+                        crate::error::AgentError::Cancelled("multimodal chat".to_string()).into(),
+                    );
+                }
+                AgentEvent::Error { message, .. } => {
+                    return Err(crate::error::ReactError::Other(message));
+                }
+                _ => {}
             }
-            // Add multimodal user message
-            ctx.push(message.clone());
         }
-
-        // Prepare message list
-        let messages = {
-            let ctx = self.memory.context.lock().await;
-            ctx.messages().to_vec()
-        };
-
-        let content = if let Some(llm_client) = &self.llm_client {
-            let response = llm_client
-                .chat(ChatRequest {
-                    messages: messages.clone(),
-                    temperature: None,
-                    max_tokens: None,
-                    tools: None,
-                    tool_choice: None,
-                    response_format: None,
-                    thinking: self.thinking.clone(),
-                    cancel_token: None,
-                    user_id: self.config.cache_user_id.clone(),
-                    cache_hints: None,
-                })
-                .await?;
-            response.content().unwrap_or_default()
-        } else {
-            let response = chat(
-                self.client.clone(),
-                &self.config.model_name,
-                &messages,
-                None,                              // temperature
-                None,                              // max_tokens
-                Some(false),                       // stream
-                None,                              // tools
-                None,                              // tool_choice
-                None,                              // response_format
-                self.config.cache_user_id.clone(), // user_id (E4 fix)
-            )
-            .await?;
-
-            response
-                .choices
-                .first()
-                .and_then(|c| c.message.content.as_text())
-                .unwrap_or_default()
-        };
-
-        // Add assistant reply to context
-        self.memory
-            .context
-            .lock()
-            .await
-            .push(crate::llm::types::Message::assistant(content.clone()));
-
-        Ok(content)
+        final_content.ok_or_else(|| {
+            crate::error::AgentError::NoResponse {
+                model: self.config.model_name.clone(),
+                agent: self.config.agent_name.clone(),
+            }
+            .into()
+        })
     }
 
     /// Execute a task with an image URL (single-turn, resets context).

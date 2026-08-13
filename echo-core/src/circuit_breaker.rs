@@ -18,6 +18,7 @@
 //! - **HalfOpen**: Allow a limited number of probe requests, decide whether to recover or re-open
 
 use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -66,6 +67,39 @@ pub struct CircuitBreaker {
     probes_in_flight: std::sync::atomic::AtomicU32,
 }
 
+/// Owned admission for one circuit-protected operation.
+///
+/// Dropping an unsettled half-open permit releases its probe slot. This makes
+/// cancellation and early returns safe without requiring every caller to
+/// remember a matching bookkeeping call.
+pub struct CircuitPermit {
+    breaker: Arc<CircuitBreaker>,
+    half_open_probe: bool,
+    settled: bool,
+}
+
+impl CircuitPermit {
+    /// Settle the admitted operation as successful.
+    pub fn success(mut self) {
+        self.breaker.record_success();
+        self.settled = true;
+    }
+
+    /// Settle the admitted operation as failed.
+    pub fn failure(mut self) {
+        self.breaker.record_failure();
+        self.settled = true;
+    }
+}
+
+impl Drop for CircuitPermit {
+    fn drop(&mut self) {
+        if !self.settled && self.half_open_probe {
+            self.breaker.release_probe();
+        }
+    }
+}
+
 impl CircuitBreaker {
     /// Create a circuit breaker with an explicit configuration.
     pub fn new(config: CircuitBreakerConfig) -> Self {
@@ -104,21 +138,23 @@ impl CircuitBreaker {
     /// which will automatically release the probe quota.
     /// If the request is rejected, callers should invoke `record_rejected()` to update statistics.
     pub fn try_advance(&self) -> bool {
+        self.try_admit().is_err()
+    }
+
+    fn try_admit(&self) -> std::result::Result<bool, ()> {
         let mut state = self.state.lock();
         match &*state {
-            State::Closed { .. } => false,
-            State::HalfOpen { .. } => {
-                // Only allow one probe at a time during HalfOpen
-                let current = self
-                    .probes_in_flight
-                    .load(std::sync::atomic::Ordering::Acquire);
-                if current >= 1 {
-                    return true; // reject: probe slot already taken
-                }
-                self.probes_in_flight
-                    .fetch_add(1, std::sync::atomic::Ordering::Release);
-                false
-            }
+            State::Closed { .. } => Ok(false),
+            State::HalfOpen { .. } => self
+                .probes_in_flight
+                .compare_exchange(
+                    0,
+                    1,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .map(|_| true)
+                .map_err(|_| ()),
             State::Open { opened_at } => {
                 if opened_at.elapsed() >= self.config.timeout {
                     info!(
@@ -130,11 +166,27 @@ impl CircuitBreaker {
                     };
                     // First probe into HalfOpen
                     self.probes_in_flight
-                        .fetch_add(1, std::sync::atomic::Ordering::Release);
-                    false
+                        .store(1, std::sync::atomic::Ordering::Release);
+                    Ok(true)
                 } else {
-                    true
+                    Err(())
                 }
+            }
+        }
+    }
+
+    /// Acquire owned admission for one operation, or reject while the circuit
+    /// is open/another half-open probe is active.
+    pub fn acquire(self: &Arc<Self>) -> Option<CircuitPermit> {
+        match self.try_admit() {
+            Ok(half_open_probe) => Some(CircuitPermit {
+                breaker: Arc::clone(self),
+                half_open_probe,
+                settled: false,
+            }),
+            Err(()) => {
+                self.record_rejected();
+                None
             }
         }
     }
@@ -153,14 +205,7 @@ impl CircuitBreaker {
 
     /// Record a successful call.
     pub fn record_success(&self) {
-        // Release probe slot if any
-        self.probes_in_flight
-            .fetch_update(
-                std::sync::atomic::Ordering::Release,
-                std::sync::atomic::Ordering::Acquire,
-                |v| if v > 0 { Some(v - 1) } else { Some(0) },
-            )
-            .ok();
+        self.release_probe();
 
         let mut state = self.state.lock();
         match &*state {
@@ -194,26 +239,19 @@ impl CircuitBreaker {
 
     /// Record a failed call.
     pub fn record_failure(&self) {
-        // Release probe slot if any
-        self.probes_in_flight
-            .fetch_update(
-                std::sync::atomic::Ordering::Release,
-                std::sync::atomic::Ordering::Acquire,
-                |v| if v > 0 { Some(v - 1) } else { Some(0) },
-            )
-            .ok();
+        self.release_probe();
 
         let mut state = self.state.lock();
         match &*state {
             State::Closed {
                 consecutive_failures,
             } => {
-                let new_count = consecutive_failures + 1;
+                let new_count = consecutive_failures.saturating_add(1);
                 if new_count >= self.config.failure_threshold {
                     warn!(
                         failures = new_count,
                         threshold = self.config.failure_threshold,
-                        "🔴 Circuit breaker opened due to consecutive failures"
+                        "Circuit breaker opened due to consecutive failures"
                     );
                     *state = State::Open {
                         opened_at: Instant::now(),
@@ -225,7 +263,7 @@ impl CircuitBreaker {
                 }
             }
             State::HalfOpen { .. } => {
-                warn!("🔴 Circuit breaker re-opened after HalfOpen probe failed");
+                warn!("Circuit breaker re-opened after HalfOpen probe failed");
                 *state = State::Open {
                     opened_at: Instant::now(),
                 };
@@ -236,6 +274,16 @@ impl CircuitBreaker {
                 };
             }
         }
+    }
+
+    fn release_probe(&self) {
+        self.probes_in_flight
+            .fetch_update(
+                std::sync::atomic::Ordering::Release,
+                std::sync::atomic::Ordering::Acquire,
+                |v| if v > 0 { Some(v - 1) } else { Some(0) },
+            )
+            .ok();
     }
 
     /// Get a human-readable description of the current state (for logging/monitoring).
@@ -372,5 +420,19 @@ mod tests {
         cb.try_advance(); // transition to HalfOpen
         cb.record_failure();
         assert_eq!(cb.state_name(), "open");
+    }
+
+    #[test]
+    fn dropped_half_open_permit_releases_probe_slot() {
+        let cb = Arc::new(CircuitBreaker::new(fast_config()));
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        let permit = cb.acquire();
+        assert!(permit.is_some());
+        assert!(cb.acquire().is_none());
+        drop(permit);
+        assert!(cb.acquire().is_some());
     }
 }

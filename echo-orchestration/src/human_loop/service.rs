@@ -69,31 +69,12 @@ use super::approval_cache::SessionApprovalCache;
 use super::audit::{PermissionAuditEntry, PermissionAuditSink};
 use super::classifier::{Classifier, ClassifierContext, DenialTracker};
 use super::permission::{
-    PermissionRequest, PermissionRequestHandler, PermissionResponse, PermissionResponseDecision,
-    PermissionUpdate, RiskLevel,
+    PermissionContext, PermissionRequest, PermissionRequestHandler, PermissionResponse,
+    PermissionResponseDecision, PermissionUpdate, RiskLevel,
 };
 use super::policy::ApprovalScope;
 use super::protected::{ProtectedPathChecker, ProtectedPathResult};
 use echo_core::error::Result;
-
-// ── 超时策略 ────────────────────────────────────────────────────────────────
-
-/// 审批超时策略
-///
-/// 当审批请求超过指定超时时间后，决定系统如何处理。
-#[derive(Debug, Clone, Default)]
-pub enum TimeoutStrategy {
-    /// 超时后拒绝执行（默认行为）
-    #[default]
-    Reject,
-    /// 超时后自动批准
-    AutoApprove {
-        /// 自动批准原因
-        reason: String,
-    },
-    /// 超时后升级为人工交互
-    Escalate,
-}
 
 // ── 权限服务配置 ────────────────────────────────────────────────────────────────
 
@@ -104,12 +85,6 @@ pub struct PermissionServiceConfig {
     pub mode: PermissionMode,
     /// 最大连续拒绝次数（超过则升级为人工审批）
     pub max_consecutive_denials: u32,
-    /// 最大总拒绝次数（超过则升级为人工审批）
-    pub max_total_denials: u32,
-    /// 是否启用 classifier（auto 模式）
-    pub enable_classifier: bool,
-    /// 超时策略
-    pub timeout_strategy: TimeoutStrategy,
     /// 是否禁止 BypassPermissions 模式（企业部署用）
     pub bypass_disabled: bool,
     /// 审批缓存 TTL（None = 永不过期，参考 Claude Code: 1h Max / 5min Pro）
@@ -121,9 +96,6 @@ impl Default for PermissionServiceConfig {
         Self {
             mode: PermissionMode::Default,
             max_consecutive_denials: DenialTracker::DEFAULT_MAX_CONSECUTIVE,
-            max_total_denials: DenialTracker::DEFAULT_MAX_TOTAL,
-            enable_classifier: true,
-            timeout_strategy: TimeoutStrategy::Reject,
             bypass_disabled: false,
             cache_ttl: Some(Duration::from_secs(30 * 60)), // 默认 30 分钟
         }
@@ -159,8 +131,34 @@ pub struct PermissionService {
     protected_paths: ProtectedPathChecker,
     /// 审计 Sink（可选）
     audit_sink: Option<Arc<dyn PermissionAuditSink>>,
-    /// 最近一次审批中用户修改的参数（side channel）
-    last_modified_args: RwLock<Option<Value>>,
+}
+
+/// Atomic result of one permission check.
+#[derive(Debug, Clone)]
+pub struct PermissionCheck {
+    pub decision: PermissionDecision,
+    pub updated_input: Option<Value>,
+}
+
+/// Immutable identity and environment snapshot for one permission decision.
+#[derive(Debug, Clone, Default)]
+pub struct PermissionInvocationContext {
+    pub scope_id: Option<String>,
+    pub request_id: Option<String>,
+    pub session_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub timeout: Option<Duration>,
+    pub permission: PermissionContext,
+    pub classifier: ClassifierContext,
+}
+
+impl PermissionCheck {
+    fn from_decision(decision: PermissionDecision) -> Self {
+        Self {
+            decision,
+            updated_input: None,
+        }
+    }
 }
 
 impl PermissionService {
@@ -205,7 +203,6 @@ impl PermissionService {
             ))),
             protected_paths: ProtectedPathChecker::new(),
             audit_sink: None,
-            last_modified_args: RwLock::new(None),
         }
     }
 
@@ -215,14 +212,6 @@ impl PermissionService {
     pub fn from_provider(provider: Arc<dyn super::HumanLoopProvider>) -> Self {
         let handler: Arc<dyn PermissionRequestHandler> = Arc::new(DynProviderHandler { provider });
         Self::new().with_request_handler(handler)
-    }
-
-    /// 设置超时策略
-    pub fn with_timeout_strategy(self, strategy: TimeoutStrategy) -> Self {
-        if let Ok(mut config) = self.config.try_write() {
-            config.timeout_strategy = strategy;
-        }
-        self
     }
 
     /// 设置权限模式
@@ -366,7 +355,7 @@ impl PermissionService {
     ///
     /// This must never call the request handler: batch planning does not have
     /// the real tool arguments and must not show a human approval dialog.
-    /// The execution path still calls [`check_with_permissions`] with the real
+    /// The execution path still calls [`Self::check_with_permissions`] with the real
     /// input before running the tool.
     pub async fn would_request_human_for_permissions(
         &self,
@@ -404,17 +393,9 @@ impl PermissionService {
         }
     }
 
-    /// 取出最近一次审批中用户修改的参数
-    ///
-    /// 返回 `Some(modified_args)` 表示用户在审批时修改了参数，
-    /// 调用方应用修改后的参数执行工具。调用后自动清除。
-    pub async fn take_modified_args(&self) -> Option<Value> {
-        self.last_modified_args.write().await.take()
-    }
-
     /// 撤销某工具的会话级审批缓存
-    pub fn revoke_cache(&self, tool_name: &str) {
-        self.cache.revoke(tool_name);
+    pub fn revoke_cache(&self, scope_id: &str, tool_name: &str) {
+        self.cache.revoke(scope_id, tool_name);
     }
 
     /// 清空所有审批缓存
@@ -488,9 +469,48 @@ impl PermissionService {
         permissions: &[ToolPermission],
         mode_override: Option<PermissionMode>,
     ) -> Result<PermissionDecision> {
+        Ok(self
+            .check_with_permissions_result_in_mode(
+                tool_name,
+                tool_input,
+                permissions,
+                mode_override,
+            )
+            .await?
+            .decision)
+    }
+
+    /// Check permissions and keep any user-updated input bound to this decision.
+    pub async fn check_with_permissions_result_in_mode(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        permissions: &[ToolPermission],
+        mode_override: Option<PermissionMode>,
+    ) -> Result<PermissionCheck> {
+        self.check_with_permissions_result_in_mode_and_context(
+            tool_name,
+            tool_input,
+            permissions,
+            mode_override,
+            None,
+        )
+        .await
+    }
+
+    /// Check permissions with invocation context for automatic classification.
+    pub async fn check_with_permissions_result_in_mode_and_context(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        permissions: &[ToolPermission],
+        mode_override: Option<PermissionMode>,
+        invocation: Option<&PermissionInvocationContext>,
+    ) -> Result<PermissionCheck> {
         let pipeline_start = std::time::Instant::now();
         let config = self.config.read().await;
         let effective_mode = mode_override.unwrap_or(config.mode);
+        let scope_id = invocation.and_then(|context| context.scope_id.as_deref());
 
         // 辅助闭包：审计 + 返回
         macro_rules! audit_return {
@@ -505,7 +525,7 @@ impl PermissionService {
                     pipeline_start,
                     pipeline_start.elapsed(),
                 );
-                return Ok(d);
+                return Ok(PermissionCheck::from_decision(d));
             }};
         }
 
@@ -559,16 +579,28 @@ impl PermissionService {
         }
 
         // 4. 检查规则注册表
-        {
+        let rule_decision = {
             let rules = self.rules.read().await;
-            if let Some(behavior) = rules.check(tool_name, permissions) {
-                let decision = behavior.to_decision();
-                audit_return!(decision, "rule_match", "rules");
+            rules
+                .check(tool_name, permissions)
+                .map(|behavior| behavior.to_decision())
+        };
+        if let Some(decision) = rule_decision {
+            if matches!(
+                decision,
+                PermissionDecision::RequireApproval | PermissionDecision::Ask { .. }
+            ) && self.has_real_handler()
+            {
+                return self
+                    .check_with_handler(tool_name, tool_input, permissions, invocation)
+                    .await;
             }
+            audit_return!(decision, "rule_match", "rules");
         }
 
         // 5. 缓存检查
-        if self.cache.is_approved(tool_name, tool_input) {
+        if scope_id.is_some_and(|scope_id| self.cache.is_approved(scope_id, tool_name, tool_input))
+        {
             audit_return!(PermissionDecision::Allow, "cache_hit", "approval_cache");
         }
 
@@ -576,6 +608,12 @@ impl PermissionService {
         {
             let tracker = self.denial_tracker.lock().await;
             if tracker.should_fallback() {
+                drop(tracker);
+                if self.has_real_handler() {
+                    return self
+                        .check_with_handler(tool_name, tool_input, permissions, invocation)
+                        .await;
+                }
                 audit_return!(
                     PermissionDecision::RequireApproval,
                     "denial_tracker_fallback",
@@ -600,37 +638,57 @@ impl PermissionService {
         }
 
         // 6. 模式分发
-        let decision = match effective_mode {
-            PermissionMode::Auto => self.check_with_classifier(tool_name, tool_input).await?,
-            PermissionMode::Default => {
-                if Self::default_confirmation_required(permissions) {
-                    self.check_with_handler(tool_name, tool_input, permissions)
+        let check = match effective_mode {
+            PermissionMode::Auto => {
+                let decision = self
+                    .check_with_classifier(
+                        tool_name,
+                        tool_input,
+                        invocation
+                            .map(|context| context.classifier.clone())
+                            .unwrap_or_default(),
+                    )
+                    .await?;
+                if matches!(
+                    decision,
+                    PermissionDecision::RequireApproval | PermissionDecision::Ask { .. }
+                ) && self.has_real_handler()
+                {
+                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
                         .await?
                 } else {
-                    PermissionDecision::Allow
+                    PermissionCheck::from_decision(decision)
+                }
+            }
+            PermissionMode::Default => {
+                if Self::default_confirmation_required(permissions) {
+                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
+                        .await?
+                } else {
+                    PermissionCheck::from_decision(PermissionDecision::Allow)
                 }
             }
             PermissionMode::Plan => {
                 // Plan 已在步骤 2 处理，此处不应到达
-                PermissionDecision::Allow
+                PermissionCheck::from_decision(PermissionDecision::Allow)
             }
             PermissionMode::AcceptEdits => {
                 if Self::accept_edits_confirmation_required(permissions) {
-                    self.check_with_handler(tool_name, tool_input, permissions)
+                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
                         .await?
                 } else {
-                    PermissionDecision::Allow
+                    PermissionCheck::from_decision(PermissionDecision::Allow)
                 }
             }
             PermissionMode::StrictConfirm => {
                 if Self::strict_confirmation_required(permissions) {
-                    self.check_with_handler(tool_name, tool_input, permissions)
+                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
                         .await?
                 } else {
-                    PermissionDecision::Allow
+                    PermissionCheck::from_decision(PermissionDecision::Allow)
                 }
             }
-            PermissionMode::DontAsk => {
+            PermissionMode::DontAsk => PermissionCheck::from_decision(
                 // 静默模式：只放行有明确 allow 规则的操作，其他静默拒绝
                 // 注意：到这里规则已检查过且无匹配，直接拒绝
                 PermissionDecision::Deny {
@@ -638,17 +696,25 @@ impl PermissionService {
                         "DontAsk 模式下工具 '{}' 未匹配任何允许规则，已静默拒绝",
                         tool_name
                     ),
+                },
+            ),
+            PermissionMode::Bubble => {
+                if self.has_real_handler() {
+                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
+                        .await?
+                } else {
+                    PermissionCheck::from_decision(PermissionDecision::RequireApproval)
                 }
             }
-            PermissionMode::Bubble => PermissionDecision::RequireApproval,
             PermissionMode::BypassPermissions => {
                 // Bypass 已在步骤 1 处理，此处不应到达
-                PermissionDecision::Allow
+                PermissionCheck::from_decision(PermissionDecision::Allow)
             }
         };
+        let decision = &check.decision;
 
         // 7. 结果后处理
-        match &decision {
+        match decision {
             PermissionDecision::Allow => {
                 let mut tracker = self.denial_tracker.lock().await;
                 tracker.reset();
@@ -661,7 +727,7 @@ impl PermissionService {
         }
 
         // 8. 审计记录（最终决策）
-        let reason = match &decision {
+        let reason = match decision {
             PermissionDecision::Allow => "allowed",
             PermissionDecision::Deny { .. } => "denied",
             PermissionDecision::RequireApproval => "require_approval",
@@ -670,14 +736,14 @@ impl PermissionService {
         self.record_audit(
             tool_name,
             tool_input,
-            &decision,
+            decision,
             reason,
             "mode_dispatch",
             pipeline_start,
             pipeline_start.elapsed(),
         );
 
-        Ok(decision)
+        Ok(check)
     }
 
     /// 使用 Classifier 检查（Auto 模式）
@@ -685,12 +751,14 @@ impl PermissionService {
         &self,
         tool_name: &str,
         tool_input: &Value,
+        context: ClassifierContext,
     ) -> Result<PermissionDecision> {
         if let Some(classifier) = &self.classifier {
-            let context = ClassifierContext::new("agent".to_string(), "session".to_string());
             let result = classifier.classify(tool_name, tool_input, &context).await?;
 
-            if result.should_block {
+            if result.confidence < 0.8 {
+                Ok(PermissionDecision::RequireApproval)
+            } else if result.should_block {
                 Ok(PermissionDecision::Deny {
                     reason: result.reason,
                 })
@@ -709,13 +777,21 @@ impl PermissionService {
         tool_name: &str,
         tool_input: &Value,
         permissions: &[ToolPermission],
-    ) -> Result<PermissionDecision> {
+        invocation: Option<&PermissionInvocationContext>,
+    ) -> Result<PermissionCheck> {
         let risk_level = RiskLevel::from_permissions(permissions);
 
-        let request = PermissionRequest::new(tool_name, tool_input.clone())
+        let mut request = PermissionRequest::new(tool_name, tool_input.clone())
             .with_permissions(permissions.to_vec())
             .with_risk_level(risk_level)
             .with_risk_based_suggestions();
+        if let Some(invocation) = invocation {
+            request.context = invocation.permission.clone();
+            request.request_id = invocation.request_id.clone();
+            request.session_id = invocation.session_id.clone();
+            request.agent_name = invocation.agent_name.clone();
+            request.timeout = invocation.timeout;
+        }
 
         // 通过 RwLock 读取当前 handler（支持运行时原地替换 provider）
         let handler = self
@@ -725,16 +801,31 @@ impl PermissionService {
             .clone();
         let response = handler.handle(request).await?;
 
-        // 处理用户修改的参数
-        if let Some(modified) = &response.updated_input {
-            *self.last_modified_args.write().await = Some(modified.clone());
+        let updated_input = response.updated_input.clone();
+        let final_input = updated_input.as_ref().unwrap_or(tool_input);
+        if let ProtectedPathResult::Protected {
+            matched_pattern,
+            path,
+        } = self.protected_paths.check(tool_name, final_input)
+        {
+            return Ok(PermissionCheck::from_decision(PermissionDecision::Deny {
+                reason: format!(
+                    "修改后的输入指向受保护路径 '{}'（匹配规则 '{}'）",
+                    path, matched_pattern
+                ),
+            }));
         }
 
-        // 处理审批缓存 — Approved 时写入缓存
-        // 根据 rule_updates 推断缓存 scope
-        if matches!(response.decision, PermissionResponseDecision::Allowed) {
-            let scope = Self::infer_scope_from_updates(&response.rule_updates);
-            self.cache.record_approval(tool_name, tool_input, scope);
+        // 处理审批缓存。缓存范围是响应中的显式字段，不能从通用规则更新猜测。
+        if let Some(scope_id) = invocation.and_then(|context| context.scope_id.as_deref())
+            && matches!(response.decision, PermissionResponseDecision::Allowed)
+        {
+            self.cache.record_approval(
+                scope_id,
+                tool_name,
+                final_input,
+                response.approval_scope.unwrap_or(ApprovalScope::Once),
+            );
         }
 
         // 处理规则更新
@@ -742,7 +833,7 @@ impl PermissionService {
             self.apply_updates(response.rule_updates).await;
         }
 
-        Ok(match response.decision {
+        let decision = match response.decision {
             PermissionResponseDecision::Allowed => PermissionDecision::Allow,
             PermissionResponseDecision::Denied { reason } => PermissionDecision::Deny {
                 reason: reason.unwrap_or_else(|| "用户拒绝".to_string()),
@@ -750,6 +841,10 @@ impl PermissionService {
             PermissionResponseDecision::NeedMoreInfo { question } => PermissionDecision::Ask {
                 suggestions: vec![question],
             },
+        };
+        Ok(PermissionCheck {
+            decision,
+            updated_input,
         })
     }
 
@@ -781,29 +876,6 @@ impl PermissionService {
             source: rule_source,
             description: None,
         }
-    }
-
-    /// 从 rule_updates 推断审批缓存粒度
-    ///
-    /// - `SessionAllTools`: 存在 session 级 allow 规则
-    /// - `Session`: 存在 session 级规则但非 "all tools" 语义
-    /// - `Once`: 无 session 规则，仅批准本次
-    fn infer_scope_from_updates(updates: &[PermissionUpdate]) -> ApprovalScope {
-        for update in updates {
-            if let PermissionUpdate::AddRule {
-                source, behavior, ..
-            } = update
-                && source == "session"
-            {
-                // session 级 allow 规则 → SessionAllTools
-                if behavior == "allow" {
-                    return ApprovalScope::SessionAllTools;
-                }
-                // session 级 deny 规则 → Session（仅针对当前工具）
-                return ApprovalScope::Session;
-            }
-        }
-        ApprovalScope::Once
     }
 
     /// 清空规则
@@ -859,18 +931,19 @@ struct DynProviderHandler {
 #[async_trait]
 impl PermissionRequestHandler for DynProviderHandler {
     async fn handle(&self, request: PermissionRequest) -> Result<PermissionResponse> {
-        use super::{HumanLoopRequest, HumanLoopResponse};
+        use super::HumanLoopResponse;
 
-        let req = HumanLoopRequest::approval(&request.tool_name, request.tool_input.clone());
+        let tool_name = request.tool_name.clone();
+        let req = request.into_human_loop_request();
 
         match self.provider.request(req).await? {
             HumanLoopResponse::Approved => Ok(PermissionResponse::allowed()),
             HumanLoopResponse::ApprovedWithScope { scope } => {
-                Ok(response_with_scope(&request.tool_name, scope))
+                Ok(response_with_scope(&tool_name, scope))
             }
             HumanLoopResponse::ModifiedArgs { args, scope } => {
                 // 保留用户修改的参数，传递给调用方
-                let mut response = response_with_scope(&request.tool_name, scope);
+                let mut response = response_with_scope(&tool_name, scope);
                 response.updated_input = Some(args);
                 Ok(response)
             }
@@ -889,20 +962,22 @@ impl PermissionRequestHandler for DynProviderHandler {
     }
 }
 
-fn response_with_scope(tool_name: &str, scope: ApprovalScope) -> PermissionResponse {
+fn response_with_scope(_tool_name: &str, scope: ApprovalScope) -> PermissionResponse {
     match scope {
         ApprovalScope::Once => PermissionResponse::allowed(),
         ApprovalScope::Session => PermissionResponse {
             decision: PermissionResponseDecision::Allowed,
-            rule_updates: vec![PermissionUpdate::add_session_rule(tool_name.to_string())],
+            rule_updates: Vec::new(),
             feedback: None,
             updated_input: None,
+            approval_scope: Some(ApprovalScope::Session),
         },
-        ApprovalScope::SessionAllTools => PermissionResponse {
+        ApprovalScope::SessionTool => PermissionResponse {
             decision: PermissionResponseDecision::Allowed,
-            rule_updates: vec![PermissionUpdate::add_session_rule("*".to_string())],
+            rule_updates: Vec::new(),
             feedback: None,
             updated_input: None,
+            approval_scope: Some(ApprovalScope::SessionTool),
         },
     }
 }
@@ -910,7 +985,6 @@ fn response_with_scope(tool_name: &str, scope: ApprovalScope) -> PermissionRespo
 // ── 权限服务构建器 ──────────────────────────────────────────────────────────────
 
 /// 权限服务构建器
-#[allow(dead_code)]
 pub struct PermissionServiceBuilder {
     config: PermissionServiceConfig,
     rules: RuleRegistry,
@@ -919,7 +993,6 @@ pub struct PermissionServiceBuilder {
     protected_paths: ProtectedPathChecker,
 }
 
-#[allow(dead_code)]
 impl PermissionServiceBuilder {
     pub fn new() -> Self {
         Self {
@@ -938,16 +1011,6 @@ impl PermissionServiceBuilder {
 
     pub fn max_consecutive_denials(mut self, max: u32) -> Self {
         self.config.max_consecutive_denials = max;
-        self
-    }
-
-    pub fn enable_classifier(mut self, enable: bool) -> Self {
-        self.config.enable_classifier = enable;
-        self
-    }
-
-    pub fn timeout_strategy(mut self, strategy: TimeoutStrategy) -> Self {
-        self.config.timeout_strategy = strategy;
         self
     }
 
@@ -987,7 +1050,6 @@ impl PermissionServiceBuilder {
             )),
             protected_paths: self.protected_paths,
             audit_sink: None,
-            last_modified_args: RwLock::new(None),
         }
     }
 }
@@ -1007,16 +1069,55 @@ mod tests {
     use futures::future::BoxFuture;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn invocation(scope_id: &str) -> PermissionInvocationContext {
+        PermissionInvocationContext {
+            scope_id: Some(scope_id.to_string()),
+            ..PermissionInvocationContext::default()
+        }
+    }
+
     struct CountingAllowHandler {
         count: Arc<AtomicUsize>,
         response: PermissionResponse,
     }
+
+    struct EchoModifiedInputHandler;
+    struct ProtectedModifiedInputHandler;
 
     #[async_trait::async_trait]
     impl PermissionRequestHandler for CountingAllowHandler {
         async fn handle(&self, _request: PermissionRequest) -> EchoResult<PermissionResponse> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(self.response.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PermissionRequestHandler for EchoModifiedInputHandler {
+        async fn handle(&self, request: PermissionRequest) -> EchoResult<PermissionResponse> {
+            tokio::task::yield_now().await;
+            Ok(PermissionResponse {
+                decision: PermissionResponseDecision::Allowed,
+                rule_updates: Vec::new(),
+                feedback: None,
+                updated_input: Some(serde_json::json!({
+                    "approved_for": request.tool_input.get("request_id").cloned()
+                })),
+                approval_scope: None,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PermissionRequestHandler for ProtectedModifiedInputHandler {
+        async fn handle(&self, _request: PermissionRequest) -> EchoResult<PermissionResponse> {
+            Ok(PermissionResponse {
+                decision: PermissionResponseDecision::Allowed,
+                rule_updates: Vec::new(),
+                feedback: None,
+                updated_input: Some(serde_json::json!({"path": ".git/config"})),
+                approval_scope: Some(ApprovalScope::Session),
+            })
         }
     }
 
@@ -1134,6 +1235,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn modified_input_is_returned_with_its_permission_decision() -> EchoResult<()> {
+        let service = PermissionService::new()
+            .with_request_handler(Arc::new(EchoModifiedInputHandler))
+            .with_mode(PermissionMode::StrictConfirm);
+
+        let check = service
+            .check_with_permissions_result_in_mode(
+                "Bash",
+                &serde_json::json!({"request_id": "one"}),
+                &[ToolPermission::Execute],
+                None,
+            )
+            .await?;
+
+        assert!(check.decision.is_allowed());
+        assert_eq!(
+            check.updated_input,
+            Some(serde_json::json!({"approved_for": "one"}))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn modified_input_is_rechecked_for_protected_paths() -> EchoResult<()> {
+        let service = PermissionService::new()
+            .with_request_handler(Arc::new(ProtectedModifiedInputHandler))
+            .with_mode(PermissionMode::StrictConfirm);
+
+        let check = service
+            .check_with_permissions_result_in_mode_and_context(
+                "Write",
+                &serde_json::json!({"path": "notes.txt"}),
+                &[ToolPermission::Write],
+                None,
+                Some(&invocation("agent-a:conversation-a")),
+            )
+            .await?;
+
+        assert!(check.decision.is_denied());
+        assert!(check.updated_input.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_modified_inputs_remain_call_scoped() -> EchoResult<()> {
+        let service = PermissionService::new()
+            .with_request_handler(Arc::new(EchoModifiedInputHandler))
+            .with_mode(PermissionMode::StrictConfirm);
+        let first_input = serde_json::json!({"request_id": "first"});
+        let second_input = serde_json::json!({"request_id": "second"});
+        let first = service.check_with_permissions_result_in_mode(
+            "Bash",
+            &first_input,
+            &[ToolPermission::Execute],
+            None,
+        );
+        let second = service.check_with_permissions_result_in_mode(
+            "Bash",
+            &second_input,
+            &[ToolPermission::Execute],
+            None,
+        );
+
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(
+            first?.updated_input,
+            Some(serde_json::json!({"approved_for": "first"}))
+        );
+        assert_eq!(
+            second?.updated_input,
+            Some(serde_json::json!({"approved_for": "second"}))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_accept_edits_allows_read_and_write_without_handler() -> EchoResult<()> {
         let service = PermissionService::new();
         service.set_mode(PermissionMode::AcceptEdits).await;
@@ -1184,29 +1361,43 @@ mod tests {
                 count: count.clone(),
                 response: PermissionResponse {
                     decision: PermissionResponseDecision::Allowed,
-                    rule_updates: vec![PermissionUpdate::add_session_rule("Write".to_string())],
+                    rule_updates: Vec::new(),
                     feedback: None,
                     updated_input: None,
+                    approval_scope: Some(ApprovalScope::SessionTool),
                 },
             }));
         service.set_mode(PermissionMode::StrictConfirm).await;
 
+        let first_input = serde_json::json!({"path": "first"});
         let decision = service
-            .check_with_permissions("Write", &serde_json::json!({}), &[ToolPermission::Write])
+            .check_with_permissions_result_in_mode_and_context(
+                "Write",
+                &first_input,
+                &[ToolPermission::Write],
+                None,
+                Some(&invocation("agent-a:conversation-a")),
+            )
             .await
             .unwrap();
-        assert!(decision.is_allowed());
+        assert!(decision.decision.is_allowed());
         assert_eq!(count.load(Ordering::SeqCst), 1);
 
         let decision = service
-            .check_with_permissions("Write", &serde_json::json!({}), &[ToolPermission::Write])
+            .check_with_permissions_result_in_mode_and_context(
+                "Write",
+                &serde_json::json!({"path": "second"}),
+                &[ToolPermission::Write],
+                None,
+                Some(&invocation("agent-a:conversation-a")),
+            )
             .await
             .unwrap();
-        assert!(decision.is_allowed());
+        assert!(decision.decision.is_allowed());
         assert_eq!(
             count.load(Ordering::SeqCst),
             1,
-            "session approval should install a rule and skip the handler next time"
+            "session tool approval should use the explicit cache scope"
         );
     }
 
@@ -1218,31 +1409,40 @@ mod tests {
                 count: count.clone(),
                 response: PermissionResponse {
                     decision: PermissionResponseDecision::Allowed,
-                    rule_updates: vec![PermissionUpdate::add_session_rule("Bash".to_string())],
+                    rule_updates: Vec::new(),
                     feedback: None,
                     updated_input: None,
+                    approval_scope: Some(ApprovalScope::SessionTool),
                 },
             }));
         service.set_mode(PermissionMode::StrictConfirm).await;
 
         let decision = service
-            .check_with_permissions("Bash", &serde_json::json!({}), &[ToolPermission::Execute])
+            .check_with_permissions_result_in_mode_and_context(
+                "Bash",
+                &serde_json::json!({}),
+                &[ToolPermission::Execute],
+                None,
+                Some(&invocation("agent-a:conversation-a")),
+            )
             .await
             .unwrap();
-        assert!(decision.is_allowed());
+        assert!(decision.decision.is_allowed());
         assert_eq!(count.load(Ordering::SeqCst), 1);
 
         service.replace_provider_preserving_cache(Arc::new(TestHumanLoopProvider));
 
         let decision = service
-            .check_with_permissions(
+            .check_with_permissions_result_in_mode_and_context(
                 "Bash",
                 &serde_json::json!({"command": "pwd"}),
                 &[ToolPermission::Execute],
+                None,
+                Some(&invocation("agent-a:conversation-a")),
             )
             .await
             .unwrap();
-        assert!(decision.is_allowed());
+        assert!(decision.decision.is_allowed());
         assert_eq!(
             count.load(Ordering::SeqCst),
             1,

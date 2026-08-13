@@ -95,11 +95,11 @@ pub struct AppConfig {
 }
 
 /// 解析最终的上下文窗口值。
-/// 优先级：用户显式设置 > 名称模式推断 > 默认 396K
+/// 优先级：用户显式设置 > 名称模式推断 > 保守默认 128K
 fn resolve_context_window(explicit: Option<u32>, provider: &str, model_name: &str) -> usize {
     explicit
         .or_else(|| infer_context_window(provider, model_name))
-        .unwrap_or(396_000)
+        .unwrap_or(u32::try_from(crate::agent::config::DEFAULT_TOKEN_LIMIT).unwrap_or(128_000))
         .clamp(1, 10_000_000) as usize
 }
 
@@ -855,10 +855,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_model_uses_396k_default_context_window() {
+    fn unknown_model_uses_conservative_default_context_window() {
         assert_eq!(
             resolve_context_window(None, "custom", "local-model"),
-            396_000
+            128_000
         );
     }
 

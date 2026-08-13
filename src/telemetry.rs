@@ -15,7 +15,7 @@
 //!
 //! // ... Run Agent ...
 //!
-//! shutdown_telemetry();
+//! shutdown_telemetry()?;
 //! # Ok(())
 //! # }
 //! ```
@@ -27,7 +27,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::TracerProvider;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -58,6 +58,13 @@ impl Default for TelemetryConfig {
 
 /// Global Metrics instance (lazy initialized)
 static METRICS: OnceLock<Metrics> = OnceLock::new();
+static TELEMETRY_RUNTIME: OnceLock<TelemetryRuntime> = OnceLock::new();
+static TELEMETRY_INIT_LOCK: Mutex<()> = Mutex::new(());
+
+struct TelemetryRuntime {
+    tracer_provider: TracerProvider,
+    meter_provider: SdkMeterProvider,
+}
 
 /// Agent runtime metrics
 ///
@@ -155,6 +162,14 @@ impl Metrics {
 ///
 /// If `enable_console` is true, also registers a fmt layer.
 pub fn init_telemetry(config: TelemetryConfig) -> Result<()> {
+    let _init_guard = TELEMETRY_INIT_LOCK.lock().map_err(|error| {
+        ReactError::Other(format!("telemetry initialization lock poisoned: {error}"))
+    })?;
+    if TELEMETRY_RUNTIME.get().is_some() {
+        return Err(ReactError::Other(
+            "Telemetry is already initialized".to_string(),
+        ));
+    }
     // ── Tracing ──
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
@@ -172,6 +187,7 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<()> {
 
     let tracer = provider.tracer("echo-agent");
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let (metrics, meter_provider) = build_metrics(&config)?;
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -184,29 +200,37 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<()> {
             .with(env_filter)
             .with(otel_layer)
             .with(fmt_layer)
-            .init();
+            .try_init()
+            .map_err(|error| {
+                ReactError::Other(format!("tracing subscriber init failed: {error}"))
+            })?;
     } else {
         tracing_subscriber::registry()
             .with(env_filter)
             .with(otel_layer)
-            .init();
+            .try_init()
+            .map_err(|error| {
+                ReactError::Other(format!("tracing subscriber init failed: {error}"))
+            })?;
     }
 
-    // ── Metrics ──
-    match init_metrics(&config) {
-        Ok(()) => {
-            tracing::info!(endpoint = %config.otlp_endpoint, "Metrics initialized");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Metrics initialization failed (non-fatal), continuing without metrics");
-        }
-    }
+    // Publish globals only after exporters and the subscriber are all ready.
+    METRICS
+        .set(metrics)
+        .map_err(|_| ReactError::Other("Metrics already initialized".to_string()))?;
+    TELEMETRY_RUNTIME
+        .set(TelemetryRuntime {
+            tracer_provider: provider,
+            meter_provider,
+        })
+        .map_err(|_| ReactError::Other("Telemetry is already initialized".to_string()))?;
+    tracing::info!(endpoint = %config.otlp_endpoint, "Metrics initialized");
 
     Ok(())
 }
 
 /// Initialize Metrics (MeterProvider + global Instruments)
-fn init_metrics(config: &TelemetryConfig) -> Result<()> {
+fn build_metrics(config: &TelemetryConfig) -> Result<(Metrics, SdkMeterProvider)> {
     let metrics_exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
         .with_endpoint(&config.otlp_endpoint)
@@ -252,14 +276,21 @@ fn init_metrics(config: &TelemetryConfig) -> Result<()> {
             .build(),
     };
 
-    METRICS
-        .set(metrics)
-        .map_err(|_| ReactError::Other("Metrics already initialized".to_string()))?;
-
-    Ok(())
+    Ok((metrics, meter_provider))
 }
 
 /// Shutdown OpenTelemetry, flush pending spans and metrics
-pub fn shutdown_telemetry() {
-    opentelemetry::global::shutdown_tracer_provider();
+pub fn shutdown_telemetry() -> Result<()> {
+    let runtime = TELEMETRY_RUNTIME
+        .get()
+        .ok_or_else(|| ReactError::Other("Telemetry is not initialized".to_string()))?;
+    runtime
+        .meter_provider
+        .shutdown()
+        .map_err(|error| ReactError::Other(format!("metrics shutdown failed: {error}")))?;
+    runtime
+        .tracer_provider
+        .shutdown()
+        .map_err(|error| ReactError::Other(format!("tracing shutdown failed: {error}")))?;
+    Ok(())
 }

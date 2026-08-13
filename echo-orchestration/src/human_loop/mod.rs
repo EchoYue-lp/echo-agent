@@ -77,9 +77,9 @@ pub use permission::{
     PermissionRequestHandler, PermissionResponse, PermissionResponseDecision, PermissionUpdate,
     RiskLevel, SuggestedAction, Suggestion,
 };
-pub use policy::{ApprovalRule, ApprovalScope, PolicyDecision};
+pub use policy::ApprovalScope;
 pub use protected::{ProtectedPathChecker, ProtectedPathResult};
-pub use service::PermissionService;
+pub use service::{PermissionInvocationContext, PermissionService};
 pub use webhook::WebhookHumanLoopProvider;
 #[cfg(feature = "websocket")]
 pub use websocket::WebSocketHumanLoopProvider;
@@ -331,7 +331,7 @@ impl HumanLoopManager {
 
     /// 创建带缓冲区大小的管理器
     pub fn with_buffer(buffer_size: usize) -> Self {
-        let (event_tx, event_rx) = mpsc::channel(buffer_size);
+        let (event_tx, event_rx) = mpsc::channel(buffer_size.max(1));
         Self {
             event_tx,
             event_rx: tokio::sync::Mutex::new(Some(event_rx)),
@@ -601,6 +601,12 @@ pub enum HumanLoopKind {
 /// 向人工发起的介入请求
 #[derive(Debug, Clone)]
 pub struct HumanLoopRequest {
+    /// Stable request identifier for concurrent UI correlation.
+    pub request_id: Option<String>,
+    /// Logical conversation/session identity.
+    pub session_id: Option<String>,
+    /// Agent or subagent identity.
+    pub agent_name: Option<String>,
     /// 请求类型
     pub kind: HumanLoopKind,
     /// 给用户的提示信息
@@ -611,6 +617,10 @@ pub struct HumanLoopRequest {
     pub args: Option<Value>,
     /// 风险等级（仅 Approval 场景）
     pub risk_level: Option<RiskLevel>,
+    /// Structured approval context.
+    pub approval_context: Option<PermissionContext>,
+    /// Structured response suggestions.
+    pub suggestions: Vec<Suggestion>,
     /// 超时时长（None 表示无限等待）
     pub timeout: Option<Duration>,
     /// 任务 ID（Selection 场景：标识等待中的任务）
@@ -628,11 +638,16 @@ impl HumanLoopRequest {
     pub fn approval(tool_name: impl Into<String>, args: Value) -> Self {
         let tool_name = tool_name.into();
         Self {
+            request_id: None,
+            session_id: None,
+            agent_name: None,
             kind: HumanLoopKind::Approval,
             prompt: format!("工具 [{}] 需要人工审批", tool_name),
             tool_name: Some(tool_name),
             args: Some(args),
             risk_level: None,
+            approval_context: None,
+            suggestions: Vec::new(),
             timeout: None,
             task_id: None,
             options: None,
@@ -649,11 +664,16 @@ impl HumanLoopRequest {
     ) -> Self {
         let tool_name = tool_name.into();
         Self {
+            request_id: None,
+            session_id: None,
+            agent_name: None,
             kind: HumanLoopKind::Approval,
             prompt: format!("工具 [{}] 需要人工审批（{}风险）", tool_name, risk_level),
             tool_name: Some(tool_name),
             args: Some(args),
             risk_level: Some(risk_level),
+            approval_context: None,
+            suggestions: Vec::new(),
             timeout: None,
             task_id: None,
             options: None,
@@ -670,11 +690,16 @@ impl HumanLoopRequest {
     ) -> Self {
         let tool_name = tool_name.into();
         Self {
+            request_id: None,
+            session_id: None,
+            agent_name: None,
             kind: HumanLoopKind::Approval,
             prompt: format!("工具 [{}] 需要人工审批", tool_name),
             tool_name: Some(tool_name),
             args: Some(args),
             risk_level: None,
+            approval_context: None,
+            suggestions: Vec::new(),
             timeout: Some(timeout),
             task_id: None,
             options: None,
@@ -686,11 +711,16 @@ impl HumanLoopRequest {
     /// 构造文本输入请求
     pub fn input(prompt: impl Into<String>) -> Self {
         Self {
+            request_id: None,
+            session_id: None,
+            agent_name: None,
             kind: HumanLoopKind::Input,
             prompt: prompt.into(),
             tool_name: None,
             args: None,
             risk_level: None,
+            approval_context: None,
+            suggestions: Vec::new(),
             timeout: None,
             task_id: None,
             options: None,
@@ -706,6 +736,9 @@ impl HumanLoopRequest {
         options: Vec<String>,
     ) -> Self {
         Self {
+            request_id: None,
+            session_id: None,
+            agent_name: None,
             kind: HumanLoopKind::Selection,
             prompt: prompt.into(),
             task_id: Some(task_id.into()),
@@ -713,6 +746,8 @@ impl HumanLoopRequest {
             tool_name: None,
             args: None,
             risk_level: None,
+            approval_context: None,
+            suggestions: Vec::new(),
             timeout: None,
             context: None,
             phase: None,
@@ -937,6 +972,12 @@ mod tests {
     #[tokio::test]
     async fn test_human_loop_manager_new() {
         let _manager = HumanLoopManager::new();
+    }
+
+    #[test]
+    fn zero_buffer_is_normalized_without_panicking() {
+        let manager = HumanLoopManager::with_buffer(0);
+        assert!(manager.try_recv_event().is_none());
     }
 
     #[test]

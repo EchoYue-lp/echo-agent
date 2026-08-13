@@ -25,6 +25,9 @@
 
 extern crate self as echo_agent;
 
+#[doc(hidden)]
+pub use echo_core::__macro_support;
+
 // ── Core modules (always compiled) ──────────────────────────────────────────
 
 pub mod agent;
@@ -36,7 +39,6 @@ pub mod error;
 #[cfg(feature = "eval")]
 #[cfg_attr(docsrs, doc(cfg(feature = "eval")))]
 pub mod eval;
-pub mod event_bus;
 pub mod evolution;
 pub mod guard;
 pub mod headless;
@@ -47,7 +49,6 @@ pub mod intent;
 pub mod llm;
 pub mod memory;
 pub mod memory_promoter;
-pub mod notebook;
 pub mod paths;
 pub mod plugin;
 pub mod retry;
@@ -73,10 +74,6 @@ pub mod a2a;
 #[cfg(feature = "channels")]
 #[cfg_attr(docsrs, doc(cfg(feature = "channels")))]
 pub mod channels;
-
-#[cfg(feature = "handoff")]
-#[cfg_attr(docsrs, doc(cfg(feature = "handoff")))]
-pub mod handoff;
 
 #[cfg(feature = "human-loop")]
 #[cfg_attr(docsrs, doc(cfg(feature = "human-loop")))]
@@ -143,7 +140,7 @@ pub mod prelude {
         envelope_event_stream, envelope_event_stream_after, validate_event_trajectory,
     };
     // Prompt Template
-    pub use echo_core::agent::PromptTemplateManager;
+    pub use echo_core::agent::{PromptTemplateManager, RunBudgetPolicy};
     // Config
     pub use crate::config::AppConfig;
 
@@ -177,7 +174,7 @@ pub mod prelude {
     // Media Tools
     #[cfg(feature = "media")]
     #[cfg_attr(docsrs, doc(cfg(feature = "media")))]
-    pub use crate::tools::media::{ImageFetchTool, WebFetchToolEnhanced};
+    pub use crate::tools::media::ImageFetchTool;
 
     // Compression
     pub use crate::compression::compressor::{
@@ -209,9 +206,12 @@ pub mod prelude {
     pub use echo_core::memory::{MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType};
 
     // Skills
+    #[cfg(feature = "files")]
+    pub use crate::skills::builtin::FileSystemSkill;
+    #[cfg(feature = "shell")]
+    pub use crate::skills::builtin::ShellSkill;
     pub use crate::skills::{
         Skill, SkillInfo, SkillRegistry,
-        builtin::{FileSystemSkill, ShellSkill},
         external::{
             ActivateSkillTool, DiscoveryScope, PromptContext, ReadSkillResourceTool,
             RunSkillScriptTool, SkillContent, SkillDescriptor, SkillLoadPolicy, SkillLoader,
@@ -296,12 +296,6 @@ pub mod advanced {
     #[cfg(feature = "telemetry")]
     #[cfg_attr(docsrs, doc(cfg(feature = "telemetry")))]
     pub use crate::telemetry::{Metrics, TelemetryConfig, init_telemetry, shutdown_telemetry};
-
-    #[cfg(feature = "handoff")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "handoff")))]
-    pub use crate::handoff::{
-        HandoffContext, HandoffManager, HandoffResult, HandoffTarget, HandoffTool,
-    };
 
     #[cfg(feature = "a2a")]
     #[cfg_attr(docsrs, doc(cfg(feature = "a2a")))]

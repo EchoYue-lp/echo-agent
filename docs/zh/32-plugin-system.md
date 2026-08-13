@@ -440,18 +440,9 @@ Theme；清除、禁用、卸载或重载后 Theme 消失时恢复各自的内�
 时会先停用插件 Theme 偏好，确保 DOM 变量、前端状态、TUI 渲染和后端持久化状态不会
 分裂。Output Style 使用同一套偏好持久化模型，并刷新可替换的 Agent 上下文投影。
 
-也可以只装配部分组件：
-
-```rust
-// 仅装配 Skills
-integrator.wire_skills(&mut agent, &skill_dirs).await;
-
-// 仅装配 Hooks
-integrator.wire_hooks(&agent, &hooks_defs).await;
-
-// 仅装配 MCP Servers（需要 mcp feature）
-integrator.wire_mcp(&mut agent, &mcp_files).await;
-```
+`wire_all` 是唯一的组件装配权威。它返回带来源所有权的 receipt；任一框架组件
+失败时会补偿整代候选组件。禁用、替换或关闭时，使用同一 receipt 调用
+`PluginIntegrator::unwire`。
 
 ---
 
@@ -765,37 +756,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
-
----
-
-## NativePlugin（遗留接口）
-
-对于需要注入自定义 Rust 逻辑的代码级扩展，保留 `NativePlugin` trait：
-
-```rust
-use echo_agent::plugin::NativePlugin;
-
-struct MyNativePlugin;
-
-impl NativePlugin for MyNativePlugin {
-    fn id(&self) -> &str { "my-native-plugin" }
-    fn name(&self) -> &str { "My Native Plugin" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn capabilities(&self) -> Vec<PluginCapability> {
-        vec![PluginCapability::Tool]
-    }
-    fn init(&mut self) -> Result<(), String> {
-        // 自定义初始化逻辑
-        Ok(())
-    }
-    fn shutdown(&mut self) -> Result<(), String> {
-        // 自定义清理逻辑
-        Ok(())
-    }
-}
-```
-
-> **提示**：大多数场景推荐使用基于 `manifest.yaml` 的文件插件。仅在需要运行时 Rust 逻辑时使用 `NativePlugin`。
 
 ---
 

@@ -1,7 +1,7 @@
 //! Anthropic cache breakpoint helper.
 //!
 //! This module extracts the breakpoint strategy from
-//! [`super::anthropic::AnthropicClient::convert_request`] into a standalone,
+//! `AnthropicClient::convert_request` into a standalone,
 //! testable helper. It maps a [`PromptCacheLayout`] to a concrete plan that
 //! the Anthropic provider can map to protocol-level `cache_control` breakpoints.
 //!

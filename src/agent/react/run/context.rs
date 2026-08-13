@@ -136,82 +136,6 @@ impl ReactAgent {
         }
     }
 
-    #[cfg(feature = "human-loop")]
-    pub(crate) async fn flush_pending_permission_rules(
-        &self,
-        service: &crate::human_loop::PermissionService,
-    ) {
-        let pending = match self.approval.pending_permission_rules.lock() {
-            Ok(mut guard) if !guard.is_empty() => std::mem::take(&mut *guard),
-            Ok(_) => return,
-            Err(e) => {
-                warn!("pending_permission_rules lock poisoned: {}", e);
-                return;
-            }
-        };
-
-        service.add_rules(pending).await;
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn log_user_input_audit(&self, content: &str) {
-        if let Some(al) = &self.guard.audit_logger {
-            let event = crate::audit::AuditEvent::now(
-                self.config.session_id.clone(),
-                self.config.agent_name.clone(),
-                crate::audit::AuditEventType::UserInput {
-                    content: content.to_string(),
-                },
-            );
-            if let Err(e) = al.log(event).await {
-                tracing::error!(error = %e, "audit log write failed — event dropped");
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn log_tool_call_audit(
-        &self,
-        tool: &str,
-        input: &serde_json::Value,
-        output: &str,
-        success: bool,
-        duration_ms: u64,
-    ) {
-        if let Some(al) = &self.guard.audit_logger {
-            let event = crate::audit::AuditEvent::now(
-                self.config.session_id.clone(),
-                self.config.agent_name.clone(),
-                crate::audit::AuditEventType::ToolCall {
-                    tool: tool.to_string(),
-                    input: input.clone(),
-                    output: output.to_string(),
-                    success,
-                    duration_ms,
-                },
-            );
-            if let Err(e) = al.log(event).await {
-                tracing::error!(error = %e, "audit log write failed — event dropped");
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn log_final_answer_audit(&self, content: &str) {
-        if let Some(al) = &self.guard.audit_logger {
-            let event = crate::audit::AuditEvent::now(
-                self.config.session_id.clone(),
-                self.config.agent_name.clone(),
-                crate::audit::AuditEventType::FinalAnswer {
-                    content: content.to_string(),
-                },
-            );
-            if let Err(e) = al.log(event).await {
-                tracing::error!(error = %e, "audit log write failed — event dropped");
-            }
-        }
-    }
-
     /// Reset message history, keeping only the system prompt to ensure each execution is independent
     pub(crate) async fn reset_messages(&self) {
         let mut ctx = self.memory.context.lock().await;
@@ -227,7 +151,7 @@ impl ReactAgent {
         }
     }
 
-    pub(crate) async fn restore_thread_context(&self) {
+    pub(crate) async fn restore_thread_context(&self) -> crate::error::Result<()> {
         let agent = self.config.agent_name.clone();
         let mut session_matcher = "startup";
 
@@ -243,8 +167,9 @@ impl ReactAgent {
                     self.reset_messages().await;
                 }
                 Err(e) => {
-                    warn!(agent = %agent, error = %e, "⚠️ Failed to load RuntimeStateStore checkpoint, starting from empty context");
-                    self.reset_messages().await;
+                    return Err(crate::error::ReactError::Other(format!(
+                        "Runtime checkpoint recovery failed for agent '{agent}': {e}"
+                    )));
                 }
             }
         } else {
@@ -258,6 +183,27 @@ impl ReactAgent {
         if start_result.block {
             warn!(agent = %self.config.agent_name, reason = ?start_result.block_reason, "SessionStart hook blocked session restore");
         }
+        Ok(())
+    }
+
+    /// Restore a persisted chat exactly once on a cold agent instance.
+    /// Existing in-process history is authoritative and must never be replaced
+    /// between turns.
+    pub(crate) async fn restore_chat_context_if_cold(&self) -> crate::error::Result<()> {
+        if self.memory.state_store.is_none() {
+            return Ok(());
+        }
+        let is_cold = {
+            let context = self.memory.context.lock().await;
+            context
+                .messages()
+                .iter()
+                .all(|message| matches!(message.role, Role::System))
+        };
+        if is_cold {
+            self.restore_thread_context().await?;
+        }
+        Ok(())
     }
 
     /// (stage4 D1) Unified recall — delegates to `MemoryRecaller` so the auto
@@ -272,33 +218,6 @@ impl ReactAgent {
         };
         let reca = crate::evolution::recall::MemoryRecaller::new(store.clone());
         reca.recall(query, 5).await
-    }
-
-    pub(crate) async fn inject_hook_messages(
-        &self,
-        source: &str,
-        phase: &str,
-        identifier: &str,
-        messages: &[String],
-    ) {
-        let mut ctx = self.memory.context.lock().await;
-        for message in messages {
-            ctx.push(runtime_context_note(
-                &format!("{source}:{phase}:{identifier}"),
-                message,
-            ));
-        }
-    }
-
-    pub(crate) async fn apply_hook_messages(
-        &self,
-        tool_name: &str,
-        hook_messages: &HookMessageBatches,
-    ) {
-        self.inject_hook_messages("Hook", "PreToolUse", tool_name, &hook_messages.pre)
-            .await;
-        self.inject_hook_messages("Hook", "PostToolUse", tool_name, &hook_messages.post)
-            .await;
     }
 
     /// Fire a lifecycle hook and inject any results into the agent context.
@@ -492,17 +411,17 @@ impl ReactAgent {
         mode: StreamMode,
         input: &str,
         history: &[Message],
-    ) -> usize {
+    ) -> crate::error::Result<usize> {
         // Clear read-before-edit tracking for the new conversation turn
         // (converged with prepare_react_context; the entry layer no longer
         // clears it separately to avoid a double clear).
         self.clear_read_files();
         match mode {
             StreamMode::Execute => {
-                self.restore_thread_context().await;
+                self.restore_thread_context().await?;
             }
             StreamMode::Chat => {
-                // Multi-turn chat mode: do not reset context
+                self.restore_chat_context_if_cold().await?;
             }
         }
 
@@ -551,7 +470,7 @@ impl ReactAgent {
             *cache = hook_result.activate_skill;
         }
 
-        recalled
+        Ok(recalled)
     }
 
     /// Streaming execution context initialization (multimodal message version)
@@ -563,14 +482,14 @@ impl ReactAgent {
         mode: StreamMode,
         message: &Message,
         history: &[Message],
-    ) -> usize {
+    ) -> crate::error::Result<usize> {
         // Clear read-before-edit tracking (see prepare_stream_context).
         self.clear_read_files();
         match mode {
             StreamMode::Execute => {
-                self.restore_thread_context().await;
+                self.restore_thread_context().await?;
             }
-            StreamMode::Chat => {}
+            StreamMode::Chat => self.restore_chat_context_if_cold().await?,
         }
 
         // Extract text from message for long-term memory retrieval
@@ -619,7 +538,7 @@ impl ReactAgent {
             }
         }
 
-        recalled
+        Ok(recalled)
     }
 }
 

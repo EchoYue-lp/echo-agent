@@ -10,7 +10,7 @@
 //! use tokio_util::sync::CancellationToken;
 //!
 //! let store = CronTaskStore::new();
-//! store.add(CronTask::new("daily-report", "0 9 * * *", "Generate daily report"))?;
+//! store.add(CronTask::new("daily-report", "0 9 * * *", "Generate daily report")).await?;
 //!
 //! let cancel = CancellationToken::new();
 //! let runner = SchedulerRunner::new(store, cancel, |task| {
@@ -18,7 +18,7 @@
 //!         println!("Firing: {}", task.name);
 //!         Ok(format!("Executed: {}", task.name))
 //!     })
-//! });
+//! }).await?;
 //! runner.spawn();
 //! ```
 
@@ -26,4 +26,4 @@ mod cron_task;
 mod runner;
 
 pub use cron_task::{CronTask, CronTaskStatus, CronTaskStore};
-pub use runner::{FireFn, SchedulerRunner};
+pub use runner::{FireFn, SchedulerHandle, SchedulerRunner};

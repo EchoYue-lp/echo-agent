@@ -1,6 +1,6 @@
 //! Trajectory replay — offline analysis of past agent runs.
 //!
-//! Given a [`Run`](crate::trace::Run) loaded from a [`RunStore`](crate::trace::RunStore),
+//! Given a [`Run`] loaded from a [`RunStore`](crate::trace::RunStore),
 //! the replay system extracts patterns, detects policy violations, and
 //! generates eval metrics without re-running the agent.
 

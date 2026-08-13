@@ -11,20 +11,17 @@
 //!
 //! **Converged with the non-streaming path:** `run_stream_channel` runs the
 //! same pre-flight checks as `prepare_react_context` — `GuardDirection::Input`
-//! and `IntentRouter` classification (DirectAnswer shortcut, skill activation).
-//! A blocked guard or a DirectAnswer short-circuit yields a stream pre-filled
-//! with terminal events without entering `run_core_loop`.
+//! and `IntentRouter` classification (including skill activation). A blocked
+//! guard yields a terminal stream without entering `run_core_loop`.
 
 use super::super::ReactAgent;
 use super::phases::{self, IterOutcome, LoopState, PrepareOutcome};
 use super::types::{StreamInit, StreamMode};
 use crate::agent::AgentEvent;
 use crate::error::Result;
-use crate::llm::types::Message;
-use echo_core::tokenizer::Tokenizer;
+use crate::llm::types::{ContentPart, Message, MessageContent};
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -40,8 +37,8 @@ impl ReactAgent {
         let buffer = self.config.stream_buffer_size;
         let (tx, rx) = mpsc::channel::<Result<AgentEvent>>(buffer);
         let context = self.memory.context.clone();
-        let text = init.text.clone();
-        let message = init.message.clone();
+        let mut text = init.text.clone();
+        let mut message = init.message.clone();
         let label = init.label.clone();
         let invocation = init.invocation;
         // Capture value-carried run metadata before the execution mutex wait.
@@ -76,7 +73,57 @@ impl ReactAgent {
         // entire stream lifetime.
         let execution_guard = self.execution_mutex.clone().lock_owned().await;
 
-        // Start a unique trace invocation BEFORE prepare. Product run identity
+        // Guard raw input before trace, hooks, memory, or conversation context
+        // can retain it. Transformations become the authoritative turn input.
+        if let Some(gm) = &self.guard.guard_manager {
+            let result = gm
+                .check_all(&text, crate::guard::GuardDirection::Input)
+                .await?;
+            match result {
+                crate::guard::GuardResult::Block { reason } => {
+                    let agent = self.config.agent_name.clone();
+                    debug!(agent = %agent, reason = %reason, "🛡️ Stream input blocked by guard");
+                    if let Some(al) = &self.guard.audit_logger {
+                        let event = crate::audit::AuditEvent::now(
+                            self.config.session_id.clone(),
+                            agent,
+                            crate::audit::AuditEventType::GuardBlock {
+                                guard: "guard_manager".to_string(),
+                                direction: crate::guard::GuardDirection::Input,
+                                reason: reason.clone(),
+                            },
+                        );
+                        if let Err(error) = al.log(event).await {
+                            tracing::warn!(%error, "Failed to log guard audit event");
+                        }
+                    }
+                    let trace_run_id = self.start_trace_run("[input blocked by guard]").await;
+                    let _ = tx
+                        .send(Ok(AgentEvent::FinalAnswer(format!(
+                            "Request blocked by safety guard: {reason}"
+                        ))))
+                        .await;
+                    self.finalize_scoped_trace_run(
+                        trace_run_id.as_deref(),
+                        crate::trace::RunStatus::Failed,
+                        None,
+                        Some(&reason),
+                    )
+                    .await;
+                    drop(execution_guard);
+                    return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
+                }
+                crate::guard::GuardResult::Transform { content, .. } => {
+                    text = content;
+                    if let Some(original) = message.take() {
+                        message = Some(message_with_replaced_text(original, &text));
+                    }
+                }
+                crate::guard::GuardResult::Pass | crate::guard::GuardResult::Warn { .. } => {}
+            }
+        }
+
+        // Start a unique trace invocation after guard transformation. Product run identity
         // remains in ExternalRunContext and is only used as correlation.
         let trace_run_id;
         if let Some(invocation) = invocation.as_ref() {
@@ -126,124 +173,29 @@ impl ReactAgent {
             .as_ref()
             .and_then(|value| value.history.as_deref())
             .unwrap_or_default();
-        let recalled = if let Some(ref msg) = init.message {
+        let recalled = if let Some(ref msg) = message {
             self.prepare_stream_context_with_message(mode, msg, history)
                 .await
         } else {
-            self.prepare_stream_context(mode, &init.text, history).await
-        };
-
-        // ── G1: Guard input check (converged with prepare_react_context) ──
-        // A blocked guard yields a stream pre-filled with a single terminal
-        // FinalAnswer event (mirrors non-streaming Ok(msg) semantics) and does
-        // NOT spawn run_core_loop. We must drop the owned execution_guard here
-        // or the agent's mutex leaks (the spawn below owns it normally).
-        if let Some(gm) = &self.guard.guard_manager {
-            let result = gm
-                .check_all(&text, crate::guard::GuardDirection::Input)
-                .await;
-            if let Ok(crate::guard::GuardResult::Block { reason }) = &result {
-                let agent = self.config.agent_name.clone();
-                debug!(agent = %agent, reason = %reason, "🛡️ Stream input blocked by guard");
-                if let Some(al) = &self.guard.audit_logger {
-                    let event = crate::audit::AuditEvent::now(
-                        self.config.session_id.clone(),
-                        agent.clone(),
-                        crate::audit::AuditEventType::GuardBlock {
-                            guard: "guard_manager".to_string(),
-                            direction: crate::guard::GuardDirection::Input,
-                            reason: reason.clone(),
-                        },
-                    );
-                    if let Err(e) = al.log(event).await {
-                        tracing::warn!(error = %e, "Failed to log guard audit event");
-                    }
-                }
-                let _ = tx
-                    .send(Ok(AgentEvent::FinalAnswer(format!(
-                        "Request blocked by safety guard: {reason}"
-                    ))))
-                    .await;
-                self.finalize_scoped_trace_run(
-                    trace_run_id.as_deref(),
-                    crate::trace::RunStatus::Failed,
-                    None,
-                    Some(reason),
-                )
-                .await;
-                // Drop the owned guard to release the execution mutex — the
-                // spawned task normally owns it, but we short-circuited.
-                drop(execution_guard);
-                return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
-            }
-        }
+            self.prepare_stream_context(mode, &text, history).await
+        }?;
 
         // ── G2: IntentRouter classification (converged with run_react_loop) ──
-        // DirectAnswer streams its tokens then a FinalAnswer and skips the
-        // core loop; SkillRequired injects a system message and falls through
-        // to the normal core loop.
+        // Routing may activate a skill. DirectAnswer uses the canonical loop
+        // so every invocation has the same lifecycle and terminal authority.
         if let Some(ref router) = self.intent_router {
             let messages = self.memory.context.lock().await.messages().to_vec();
-            let intent = router.classify(&text, &messages).await;
+            let cancel = invocation
+                .as_ref()
+                .and_then(|context| context.cancel.clone())
+                .or_else(|| {
+                    legacy_runtime.as_ref().and_then(|(_, token, _, _)| {
+                        token.as_ref().map(|token| token.as_ref().clone())
+                    })
+                })
+                .unwrap_or_default();
+            let intent = router.classify_with_cancel(&text, &messages, cancel).await;
             match intent {
-                crate::intent::Intent::DirectAnswer { confidence }
-                    if self.allows_direct_answer_shortcut() =>
-                {
-                    tracing::info!(
-                        agent = %self.config.agent_name,
-                        confidence = confidence,
-                        "🎯 Stream IntentRouter: DirectAnswer shortcut"
-                    );
-                    let mut snap = if let Some(invocation) = invocation.as_ref() {
-                        AgentSnapshot::from_agent_with_invocation(self, invocation)
-                    } else {
-                        make_snapshot(self)
-                    };
-                    if let Some((
-                        current_run_id,
-                        external_cancel,
-                        external_trace_sink,
-                        external_delegation_policy,
-                    )) = legacy_runtime.as_ref()
-                    {
-                        snap.current_run_id = current_run_id.clone();
-                        snap.external_cancel = external_cancel.clone();
-                        snap.external_trace_sink = external_trace_sink.clone();
-                        snap.external_delegation_policy = *external_delegation_policy;
-                    }
-                    snap.trace_run_id = trace_run_id.clone();
-                    // DirectAnswer uses trimmed [system, user] messages and does
-                    // not consume the recalled context, so the recall count is
-                    // informational only.
-                    let _ = recalled;
-                    let content = match snap
-                        .direct_answer_stream(&self.config.system_prompt, &text, &tx)
-                        .await
-                    {
-                        Ok(content) => content,
-                        Err(error) => {
-                            let error_text = error.to_string();
-                            snap.finalize_run(
-                                crate::trace::RunStatus::Failed,
-                                None,
-                                Some(error_text.as_str()),
-                            )
-                            .await;
-                            return Err(error);
-                        }
-                    };
-                    snap.finalize_run(crate::trace::RunStatus::Completed, Some(&content), None)
-                        .await;
-                    // Push assistant message so the agent remembers this turn.
-                    self.memory
-                        .context
-                        .lock()
-                        .await
-                        .push(Message::assistant(content));
-                    drop(execution_guard);
-                    drop(active_turn_lease);
-                    return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
-                }
                 crate::intent::Intent::DirectAnswer { confidence } => {
                     tracing::debug!(
                         agent = %self.config.agent_name,
@@ -296,6 +248,8 @@ impl ReactAgent {
             snap.external_trace_sink = external_trace_sink.clone();
             snap.external_delegation_policy = *external_delegation_policy;
         }
+        snap.current_turn_id = Some(turn_id);
+        snap.current_message = message.clone();
         snap.trace_run_id = trace_run_id;
         active_turn_lease.set_steerable(true);
 
@@ -304,15 +258,45 @@ impl ReactAgent {
             let _execution_guard = execution_guard;
             let _active_turn_lease = active_turn_lease;
             if let Err(e) = snap
-                .run_core_loop(context, text, message, label, mode, recalled, tx.clone())
+                .run_core_loop(
+                    context,
+                    text,
+                    message,
+                    label,
+                    mode,
+                    recalled,
+                    true,
+                    tx.clone(),
+                )
                 .await
             {
-                let _ = tx.try_send(Err(e));
+                let _ = tx.send(Ok(AgentEvent::from_error("react_loop", &e))).await;
             }
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
+}
+
+fn message_with_replaced_text(mut message: Message, replacement: &str) -> Message {
+    message.content = match message.content {
+        MessageContent::Parts(parts) => {
+            let mut retained = Vec::with_capacity(parts.len().saturating_add(1));
+            retained.push(ContentPart::Text {
+                text: replacement.to_string(),
+            });
+            retained.extend(
+                parts
+                    .into_iter()
+                    .filter(|part| !matches!(part, ContentPart::Text { .. })),
+            );
+            MessageContent::Parts(retained)
+        }
+        MessageContent::Text(_) | MessageContent::Empty => {
+            MessageContent::Text(replacement.to_string())
+        }
+    };
+    message
 }
 
 // ── AgentRunSnapshot: core loop driver ───────────────────────────────
@@ -330,7 +314,7 @@ impl AgentSnapshot {
         context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
         assistant_draft: Option<Message>,
     ) -> usize {
-        let Some(turn_id) = self.current_run_id.as_deref() else {
+        let Some(turn_id) = self.current_turn_id.as_deref() else {
             return 0;
         };
         let pending = self.turn_steer_mailbox.drain(turn_id);
@@ -346,137 +330,6 @@ impl AgentSnapshot {
             guard.push(message);
         }
         count
-    }
-
-    /// Streaming "direct answer" shortcut used by IntentRouter.
-    ///
-    /// Bypasses the ReAct loop and calls the LLM directly with a trimmed
-    /// `[system, user]` message pair (no tools, no ContextManager history),
-    /// streaming `AgentEvent::Token` for each content chunk and finishing with
-    /// a single `AgentEvent::FinalAnswer`. Mirrors the non-streaming
-    /// `ReactAgent::direct_answer` semantics but yields tokens as they arrive.
-    ///
-    /// Returns the full accumulated text so the caller can push the assistant
-    /// message into context. On error, the error is forwarded to `tx` and an
-    /// empty string is returned.
-    pub(crate) async fn direct_answer_stream(
-        &self,
-        system_prompt: &str,
-        message: &str,
-        tx: &mpsc::Sender<Result<AgentEvent>>,
-    ) -> Result<String> {
-        let messages = vec![
-            Message::system(system_prompt.to_string()),
-            Message::user(message.to_string()),
-        ];
-
-        let estimated_context_tokens: usize = messages
-            .iter()
-            .filter_map(|message| message.text_content())
-            .fold(0usize, |total, text| {
-                total.saturating_add(self.calibrated_tokenizer.count_tokens(&text))
-            });
-        let llm_started = Instant::now();
-        let stream = super::phases::think::create_llm_stream(self, messages.clone(), false).await?;
-        let mut stream = std::pin::pin!(stream);
-        let mut content = String::new();
-        let mut last_usage: Option<echo_core::llm::types::Usage> = None;
-        use futures::StreamExt;
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = match chunk_result {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx
-                        .send(Ok(AgentEvent::Error {
-                            source: "direct_answer".into(),
-                            message: e.to_string(),
-                        }))
-                        .await;
-                    return Ok(content);
-                }
-            };
-            // Capture usage from the final streaming chunk (when
-            // stream_options.include_usage is supported by the provider).
-            if chunk.usage.is_some() {
-                last_usage = chunk.usage.clone();
-            }
-            // DirectAnswer is plain text — only forward content deltas, ignore
-            // reasoning/tool_call deltas (no tools are attached).
-            if let Some(choice) = chunk.choices.first()
-                && let Some(delta) = &choice.delta.content
-                && !delta.is_empty()
-            {
-                content.push_str(delta);
-                if tx.send(Ok(AgentEvent::Token(delta.clone()))).await.is_err() {
-                    // Receiver dropped — caller cancelled the stream.
-                    break;
-                }
-            }
-        }
-
-        // Emit LlmUsage so the observability system records token counts.
-        // This mirrors what run_think() does for the full ReAct path.
-        let pt = last_usage
-            .as_ref()
-            .map(|usage| usage.effective_prompt_tokens())
-            .unwrap_or(0) as usize;
-        let ct = last_usage
-            .as_ref()
-            .and_then(|u| u.completion_tokens)
-            .unwrap_or(0) as usize;
-        let total_tokens = last_usage
-            .as_ref()
-            .map(|usage| usage.effective_total_tokens() as usize)
-            .unwrap_or_else(|| pt.saturating_add(ct));
-        let cached_prompt_tokens = last_usage
-            .as_ref()
-            .map(|u| u.cached_prompt_tokens() as usize)
-            .unwrap_or(0);
-        let cache_creation_prompt_tokens = last_usage
-            .as_ref()
-            .map(|u| u.cache_creation_prompt_tokens() as usize)
-            .unwrap_or(0);
-        let usage_reported = last_usage.is_some();
-        if let Some(ref usage) = last_usage {
-            self.token_tracker.record_usage(usage);
-        }
-
-        self.record_event(crate::trace::RunEvent::LlmCall {
-            messages: messages.len(),
-            prompt_tokens: u32::try_from(pt).unwrap_or(u32::MAX),
-            completion_tokens: u32::try_from(ct).unwrap_or(u32::MAX),
-            cached_prompt_tokens: u32::try_from(cached_prompt_tokens).unwrap_or(u32::MAX),
-            cache_creation_prompt_tokens: u32::try_from(cache_creation_prompt_tokens)
-                .unwrap_or(u32::MAX),
-            usage_reported,
-            estimated_context_tokens,
-            protected_context_tokens: 0,
-            protected_message_count: 0,
-            context_limit_tokens: self.config.token_limit,
-            context_breakdown: crate::trace::LlmContextBreakdown::estimate(
-                &messages,
-                self.calibrated_tokenizer.as_ref(),
-            ),
-            cache_fingerprint: super::phases::think::cache_fingerprint(&messages, None),
-            duration_ms: u64::try_from(llm_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        })
-        .await;
-
-        let _ = tx
-            .send(Ok(AgentEvent::LlmUsage {
-                model: self.config.model_name.clone(),
-                prompt_tokens: pt,
-                completion_tokens: ct,
-                total_tokens,
-                cached_prompt_tokens,
-                cache_creation_prompt_tokens,
-                usage_reported,
-            }))
-            .await;
-
-        // Terminal event — frontend treats FinalAnswer as end-of-stream.
-        let _ = tx.send(Ok(AgentEvent::FinalAnswer(content.clone()))).await;
-        Ok(content)
     }
 
     /// Unified ReAct core loop — shared by both streaming and non-streaming paths.
@@ -499,6 +352,7 @@ impl AgentSnapshot {
         label: String,
         mode: StreamMode,
         recalled: usize,
+        user_prompt_hook_already_run: bool,
         tx: mpsc::Sender<Result<AgentEvent>>,
     ) -> Result<()> {
         // NOTE: execution_mutex is already held by the spawned task
@@ -507,12 +361,28 @@ impl AgentSnapshot {
 
         // ── Pre-loop preparation ─────────────────────────────────────
         let mut state = match phases::prepare::prepare_turn(
-            &self, &context, &tx, &text, &label, mode, recalled,
+            &self,
+            &context,
+            &tx,
+            &text,
+            &label,
+            mode,
+            recalled,
+            user_prompt_hook_already_run,
         )
         .await?
         {
             PrepareOutcome::Continue { task_node_id } => LoopState::new(task_node_id),
-            PrepareOutcome::BlockedAndDone | PrepareOutcome::Abandoned => return Ok(()),
+            PrepareOutcome::BlockedAndDone => return Ok(()),
+            PrepareOutcome::Abandoned => {
+                self.finalize_run(
+                    crate::trace::RunStatus::Cancelled,
+                    None,
+                    Some("event consumer disconnected during preparation"),
+                )
+                .await;
+                return Ok(());
+            }
         };
 
         let agent_name = self.config.agent_name.clone();
@@ -590,6 +460,21 @@ impl AgentSnapshot {
                 match phases::compact::run_compact(&self, &context, &tx, iteration).await? {
                     phases::CompactOutcome::Continue(m) => m,
                     phases::CompactOutcome::Abandoned => {
+                        self.finalize_run(
+                            crate::trace::RunStatus::Cancelled,
+                            None,
+                            Some("event consumer disconnected during compaction"),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                    phases::CompactOutcome::Failed => {
+                        self.finalize_run(
+                            crate::trace::RunStatus::Failed,
+                            None,
+                            Some("context preparation failed"),
+                        )
+                        .await;
                         return Ok(());
                     }
                 };
@@ -602,9 +487,25 @@ impl AgentSnapshot {
             .await?
             {
                 phases::ThinkOutcome::Continue(t) => t,
-                phases::ThinkOutcome::Abandoned
-                | phases::ThinkOutcome::Cancelled
-                | phases::ThinkOutcome::Blocked => {
+                phases::ThinkOutcome::Abandoned | phases::ThinkOutcome::Blocked => {
+                    self.finalize_run(
+                        crate::trace::RunStatus::Cancelled,
+                        None,
+                        Some("event consumer disconnected or intervention blocked the run"),
+                    )
+                    .await;
+                    return Ok(());
+                }
+                phases::ThinkOutcome::Cancelled => {
+                    return Ok(());
+                }
+                phases::ThinkOutcome::Failed => {
+                    self.finalize_run(
+                        crate::trace::RunStatus::Failed,
+                        None,
+                        Some("model response failed"),
+                    )
+                    .await;
                     return Ok(());
                 }
             };
@@ -658,6 +559,7 @@ impl AgentSnapshot {
                 let assistant_draft = phases::with_reasoning_content(
                     Message::assistant(think.content_buffer.clone()),
                     think.reasoning_buffer.clone(),
+                    think.reasoning_blocks.clone(),
                 );
                 if self
                     .drain_steer_into_context(&context, Some(assistant_draft))
@@ -677,6 +579,7 @@ impl AgentSnapshot {
                     IterOutcome::FinalText {
                         answer,
                         reasoning_content,
+                        reasoning_blocks,
                     } => {
                         match phases::finalize::emit_final_text(
                             &self,
@@ -688,6 +591,7 @@ impl AgentSnapshot {
                             ct,
                             answer,
                             reasoning_content,
+                            reasoning_blocks,
                         )
                         .await?
                         {
@@ -709,10 +613,17 @@ impl AgentSnapshot {
                     if self.drain_steer_into_context(&context, None).await > 0 {
                         continue;
                     }
-                    return phases::finalize::finalize_completed_run(
-                        &self, context, &label, &output, iteration, &state, tx,
+                    match phases::finalize::finalize_completed_run(
+                        &self, &context, &label, &output, iteration, &state, &tx,
                     )
-                    .await;
+                    .await?
+                    {
+                        ControlFlow::Continue(()) => {
+                            state.stop_hook_continued = true;
+                            continue;
+                        }
+                        ControlFlow::Break(()) => return Ok(()),
+                    }
                 }
                 // FinalText is only produced by verify_final_text and is
                 // already handled inline in the text branch above. Reaching
@@ -722,6 +633,7 @@ impl AgentSnapshot {
                 IterOutcome::FinalText {
                     answer,
                     reasoning_content,
+                    reasoning_blocks,
                 } => {
                     let pt = 0;
                     let ct = 0;
@@ -735,6 +647,7 @@ impl AgentSnapshot {
                         ct,
                         answer,
                         reasoning_content,
+                        reasoning_blocks,
                     )
                     .await?
                     {
@@ -746,6 +659,12 @@ impl AgentSnapshot {
                     return phases::finalize::finalize_no_response(&self, &state, tx).await;
                 }
                 IterOutcome::Abandoned => {
+                    self.finalize_run(
+                        crate::trace::RunStatus::Cancelled,
+                        None,
+                        Some("event consumer disconnected or tool batch was abandoned"),
+                    )
+                    .await;
                     return Ok(());
                 }
             }
@@ -1681,10 +1600,13 @@ mod tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::FinalAnswer(answer) if answer == "resumed"
-        )));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::FinalAnswer(answer) if answer == "resumed"
+            )),
+            "unexpected resume events: {events:?}"
+        );
 
         let summary = run_store
             .list_all(1)
@@ -2182,6 +2104,7 @@ mod tests {
                 role: Some("assistant".to_string()),
                 content: Some("Hello world".to_string()),
                 reasoning_content: None,
+                reasoning_blocks: None,
                 tool_calls: None,
             }),
             StreamChunk::Terminal {
@@ -2224,6 +2147,7 @@ mod tests {
                 role: Some("assistant".to_string()),
                 content: Some("No usage here".to_string()),
                 reasoning_content: None,
+                reasoning_blocks: None,
                 tool_calls: None,
             }),
             StreamChunk::Terminal {
@@ -2315,13 +2239,13 @@ mod tests {
     // fixture is red until M3 lands the finish_reason/terminal check; it is
     // pinned here so the fix lands with a failing-then-passing test.
     #[tokio::test]
-    #[ignore = "M3: truncated stream terminal check (Q-FLT-01-P1-01); red until the fix lands"]
     async fn truncated_stream_is_not_accepted_as_complete() {
         let llm = MockLlmClient::new().with_stream_script(vec![
             StreamChunk::Delta(DeltaMessage {
                 role: Some("assistant".to_string()),
                 content: Some("Partial answer that never finished".to_string()),
                 reasoning_content: None,
+                reasoning_blocks: None,
                 tool_calls: None,
             }),
             StreamChunk::Err(ReactError::Llm(Box::new(LlmError::NetworkError(

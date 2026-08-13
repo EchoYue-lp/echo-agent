@@ -64,7 +64,8 @@ pub struct WorkflowStep {
 /// let output = wf.run("Hello world").await?;
 /// println!("Final result: {}", output.result);
 /// for s in &output.steps {
-///     println!("  {} ({:?}): {}", s.agent_name, s.elapsed, &s.output[..s.output.len().min(80)]);
+///     let preview: String = s.output.chars().take(80).collect();
+///     println!("  {} ({:?}): {}", s.agent_name, s.elapsed, preview);
 /// }
 /// # Ok(())
 /// # }

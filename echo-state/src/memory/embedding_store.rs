@@ -30,6 +30,7 @@
 //! # }
 //! ```
 
+use super::store::namespace_key;
 use crate::util::expand_tilde;
 use echo_core::error::{MemoryError, Result};
 pub use echo_core::memory::embedder::Embedder;
@@ -47,7 +48,7 @@ use tracing::{debug, info, warn};
 /// 内存向量索引：namespace_key → key → 嵌入向量
 #[derive(Default)]
 struct VecIndex {
-    /// namespace_key（如 "alice/memories"）→ key（UUID）→ 向量
+    /// JSON-encoded namespace components → key (UUID) → vector.
     data: HashMap<String, HashMap<String, Vec<f32>>>,
 }
 
@@ -220,7 +221,7 @@ impl EmbeddingStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<StoreItem>> {
-        let ns_key = namespace.join("/");
+        let ns_key = namespace_key(namespace);
 
         let query_vec = match self.embedder.embed(query).await {
             Ok(v) => v,
@@ -240,9 +241,9 @@ impl EmbeddingStore {
             let mut scored: Vec<(f32, String)> = ns_vecs
                 .iter()
                 .take(self.max_candidates)
-                .map(|(key, vec)| (cosine_similarity(&query_vec, vec), key.clone()))
-                .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                .map(|(key, vec)| Ok((cosine_similarity(&query_vec, vec)?, key.clone())))
+                .collect::<Result<Vec<_>>>()?;
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0));
             scored.truncate(limit);
             scored
         };
@@ -339,7 +340,13 @@ impl Store for EmbeddingStore {
             let text = Self::extract_text(&value);
             match self.embedder.embed(&text).await {
                 Ok(vec) => {
-                    let ns_key = namespace.join("/");
+                    if vec.is_empty() || vec.iter().any(|value| !value.is_finite()) {
+                        return Err(MemoryError::SerializationError(
+                            "embedder returned an empty or non-finite vector".to_string(),
+                        )
+                        .into());
+                    }
+                    let ns_key = namespace_key(namespace);
                     debug!(ns = %ns_key, key = %key, dims = vec.len(), "📌 向量索引已更新");
                     self.index.write().await.insert(&ns_key, key, vec);
                     // 批量刷盘：不在每次 put 时立即写盘，减少 IO 开销。
@@ -375,7 +382,7 @@ impl Store for EmbeddingStore {
         Box::pin(async move {
             let found = self.inner.delete(namespace, key).await?;
             if found {
-                let ns_key = namespace.join("/");
+                let ns_key = namespace_key(namespace);
                 self.index.write().await.remove(&ns_key, key);
                 // 批量刷盘：调用者应定期调用 `flush_vector_index()` 持久化。
             }
@@ -472,18 +479,40 @@ impl Store for EmbeddingStore {
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 
-/// 余弦相似度：两向量维度不匹配或为零向量时返回 0.0
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+/// Compute cosine similarity, rejecting corrupt or incompatible embeddings.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     if a.len() != b.len() || a.is_empty() {
-        return 0.0;
+        return Err(MemoryError::SerializationError(format!(
+            "embedding dimension mismatch: query {}, stored {}",
+            a.len(),
+            b.len()
+        ))
+        .into());
+    }
+    if a.iter().chain(b).any(|value| !value.is_finite()) {
+        return Err(MemoryError::SerializationError(
+            "embedding contains a non-finite value".to_string(),
+        )
+        .into());
     }
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
+        Err(
+            MemoryError::SerializationError("embedding vector has zero magnitude".to_string())
+                .into(),
+        )
     } else {
-        dot / (norm_a * norm_b)
+        let similarity = dot / (norm_a * norm_b);
+        if similarity.is_finite() {
+            Ok(similarity)
+        } else {
+            Err(
+                MemoryError::SerializationError("embedding similarity is non-finite".to_string())
+                    .into(),
+            )
+        }
     }
 }
 
@@ -511,60 +540,78 @@ mod tests {
     use crate::memory::store::InMemoryStore;
     use serde_json::json;
 
-    async fn make_store() -> EmbeddingStore {
+    fn make_store() -> Result<EmbeddingStore> {
         let inner = Arc::new(InMemoryStore::new());
-        let embedder = Arc::new(MockEmbedder::new(4));
-        EmbeddingStore::new(inner, embedder)
+        let embedder = Arc::new(MockEmbedder::new(4)?);
+        Ok(EmbeddingStore::new(inner, embedder))
     }
 
     #[tokio::test]
-    async fn test_put_and_semantic_search() {
-        let store = make_store().await;
+    async fn test_put_and_semantic_search() -> Result<()> {
+        let store = make_store()?;
         let ns = &["test", "ns"];
 
         store
             .put(ns, "k1", json!({"content": "Rust programming"}))
-            .await
-            .unwrap();
+            .await?;
         store
             .put(ns, "k2", json!({"content": "Python machine learning"}))
-            .await
-            .unwrap();
+            .await?;
 
         let results = store
             .search_with(ns, SearchQuery::semantic("Rust", 5))
-            .await
-            .unwrap();
+            .await?;
         assert!(!results.is_empty());
-        assert!(results[0].score.is_some());
+        assert!(results.first().is_some_and(|result| result.score.is_some()));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_delete_removes_from_index() {
-        let store = make_store().await;
+    async fn test_delete_removes_from_index() -> Result<()> {
+        let store = make_store()?;
         let ns = &["test", "del"];
 
         store
             .put(ns, "k1", json!({"content": "hello world"}))
-            .await
-            .unwrap();
-        store.delete(ns, "k1").await.unwrap();
+            .await?;
+        store.delete(ns, "k1").await?;
 
         // 向量索引中已无该条目
         let index = store.index.read().await;
-        let ns_vecs = index.get_namespace("test/del");
+        let ns_key = namespace_key(ns);
+        let ns_vecs = index.get_namespace(&ns_key);
         assert!(ns_vecs.map(|m| m.is_empty()).unwrap_or(true));
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_cosine_similarity() {
         let a = vec![1.0f32, 0.0, 0.0];
         let b = vec![1.0f32, 0.0, 0.0];
-        let sim = cosine_similarity(&a, &b);
+        let sim = cosine_similarity(&a, &b).unwrap_or_default();
         assert!((sim - 1.0).abs() < 1e-5);
 
         let c = vec![0.0f32, 1.0, 0.0];
-        let sim2 = cosine_similarity(&a, &c);
+        let sim2 = cosine_similarity(&a, &c).unwrap_or_default();
         assert!((sim2 - 0.0).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn slash_in_namespace_component_does_not_alias_nested_namespace() -> Result<()> {
+        let store = make_store()?;
+        store
+            .put(&["a/b"], "flat", json!({"content": "flat"}))
+            .await?;
+        store
+            .put(&["a", "b"], "nested", json!({"content": "nested"}))
+            .await?;
+
+        let index = store.index.read().await;
+        let flat_key = namespace_key(&["a/b"]);
+        let nested_key = namespace_key(&["a", "b"]);
+        assert_ne!(flat_key, nested_key);
+        assert!(index.get_namespace(&flat_key).is_some());
+        assert!(index.get_namespace(&nested_key).is_some());
+        Ok(())
     }
 }

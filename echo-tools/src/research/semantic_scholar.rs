@@ -130,7 +130,13 @@ impl Tool for SemanticScholarSearchTool {
 
             let status = response.status();
             if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
+                let body = crate::http_body::read_bounded_text(
+                    response,
+                    crate::http_body::MAX_API_RESPONSE_BYTES,
+                    TOOL_NAME,
+                    None,
+                )
+                .await?;
                 return Err(ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
                     message: format!("Semantic Scholar API error ({}): {}", status, body),
@@ -138,13 +144,13 @@ impl Tool for SemanticScholarSearchTool {
                 .into());
             }
 
-            let json: Value = response
-                .json()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to parse Semantic Scholar response: {}", e),
-                })?;
+            let json: Value = crate::http_body::read_bounded_json(
+                response,
+                crate::http_body::MAX_API_RESPONSE_BYTES,
+                TOOL_NAME,
+                None,
+            )
+            .await?;
 
             let total = json.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
             let papers = json

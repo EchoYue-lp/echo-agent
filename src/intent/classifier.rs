@@ -42,8 +42,8 @@ use std::sync::Arc;
 /// ```
 #[derive(Clone)]
 pub struct KeywordClassifier {
-    /// trigger_word -> skill_name (case-insensitive)
-    skill_keywords: HashMap<String, String>,
+    /// trigger_word -> all owning skill names (case-insensitive)
+    skill_keywords: HashMap<String, Vec<String>>,
     /// trigger phrases for DirectAnswer (case-insensitive)
     direct_keywords: Vec<String>,
     /// Whether DirectAnswer routing is enabled
@@ -72,8 +72,11 @@ impl KeywordClassifier {
     /// from `SKILL.md` frontmatter.
     pub fn add_skill_keywords(&mut self, skill_name: &str, trigger_words: &[&str]) {
         for word in trigger_words {
-            self.skill_keywords
-                .insert(word.to_lowercase(), skill_name.to_string());
+            let owners = self.skill_keywords.entry(word.to_lowercase()).or_default();
+            if !owners.iter().any(|owner| owner == skill_name) {
+                owners.push(skill_name.to_string());
+                owners.sort();
+            }
         }
     }
 
@@ -107,19 +110,29 @@ impl KeywordClassifier {
         //    Multiple triggers matching the same skill boosts confidence.
         //    If two skills score similarly, confidence drops (ambiguous input).
         let mut skill_scores: HashMap<&str, f32> = HashMap::new();
-        for (trigger, skill) in &self.skill_keywords {
+        for (trigger, skills) in &self.skill_keywords {
             if let Some(weight) = Self::match_weight(&lower, trigger) {
-                *skill_scores.entry(skill.as_str()).or_insert(0.0) += weight;
+                for skill in skills {
+                    *skill_scores.entry(skill.as_str()).or_insert(0.0) += weight;
+                }
             }
         }
 
         if !skill_scores.is_empty() {
             // Sort by score descending
             let mut scored: Vec<(&str, f32)> = skill_scores.into_iter().collect();
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
 
-            let (best_skill, best_score) = scored[0];
+            let Some((best_skill, best_score)) = scored.first().copied() else {
+                return Intent::Fallback;
+            };
             let runner_up_score = scored.get(1).map(|(_, s)| *s).unwrap_or(0.0);
+            if scored
+                .get(1)
+                .is_some_and(|(_, score)| (*score - best_score).abs() <= f32::EPSILON)
+            {
+                return Intent::Fallback;
+            }
 
             // Confidence based on:
             // - Absolute score (higher = more triggers matched)
@@ -318,7 +331,12 @@ impl LlmIntentClassifier {
                     } else {
                         format!(
                             " (examples: {})",
-                            s.example_triggers[..s.example_triggers.len().min(3)].join(", ")
+                            s.example_triggers
+                                .iter()
+                                .take(3)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         )
                     };
                     format!("{}. {} — {}{}", i + 1, s.name, s.description, examples)
@@ -366,7 +384,8 @@ Respond ONLY with valid JSON (no markdown):
             let confidence = parsed
                 .get("confidence")
                 .and_then(|v| v.as_f64())
-                .unwrap_or(0.5) as f32;
+                .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                .unwrap_or(0.0) as f32;
 
             match parsed
                 .get("intent")

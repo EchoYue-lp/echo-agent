@@ -5,11 +5,12 @@
 
 use crate::error::{AgentError, ReactError, Result};
 use echo_core::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationToken};
+use echo_core::error::AgentTerminalKind;
 use echo_core::llm::types::Message;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
@@ -274,14 +275,48 @@ pub struct TeammateHandle {
 ///
 /// The subagent continues on a spawned task; lifecycle events
 /// (`DispatchStarted` / `DispatchCompleted` / `DispatchFailed`) still fire on
-/// the registry event bus. Unlike [`TeammateHandle`], this does not expose a
-/// join handle — callers observe completion via events / UI.
+/// the registry event bus. The handle also owns cancellation and the eventual
+/// result so direct API callers do not have to depend on a lossy event stream.
 #[derive(Debug, Clone)]
 pub struct BackgroundSubagentHandle {
     /// Stable execution id (also on `DispatchStarted.execution_id`).
     pub execution_id: String,
     /// Target subagent name.
     pub agent_name: String,
+    cancel: CancellationToken,
+    join_handle: Arc<Mutex<Option<tokio::task::JoinHandle<Result<SubagentResult>>>>>,
+}
+
+impl BackgroundSubagentHandle {
+    /// Request cancellation of the background dispatch.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Check whether the spawned dispatch has reached a terminal state.
+    pub fn is_finished(&self) -> bool {
+        self.join_handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+
+    /// Await and consume the background result.
+    ///
+    /// Cloned handles share one result slot; only the first `join` call
+    /// consumes it. Later calls return an explicit error.
+    pub async fn join(&self) -> Result<SubagentResult> {
+        let handle = self
+            .join_handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| ReactError::Other("Background result already consumed".to_string()))?;
+        handle
+            .await
+            .map_err(|error| ReactError::Other(format!("Background join error: {error}")))?
+    }
 }
 
 impl TeammateHandle {
@@ -780,6 +815,13 @@ impl SubagentExecutor {
         }
     }
 
+    fn dispatch_owned(
+        self,
+        req: DispatchRequest,
+    ) -> futures::future::BoxFuture<'static, Result<SubagentResult>> {
+        Box::pin(async move { self.dispatch(req).await })
+    }
+
     /// Clone internals so a background subagent can own an executor on a spawned task.
     fn clone_for_spawn(&self) -> Self {
         Self {
@@ -849,21 +891,22 @@ impl SubagentExecutor {
         req.background = true;
         let agent_name = req.agent_name.clone();
         let agent_name_for_handle = agent_name.clone();
+        let cancel = req.cancel.clone();
         let spawned = self.clone_for_spawn();
 
-        tokio::spawn(async move {
-            if let Err(e) = spawned.dispatch(req).await {
-                warn!(
-                    agent = %agent_name,
-                    error = %e,
-                    "background subagent dispatch failed"
-                );
+        let join_handle = tokio::spawn(async move {
+            let result = spawned.dispatch(req).await;
+            if let Err(error) = &result {
+                warn!(agent = %agent_name, error = %error, "background subagent dispatch failed");
             }
+            result
         });
 
         Ok(BackgroundSubagentHandle {
             execution_id,
             agent_name: agent_name_for_handle,
+            cancel,
+            join_handle: Arc::new(Mutex::new(Some(join_handle))),
         })
     }
 
@@ -993,7 +1036,7 @@ impl SubagentExecutor {
         &self,
         req: &DispatchRequest,
     ) -> std::result::Result<SubagentResult, crate::error::ReactError> {
-        use super::team::{ArcAgentBox, TeamAgent, TeamExecutionResult};
+        use super::team::{ArcAgentBox, TeamAgent, TeamDispatchFn, TeamExecutionResult};
 
         let registered = self.registry.get(&req.agent_name).await.ok_or_else(|| {
             crate::error::ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
@@ -1028,6 +1071,61 @@ impl SubagentExecutor {
                 ))
             })?;
 
+        let team_parent = req.agent_name.clone();
+        let team_cancel = req.cancel.child_token();
+        let team_runtime = req.runtime_context.clone();
+        let team_policy = req.delegation_policy;
+        let spawned = self.clone_for_spawn();
+        let member_dispatch: TeamDispatchFn = Arc::new(move |agent_name, task| {
+            let executor = spawned.clone_for_spawn();
+            let parent_agent = team_parent.clone();
+            let cancel = team_cancel.child_token();
+            let runtime_context = team_runtime.clone().map(|mut context| {
+                context.execution_id =
+                    Some(format!("team-member-{}", uuid::Uuid::new_v4().as_simple()));
+                context.isolation_id = context
+                    .run_id
+                    .as_ref()
+                    .map(|run_id| format!("{run_id}:{agent_name}"));
+                context
+            });
+            Box::pin(async move {
+                let registered = executor
+                    .registry
+                    .get(&agent_name)
+                    .await
+                    .ok_or_else(|| format!("Team subagent '{agent_name}' not registered"))?;
+                if registered.definition.execution_mode == ExecutionMode::Team {
+                    return Err(format!(
+                        "Nested Team mode is not supported for member '{agent_name}'"
+                    ));
+                }
+                let delegation_policy = team_policy.child_policy().ok_or_else(|| {
+                    format!(
+                        "Delegation depth exceeded before Team member '{agent_name}' (max {})",
+                        team_policy.max_delegate_depth
+                    )
+                })?;
+                executor
+                    .dispatch_owned(DispatchRequest {
+                        agent_name,
+                        task,
+                        mode_override: None,
+                        cancel,
+                        parent_agent,
+                        parent_context: None,
+                        delegation_policy,
+                        runtime_context,
+                        message: None,
+                        prompt_payload: None,
+                        constraints: Vec::new(),
+                        background: false,
+                    })
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+        });
+
         let mut builder = TeamAgent::builder()
             .manager(
                 &spec.manager,
@@ -1035,6 +1133,9 @@ impl SubagentExecutor {
                 manager_def,
             )
             .strategy(spec.strategy.clone())
+            .config(spec.config.clone())
+            .cancel(req.cancel.child_token())
+            .member_dispatch(member_dispatch)
             .run_id(
                 req.runtime_context
                     .as_ref()
@@ -1165,7 +1266,7 @@ impl SubagentExecutor {
             .or_else(|| std::env::current_dir().ok());
         // Multimodal path: when a Message is supplied, run it so the subagent
         // sees images/files. Falls back to the text task otherwise.
-        let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation);
+        let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
         let raw_stream = if let Some(msg) = message {
             agent
                 .execute_stream_message_with_invocation_context(
@@ -1184,7 +1285,6 @@ impl SubagentExecutor {
         let mut in_thinking = false;
         let mut prompt_tokens: usize = 0;
         let mut completion_tokens: usize = 0;
-        let mut cancelled = false;
         let mut usage_stats = super::usage::LlmUsageStats::default();
         let mut pending_verification = HashMap::<String, String>::new();
         let mut pending_file_access = HashMap::<String, (bool, String)>::new();
@@ -1397,18 +1497,32 @@ impl SubagentExecutor {
                 }
                 AgentEvent::FinalAnswer(_) => {}
                 AgentEvent::Cancelled => {
-                    cancelled = true;
-                    break;
+                    return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                        "Subagent '{subagent}' cancelled"
+                    )))));
                 }
-                AgentEvent::Error { source, message } => {
-                    return Err(ReactError::Other(format!("{source}: {message}")));
+                AgentEvent::Error {
+                    source,
+                    message,
+                    failure,
+                } => {
+                    return match failure.terminal_kind {
+                        AgentTerminalKind::Cancelled => {
+                            Err(ReactError::Agent(Box::new(AgentError::Cancelled(message))))
+                        }
+                        AgentTerminalKind::TimedOut => {
+                            Err(ReactError::Agent(Box::new(AgentError::Timeout(message))))
+                        }
+                        AgentTerminalKind::PermissionDenied => Err(ReactError::Agent(Box::new(
+                            AgentError::PermissionDenied(message),
+                        ))),
+                        AgentTerminalKind::Failed => {
+                            Err(ReactError::Other(format!("{source}: {message}")))
+                        }
+                    };
                 }
                 _ => {}
             }
-        }
-
-        if cancelled {
-            output = "Cancelled during execution".to_string();
         }
 
         let tokens_used = Some(prompt_tokens.saturating_add(completion_tokens));
@@ -1419,11 +1533,7 @@ impl SubagentExecutor {
             None
         };
 
-        let status = if cancelled {
-            SubagentStatus::Cancelled
-        } else {
-            SubagentStatus::Completed
-        };
+        let status = SubagentStatus::Completed;
         let mut result = SubagentResult {
             agent_name: subagent.to_string(),
             output,
@@ -1440,9 +1550,6 @@ impl SubagentExecutor {
             usage,
         }
         .with_structured(execution_id.as_deref(), artifact_base_dir.as_deref());
-        if cancelled {
-            result.outcome.remaining_work = vec!["cancelled during execution".to_string()];
-        }
         merge_observed_evidence(
             &mut result.outcome,
             observed_verification,
@@ -1552,24 +1659,60 @@ impl SubagentExecutor {
 
     /// Fork mode: acquire semaphore, spawn task, await with timeout.
     async fn dispatch_fork(&self, req: &DispatchRequest) -> Result<SubagentResult> {
-        let permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| ReactError::Other(format!("Semaphore error: {}", e)))?;
-
         let registered =
             self.registry.get(&req.agent_name).await.ok_or_else(|| {
                 ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
             })?;
-
-        let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
-
         let timeout_secs = if registered.definition.timeout_secs > 0 {
             registered.definition.timeout_secs
         } else {
             self.config.default_timeout_secs
+        };
+        let deadline = (timeout_secs > 0)
+            .then(|| tokio::time::Instant::now() + Duration::from_secs(timeout_secs));
+        let permit = tokio::select! {
+            biased;
+            _ = req.cancel.cancelled() => {
+                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                    "Fork subagent '{}' cancelled while waiting for capacity",
+                    req.agent_name
+                )))));
+            }
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                return Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
+                    "Fork subagent '{}' timed out after {}s while waiting for capacity",
+                    req.agent_name, timeout_secs
+                )))));
+            }
+            permit = self.semaphore.clone().acquire_owned() => permit
+                .map_err(|error| ReactError::Other(format!("Semaphore error: {error}")))?,
+        };
+
+        let agent_arc = tokio::select! {
+            biased;
+            _ = req.cancel.cancelled() => {
+                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                    "Fork subagent '{}' cancelled during initialization",
+                    req.agent_name
+                )))));
+            }
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                return Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
+                    "Fork subagent '{}' timed out after {}s during initialization",
+                    req.agent_name, timeout_secs
+                )))));
+            }
+            agent = self.isolated_dispatch_agent(&req.agent_name) => agent?,
         };
 
         let agent_name = req.agent_name.clone();
@@ -1628,11 +1771,11 @@ impl SubagentExecutor {
             None
         };
         if isolate_workspace && data_workspace_factory.is_none() {
-            tracing::warn!(
-                subagent = %agent_name,
-                "Subagent declares isolate_workspace but no DataWorkspaceFactory is configured; \
-                 running without a workspace"
-            );
+            return Err(ReactError::Other(format!(
+                "Subagent '{}' declares isolate_workspace but no DataWorkspaceFactory is configured; \
+                 refusing to run without isolation",
+                agent_name
+            )));
         }
         let runtime_run_id = runtime_context
             .as_ref()
@@ -1769,14 +1912,14 @@ impl SubagentExecutor {
             // the same `[workspace]` shape planned invocations use.
             append_working_dir_context(&mut enhanced_task, invocation.working_dir.as_deref());
 
-            let mut result = if timeout_secs > 0 {
+            let mut result = if let Some(deadline) = deadline {
                 tokio::select! {
                     biased;
                     _ = execution_cancel.cancelled() => Err(ReactError::Agent(Box::new(
                         AgentError::Cancelled(format!("Fork subagent '{}' cancelled", agent_name))
                     ))),
-                    r = tokio::time::timeout(
-                        Duration::from_secs(timeout_secs),
+                    r = tokio::time::timeout_at(
+                        deadline,
                         Self::execute_agent_streaming(
                             registry,
                             agent,
@@ -1891,6 +2034,7 @@ impl SubagentExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::subagent::SubagentDefinition;
     use crate::agent::subagent::prompt::{
         CompiledSubagentSystemPrompt, PromptDiagnostics, SubagentSystemPromptInput,
     };
@@ -2139,6 +2283,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fork_cancelled_while_queued_never_starts_agent() -> std::result::Result<(), String> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let agent = MockAgent::new("queued").with_response("should not run");
+        let observed = agent.clone();
+        let mut definition = SubagentDefinition::new("queued", "Queued agent");
+        definition.execution_mode = ExecutionMode::Fork;
+        registry.register(definition, Box::new(agent)).await;
+        let executor = Arc::new(SubagentExecutor::new(
+            registry,
+            SubagentExecutorConfig {
+                max_concurrent_forks: 1,
+                default_timeout_secs: 30,
+                ..SubagentExecutorConfig::default()
+            },
+        ));
+        let permit = Arc::clone(&executor.semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|error| error.to_string())?;
+        let cancel = CancellationToken::new();
+        let request = DispatchRequest {
+            agent_name: "queued".to_string(),
+            task: "must not start".to_string(),
+            mode_override: None,
+            cancel: cancel.clone(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            prompt_payload: None,
+            constraints: Vec::new(),
+            background: false,
+        };
+        let execution = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move { executor.dispatch(request).await }
+        });
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        drop(permit);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| "cancelled queued dispatch did not terminate".to_string())?
+            .map_err(|error| error.to_string())?;
+        assert!(result.is_err());
+        assert_eq!(observed.call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn dispatch_uses_injected_prompt_compiler() -> Result<()> {
         let registry = Arc::new(SubagentRegistry::new());
         let executor = SubagentExecutor::new(
@@ -2178,7 +2374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_background_returns_before_completion() {
+    async fn dispatch_background_returns_before_completion() -> Result<()> {
         let (registry, executor) = make_executor().await;
         let agent = MockAgent::new("slow")
             .with_delay_ms(200)
@@ -2203,7 +2399,7 @@ mod tests {
         };
 
         let started_at = Instant::now();
-        let handle = executor.dispatch_background(req).await.unwrap();
+        let handle = executor.dispatch_background(req).await?;
         assert!(
             started_at.elapsed() < Duration::from_millis(100),
             "dispatch_background must return before the slow subagent finishes"
@@ -2211,6 +2407,7 @@ mod tests {
         assert!(!handle.execution_id.is_empty());
         assert_eq!(handle.agent_name, "slow");
         assert!(handle.execution_id.starts_with("agent_tool-"));
+        assert!(!handle.is_finished());
 
         let mut saw_started_bg = false;
         let mut saw_completed = false;
@@ -2247,6 +2444,44 @@ mod tests {
             saw_completed,
             "expected DispatchCompleted after background work"
         );
+        let result = handle.join().await?;
+        assert!(result.output.contains("bg done"));
+        assert!(
+            handle.join().await.is_err(),
+            "result must only be consumed once"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn background_handle_cancels_dispatch() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                super::super::types::SubagentDefinition::new("slow", "Slow subagent"),
+                Box::new(MockAgent::new("slow").with_delay_ms(1_000)),
+            )
+            .await;
+        let handle = executor
+            .dispatch_background(DispatchRequest {
+                agent_name: "slow".into(),
+                task: "wait".into(),
+                mode_override: None,
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".into(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                prompt_payload: None,
+                constraints: Vec::new(),
+                background: false,
+            })
+            .await?;
+        handle.cancel();
+        let result = handle.join().await?;
+        assert_eq!(result.outcome.status, SubagentStatus::Cancelled);
+        Ok(())
     }
 
     #[tokio::test]
@@ -2480,7 +2715,11 @@ mod tests {
         registry
             .register(
                 super::super::types::SubagentDefinition::new("slow-cancel", "Slow cancel"),
-                Box::new(MockAgent::new("slow-cancel").with_delay_ms(500)),
+                Box::new(
+                    MockAgent::new("slow-cancel")
+                        .with_delay_ms(500)
+                        .with_default_success("completed"),
+                ),
             )
             .await;
         let mut events = registry.event_bus().subscribe();
@@ -2532,7 +2771,11 @@ mod tests {
         registry
             .register(
                 definition,
-                Box::new(MockAgent::new("slow-timeout").with_delay_ms(1_500)),
+                Box::new(
+                    MockAgent::new("slow-timeout")
+                        .with_delay_ms(1_500)
+                        .with_default_success("completed"),
+                ),
             )
             .await;
         let mut events = registry.event_bus().subscribe();
@@ -2998,7 +3241,7 @@ mod tests {
         registry.register(mgr_def, Box::new(manager)).await;
 
         // Subagent: returns a canned result.
-        let subagent = MockAgent::new("wk").with_response("subagent-out");
+        let subagent = MockAgent::new("wk").with_default_success("subagent-out");
         let w_def = super::super::types::SubagentDefinition::new("wk", "Subagent");
         registry.register(w_def, Box::new(subagent)).await;
 

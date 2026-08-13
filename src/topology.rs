@@ -44,6 +44,8 @@ use std::sync::{Arc, RwLock};
 /// Node type
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeType {
+    /// General top-level Agent
+    Agent,
     /// Orchestrator Agent
     Orchestrator,
     /// Subagent Agent
@@ -197,7 +199,7 @@ impl TopologyTracker {
     /// Record a call relationship (with duration)
     pub fn record_call_with_duration(&self, from: &str, to: &str, label: &str, duration_ms: u64) {
         // Ensure the node exists
-        self.ensure_node(from, NodeType::Subagent);
+        self.ensure_node(from, NodeType::Agent);
         self.ensure_node(to, NodeType::Tool);
 
         if let Ok(mut edges) = self.edges.write() {
@@ -287,6 +289,7 @@ impl TopologyTracker {
         if let Ok(nodes) = self.nodes.read() {
             for node in nodes.values() {
                 let icon = match node.node_type {
+                    NodeType::Agent => "🤖",
                     NodeType::Orchestrator => "🎯",
                     NodeType::Subagent => "⚙️",
                     NodeType::Planner => "📐",
@@ -294,6 +297,7 @@ impl TopologyTracker {
                     NodeType::Tool => "🔧",
                 };
                 let shape = match node.node_type {
+                    NodeType::Agent => format!("{}[\"{}  {}\"]", node.id, icon, node.label),
                     NodeType::Orchestrator => {
                         format!("{}{{{{\"{}  {}\"}}}}", node.id, icon, node.label)
                     }
@@ -343,6 +347,7 @@ impl TopologyTracker {
         if let Ok(nodes) = self.nodes.read() {
             for node in nodes.values() {
                 let (shape, color) = match node.node_type {
+                    NodeType::Agent => ("box", "#42A5F5"),
                     NodeType::Orchestrator => ("diamond", "#FFB74D"),
                     NodeType::Subagent => ("box", "#64B5F6"),
                     NodeType::Planner => ("hexagon", "#81C784"),
@@ -489,7 +494,7 @@ impl AgentCallback for TopologyCallback {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             self.tracker
-                .add_node(TopologyNode::new(agent, NodeType::Subagent));
+                .add_node(TopologyNode::new(agent, NodeType::Agent));
             self.tracker
                 .add_node(TopologyNode::new(tool, NodeType::Tool));
             self.tracker.record_call(agent, tool, "call");

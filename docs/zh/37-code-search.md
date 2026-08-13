@@ -55,7 +55,7 @@ CodeSearchTool                        ← 实现 Tool trait
 echo_tools = { version = "0.2", features = ["files"] }
 ```
 
-注册方式（由 `echo_tools::registry` 自动完成）：
+注册由 `echo_agent::tools::register_all_tools` 自动完成：
 
 ```rust
 #[cfg(feature = "files")]
@@ -125,7 +125,7 @@ tool_manager.register(Box::new(CodeSearchTool::new()));
 
 ```rust
 use echo_agent::prelude::*;
-use echo_tools::files::code_search::CodeSearchTool;
+use echo_agent::tools::files::code_search::CodeSearchTool;
 
 let mut agent = ReactAgentBuilder::new()
     .model("qwen3-max")
@@ -143,7 +143,7 @@ let answer = agent
 ### 限定搜索目录
 
 ```rust
-use echo_tools::files::code_search::CodeSearchTool;
+use echo_agent::tools::files::code_search::CodeSearchTool;
 
 // 将搜索限制在指定目录下
 agent.add_tool(Box::new(CodeSearchTool::with_base_dir("/workspace/my-project")));
@@ -237,7 +237,7 @@ src/tools/grep.rs:91:     fn execute(&self, parameters: ToolParameters) -> BoxFu
 
 ```rust
 use echo_agent::prelude::*;
-use echo_tools::files::code_search::CodeSearchTool;
+use echo_agent::tools::files::code_search::CodeSearchTool;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

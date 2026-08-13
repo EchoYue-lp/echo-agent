@@ -4,7 +4,7 @@
 //!
 //! | Layer | Implementation | Scope |
 //! |------|------|--------|
-//! | Short-term context | [`compression::ContextManager`] | Within a single `execute()` call |
+//! | Short-term context | [`crate::compression::ContextManager`] | Within a single `execute()` call |
 //! | Conversation history | [`ConversationStore`] / `SqliteConversationStore` | Transcript projection, history browsing, multi-user isolation |
 //! | Long-term memory | [`Store`] / [`FileStore`] / `SqliteStore` | Cross-session, cross-user sharing |
 //!
@@ -66,9 +66,13 @@ mod test_utils {
     }
 
     impl MockEmbedder {
-        pub fn new(dimension: usize) -> Self {
-            assert!(dimension > 0);
-            Self { dimension }
+        pub fn new(dimension: usize) -> Result<Self> {
+            if dimension == 0 {
+                return Err(echo_core::error::ReactError::Other(
+                    "mock embedder dimension must be greater than zero".to_string(),
+                ));
+            }
+            Ok(Self { dimension })
         }
     }
 

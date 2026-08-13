@@ -9,13 +9,32 @@ use echo_core::agent::Agent;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, info, warn};
 
 use super::events::SubagentEventBus;
 use super::types::{RegisteredSubagent, SubagentDefinition};
 
-type AgentMap = Arc<RwLock<HashMap<String, Arc<dyn Agent>>>>;
+struct RegistryEntry {
+    definition: SubagentDefinition,
+    agent: Option<Arc<dyn Agent>>,
+    factory: Option<Arc<dyn AgentFactory>>,
+    revision: u64,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    entries: HashMap<String, RegistryEntry>,
+    next_revision: u64,
+}
+
+impl RegistryState {
+    fn next_revision(&mut self) -> u64 {
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.next_revision
+    }
+}
 
 // ── Agent Factory ─────────────────────────────────────────────────────────────
 
@@ -70,12 +89,10 @@ where
 /// - Factory support for lazy instantiation
 /// - Lifecycle events
 pub struct SubagentRegistry {
-    /// Agent instances (compatible with existing SubAgentMap).
-    agents: AgentMap,
-    /// Definitions for each registered agent.
-    definitions: Arc<RwLock<HashMap<String, SubagentDefinition>>>,
-    /// Factory functions for lazy instantiation.
-    factories: Arc<RwLock<HashMap<String, Arc<dyn AgentFactory>>>>,
+    /// One atomic record per name keeps definition and executable generation aligned.
+    state: Arc<RwLock<RegistryState>>,
+    executable_catalog: Arc<std::sync::RwLock<Vec<SubagentDefinition>>>,
+    catalog_revision: Arc<AtomicU64>,
     /// Names currently being instantiated (prevents double-creation races).
     instantiating: Arc<RwLock<HashSet<String>>>,
     /// Notifier for waiters on factory instantiation completion.
@@ -88,9 +105,9 @@ impl SubagentRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            agents: AgentMap::new(RwLock::new(HashMap::new())),
-            definitions: Arc::new(RwLock::new(HashMap::new())),
-            factories: Arc::new(RwLock::new(HashMap::new())),
+            state: Arc::new(RwLock::new(RegistryState::default())),
+            executable_catalog: Arc::new(std::sync::RwLock::new(Vec::new())),
+            catalog_revision: Arc::new(AtomicU64::new(0)),
             instantiating: Arc::new(RwLock::new(HashSet::new())),
             instantiating_done: Arc::new(Notify::new()),
             event_bus: SubagentEventBus::new(),
@@ -100,9 +117,9 @@ impl SubagentRegistry {
     /// Create with a specific event bus.
     pub fn with_event_bus(event_bus: SubagentEventBus) -> Self {
         Self {
-            agents: AgentMap::new(RwLock::new(HashMap::new())),
-            definitions: Arc::new(RwLock::new(HashMap::new())),
-            factories: Arc::new(RwLock::new(HashMap::new())),
+            state: Arc::new(RwLock::new(RegistryState::default())),
+            executable_catalog: Arc::new(std::sync::RwLock::new(Vec::new())),
+            catalog_revision: Arc::new(AtomicU64::new(0)),
             instantiating: Arc::new(RwLock::new(HashSet::new())),
             instantiating_done: Arc::new(Notify::new()),
             event_bus,
@@ -115,22 +132,50 @@ impl SubagentRegistry {
     pub fn from_subagent_map(map: SubAgentMap) -> Self {
         let registry = Self::new();
         if let Ok(agents) = map.read() {
+            let Ok(mut state) = registry.state.try_write() else {
+                return registry;
+            };
             for (name, agent) in agents.iter() {
                 let def = SubagentDefinition::simple_sync(name.clone());
-                // We can't do async writes here, so we use blocking inserts
-                // into the Arc<RwLock> maps. Since we just created the registry,
-                // there are no other references yet.
-                let agents_map = registry.agents.clone();
-                let definitions_map = registry.definitions.clone();
-                if let Ok(mut a) = agents_map.try_write() {
-                    a.insert(name.clone(), agent.clone());
-                }
-                if let Ok(mut d) = definitions_map.try_write() {
-                    d.insert(name.clone(), def);
-                }
+                let revision = state.next_revision();
+                state.entries.insert(
+                    name.clone(),
+                    RegistryEntry {
+                        definition: def,
+                        agent: Some(agent.clone()),
+                        factory: None,
+                        revision,
+                    },
+                );
             }
+            registry.publish_catalog(&state);
         }
         registry
+    }
+
+    fn publish_catalog(&self, state: &RegistryState) {
+        let mut definitions = state
+            .entries
+            .values()
+            .filter(|entry| entry.agent.is_some() || entry.factory.is_some())
+            .map(|entry| entry.definition.clone())
+            .collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        *self
+            .executable_catalog
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = definitions;
+        self.catalog_revision.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn executable_catalog_handle(
+        &self,
+    ) -> Arc<std::sync::RwLock<Vec<SubagentDefinition>>> {
+        Arc::clone(&self.executable_catalog)
+    }
+
+    pub(crate) fn catalog_revision_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.catalog_revision)
     }
 
     // ── Registration ──────────────────────────────────────────────────────
@@ -141,14 +186,19 @@ impl SubagentRegistry {
         info!(subagent = %name, mode = %def.execution_mode, "Registering subagent");
 
         let arc_agent = Arc::new(agent);
-        {
-            let mut agents = self.agents.write().await;
-            agents.insert(name.clone(), arc_agent);
-        }
-        {
-            let mut defs = self.definitions.write().await;
-            defs.insert(name.clone(), def);
-        }
+        let mut state = self.state.write().await;
+        let revision = state.next_revision();
+        state.entries.insert(
+            name.clone(),
+            RegistryEntry {
+                definition: def,
+                agent: Some(arc_agent),
+                factory: None,
+                revision,
+            },
+        );
+        self.publish_catalog(&state);
+        drop(state);
 
         self.event_bus
             .emit(super::events::SubagentEvent::Registered { name: name.clone() });
@@ -162,23 +212,28 @@ impl SubagentRegistry {
         let name = def.name.clone();
         let arc_agent = Arc::new(agent);
 
-        let ok = match self.agents.try_write() {
-            Ok(mut agents) => {
-                agents.insert(name.clone(), arc_agent);
+        let ok = match self.state.try_write() {
+            Ok(mut state) => {
+                let revision = state.next_revision();
+                state.entries.insert(
+                    name.clone(),
+                    RegistryEntry {
+                        definition: def,
+                        agent: Some(arc_agent),
+                        factory: None,
+                        revision,
+                    },
+                );
+                self.publish_catalog(&state);
                 true
             }
             Err(_) => {
-                warn!(subagent = %name, "Lock contention on agents map, registration deferred");
+                warn!(subagent = %name, "Lock contention on subagent registry, registration deferred");
                 false
             }
         };
 
         if ok {
-            if let Ok(mut defs) = self.definitions.try_write() {
-                defs.insert(name.clone(), def);
-            } else {
-                warn!(subagent = %name, "Lock contention on definitions map");
-            }
             self.event_bus
                 .emit(super::events::SubagentEvent::Registered { name });
         }
@@ -191,14 +246,18 @@ impl SubagentRegistry {
         let name = def.name.clone();
         debug!(subagent = %name, "Registering subagent factory");
 
-        {
-            let mut defs = self.definitions.write().await;
-            defs.insert(name.clone(), def);
-        }
-        {
-            let mut facts = self.factories.write().await;
-            facts.insert(name.clone(), factory);
-        }
+        let mut state = self.state.write().await;
+        let revision = state.next_revision();
+        state.entries.insert(
+            name,
+            RegistryEntry {
+                definition: def,
+                agent: None,
+                factory: Some(factory),
+                revision,
+            },
+        );
+        self.publish_catalog(&state);
     }
 
     /// Register a **definition only** — no agent instance and no factory.
@@ -219,8 +278,18 @@ impl SubagentRegistry {
     pub async fn register_definition(&self, def: SubagentDefinition) -> bool {
         let name = def.name.clone();
         debug!(subagent = %name, "Registering subagent definition (no instance)");
-        let mut defs = self.definitions.write().await;
-        defs.insert(name, def);
+        let mut state = self.state.write().await;
+        let revision = state.next_revision();
+        state.entries.insert(
+            name,
+            RegistryEntry {
+                definition: def,
+                agent: None,
+                factory: None,
+                revision,
+            },
+        );
+        self.publish_catalog(&state);
         true
     }
 
@@ -231,9 +300,19 @@ impl SubagentRegistry {
     /// Logs a warning and returns `false` on lock contention.
     pub fn register_definition_sync(&self, def: SubagentDefinition) -> bool {
         let name = def.name.clone();
-        match self.definitions.try_write() {
-            Ok(mut defs) => {
-                defs.insert(name, def);
+        match self.state.try_write() {
+            Ok(mut state) => {
+                let revision = state.next_revision();
+                state.entries.insert(
+                    name,
+                    RegistryEntry {
+                        definition: def,
+                        agent: None,
+                        factory: None,
+                        revision,
+                    },
+                );
+                self.publish_catalog(&state);
                 true
             }
             Err(error) => {
@@ -250,41 +329,34 @@ impl SubagentRegistry {
         factory: Arc<dyn AgentFactory>,
     ) -> bool {
         let name = def.name.clone();
-        let mut definitions = match self.definitions.try_write() {
-            Ok(definitions) => definitions,
+        let mut state = match self.state.try_write() {
+            Ok(state) => state,
             Err(error) => {
                 warn!(subagent = %name, %error, "Cannot register subagent definition");
                 return false;
             }
         };
 
-        let mut factories = match self.factories.try_write() {
-            Ok(factories) => factories,
-            Err(error) => {
-                warn!(subagent = %name, %error, "Cannot register subagent factory");
-                return false;
-            }
-        };
-
-        definitions.insert(name.clone(), def);
-        factories.insert(name, factory);
+        let revision = state.next_revision();
+        state.entries.insert(
+            name,
+            RegistryEntry {
+                definition: def,
+                agent: None,
+                factory: Some(factory),
+                revision,
+            },
+        );
+        self.publish_catalog(&state);
         true
     }
 
     /// Remove a subagent by name.
     pub async fn remove(&self, name: &str) {
-        {
-            let mut agents = self.agents.write().await;
-            agents.remove(name);
-        }
-        {
-            let mut defs = self.definitions.write().await;
-            defs.remove(name);
-        }
-        {
-            let mut facts = self.factories.write().await;
-            facts.remove(name);
-        }
+        let mut state = self.state.write().await;
+        state.entries.remove(name);
+        self.publish_catalog(&state);
+        drop(state);
 
         self.event_bus
             .emit(super::events::SubagentEvent::Unregistered {
@@ -296,15 +368,12 @@ impl SubagentRegistry {
 
     /// Look up a registered subagent. Returns None if not found.
     pub async fn get(&self, name: &str) -> Option<RegisteredSubagent> {
-        let agents = self.agents.read().await;
-        let defs = self.definitions.read().await;
-
-        let definition = defs.get(name).cloned()?;
-        let has_instance = agents.contains_key(name);
+        let state = self.state.read().await;
+        let entry = state.entries.get(name)?;
 
         Some(RegisteredSubagent {
-            definition,
-            has_instance,
+            definition: entry.definition.clone(),
+            has_instance: entry.agent.is_some(),
         })
     }
 
@@ -320,19 +389,28 @@ impl SubagentRegistry {
 
         // Check if already instantiated
         {
-            let agents = self.agents.read().await;
-            if let Some(agent) = agents.get(name) {
-                return Some(agent.clone());
+            let state = self.state.read().await;
+            if let Some(agent) = state
+                .entries
+                .get(name)
+                .and_then(|entry| entry.agent.clone())
+            {
+                return Some(agent);
             }
         }
 
         // Try factory
-        let factory_arc = {
-            let factories = self.factories.read().await;
-            factories.get(name).cloned()
+        let factory_revision = {
+            let state = self.state.read().await;
+            state.entries.get(name).and_then(|entry| {
+                entry
+                    .factory
+                    .clone()
+                    .map(|factory| (factory, entry.revision))
+            })
         };
 
-        if let Some(factory) = factory_arc {
+        if let Some((factory, factory_revision)) = factory_revision {
             // Prevent concurrent double-instantiation
             {
                 let mut in_progress = self.instantiating.write().await;
@@ -346,9 +424,13 @@ impl SubagentRegistry {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         // Check if agent has been created
                         {
-                            let agents = self.agents.read().await;
-                            if let Some(agent) = agents.get(name) {
-                                return Some(agent.clone());
+                            let state = self.state.read().await;
+                            if let Some(agent) = state
+                                .entries
+                                .get(name)
+                                .and_then(|entry| entry.agent.clone())
+                            {
+                                return Some(agent);
                             }
                         }
                         // Check if instantiation failed (removed from instantiating but not in agents)
@@ -356,8 +438,11 @@ impl SubagentRegistry {
                             let in_progress = self.instantiating.read().await;
                             if !in_progress.contains(name) {
                                 // Instantiation finished (success or failure), re-check agents
-                                let agents = self.agents.read().await;
-                                return agents.get(name).cloned();
+                                let state = self.state.read().await;
+                                return state
+                                    .entries
+                                    .get(name)
+                                    .and_then(|entry| entry.agent.clone());
                             }
                         }
                         if start.elapsed() > timeout {
@@ -382,12 +467,14 @@ impl SubagentRegistry {
             match result {
                 Ok(agent) => {
                     let arc_agent = Arc::new(agent);
-                    let mut agents = self.agents.write().await;
-                    agents.insert(name.to_string(), arc_agent.clone());
-                    // Remove factory after successful instantiation
-                    drop(agents);
-                    let mut facts = self.factories.write().await;
-                    facts.remove(name);
+                    let mut state = self.state.write().await;
+                    let entry = state.entries.get_mut(name)?;
+                    if entry.revision != factory_revision {
+                        warn!(subagent = %name, "Discarding stale subagent factory result");
+                        return entry.agent.clone();
+                    }
+                    entry.agent = Some(arc_agent.clone());
+                    self.publish_catalog(&state);
                     return Some(arc_agent);
                 }
                 Err(e) => {
@@ -405,8 +492,11 @@ impl SubagentRegistry {
     /// Unlike `get_agent`, this never updates or reuses the cached agent.
     pub async fn create_fresh_agent(&self, name: &str) -> Result<Option<Arc<dyn Agent>>> {
         let factory = {
-            let factories = self.factories.read().await;
-            factories.get(name).cloned()
+            let state = self.state.read().await;
+            state
+                .entries
+                .get(name)
+                .and_then(|entry| entry.factory.clone())
         };
 
         match factory {
@@ -420,39 +510,47 @@ impl SubagentRegistry {
 
     /// Check if a subagent is registered.
     pub async fn contains(&self, name: &str) -> bool {
-        let defs = self.definitions.read().await;
-        defs.contains_key(name)
+        self.state.read().await.entries.contains_key(name)
     }
 
     /// List all available subagent definitions.
     pub async fn list_available(&self) -> Vec<SubagentDefinition> {
-        let defs = self.definitions.read().await;
-        defs.values().cloned().collect()
+        let state = self.state.read().await;
+        state
+            .entries
+            .values()
+            .filter(|entry| entry.agent.is_some() || entry.factory.is_some())
+            .map(|entry| entry.definition.clone())
+            .collect()
     }
 
     /// List subagent definitions matching a tag.
     pub async fn list_by_tag(&self, tag: &str) -> Vec<SubagentDefinition> {
-        let defs = self.definitions.read().await;
-        defs.values()
-            .filter(|d| d.tags.iter().any(|t| t == tag))
+        let state = self.state.read().await;
+        state
+            .entries
+            .values()
+            .filter(|entry| entry.agent.is_some() || entry.factory.is_some())
+            .map(|entry| &entry.definition)
+            .filter(|definition| definition.tags.iter().any(|entry_tag| entry_tag == tag))
             .cloned()
             .collect()
     }
 
     /// Get agent names for tool description (convenience).
     pub async fn agent_names(&self) -> Vec<String> {
-        let defs = self.definitions.read().await;
-        defs.keys().cloned().collect()
+        let state = self.state.read().await;
+        state
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.agent.is_some() || entry.factory.is_some())
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// Get the event bus reference.
     pub fn event_bus(&self) -> &SubagentEventBus {
         &self.event_bus
-    }
-
-    /// Get the underlying agents map (for backward compat).
-    pub fn agents_map(&self) -> AgentMap {
-        self.agents.clone()
     }
 }
 
@@ -465,9 +563,9 @@ impl Default for SubagentRegistry {
 impl Clone for SubagentRegistry {
     fn clone(&self) -> Self {
         Self {
-            agents: self.agents.clone(),
-            definitions: self.definitions.clone(),
-            factories: self.factories.clone(),
+            state: self.state.clone(),
+            executable_catalog: self.executable_catalog.clone(),
+            catalog_revision: self.catalog_revision.clone(),
             instantiating: self.instantiating.clone(),
             instantiating_done: self.instantiating_done.clone(),
             event_bus: self.event_bus.clone(),
@@ -575,9 +673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_definition_only_makes_definition_discoverable() {
-        // Definition-only registration (no instance, no factory) is the
-        // The definition must be discoverable, but no agent instance exists.
+    async fn test_register_definition_only_is_not_advertised_as_executable() {
         let registry = SubagentRegistry::new();
         let def = SubagentDefinition::new("plugin_agent", "Plugin-defined agent");
 
@@ -586,11 +682,8 @@ mod tests {
 
         assert!(registry.contains("plugin_agent").await);
         let available = registry.list_available().await;
-        assert!(available.iter().any(|d| d.name == "plugin_agent"));
-        assert_eq!(
-            registry.agent_names().await,
-            vec!["plugin_agent".to_string()]
-        );
+        assert!(!available.iter().any(|d| d.name == "plugin_agent"));
+        assert!(registry.agent_names().await.is_empty());
 
         // No instance: get_agent must return None (no factory to invoke).
         let registered = registry.get("plugin_agent").await.unwrap();
@@ -626,9 +719,12 @@ mod tests {
         let registry = SubagentRegistry::new();
         let inserted = registry.register_definition_sync(SubagentDefinition::new("sync", "S"));
         assert!(inserted);
-        // try_read is fine here — we just inserted, no async contention.
-        let defs = registry.definitions.try_read().unwrap();
-        assert!(defs.contains_key("sync"));
+        let state = registry.state.try_read().ok();
+        assert!(
+            state
+                .as_ref()
+                .is_some_and(|state| state.entries.contains_key("sync"))
+        );
     }
 
     #[tokio::test]

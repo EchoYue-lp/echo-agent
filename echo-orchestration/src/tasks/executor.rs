@@ -82,7 +82,7 @@ pub struct TaskExecutorConfig {
     /// Optional emitter for the unified lifecycle hook system (echo-core).
     ///
     /// This is the sole owner of unified `TaskCreated`, `TaskStarted`, and
-    /// terminal `TaskCompleted` events. Trait-based [`TaskHooks`] remain an
+    /// terminal `TaskCompleted` events. Trait-based [`crate::tasks::TaskHooks`] remain an
     /// execution-policy extension point and must not emit the same lifecycle.
     pub unified_hook_executor: Option<echo_core::hooks::UnifiedHookExecutorFn>,
 }
@@ -501,7 +501,7 @@ impl TaskExecutor {
         self
     }
 
-    /// Set a shared [`TaskSpawner`] for `execute_all_async()`.
+    /// Set a shared [`crate::tasks::TaskSpawner`] for `execute_all_async()`.
     ///
     /// When set, all async DAG executions share the same spawner so tasks
     /// appear in a unified `list()` and share concurrency control.
@@ -732,6 +732,7 @@ impl TaskExecutor {
                             task_store,
                             verifier_clone,
                             replanner,
+                            true,
                         ) => {
                             result
                         }
@@ -848,6 +849,7 @@ impl TaskExecutor {
                 self.task_store.clone(),
                 self.verifier.clone(),
                 self.replanner.clone(),
+                true,
             ) => {
                 result
             }
@@ -906,6 +908,7 @@ impl TaskExecutor {
                 self.task_store.clone(),
                 self.verifier.clone(),
                 self.replanner.clone(),
+                false,
             ) => result,
         };
         Self::emit_task_terminal(
@@ -938,6 +941,7 @@ impl TaskExecutor {
         task_store: Option<Arc<dyn super::store::TaskStore>>,
         verifier: Option<Arc<dyn Verifier>>,
         replanner: Option<Arc<dyn Replanner>>,
+        retry_inline: bool,
     ) -> TaskExecutionResult {
         let task_id = task.id.clone();
         let timeout_secs = if task.timeout_secs > 0 {
@@ -1203,6 +1207,25 @@ impl TaskExecutor {
                                     None,
                                 );
 
+                                if !retry_inline {
+                                    let _ =
+                                        manager.update_task_status(&task_id, TaskStatus::Pending);
+                                    if let Some(ref store) = task_store
+                                        && let Some(task_snapshot) = manager.get_task(&task_id)
+                                        && let Err(error) = store.save_task(&task_snapshot).await
+                                    {
+                                        warn!(task_id = %task_id, %error, "Failed to persist requeued task");
+                                    }
+                                    return TaskExecutionResult {
+                                        task_id,
+                                        status: TaskStatus::Pending,
+                                        output: None,
+                                        error: Some(error_str),
+                                        duration: start.elapsed(),
+                                        attempts: current_attempt,
+                                    };
+                                }
+
                                 if let Some(next_attempt) = current_attempt.checked_add(1) {
                                     current_attempt = next_attempt;
                                     tokio::select! {
@@ -1454,7 +1477,7 @@ impl TaskExecutor {
     /// Spawn the current ready frontier as non-blocking background tasks.
     ///
     /// Returns handles immediately — the caller's ReAct loop is not blocked.
-    /// Each returned [`BackgroundTask`] can be polled for status, awaited, or cancelled.
+    /// Each returned [`crate::tasks::BackgroundTask`] can be polled for status, awaited, or cancelled.
     ///
     /// This is a one-wave primitive, not a second full DAG executor. Completion
     /// wakes dependents; callers may invoke this method again for the next
@@ -1479,6 +1502,7 @@ impl TaskExecutor {
                 super::background_task::TaskSpawnerConfig {
                     max_concurrent: self.config.max_concurrent,
                     default_timeout_secs: self.config.default_timeout_secs,
+                    ..Default::default()
                 },
             ))
         });
@@ -1532,6 +1556,7 @@ impl TaskExecutor {
                     task_store,
                     verifier,
                     None, // replanner
+                    true,
                 )
                 .await;
 
@@ -1593,8 +1618,11 @@ impl TaskExecutor {
 
         // Re-add incomplete tasks to the TaskManager
         for mut task in incomplete {
-            // Reset Running → Pending so execute_ready_tasks picks them up
-            if matches!(task.status, TaskStatus::Running) {
+            // A persisted in-progress state has no live owner after restart.
+            if matches!(
+                task.status,
+                TaskStatus::Running | TaskStatus::Retrying { .. }
+            ) {
                 task.status = TaskStatus::Pending;
             }
             self.task_manager.add_task(task);
@@ -1635,11 +1663,11 @@ impl RuntimeDagController for ManagedTaskDagController {
         {
             return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
         }
-        let claim = TaskClaim {
-            revision: expected_revision,
-            attempt: task.execution.retry_count.saturating_add(1),
-            spec_hash: task.spec.stable_hash().map_err(ReactError::Other)?,
-        };
+        let claim = TaskClaim::new(
+            expected_revision,
+            task.execution.retry_count.saturating_add(1),
+            task.spec.stable_hash().map_err(ReactError::Other)?,
+        );
         self.claims
             .lock()
             .await
@@ -1802,6 +1830,34 @@ impl RuntimeDagController for ManagedTaskDagController {
         };
         self.claims.lock().await.remove(&runtime_task.spec.id);
         resolution
+    }
+
+    async fn abandon_claim(
+        &self,
+        _run_id: &str,
+        claim: &TaskClaim,
+        runtime_task: &Task,
+        abandonment: super::runtime_executor::RuntimeClaimAbandonment,
+    ) -> Result<()> {
+        let mut claims = self.claims.lock().await;
+        if claims.get(&runtime_task.spec.id) != Some(claim) {
+            return Ok(());
+        }
+        let status = match abandonment {
+            super::runtime_executor::RuntimeClaimAbandonment::Cancelled => TaskStatus::Cancelled,
+            super::runtime_executor::RuntimeClaimAbandonment::Failed { error } => {
+                TaskStatus::Failed(error)
+            }
+        };
+        self.executor
+            .task_manager
+            .update_task_status(&runtime_task.spec.id, status)
+            .map_err(ReactError::Other)?;
+        if let Some(task) = self.executor.task_manager.get_task(&runtime_task.spec.id) {
+            self.persist_task(&task).await?;
+        }
+        claims.remove(&runtime_task.spec.id);
+        Ok(())
     }
 
     async fn block_task(&self, _run_id: &str, task: &Task, reason: &str) -> Result<()> {

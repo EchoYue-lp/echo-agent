@@ -15,6 +15,13 @@ use tokio::sync::{Mutex, oneshot};
 
 use super::jsonrpc::{self, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_LSP_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+fn accepts_lsp_message_size(bytes: usize) -> bool {
+    bytes <= MAX_LSP_MESSAGE_BYTES
+}
+
 /// Stdio-based LSP client for a single language server.
 ///
 /// Spawns the server as a child process and communicates via JSON-RPC
@@ -159,6 +166,10 @@ impl StdioLspClient {
             let Some(len) = content_length else {
                 continue;
             };
+            if !accepts_lsp_message_size(len) {
+                pending.lock().await.clear();
+                return;
+            }
 
             // Read body
             let mut body = vec![0u8; len];
@@ -217,14 +228,34 @@ impl StdioLspClient {
             pending.insert(id, tx);
         }
 
-        writer_tx
-            .send(data)
-            .await
-            .map_err(|_| LspError::CommunicationError("Writer channel closed".into()))?;
+        if writer_tx.send(data).await.is_err() {
+            self.pending.lock().await.remove(&id);
+            return Err(LspError::CommunicationError("Writer channel closed".into()));
+        }
 
-        let response = rx
-            .await
-            .map_err(|_| LspError::CommunicationError("Response channel closed".into()))?;
+        let response = match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&id);
+                return Err(LspError::CommunicationError(
+                    "Response channel closed".into(),
+                ));
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                let cancellation = JsonRpcNotification::new(
+                    "$/cancelRequest",
+                    Some(serde_json::json!({ "id": id })),
+                );
+                if let Ok(data) = jsonrpc::encode_message(&cancellation) {
+                    let _ = writer_tx.send(data).await;
+                }
+                return Err(LspError::CommunicationError(format!(
+                    "LSP request '{method}' timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )));
+            }
+        };
 
         if let Some(err) = response.error {
             return Err(LspError::ServerError(err.to_string()));
@@ -529,5 +560,18 @@ impl LspClient for StdioLspClient {
             last_error: self.last_error.clone(),
             pid: self.child.as_ref().and_then(|c| c.id()),
         }
+    }
+}
+
+#[cfg(test)]
+mod message_size_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_unbounded_content_length() {
+        assert!(accepts_lsp_message_size(MAX_LSP_MESSAGE_BYTES));
+        assert!(!accepts_lsp_message_size(
+            MAX_LSP_MESSAGE_BYTES.saturating_add(1)
+        ));
     }
 }

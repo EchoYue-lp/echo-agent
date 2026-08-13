@@ -2,7 +2,7 @@
 //!
 //! One file per conversation under `<base>/conversations/<id>.json`, plus a
 //! monotonic id counter in `<base>/conversations/_meta.json`. This is the
-//! no-SQLite alternative to [`SqliteConversationStore`] (`sqlite` feature).
+//! no-SQLite alternative to `SqliteConversationStore` (`sqlite` feature).
 //!
 //! ## Layout
 //!
@@ -463,24 +463,10 @@ fn now_rfc3339() -> String {
 /// Character-safe (no byte slicing); the allowed set is ASCII so the check is
 /// char-boundary-correct by construction.
 fn safe_segment(id: &str) -> Result<String> {
-    if id.is_empty() {
-        return Err(MemoryError::Unsupported("conversation id is empty".into()).into());
-    }
-    // Reject anything that is not a path-safe token. We allow alphanumerics,
-    // `-`, `_`, `.` (but `..` alone is rejected below), and `:` (common in ids).
-    for ch in id.chars() {
-        let safe = ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '~');
-        if !safe {
-            return Err(MemoryError::Unsupported(format!(
-                "conversation id contains unsafe character {ch:?}"
-            ))
-            .into());
-        }
-    }
-    if id == ".." || id == "." || id.contains('/') || id.contains('\\') {
-        return Err(
-            MemoryError::Unsupported(format!("conversation id is a path segment: {id:?}")).into(),
-        );
+    echo_core::utils::fs::validate_path_segment(id)
+        .map_err(|error| MemoryError::Unsupported(error.to_string()))?;
+    if id == "_meta" {
+        return Err(MemoryError::Unsupported("conversation id is reserved: _meta".into()).into());
     }
     Ok(id.to_string())
 }
@@ -492,44 +478,7 @@ fn safe_segment(id: &str) -> Result<String> {
 /// Unix, the parent directory is fsynced as well so the renamed directory entry
 /// survives a crash.
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other(format!("path has no parent: {}", path.display())))?;
-    std::fs::create_dir_all(parent)?;
-    // Unique temp name: avoids collisions across concurrent writes (even though
-    // the in-process Mutex serializes this store, multi-process safety is a
-    // belt-and-suspenders property).
-    let tmp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("data"),
-        uuid::Uuid::new_v4()
-    ));
-    let write_result = (|| {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()
-    })();
-    if let Err(error) = write_result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error);
-    }
-    if let Err(error) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error);
-    }
-    sync_parent_directory(parent)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
-    std::fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
-    Ok(())
+    echo_core::utils::fs::atomic_write(path, bytes)
 }
 
 #[cfg(test)]
@@ -774,6 +723,7 @@ mod tests {
         assert!(safe_segment("a/b").is_err());
         assert!(safe_segment("a\\b").is_err());
         assert!(safe_segment("").is_err());
+        assert!(safe_segment("_meta").is_err());
         assert!(safe_segment("conv-1709000000-abc123").is_ok());
         assert!(safe_segment("2026-07-28T10:00:00Z").is_ok());
     }

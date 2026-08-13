@@ -21,7 +21,7 @@ use futures::future::BoxFuture;
 ///
 /// # #[tokio::main]
 /// # async fn main() {
-/// let embedder = MockEmbedder::new(8);
+/// let embedder = MockEmbedder::new(8).unwrap();
 /// let vec = embedder.embed("hello world").await.unwrap();
 /// assert_eq!(vec.len(), 8);
 /// // Normalized vector, magnitude approximately 1.0
@@ -35,9 +35,13 @@ pub struct MockEmbedder {
 
 impl MockEmbedder {
     /// Create a MockEmbedder with the specified dimension (recommended 4~64, sufficient for testing similarity logic)
-    pub fn new(dimension: usize) -> Self {
-        assert!(dimension > 0, "dimension must be > 0");
-        Self { dimension }
+    pub fn new(dimension: usize) -> Result<Self> {
+        if dimension == 0 {
+            return Err(crate::error::ReactError::Other(
+                "mock embedder dimension must be greater than zero".to_string(),
+            ));
+        }
+        Ok(Self { dimension })
     }
 }
 

@@ -33,7 +33,7 @@ use super::types::ExecutionMode;
 /// Historical mode presets:
 /// - **Sync**: no inheritance ([`Self::sync_default`] == fresh).
 /// - **Fork mode preset**: inherits tools + recent history.
-/// - **Teammate**: no inheritance (communicates via mailbox).
+/// - **Teammate**: no inheritance; execution is controlled by its background handle.
 #[derive(Debug, Clone)]
 pub struct ContextInheritance {
     /// Inherit specific tools by name. `None` = inherit all.
@@ -80,7 +80,7 @@ impl ContextInheritance {
         }
     }
 
-    /// Teammate mode default: nothing inherited, communication via mailbox.
+    /// Teammate mode default: nothing inherited.
     pub fn teammate_default() -> Self {
         Self {
             inherit_tools: None,
@@ -109,53 +109,6 @@ impl Default for ContextInheritance {
     }
 }
 
-// ── Subagent Context ──────────────────────────────────────────────────────────
-
-/// Memory scope for subagent context
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum MemoryScope {
-    /// No memory inheritance
-    #[default]
-    None,
-    /// Only inherit relevant memories (based on task similarity)
-    Relevant,
-    /// Full memory inheritance
-    Full,
-}
-
-/// Output schema specification for subagent
-#[derive(Debug, Clone)]
-pub struct OutputSchema {
-    /// Whether to include summary in output
-    pub summary: bool,
-    /// Whether to include findings in output
-    pub findings: bool,
-    /// Whether to include evidence in output
-    pub evidence: bool,
-    /// Whether to include files read in output
-    pub files_read: bool,
-    /// Whether to include recommendations in output
-    pub recommendations: bool,
-    /// Whether to include blockers in output
-    pub blockers: bool,
-    /// Whether to include confidence score in output
-    pub confidence: bool,
-}
-
-impl Default for OutputSchema {
-    fn default() -> Self {
-        Self {
-            summary: true,
-            findings: true,
-            evidence: false,
-            files_read: false,
-            recommendations: false,
-            blockers: false,
-            confidence: false,
-        }
-    }
-}
-
 /// Snapshot of a parent agent's context for inheritance.
 ///
 /// Extracted from the parent before spawning a subagent.
@@ -172,20 +125,8 @@ pub struct SubagentContext {
     // ── Scoped Context Fields (Step 6) ──────────────────────────────────────
     /// Parent's overall goal (for context)
     pub parent_goal: Option<String>,
-    /// Task assigned to this subagent
-    pub assigned_task: Option<String>,
-    /// Relevant files for this task
-    pub relevant_files: Vec<String>,
-    /// Relevant artifacts from parent execution
-    pub relevant_artifacts: Vec<String>,
-    /// Constraints for this subagent (e.g., time limits, resource limits)
-    pub constraints: Vec<String>,
     /// Allowed tools for this subagent (overrides inheritance)
     pub allowed_tools: Option<Vec<String>>,
-    /// Memory scope for this subagent
-    pub memory_scope: MemoryScope,
-    /// Output schema specification
-    pub output_schema: OutputSchema,
 }
 
 impl std::fmt::Debug for SubagentContext {
@@ -195,13 +136,7 @@ impl std::fmt::Debug for SubagentContext {
             .field("messages", &self.messages)
             .field("store", &self.store.as_ref().map(|_| "Store { .. }"))
             .field("parent_goal", &self.parent_goal)
-            .field("assigned_task", &self.assigned_task)
-            .field("relevant_files", &self.relevant_files)
-            .field("relevant_artifacts", &self.relevant_artifacts)
-            .field("constraints", &self.constraints)
             .field("allowed_tools", &self.allowed_tools)
-            .field("memory_scope", &self.memory_scope)
-            .field("output_schema", &self.output_schema)
             .finish()
     }
 }
@@ -215,13 +150,7 @@ impl SubagentContext {
             store: None,
             // Scoped context fields
             parent_goal: None,
-            assigned_task: None,
-            relevant_files: Vec::new(),
-            relevant_artifacts: Vec::new(),
-            constraints: Vec::new(),
             allowed_tools: None,
-            memory_scope: MemoryScope::default(),
-            output_schema: OutputSchema::default(),
         }
     }
 
@@ -252,6 +181,7 @@ impl SubagentContext {
         };
 
         let messages = match inheritance.inherit_history {
+            Some(0) => all_messages.to_vec(),
             Some(n) => {
                 let start = all_messages.len().saturating_sub(n);
                 all_messages.get(start..).unwrap_or_default().to_vec()
@@ -270,13 +200,7 @@ impl SubagentContext {
             // The active user request is scoped delegation context rather than
             // inherited conversation history, so Fresh subagents receive it.
             parent_goal,
-            assigned_task: None,
-            relevant_files: Vec::new(),
-            relevant_artifacts: Vec::new(),
-            constraints: Vec::new(),
             allowed_tools: None,
-            memory_scope: MemoryScope::default(),
-            output_schema: OutputSchema::default(),
         }
     }
 
@@ -286,10 +210,6 @@ impl SubagentContext {
             || !self.messages.is_empty()
             || self.store.is_some()
             || self.parent_goal.is_some()
-            || self.assigned_task.is_some()
-            || !self.relevant_files.is_empty()
-            || !self.relevant_artifacts.is_empty()
-            || !self.constraints.is_empty()
             || self.allowed_tools.is_some()
     }
 }

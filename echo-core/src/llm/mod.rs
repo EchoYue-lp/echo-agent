@@ -205,6 +205,8 @@ pub struct ChatResponse {
     pub message: Message,
     /// Provider-specific finish reason.
     pub finish_reason: Option<String>,
+    /// Provider-normalized token usage, symmetric with [`ChatChunk::usage`].
+    pub usage: Option<types::Usage>,
     /// Raw provider response for callers needing extra metadata.
     pub raw: ChatCompletionResponse,
 }

@@ -15,7 +15,6 @@ use crate::prelude::ReactAgent;
 use crate::sandbox::SandboxManager;
 use crate::tools::{Tool, ToolExecutionConfig};
 use crate::trace::RunStore;
-use echo_core::agent::PromptTemplateManager;
 use echo_core::circuit_breaker::CircuitBreakerConfig;
 use std::sync::Arc;
 
@@ -68,6 +67,7 @@ pub struct ReactAgentBuilder {
     run_budget: echo_core::agent::RunBudgetPolicy,
     model_profile: Option<echo_core::llm::capabilities::ModelProfile>,
     token_limit: usize,
+    token_limit_explicit: bool,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     callbacks: Vec<Arc<dyn AgentCallback>>,
@@ -93,8 +93,6 @@ pub struct ReactAgentBuilder {
     sandbox_manager: Option<Arc<SandboxManager>>,
     run_store: Option<Arc<dyn RunStore>>,
     tool_execution_pipeline: Option<Arc<ToolExecutionPipeline>>,
-    /// Prompt template engine for variable substitution in system prompts
-    prompt_template_engine: Option<Arc<PromptTemplateManager>>,
     /// Intervention callbacks that can influence agent behavior
     /// (block tool calls, inject context, redirect execution, cancel).
     intervention_callbacks: Vec<Arc<dyn InterventionCallback>>,
@@ -150,6 +148,7 @@ impl ReactAgentBuilder {
             run_budget: echo_core::agent::RunBudgetPolicy::default(),
             model_profile: None,
             token_limit: DEFAULT_TOKEN_LIMIT,
+            token_limit_explicit: false,
             max_tokens: None,
             temperature: None,
             callbacks: Vec::new(),
@@ -173,7 +172,6 @@ impl ReactAgentBuilder {
             sandbox_manager: None,
             run_store: None,
             tool_execution_pipeline: None,
-            prompt_template_engine: None,
             intervention_callbacks: Vec::new(),
             react_checkpoint_interval: 0,
             intent_router: None,
@@ -216,7 +214,7 @@ impl ReactAgentBuilder {
             .system_prompt(system_prompt)
             .enable_tools()
             .enable_memory()
-            .enable_planning()
+            .enable_tasks()
             .build()
     }
     // ── Basic Configuration ─────────────────────────────────────────────────────
@@ -330,8 +328,8 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// Enable task planning
-    pub fn enable_planning(mut self) -> Self {
+    /// Enable revisioned task CRUD tools.
+    pub fn enable_tasks(mut self) -> Self {
         self.enable_task = true;
         self
     }
@@ -510,6 +508,7 @@ impl ReactAgentBuilder {
     /// Set token limit
     pub fn token_limit(mut self, limit: usize) -> Self {
         self.token_limit = limit;
+        self.token_limit_explicit = true;
         self
     }
 
@@ -806,8 +805,7 @@ impl ReactAgentBuilder {
     /// Set a custom [`ToolExecutionPipeline`] for fine-grained control over
     /// the tool execution lifecycle (hooks, permissions, guards, etc.).
     ///
-    /// When set, `execute_tool_feedback_raw` delegates to this pipeline.
-    /// When `None` (default), the built-in inline implementation is used.
+    /// When absent, the standard pipeline is used.
     pub fn tool_execution_pipeline(mut self, pipeline: ToolExecutionPipeline) -> Self {
         self.tool_execution_pipeline = Some(Arc::new(pipeline));
         self
@@ -816,35 +814,6 @@ impl ReactAgentBuilder {
     /// Set sandbox manager, providing secure isolation for skill script execution
     pub fn sandbox_manager(mut self, manager: Arc<SandboxManager>) -> Self {
         self.sandbox_manager = Some(manager);
-        self
-    }
-
-    /// Set a prompt template engine for variable substitution in system prompts.
-    ///
-    /// When set, the agent can use the template engine to render prompt
-    /// templates with dynamic variable substitution (e.g., `{{name}}`,
-    /// `{{mode}}`). This enables centralized template management and
-    /// dynamic prompt assembly.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use echo_agent::prelude::*;
-    /// use echo_core::agent::PromptTemplateManager;
-    /// use std::sync::Arc;
-    ///
-    /// # fn main() -> echo_agent::error::Result<()> {
-    /// let engine = Arc::new(PromptTemplateManager::new());
-    /// engine.register("my_prompt", "You are {{role}}.");
-    /// let agent = ReactAgentBuilder::new()
-    ///     .model("qwen3-max")
-    ///     .with_prompt_template_engine(engine)
-    ///     .build()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_prompt_template_engine(mut self, engine: Arc<PromptTemplateManager>) -> Self {
-        self.prompt_template_engine = Some(engine);
         self
     }
 
@@ -883,9 +852,11 @@ impl ReactAgentBuilder {
             .tool_execution(self.tool_execution)
             .max_iterations(self.max_iterations)
             .run_budget(self.run_budget)
-            .token_limit(self.token_limit)
             .max_tokens(self.max_tokens)
             .temperature(self.temperature);
+        if self.token_limit_explicit {
+            config = config.token_limit(self.token_limit);
+        }
         if let Some(profile) = self.model_profile {
             config = config.model_profile(profile);
         }
@@ -937,6 +908,9 @@ impl ReactAgentBuilder {
             // Mutex 中毒时恢复毒锁内部数据继续写入, 不 panic 整个 agent。
             *config.working_dir.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(working_dir.clone());
+        }
+        if config.token_budget_config.enabled {
+            config.token_budget_config.build(config.token_limit)?;
         }
         if self.react_checkpoint_interval > 0 {
             config = config.react_checkpoint_interval(self.react_checkpoint_interval);
@@ -1027,11 +1001,6 @@ impl ReactAgentBuilder {
         // Set tool execution pipeline
         if let Some(pipeline) = self.tool_execution_pipeline {
             agent.tool_execution_pipeline = Some(pipeline);
-        }
-
-        // Set prompt template engine
-        if let Some(engine) = self.prompt_template_engine {
-            agent.set_prompt_template_engine(engine);
         }
 
         // Set intent router

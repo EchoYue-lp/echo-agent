@@ -231,14 +231,19 @@ impl SkillCandidateDetector {
         let existing_filter = MemoryFilter::new();
         let existing_candidates = typed_store
             .list_typed(CANDIDATE_NAMESPACE, &existing_filter)
-            .await
-            .unwrap_or_default();
+            .await?;
         let existing_names: std::collections::HashSet<String> =
             existing_candidates.iter().map(|e| e.key.clone()).collect();
 
         // 5. For each group above threshold, propose or reinforce.
+        let mut ordered_groups: Vec<_> = groups.iter().collect();
+        ordered_groups.sort_by(|((topic_a, type_a), _), ((topic_b, type_b), _)| {
+            topic_a
+                .cmp(topic_b)
+                .then_with(|| format!("{type_a:?}").cmp(&format!("{type_b:?}")))
+        });
         let mut proposed = 0usize;
-        for ((topic, source_type), entries) in &groups {
+        for ((topic, source_type), entries) in ordered_groups {
             if entries.len() < self.min_observations {
                 continue;
             }
@@ -251,12 +256,7 @@ impl SkillCandidateDetector {
 
             if existing_names.contains(&key) {
                 // Reinforce existing candidate — update sample count.
-                if let Some(existing) = typed_store
-                    .get_typed(CANDIDATE_NAMESPACE, &key)
-                    .await
-                    .ok()
-                    .flatten()
-                {
+                if let Some(existing) = typed_store.get_typed(CANDIDATE_NAMESPACE, &key).await? {
                     let old_count = candidate_sample_count(&existing);
                     if candidate.sample_count > old_count {
                         // Update with new sample count and confidence.
@@ -265,9 +265,7 @@ impl SkillCandidateDetector {
                                 .unwrap_or(candidate.created_at),
                             ..candidate.clone()
                         };
-                        let value =
-                            serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
-                        let content = serde_json::to_string(&value).unwrap_or_default();
+                        let content = serde_json::to_string(&updated)?;
                         typed_store
                             .put_typed(CANDIDATE_NAMESPACE, &key, &content, existing.meta.clone())
                             .await?;
@@ -276,8 +274,7 @@ impl SkillCandidateDetector {
                 }
             } else {
                 // New candidate — persist and register.
-                let value = serde_json::to_value(&candidate).unwrap_or(serde_json::Value::Null);
-                let content = serde_json::to_string(&value).unwrap_or_default();
+                let content = serde_json::to_string(&candidate)?;
                 typed_store
                     .put_typed(
                         CANDIDATE_NAMESPACE,
@@ -288,8 +285,9 @@ impl SkillCandidateDetector {
                     .await?;
 
                 // Register with the evolution-owned Curator lifecycle.
-                if let Err(e) = self.curator.register_candidate(&key) {
-                    tracing::warn!("Failed to register candidate '{}': {}", key, e);
+                if let Err(error) = self.curator.register_candidate(&key) {
+                    let _ = typed_store.delete_typed(CANDIDATE_NAMESPACE, &key).await;
+                    return Err(error);
                 }
 
                 // Record in audit log.
@@ -300,7 +298,11 @@ impl SkillCandidateDetector {
                     ))
                     .trigger("skill_candidate_detector".to_string())
                     .build(change_log);
-                change_log.record(entry)?;
+                if let Err(error) = change_log.record(entry) {
+                    let _ = typed_store.delete_typed(CANDIDATE_NAMESPACE, &key).await;
+                    let _ = self.curator.remove_candidate(&key);
+                    return Err(error);
+                }
 
                 if let Some(observer) = &self.observer {
                     observer.on_skill_candidate_detected(&key).await;

@@ -5,34 +5,98 @@ use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt;
 
 /// Current schema version for the framework event transport contract.
-pub const AGENT_EVENT_SCHEMA_VERSION: u16 = 1;
+pub const AGENT_EVENT_SCHEMA_VERSION: u16 = 3;
+
+macro_rules! identity_id {
+    ($name:ident, $label:literal) => {
+        #[doc = concat!("Validated, wire-transparent `", stringify!($name), "` value.")]
+        ///
+        /// Identity types are deliberately not interchangeable:
+        ///
+        /// ```compile_fail
+        /// use echo_agent::agent::{RunId, TurnId};
+        /// let run_id = RunId::new("run-1")?;
+        /// let _turn_id: TurnId = run_id;
+        /// # Ok::<(), echo_agent::Error>(())
+        /// ```
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self> {
+                let value = value.into();
+                if value.trim().is_empty() {
+                    return Err(crate::error::ReactError::Other(format!(
+                        "{} must not be empty",
+                        $label
+                    )));
+                }
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+    };
+}
+
+identity_id!(StreamId, "event stream_id");
+identity_id!(ConversationId, "conversation_id");
+identity_id!(RunId, "run_id");
+identity_id!(TurnId, "turn_id");
+identity_id!(MessageId, "message_id");
+identity_id!(ExecutionId, "execution_id");
+identity_id!(EventId, "event_id");
 
 /// Stable invocation identity copied onto every emitted event.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventIdentity {
-    pub conversation_id: Option<String>,
+    /// Unique identity of one concrete event stream invocation.
+    pub stream_id: StreamId,
+    pub conversation_id: Option<ConversationId>,
     /// Formal task run identity. Ordinary chat turns keep this as `None`.
-    pub run_id: Option<String>,
-    pub turn_id: String,
-    pub execution_id: Option<String>,
+    pub run_id: Option<RunId>,
+    pub turn_id: TurnId,
+    /// Message that triggered this invocation when message and turn identities differ.
+    pub message_id: Option<MessageId>,
+    pub execution_id: Option<ExecutionId>,
     /// Parent event for a child invocation, such as a delegated subagent.
-    pub parent_event_id: Option<String>,
+    pub parent_event_id: Option<EventId>,
 }
 
 /// Versioned transport contract around an [`AgentEvent`] payload.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub schema_version: u16,
-    pub event_id: String,
+    pub event_id: EventId,
+    /// Integrity digest for the parent link and payload occupying this logical slot.
+    pub content_hash: String,
     /// Monotonic within one wrapped invocation/execution stream, starting at 1.
     pub sequence: u64,
-    pub conversation_id: Option<String>,
-    pub run_id: Option<String>,
-    pub turn_id: String,
-    pub execution_id: Option<String>,
-    pub parent_event_id: Option<String>,
+    pub stream_id: StreamId,
+    pub conversation_id: Option<ConversationId>,
+    pub run_id: Option<RunId>,
+    pub turn_id: TurnId,
+    pub message_id: Option<MessageId>,
+    pub execution_id: Option<ExecutionId>,
+    pub parent_event_id: Option<EventId>,
     pub timestamp: DateTime<Utc>,
     pub payload: AgentEvent,
 }
@@ -42,33 +106,64 @@ impl EventEnvelope {
     pub fn new(
         identity: &EventIdentity,
         sequence: u64,
-        parent_event_id: Option<String>,
+        parent_event_id: Option<EventId>,
         payload: AgentEvent,
-    ) -> Self {
+    ) -> Result<Self> {
+        identity.validate()?;
+        if sequence == 0 {
+            return Err(crate::error::ReactError::Other(
+                "event sequence must start at one".to_string(),
+            ));
+        }
         let event_id = stable_event_id(identity, sequence);
-        Self {
+        let content_hash = event_content_hash(parent_event_id.as_ref(), &payload)?;
+        Ok(Self {
             schema_version: AGENT_EVENT_SCHEMA_VERSION,
             event_id,
+            content_hash,
             sequence,
+            stream_id: identity.stream_id.clone(),
             conversation_id: identity.conversation_id.clone(),
             run_id: identity.run_id.clone(),
             turn_id: identity.turn_id.clone(),
+            message_id: identity.message_id.clone(),
             execution_id: identity.execution_id.clone(),
             parent_event_id,
             timestamp: Utc::now(),
             payload,
-        }
+        })
     }
 }
 
-fn stable_event_id(identity: &EventIdentity, sequence: u64) -> String {
+fn event_content_hash(parent_event_id: Option<&EventId>, payload: &AgentEvent) -> Result<String> {
+    let mut hasher = Sha256::new();
+    match parent_event_id {
+        Some(value) => {
+            hasher.update([1]);
+            hasher.update(value.as_str().as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    let encoded = serde_json::to_vec(payload).map_err(|error| {
+        crate::error::ReactError::Other(format!("failed to hash Agent event payload: {error}"))
+    })?;
+    hasher.update(encoded);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn stable_event_id(identity: &EventIdentity, sequence: u64) -> EventId {
     let mut hasher = Sha256::new();
     hasher.update(AGENT_EVENT_SCHEMA_VERSION.to_be_bytes());
+    hasher.update(identity.stream_id.as_str().as_bytes());
     for part in [
-        identity.conversation_id.as_deref(),
-        identity.run_id.as_deref(),
+        identity
+            .conversation_id
+            .as_ref()
+            .map(ConversationId::as_str),
+        identity.run_id.as_ref().map(RunId::as_str),
         Some(identity.turn_id.as_str()),
-        identity.execution_id.as_deref(),
+        identity.message_id.as_ref().map(MessageId::as_str),
+        identity.execution_id.as_ref().map(ExecutionId::as_str),
     ] {
         match part {
             Some(value) => {
@@ -80,12 +175,91 @@ fn stable_event_id(identity: &EventIdentity, sequence: u64) -> String {
         }
     }
     hasher.update(sequence.to_be_bytes());
-    format!("evt_{:x}", hasher.finalize())
+    EventId(format!("evt_{:x}", hasher.finalize()))
 }
 
 impl EventIdentity {
+    pub fn new(stream_id: impl Into<String>, turn_id: impl Into<String>) -> Result<Self> {
+        let identity = Self {
+            stream_id: StreamId::new(stream_id)?,
+            conversation_id: None,
+            run_id: None,
+            turn_id: TurnId::new(turn_id)?,
+            message_id: None,
+            execution_id: None,
+            parent_event_id: None,
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        StreamId::new(self.stream_id.as_str())?;
+        TurnId::new(self.turn_id.as_str())?;
+        Ok(())
+    }
+
+    /// Construct identity for a formal run whose first turn and execution use
+    /// the same externally assigned value.
+    pub fn for_run(run_id: impl Into<String>) -> Result<Self> {
+        let run_id = run_id.into();
+        Ok(Self {
+            stream_id: StreamId(uuid::Uuid::new_v4().to_string()),
+            conversation_id: None,
+            run_id: Some(RunId::new(run_id.clone())?),
+            turn_id: TurnId::new(run_id.clone())?,
+            message_id: None,
+            execution_id: Some(ExecutionId::new(run_id)?),
+            parent_event_id: None,
+        })
+    }
+
+    /// Construct identity for an interactive chat turn while preserving the
+    /// optional formal run and triggering message identities separately.
+    pub fn for_chat(
+        conversation_id: Option<String>,
+        turn_id: impl Into<String>,
+        message_id: impl Into<String>,
+        run_id: Option<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            stream_id: StreamId(uuid::Uuid::new_v4().to_string()),
+            conversation_id: conversation_id.map(ConversationId::new).transpose()?,
+            run_id: run_id.map(RunId::new).transpose()?,
+            turn_id: TurnId::new(turn_id)?,
+            message_id: Some(MessageId::new(message_id)?),
+            execution_id: None,
+            parent_event_id: None,
+        })
+    }
+
+    pub fn with_execution_id(mut self, execution_id: impl Into<String>) -> Result<Self> {
+        self.execution_id = Some(ExecutionId::new(execution_id)?);
+        Ok(self)
+    }
+
+    pub fn with_conversation_id(mut self, conversation_id: impl Into<String>) -> Result<Self> {
+        self.conversation_id = Some(ConversationId::new(conversation_id)?);
+        Ok(self)
+    }
+
+    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Result<Self> {
+        self.run_id = Some(RunId::new(run_id)?);
+        Ok(self)
+    }
+
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Result<Self> {
+        self.message_id = Some(MessageId::new(message_id)?);
+        Ok(self)
+    }
+
+    pub fn with_parent_event_id(mut self, parent_event_id: impl Into<String>) -> Result<Self> {
+        self.parent_event_id = Some(EventId::new(parent_event_id)?);
+        Ok(self)
+    }
+
     /// Derive transport identity from one value-scoped agent invocation.
-    pub fn from_invocation(invocation: &super::AgentInvocationContext) -> Self {
+    pub fn from_invocation(invocation: &super::AgentInvocationContext) -> Result<Self> {
         let runtime = invocation.runtime.as_ref();
         let run_id = runtime.and_then(|value| value.run_id.clone());
         let execution_id = runtime.and_then(|value| value.execution_id.clone());
@@ -94,13 +268,21 @@ impl EventIdentity {
             .or_else(|| execution_id.clone())
             .or_else(|| run_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        Self {
-            conversation_id: runtime.and_then(|value| value.conversation_id.clone()),
-            run_id,
-            turn_id,
-            execution_id,
+        Ok(Self {
+            stream_id: StreamId(uuid::Uuid::new_v4().to_string()),
+            conversation_id: runtime
+                .and_then(|value| value.conversation_id.clone())
+                .map(ConversationId::new)
+                .transpose()?,
+            run_id: run_id.map(RunId::new).transpose()?,
+            turn_id: TurnId::new(turn_id)?,
+            message_id: runtime
+                .and_then(|value| value.message_id.clone())
+                .map(MessageId::new)
+                .transpose()?,
+            execution_id: execution_id.map(ExecutionId::new).transpose()?,
             parent_event_id: None,
-        }
+        })
     }
 }
 
@@ -126,9 +308,13 @@ pub fn envelope_event_stream_after<'a>(
     last_persisted_sequence: u64,
 ) -> BoxStream<'a, Result<EventEnvelope>> {
     let wrapped = async_stream::stream! {
+        if let Err(error) = identity.validate() {
+            yield Err(error);
+            return;
+        }
         let mut sequence = last_persisted_sequence;
         let mut terminal_emitted = false;
-        let mut tool_calls = HashMap::<String, String>::new();
+        let mut tool_calls = HashMap::<String, EventId>::new();
 
         while let Some(item) = stream.next().await {
             let payload = match item {
@@ -136,10 +322,17 @@ pub fn envelope_event_stream_after<'a>(
                 Err(error) => AgentEvent::Error {
                     source: "agent_stream".to_string(),
                     message: error.to_string(),
+                    failure: crate::error::AgentFailure::from_react_error(&error),
                 },
             };
 
-            sequence = sequence.saturating_add(1);
+            let Some(next_sequence) = sequence.checked_add(1) else {
+                yield Err(crate::error::ReactError::Other(
+                    "event sequence exhausted".to_string(),
+                ));
+                return;
+            };
+            sequence = next_sequence;
             let tool_call_id = match &payload {
                 AgentEvent::ToolCall { call_id, .. } => Some(call_id.clone()),
                 _ => None,
@@ -155,7 +348,13 @@ pub fn envelope_event_stream_after<'a>(
                 AgentEvent::ToolResult { .. } | AgentEvent::ToolError { .. }
             );
             let is_terminal = payload.is_terminal();
-            let envelope = EventEnvelope::new(&identity, sequence, parent_event_id, payload);
+            let envelope = match EventEnvelope::new(&identity, sequence, parent_event_id, payload) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
 
             if let Some(call_id) = tool_call_id {
                 tool_calls.insert(call_id, envelope.event_id.clone());
@@ -178,16 +377,26 @@ pub fn envelope_event_stream_after<'a>(
         }
 
         if !terminal_emitted {
-            sequence = sequence.saturating_add(1);
-            yield Ok(EventEnvelope::new(
+            let Some(next_sequence) = sequence.checked_add(1) else {
+                yield Err(crate::error::ReactError::Other(
+                    "event sequence exhausted before terminal event".to_string(),
+                ));
+                return;
+            };
+            sequence = next_sequence;
+            yield EventEnvelope::new(
                 &identity,
                 sequence,
                 identity.parent_event_id.clone(),
                 AgentEvent::Error {
                     source: "agent_stream".to_string(),
                     message: "agent stream ended without a terminal event".to_string(),
+                    failure: crate::error::AgentFailure::message(
+                        "agent_stream",
+                        "agent stream ended without a terminal event",
+                    ),
                 },
-            ));
+            );
         }
     };
     Box::pin(wrapped)
@@ -199,36 +408,64 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
     let Some(first) = events.first() else {
         return vec!["trajectory is empty".to_string()];
     };
-    let mut seen_ids = std::collections::HashSet::<String>::new();
-    let mut seen_event_ids = std::collections::HashSet::<String>::new();
-    let mut tool_calls = HashMap::<String, String>::new();
+    let mut seen_ids = std::collections::HashSet::<EventId>::new();
+    let mut seen_event_ids = std::collections::HashSet::<EventId>::new();
+    let mut tool_calls = HashMap::<String, EventId>::new();
     let mut terminal_count = 0_usize;
 
     for (index, event) in events.iter().enumerate() {
         let expected_sequence = u64::try_from(index)
-            .unwrap_or(u64::MAX)
-            .saturating_add(first.sequence);
+            .ok()
+            .and_then(|offset| first.sequence.checked_add(offset));
         if event.schema_version != AGENT_EVENT_SCHEMA_VERSION {
             violations.push(format!(
                 "unsupported schema version at sequence {}: {}",
                 event.sequence, event.schema_version
             ));
         }
-        if event.sequence != expected_sequence {
+        if expected_sequence != Some(event.sequence) {
             violations.push(format!(
-                "non-contiguous sequence: expected {expected_sequence}, got {}",
+                "non-contiguous sequence: expected {}, got {}",
+                expected_sequence
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "sequence overflow".to_string()),
                 event.sequence
             ));
         }
-        if event.conversation_id != first.conversation_id
+        if event.stream_id != first.stream_id
+            || event.conversation_id != first.conversation_id
             || event.run_id != first.run_id
             || event.turn_id != first.turn_id
+            || event.message_id != first.message_id
             || event.execution_id != first.execution_id
         {
             violations.push(format!("identity changed at sequence {}", event.sequence));
         }
         if !seen_event_ids.insert(event.event_id.clone()) {
             violations.push(format!("duplicate event id: {}", event.event_id));
+        }
+        let identity = EventIdentity {
+            stream_id: event.stream_id.clone(),
+            conversation_id: event.conversation_id.clone(),
+            run_id: event.run_id.clone(),
+            turn_id: event.turn_id.clone(),
+            message_id: event.message_id.clone(),
+            execution_id: event.execution_id.clone(),
+            parent_event_id: first.parent_event_id.clone(),
+        };
+        if event.event_id != stable_event_id(&identity, event.sequence) {
+            violations.push(format!("invalid event id at sequence {}", event.sequence));
+        }
+        match event_content_hash(event.parent_event_id.as_ref(), &event.payload) {
+            Ok(expected) if event.content_hash != expected => violations.push(format!(
+                "invalid content hash at sequence {}",
+                event.sequence
+            )),
+            Err(error) => violations.push(format!(
+                "could not validate content hash at sequence {}: {error}",
+                event.sequence
+            )),
+            Ok(_) => {}
         }
         if let Some(parent_id) = event.parent_event_id.as_ref()
             && first.parent_event_id.as_ref() != Some(parent_id)
@@ -301,10 +538,12 @@ mod tests {
 
     fn identity() -> EventIdentity {
         EventIdentity {
-            conversation_id: Some("conversation-1".to_string()),
+            stream_id: StreamId("stream-1".to_string()),
+            conversation_id: Some(ConversationId("conversation-1".to_string())),
             run_id: None,
-            turn_id: "turn-1".to_string(),
-            execution_id: Some("execution-1".to_string()),
+            turn_id: TurnId("turn-1".to_string()),
+            message_id: Some(MessageId("message-1".to_string())),
+            execution_id: Some(ExecutionId("execution-1".to_string())),
             parent_event_id: None,
         }
     }
@@ -389,7 +628,9 @@ mod tests {
         assert_eq!(failed_events.len(), 1);
         assert!(matches!(
             failed_events.first().map(|event| &event.payload),
-            Some(AgentEvent::Error { source, message })
+            Some(AgentEvent::Error {
+                source, message, ..
+            })
                 if source == "agent_stream" && message.contains("provider disconnected")
         ));
         Ok(())
@@ -402,13 +643,13 @@ mod tests {
             8,
             None,
             AgentEvent::FinalAnswer("done".to_string()),
-        );
+        )?;
         let repeated = EventEnvelope::new(
             &identity(),
             8,
             None,
             AgentEvent::FinalAnswer("done".to_string()),
-        );
+        )?;
         assert_eq!(first.event_id, repeated.event_id);
 
         let resumed = envelope_event_stream_after(
@@ -427,13 +668,34 @@ mod tests {
     }
 
     #[test]
+    fn independent_streams_with_same_business_identity_do_not_collide() -> Result<()> {
+        let first_identity = identity();
+        let mut second_identity = first_identity.clone();
+        second_identity.stream_id = StreamId("stream-2".to_string());
+        let first = EventEnvelope::new(
+            &first_identity,
+            1,
+            None,
+            AgentEvent::FinalAnswer("done".to_string()),
+        )?;
+        let second = EventEnvelope::new(
+            &second_identity,
+            1,
+            None,
+            AgentEvent::FinalAnswer("done".to_string()),
+        )?;
+        assert_ne!(first.event_id, second.event_id);
+        Ok(())
+    }
+
+    #[test]
     fn serializes_versioned_contract() -> Result<()> {
         let envelope = EventEnvelope::new(
             &identity(),
             1,
             None,
             AgentEvent::FinalAnswer("done".to_string()),
-        );
+        )?;
         let value = serde_json::to_value(&envelope)
             .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
         assert_eq!(
@@ -472,10 +734,7 @@ mod tests {
                 }),
                 Ok(AgentEvent::Cancelled),
             ],
-            vec![Ok(AgentEvent::Error {
-                source: "model".to_string(),
-                message: "stream interrupted".to_string(),
-            })],
+            vec![Ok(AgentEvent::error_message("model", "stream interrupted"))],
         ] {
             let events = envelope_event_stream(Box::pin(stream::iter(raw)), identity())
                 .collect::<Vec<_>>()
@@ -488,16 +747,16 @@ mod tests {
     }
 
     #[test]
-    fn trajectory_validator_reports_sequence_identity_parent_and_terminal_drift() {
+    fn trajectory_validator_reports_sequence_identity_parent_and_terminal_drift() -> Result<()> {
         let mut first = EventEnvelope::new(
             &identity(),
             1,
-            Some("missing-parent".to_string()),
+            Some(EventId("missing-parent".to_string())),
             AgentEvent::FinalAnswer("early".to_string()),
-        );
+        )?;
         first.schema_version = AGENT_EVENT_SCHEMA_VERSION.saturating_add(1);
-        let mut second = EventEnvelope::new(&identity(), 3, None, AgentEvent::Cancelled);
-        second.turn_id = "different-turn".to_string();
+        let mut second = EventEnvelope::new(&identity(), 3, None, AgentEvent::Cancelled)?;
+        second.turn_id = TurnId("different-turn".to_string());
         second.event_id = first.event_id.clone();
         let violations = validate_event_trajectory(&[first, second]);
         for expected in [
@@ -510,5 +769,51 @@ mod tests {
         ] {
             assert!(violations.iter().any(|value| value.contains(expected)));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_blank_identity_and_zero_sequence() {
+        let mut blank = identity();
+        blank.turn_id = TurnId(String::new());
+        assert!(EventEnvelope::new(&blank, 1, None, AgentEvent::Cancelled).is_err());
+        assert!(EventEnvelope::new(&identity(), 0, None, AgentEvent::Cancelled).is_err());
+    }
+
+    #[test]
+    fn trajectory_rejects_tampered_slot_and_content() -> Result<()> {
+        let mut slot = EventEnvelope::new(
+            &identity(),
+            1,
+            None,
+            AgentEvent::FinalAnswer("original".to_string()),
+        )?;
+        slot.event_id = EventId("evt_tampered".to_string());
+        slot.content_hash = "sha256:tampered".to_string();
+        let violations = validate_event_trajectory(&[slot]);
+        assert!(
+            violations
+                .iter()
+                .any(|value| value.contains("invalid event id"))
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|value| value.contains("invalid content hash"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_exhausted_resume_sequence() {
+        let events = envelope_event_stream_after(
+            Box::pin(stream::iter(vec![Ok(AgentEvent::Cancelled)])),
+            identity(),
+            u64::MAX,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert_eq!(events.len(), 1);
+        assert!(events.first().is_some_and(Result::is_err));
     }
 }

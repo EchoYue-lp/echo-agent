@@ -203,7 +203,6 @@ async fn main() -> Result<()> {
 | `examples/demo18_semantic_memory.rs` | Store 语义搜索（EmbeddingStore / 向量检索） |
 | `examples/demo19_guard.rs` | Guard 系统（规则 / LLM 内容过滤） |
 | `examples/demo20_audit.rs` | 审计日志 |
-| `examples/demo21_handoff.rs` | Agent 切换（Handoff） |
 | `examples/demo22_plan_execute.rs` | Plan-and-Execute 规划执行 |
 | `examples/demo23_a2a.rs` | A2A 协议 |
 | `examples/demo24_topology.rs` | 多 Agent 拓扑可视化 |

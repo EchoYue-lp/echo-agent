@@ -72,7 +72,7 @@ async fn handle_approval(req: HumanLoopRequest) -> Result<HumanLoopResponse> {
         "a" | "all" => {
             println!("  Approved all tools for this session");
             Ok(HumanLoopResponse::ApprovedWithScope {
-                scope: ApprovalScope::SessionAllTools,
+                scope: ApprovalScope::SessionTool,
             })
         }
         "e" | "edit" => handle_edit_args(&req).await,
@@ -160,7 +160,7 @@ async fn handle_edit_args(req: &HumanLoopRequest) -> Result<HumanLoopResponse> {
     let scope_input = read_line_with_timeout(req.timeout).await?;
     let scope = match scope_input.trim().to_lowercase().as_str() {
         "s" | "session" => ApprovalScope::Session,
-        "a" | "all" => ApprovalScope::SessionAllTools,
+        "a" | "all" => ApprovalScope::SessionTool,
         _ => ApprovalScope::Once,
     };
 

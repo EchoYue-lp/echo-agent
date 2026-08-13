@@ -20,8 +20,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use tokio::sync::{Mutex, RwLock};
 
 pub use crate::error::Result;
 
@@ -358,7 +358,6 @@ pub enum RunEvent {
         failure: Option<crate::tools::ToolFailure>,
     },
     /// An error occurred at the run level.
-    #[allow(dead_code)]
     Error {
         /// Error message.
         message: String,
@@ -634,7 +633,9 @@ impl Default for InMemoryRunStore {
 #[async_trait::async_trait]
 impl RunStore for InMemoryRunStore {
     async fn save(&self, run: Run) -> Result<()> {
-        self.runs.write().await.insert(run.run_id.clone(), run);
+        let mut runs = self.runs.write().await;
+        let merged = merge_run(runs.get(&run.run_id).cloned(), run);
+        runs.insert(merged.run_id.clone(), merged);
         Ok(())
     }
 
@@ -662,104 +663,237 @@ impl RunStore for InMemoryRunStore {
         summaries.truncate(limit);
         Ok(summaries)
     }
+
+    async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| crate::error::ReactError::Other(format!("run '{run_id}' not found")))?;
+        run.push_event(event);
+        Ok(())
+    }
 }
 
 // ── JsonlRunStore ────────────────────────────────────────────────────
 
 /// File-based [`RunStore`] that persists each run as a JSONL file.
 ///
-/// Each run is stored in `{dir}/{run_id}.jsonl`. Every call to [`save`]
-/// appends a complete JSON line, so the latest line always represents the
-/// current run state. An in-memory cache avoids re-reading files on every
-/// query.
+/// Each run is stored in `{dir}/{run_id}.jsonl`: the first line is a compacted
+/// [`Run`] snapshot and later lines are individual [`RunEvent`] values.
+/// [`RunStore::save`] atomically compacts the file; [`RunStore::append_event`]
+/// appends only one bounded event, avoiding quadratic write amplification.
 ///
 /// Suitable for production use with persistent storage across restarts.
 pub struct JsonlRunStore {
     dir: PathBuf,
-    /// In-memory cache: run_id → Run (newest state)
+    shared: Arc<JsonlRunStoreData>,
+    retention: echo_core::utils::retention::ContentRetentionPolicy,
+    max_runs: usize,
+}
+
+struct JsonlRunStoreData {
     cache: RwLock<HashMap<String, Run>>,
+    mutation_lock: Mutex<()>,
+}
+
+fn jsonl_store_registry() -> &'static StdMutex<HashMap<PathBuf, Weak<JsonlRunStoreData>>> {
+    static REGISTRY: OnceLock<StdMutex<HashMap<PathBuf, Weak<JsonlRunStoreData>>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
 impl JsonlRunStore {
+    const DEFAULT_MAX_RUNS: usize = 1_024;
     /// Create a new store rooted at `dir`. The directory is created if it
     /// does not exist. Existing `.jsonl` files are scanned to populate the
     /// in-memory cache (only the last line of each file is loaded).
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
+        let dir = std::fs::canonicalize(&dir)?;
+        let mut registry = jsonl_store_registry().lock().map_err(|error| {
+            crate::error::ReactError::Other(format!("run registry poisoned: {error}"))
+        })?;
+        if let Some(shared) = registry.get(&dir).and_then(Weak::upgrade) {
+            return Ok(Self {
+                dir,
+                shared,
+                retention: echo_core::utils::retention::ContentRetentionPolicy::default(),
+                max_runs: Self::DEFAULT_MAX_RUNS,
+            });
+        }
         let mut cache = HashMap::new();
 
-        // Populate cache from existing files
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "jsonl")
-                    && let Some(run) = Self::load_last_line(&path)
-                {
-                    cache.insert(run.run_id.clone(), run);
-                }
+        // Populate only the newest bounded set and remove expired run logs.
+        let mut paths = std::fs::read_dir(&dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .collect::<Vec<_>>();
+        paths.sort_by_key(|path| {
+            std::fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        });
+        if paths.len() > Self::DEFAULT_MAX_RUNS {
+            let expired = paths.len().saturating_sub(Self::DEFAULT_MAX_RUNS);
+            for path in paths.drain(..expired) {
+                std::fs::remove_file(path)?;
             }
         }
+        for path in paths {
+            let run = Self::load_run(&path)?;
+            let expected = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other(format!(
+                        "run filename is not valid UTF-8: {}",
+                        path.display()
+                    ))
+                })?;
+            if run.run_id != expected {
+                return Err(crate::error::ReactError::Other(format!(
+                    "run identity mismatch in {}",
+                    path.display()
+                )));
+            }
+            cache.insert(run.run_id.clone(), run);
+        }
+
+        let shared = Arc::new(JsonlRunStoreData {
+            cache: RwLock::new(cache),
+            mutation_lock: Mutex::new(()),
+        });
+        registry.insert(dir.clone(), Arc::downgrade(&shared));
 
         Ok(Self {
             dir,
-            cache: RwLock::new(cache),
+            shared,
+            retention: echo_core::utils::retention::ContentRetentionPolicy::default(),
+            max_runs: Self::DEFAULT_MAX_RUNS,
         })
     }
 
+    pub fn with_retention_policy(
+        mut self,
+        retention: echo_core::utils::retention::ContentRetentionPolicy,
+    ) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    /// Bound both durable run files and the in-memory cache.
+    pub fn with_max_runs(mut self, max_runs: usize) -> Self {
+        self.max_runs = max_runs.max(1);
+        self
+    }
+
     /// Return the file path for a given run ID.
-    fn run_path(&self, run_id: &str) -> PathBuf {
-        self.dir.join(format!("{run_id}.jsonl"))
+    fn run_path(&self, run_id: &str) -> Result<PathBuf> {
+        let name = format!("{run_id}.jsonl");
+        Ok(echo_core::utils::fs::join_path_segment(&self.dir, &name)?)
     }
 
-    /// Read only the **last** line of a JSONL file and deserialize it as a `Run`.
-    fn load_last_line(path: &Path) -> Option<Run> {
-        let data = std::fs::read_to_string(path).ok()?;
-        // Find the last non-empty line
-        let last_line = data.lines().rfind(|l| !l.trim().is_empty())?;
-        serde_json::from_str::<Run>(last_line).ok()
+    fn parse_run_log(data: &str, path: &Path) -> Result<Run> {
+        let has_partial_tail = !data.ends_with('\n');
+        let lines = data
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        let first = lines.first().ok_or_else(|| {
+            crate::error::ReactError::Other(format!("empty run file: {}", path.display()))
+        })?;
+        let mut run = serde_json::from_str::<Run>(first)?;
+        for (index, line) in lines.iter().enumerate().skip(1) {
+            match serde_json::from_str::<RunEvent>(line) {
+                Ok(event) => run.push_event(event),
+                Err(error) if has_partial_tail && index.saturating_add(1) == lines.len() => {
+                    tracing::warn!(path = %path.display(), %error, "ignoring truncated run event tail");
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(run)
     }
 
-    /// Async version of `load_last_line` for use in async contexts.
-    async fn load_last_line_async(path: &Path) -> Option<Run> {
-        let data = tokio::fs::read_to_string(path).await.ok()?;
-        let last_line = data.lines().rfind(|l| !l.trim().is_empty())?;
-        serde_json::from_str::<Run>(last_line).ok()
+    fn load_run(path: &Path) -> Result<Run> {
+        let data = std::fs::read_to_string(path)?;
+        Self::parse_run_log(&data, path)
+    }
+
+    async fn load_run_async(path: &Path) -> Result<Run> {
+        let data = tokio::fs::read_to_string(path).await?;
+        Self::parse_run_log(&data, path)
+    }
+
+    async fn persist_unlocked(&self, run: Run) -> Result<()> {
+        let run_id = run.run_id.clone();
+        let path = self.run_path(&run_id)?;
+        let mut value = serde_json::to_value(&run)?;
+        self.retention.sanitize_json(&mut value);
+        let safe_run: Run = serde_json::from_value(value)?;
+        let mut bytes = serde_json::to_vec(&safe_run)?;
+        bytes.push(b'\n');
+        let path_for_write = path.clone();
+        tokio::task::spawn_blocking(move || {
+            echo_core::utils::fs::atomic_write(&path_for_write, &bytes)
+        })
+        .await
+        .map_err(|error| {
+            crate::error::ReactError::Other(format!("run writer join failed: {error}"))
+        })??;
+        self.shared.cache.write().await.insert(run_id, safe_run);
+        self.prune_unlocked().await?;
+        Ok(())
+    }
+
+    async fn prune_unlocked(&self) -> Result<()> {
+        let mut cache = self.shared.cache.write().await;
+        while cache.len() > self.max_runs {
+            let Some(oldest) = cache
+                .values()
+                .min_by_key(|run| run.started_at)
+                .map(|run| run.run_id.clone())
+            else {
+                break;
+            };
+            cache.remove(&oldest);
+            let path = self.run_path(&oldest)?;
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl RunStore for JsonlRunStore {
     async fn save(&self, run: Run) -> Result<()> {
-        let run_id = run.run_id.clone();
-        let path = self.run_path(&run_id);
-        let line = serde_json::to_string(&run)?;
-
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .write(true)
-            .open(&path)
-            .await?;
-        file.write_all(line.as_bytes()).await?;
-        file.write_all(b"\n").await?;
-
-        // Update in-memory cache
-        self.cache.write().await.insert(run_id, run);
-        Ok(())
+        let _guard = self.shared.mutation_lock.lock().await;
+        let existing = self.shared.cache.read().await.get(&run.run_id).cloned();
+        self.persist_unlocked(merge_run(existing, run)).await
     }
 
     async fn load(&self, run_id: &str) -> Result<Option<Run>> {
         // Check cache first
-        if let Some(run) = self.cache.read().await.get(run_id) {
+        if let Some(run) = self.shared.cache.read().await.get(run_id) {
             return Ok(Some(run.clone()));
         }
         // Fall back to disk (async)
-        let path = self.run_path(run_id);
-        if tokio::fs::try_exists(&path).await.unwrap_or(false)
-            && let Some(run) = Self::load_last_line_async(&path).await
-        {
-            self.cache
+        let path = self.run_path(run_id)?;
+        if tokio::fs::try_exists(&path).await? {
+            let run = Self::load_run_async(&path).await?;
+            if run.run_id != run_id {
+                return Err(crate::error::ReactError::Other(format!(
+                    "run identity mismatch in {}",
+                    path.display()
+                )));
+            }
+            self.shared
+                .cache
                 .write()
                 .await
                 .insert(run_id.to_string(), run.clone());
@@ -769,7 +903,7 @@ impl RunStore for JsonlRunStore {
     }
 
     async fn list_by_session(&self, session_id: &str) -> Result<Vec<RunSummary>> {
-        let cache = self.cache.read().await;
+        let cache = self.shared.cache.read().await;
         let mut summaries: Vec<RunSummary> = cache
             .values()
             .filter(|r| r.session_id == session_id)
@@ -781,7 +915,7 @@ impl RunStore for JsonlRunStore {
     }
 
     async fn list_all(&self, limit: usize) -> Result<Vec<RunSummary>> {
-        let cache = self.cache.read().await;
+        let cache = self.shared.cache.read().await;
         let mut summaries: Vec<RunSummary> = cache.values().map(Run::summary).collect();
         summaries.sort_by_key(|s| s.started_at);
         summaries.reverse();
@@ -789,16 +923,66 @@ impl RunStore for JsonlRunStore {
         Ok(summaries)
     }
 
-    /// Append a single event by writing an updated line to the JSONL file.
+    /// Append one sanitized event line without rewriting the accumulated run.
     async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()> {
-        // Load current state, append event, save back
-        let mut run = match self.load(run_id).await? {
+        let _guard = self.shared.mutation_lock.lock().await;
+        let mut run = match self.shared.cache.read().await.get(run_id).cloned() {
             Some(run) => run,
-            None => return Ok(()),
+            None => {
+                return Err(crate::error::ReactError::Other(format!(
+                    "run '{run_id}' not found"
+                )));
+            }
         };
-        run.push_event(event);
-        self.save(run).await
+        let mut value = serde_json::to_value(&event)?;
+        self.retention.sanitize_json(&mut value);
+        let safe_event: RunEvent = serde_json::from_value(value)?;
+        let mut bytes = serde_json::to_vec(&safe_event)?;
+        bytes.push(b'\n');
+        let path = self.run_path(run_id)?;
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+            file.write_all(&bytes)?;
+            file.sync_data()
+        })
+        .await
+        .map_err(|error| {
+            crate::error::ReactError::Other(format!("run event writer join failed: {error}"))
+        })??;
+        run.push_event(safe_event);
+        self.shared
+            .cache
+            .write()
+            .await
+            .insert(run_id.to_string(), run);
+        Ok(())
     }
+}
+
+fn merge_run(existing: Option<Run>, mut incoming: Run) -> Run {
+    let Some(existing) = existing else {
+        return incoming;
+    };
+    if existing.events.len() > incoming.events.len() {
+        incoming.events = existing.events;
+        incoming.token_usage = existing.token_usage;
+        incoming.timings.llm_duration_ms = existing.timings.llm_duration_ms;
+    }
+    if is_terminal(existing.status) {
+        incoming.status = existing.status;
+        incoming.final_output = existing.final_output;
+        incoming.error = existing.error;
+        incoming.finished_at = existing.finished_at;
+    }
+    incoming
+}
+
+fn is_terminal(status: RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+    )
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────
@@ -1043,6 +1227,62 @@ mod tests {
 
         let loaded = store.load("r1").await.unwrap().unwrap();
         assert_eq!(loaded.events.len(), 1);
+        let lines = std::fs::read_to_string(dir.join("r1.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(lines, 2, "one snapshot plus one event line");
+    }
+
+    #[tokio::test]
+    async fn jsonl_store_replays_events_and_ignores_only_truncated_tail() -> Result<()> {
+        let dir = temp_dir();
+        let store = JsonlRunStore::new(&dir)?;
+        store.save(make_run("replay", "session")).await?;
+        store
+            .append_event("replay", RunEvent::Checkpoint { id: "one".into() })
+            .await?;
+        drop(store);
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("replay.jsonl"))?
+            .write_all(b"{truncated")?;
+
+        let reopened = JsonlRunStore::new(&dir)?;
+        let run = reopened
+            .load("replay")
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("missing replayed run".into()))?;
+        assert_eq!(run.events.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn jsonl_store_rejects_complete_corrupt_event_tail() -> Result<()> {
+        let dir = temp_dir();
+        let run = make_run("complete-corrupt", "session");
+        let mut data = serde_json::to_string(&run)?;
+        data.push_str("\n{not-an-event}\n");
+        std::fs::write(dir.join("complete-corrupt.jsonl"), data)?;
+
+        assert!(JsonlRunStore::new(&dir).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn jsonl_store_prunes_oldest_run_files_and_cache() -> Result<()> {
+        let dir = temp_dir();
+        let store = JsonlRunStore::new(&dir)?.with_max_runs(2);
+        for id in ["r1", "r2", "r3"] {
+            store.save(make_run(id, "session")).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        assert!(store.load("r1").await?.is_none());
+        assert!(store.load("r2").await?.is_some());
+        assert!(store.load("r3").await?.is_some());
+        assert!(!dir.join("r1.jsonl").exists());
+        Ok(())
     }
 
     #[tokio::test]
@@ -1056,5 +1296,124 @@ mod tests {
         let store2 = JsonlRunStore::new(&dir).unwrap();
         let loaded = store2.load("r1").await.unwrap();
         assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn jsonl_store_rejects_run_id_path_escape() -> Result<()> {
+        let dir = temp_dir();
+        let store = JsonlRunStore::new(&dir)?;
+        for id in ["../outside", "/tmp/outside", "a/b", "a\\b"] {
+            assert!(store.save(make_run(id, "s1")).await.is_err());
+            assert!(store.load(id).await.is_err());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn jsonl_store_redacts_and_bounds_all_persisted_content() -> Result<()> {
+        let dir = temp_dir();
+        let store = JsonlRunStore::new(&dir)?.with_retention_policy(
+            echo_core::utils::retention::ContentRetentionPolicy {
+                max_string_chars: 64,
+                max_array_items: 10,
+            },
+        );
+        let mut run = make_run("redacted", "session");
+        run.input = "Bearer abcdefghijklmnopqrstuvwxyz".to_string();
+        run.final_output = Some("中文字符".repeat(40));
+        run.error = Some("token: secretvalue123456".to_string());
+        run.events.push(RunEvent::ToolCall {
+            call_id: "call".to_string(),
+            name: "shell".to_string(),
+            args: Some(serde_json::json!({
+                "nested": {"key": "sk-abcdefghijklmnopqrstuvwxyz"}
+            })),
+            risk: None,
+            duration_ms: 1,
+        });
+        store.save(run).await?;
+
+        let bytes = tokio::fs::read_to_string(dir.join("redacted.jsonl")).await?;
+        assert!(!bytes.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(!bytes.contains("secretvalue123456"));
+        assert!(bytes.contains("[REDACTED]"));
+        assert!(bytes.contains("[TRUNCATED]"));
+        let loaded = store
+            .load("redacted")
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("missing redacted run".to_string()))?;
+        assert!(!loaded.input.contains("abcdefghijklmnopqrstuvwxyz"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn jsonl_store_serializes_instances_and_preserves_terminal_state() -> Result<()> {
+        let dir = temp_dir();
+        let first = Arc::new(JsonlRunStore::new(&dir)?);
+        let second = Arc::new(JsonlRunStore::new(&dir)?);
+        let mut running = make_run("shared", "session");
+        running.status = RunStatus::Running;
+        running.finished_at = None;
+        first.save(running.clone()).await?;
+
+        let left = Arc::clone(&first);
+        let right = Arc::clone(&second);
+        let append_left = tokio::spawn(async move {
+            left.append_event(
+                "shared",
+                RunEvent::ToolCall {
+                    call_id: "left".into(),
+                    name: "read_file".into(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 1,
+                },
+            )
+            .await
+        });
+        let append_right = tokio::spawn(async move {
+            right
+                .append_event(
+                    "shared",
+                    RunEvent::ToolCall {
+                        call_id: "right".into(),
+                        name: "read_file".into(),
+                        args: None,
+                        risk: None,
+                        duration_ms: 1,
+                    },
+                )
+                .await
+        });
+        append_left
+            .await
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))??;
+        append_right
+            .await
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))??;
+
+        let mut completed = running.clone();
+        completed.status = RunStatus::Completed;
+        completed.final_output = Some("done".into());
+        completed.finished_at = Some(Utc::now());
+        first.save(completed).await?;
+        second.save(running).await?;
+
+        let loaded = first
+            .load("shared")
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("missing run".into()))?;
+        assert_eq!(loaded.events.len(), 2);
+        assert_eq!(loaded.status, RunStatus::Completed);
+        assert_eq!(loaded.final_output.as_deref(), Some("done"));
+        Ok(())
+    }
+
+    #[test]
+    fn jsonl_store_rejects_corrupt_existing_run() -> Result<()> {
+        let dir = temp_dir();
+        std::fs::write(dir.join("broken.jsonl"), b"{not-json}\n")?;
+        assert!(JsonlRunStore::new(&dir).is_err());
+        Ok(())
     }
 }

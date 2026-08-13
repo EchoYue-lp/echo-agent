@@ -115,11 +115,13 @@ pub(crate) async fn verify_final_text(
 ) -> Result<IterOutcome> {
     let content_buffer = think.content_buffer;
     let reasoning_content = think.reasoning_buffer;
+    let reasoning_blocks = think.reasoning_blocks;
     if !verify_answer(snap, context, &content_buffer, state.verifier_retry_count).await {
         // Push the LLM's answer to context so it can see its own attempt
         context.lock().await.push(with_reasoning_content(
             Message::assistant(content_buffer),
             reasoning_content,
+            reasoning_blocks,
         ));
         state.verifier_retry_count += 1;
         return Ok(IterOutcome::Continue);
@@ -128,6 +130,7 @@ pub(crate) async fn verify_final_text(
     Ok(IterOutcome::FinalText {
         answer: content_buffer,
         reasoning_content,
+        reasoning_blocks,
     })
 }
 

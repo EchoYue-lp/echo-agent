@@ -4,6 +4,7 @@
 //! patch proposals to improve skill instructions with better error handling.
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use echo_core::memory::store::Store;
@@ -78,9 +79,18 @@ pub struct SkillPatch {
     /// When this patch was proposed.
     #[serde(with = "crate::utils::time::local_rfc3339")]
     pub proposed_at: DateTime<Utc>,
+    /// SHA-256 of the exact SKILL.md content reviewed for this proposal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hash: Option<String>,
 }
 
 impl SkillPatch {
+    /// Bind this proposal to the exact current source revision.
+    pub async fn bind_to_source(mut self, path: &std::path::Path) -> Result<Self> {
+        let content = tokio::fs::read(path).await?;
+        self.source_hash = Some(sha256_hex(&content));
+        Ok(self)
+    }
     /// Generate a human-readable summary of the patch.
     pub fn summary(&self) -> String {
         match &self.patch_type {
@@ -271,12 +281,37 @@ impl SkillPatcher {
         change_log: &dyn ChangeLog,
     ) -> Result<()> {
         let path = &descriptor.location;
+        let lock_path = path.with_extension("md.patch.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        fs2::FileExt::try_lock_exclusive(&lock_file).map_err(|error| {
+            crate::error::ReactError::Other(format!(
+                "another patch is already updating {}: {error}",
+                path.display()
+            ))
+        })?;
         let content = tokio::fs::read_to_string(path).await.map_err(|e| {
             crate::error::ReactError::Other(format!(
                 "Failed to read SKILL.md at {}: {e}",
                 path.display()
             ))
         })?;
+        let current_hash = sha256_hex(content.as_bytes());
+        let expected_hash = patch.source_hash.as_deref().ok_or_else(|| {
+            crate::error::ReactError::Other(
+                "patch proposal is not bound to a source revision; call bind_to_source first"
+                    .to_string(),
+            )
+        })?;
+        if expected_hash != current_hash {
+            return Err(crate::error::ReactError::Other(format!(
+                "SKILL.md changed after proposal review (expected {expected_hash}, found {current_hash})"
+            )));
+        }
 
         // Split frontmatter (--- ... ---) from body. If no frontmatter, treat
         // the entire content as body.
@@ -301,20 +336,13 @@ impl SkillPatcher {
             format!("{frontmatter}\n{new_body}\n")
         };
 
-        // Write back atomically (write to tmp, then rename — same pattern as FileStore).
-        let tmp_path = path.with_extension("md.tmp");
-        tokio::fs::write(&tmp_path, &new_content)
-            .await
-            .map_err(|e| {
-                crate::error::ReactError::Other(format!("Failed to write patched SKILL.md: {e}"))
-            })?;
-        tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
-            crate::error::ReactError::Other(format!("Failed to rename patched SKILL.md: {e}"))
-        })?;
+        echo_core::utils::fs::atomic_write(path, new_content.as_bytes())?;
 
         // Record in audit log.
         let entry =
             ChangeEntryBuilder::new(EntityType::Skill, &patch.skill_name, ChangeType::Update)
+                .before(serde_json::json!({"path": path, "sha256": current_hash, "content": content}))
+                .after(serde_json::json!({"path": path, "sha256": sha256_hex(new_content.as_bytes()), "content": new_content}))
                 .reason(format!(
                     "Applied patch: {} (confidence: {:.0}%)",
                     patch.patch_type.label(),
@@ -322,7 +350,10 @@ impl SkillPatcher {
                 ))
                 .trigger("skill_patcher".to_string())
                 .build(change_log);
-        change_log.record(entry)?;
+        if let Err(error) = change_log.record(entry) {
+            echo_core::utils::fs::atomic_write(path, content.as_bytes())?;
+            return Err(error);
+        }
 
         tracing::info!(
             skill = %patch.skill_name,
@@ -467,8 +498,16 @@ impl SkillPatcher {
             confidence,
             priority,
             proposed_at: Utc::now(),
+            source_hash: None,
         })
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -633,6 +672,7 @@ mod tests {
             confidence: 0.85,
             priority: 7,
             proposed_at: Utc::now(),
+            source_hash: None,
         };
 
         let summary = patch.summary();
@@ -656,6 +696,7 @@ mod tests {
             confidence: 0.9,
             priority: 9,
             proposed_at: Utc::now(),
+            source_hash: None,
         };
 
         let summary = patch.summary();

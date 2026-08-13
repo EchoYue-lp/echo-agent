@@ -5,7 +5,7 @@
 //! 2. 创建新 worktree 用于并行子 Agent 工作
 //! 3. 再次列出 worktree 确认创建成功
 //! 4. 移除 worktree 并清理分支
-//! 5. 创建 git checkpoint（轻量标签）
+//! 5. 为单个文件创建精确 checkpoint
 //!
 //! 需要：
 //! - 当前目录在 git 仓库内（echo-agent 项目本身即可）
@@ -136,14 +136,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("Part 5：Git Checkpoint（文件修改前的安全快照）");
     println!("───────────────────────────────────────────────────────\n");
 
-    println!("  checkpoint 会在修改文件前为当前 HEAD 创建轻量标签，");
-    println!("  方便在出错时回滚到修改前的状态。\n");
+    println!("  checkpoint 会在修改文件前保存该文件的工作区内容和暂存区状态，");
+    println!("  回滚时不会覆盖仓库里的其它改动。\n");
 
-    let checkpoint = create_checkpoint(repo_path);
-    match &checkpoint {
-        Some(tag) => {
-            println!("  ✓ Checkpoint 创建成功: {}", tag);
-            println!("    可用 `git checkout {tag} -- .` 回滚");
+    let checkpoint_target = repo_path.join("Cargo.toml");
+    match create_checkpoint(&checkpoint_target)? {
+        Some(checkpoint_id) => {
+            println!("  ✓ Checkpoint 创建成功: {}", checkpoint_id);
+            println!("    快照文件: {}", checkpoint_target.display());
         }
         None => {
             println!("  ⚠ 未创建 checkpoint（可能不在 git 仓库中）");
@@ -152,7 +152,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Clean up old checkpoints, keeping last 5
-    cleanup_old_checkpoints(repo_path, 5);
+    cleanup_old_checkpoints(&checkpoint_target, 5);
     println!("  已清理旧 checkpoint（保留最近 5 个）");
 
     // ── Summary ─────────────────────────────────────────────────────────
@@ -164,8 +164,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("    避免文件冲突。Worktree 共享 .git 对象存储，因此非常轻量。");
     println!();
     println!("  Checkpoint 的核心场景：");
-    println!("    Agent 在修改文件前自动创建 checkpoint 标签，");
-    println!("    如果修改导致问题，可以一键回滚到 checkpoint 状态。");
+    println!("    Agent 在修改文件前保存文件内容及其 Git index 条目，");
+    println!("    如果修改失败，只回滚目标文件，不影响其它未提交改动。");
 
     println!("\n═══════════════════════════════════════════════════════");
     println!("    demo58 完成");

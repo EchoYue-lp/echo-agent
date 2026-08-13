@@ -11,35 +11,46 @@
 
 use serde::Serialize;
 
+use crate::error::{ReactError, Result};
+
 /// Fine-grained token budget that divides the model's context window
 /// into fixed-percentage allocations.
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
     /// Total context window size (model-dependent, e.g. 128000 for GPT-4o).
-    pub total_window: usize,
+    total_window: usize,
     /// Fraction of total reserved for the system prompt (default 0.10).
-    pub system_prompt_pct: f64,
+    system_prompt_pct: f64,
     /// Fraction of total reserved for tool definitions (default 0.05).
-    pub tool_defs_pct: f64,
+    tool_defs_pct: f64,
     /// Fraction of total reserved for output generation (default 0.10).
-    pub output_pct: f64,
+    output_pct: f64,
     /// Fraction of total kept as safety margin (default 0.10).
-    pub safety_pct: f64,
+    safety_pct: f64,
 }
 
 impl TokenBudget {
+    /// Total context window governed by this budget.
+    pub fn total_window(&self) -> usize {
+        self.total_window
+    }
     /// Create a default budget from the total context window size.
     ///
     /// Uses a safe allocation: 10% system, 5% tools, 10% output, 10% safety,
     /// leaving 65% for conversation history.
-    pub fn new(total_window: usize) -> Self {
-        Self {
+    pub fn new(total_window: usize) -> Result<Self> {
+        if total_window == 0 {
+            return Err(ReactError::Other(
+                "token budget total window must be greater than zero".to_string(),
+            ));
+        }
+        Ok(Self {
             total_window,
             system_prompt_pct: 0.10,
             tool_defs_pct: 0.05,
             output_pct: 0.10,
             safety_pct: 0.10,
-        }
+        })
     }
 
     /// Customize the allocation percentages. All values are fractions
@@ -53,12 +64,27 @@ impl TokenBudget {
         tool_pct: f64,
         output_pct: f64,
         safety_pct: f64,
-    ) -> Self {
+    ) -> Result<Self> {
+        let allocations = [system_pct, tool_pct, output_pct, safety_pct];
+        if allocations
+            .iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        {
+            return Err(ReactError::Other(
+                "token budget allocations must be finite values in [0, 1]".to_string(),
+            ));
+        }
+        let total = allocations.iter().sum::<f64>();
+        if total > 1.0 {
+            return Err(ReactError::Other(format!(
+                "token budget allocations total {total}, exceeding 1.0"
+            )));
+        }
         self.system_prompt_pct = system_pct;
         self.tool_defs_pct = tool_pct;
         self.output_pct = output_pct;
         self.safety_pct = safety_pct;
-        self
+        Ok(self)
     }
 
     /// Maximum tokens available for the system prompt.
@@ -74,6 +100,11 @@ impl TokenBudget {
     /// Maximum tokens reserved for LLM output.
     pub fn output_budget(&self) -> usize {
         (self.total_window as f64 * self.output_pct) as usize
+    }
+
+    /// Tokens held back as a safety margin for provider accounting drift.
+    pub fn safety_budget(&self) -> usize {
+        (self.total_window as f64 * self.safety_pct) as usize
     }
 
     /// Maximum tokens available for conversation history.
@@ -95,20 +126,21 @@ impl TokenBudget {
     ) -> TokenAllocation {
         let sys_ok = system_size <= self.system_prompt_budget();
         let tool_ok = tool_defs_size <= self.tool_definitions_budget();
-        let conv_ok = conversation_size <= self.conversation_budget();
+        // Category percentages are reporting targets, not hard partitions.
+        // Unused capacity remains available to the other input categories.
+        let effective_conversation_budget = self
+            .total_window
+            .saturating_sub(self.output_budget())
+            .saturating_sub(self.safety_budget())
+            .saturating_sub(system_size)
+            .saturating_sub(tool_defs_size);
+        let conv_ok = conversation_size <= effective_conversation_budget;
+        let conversation_excess = conversation_size.saturating_sub(effective_conversation_budget);
 
-        let conversation_excess = if conv_ok {
-            0
-        } else {
-            conversation_size.saturating_sub(self.conversation_budget())
-        };
-
-        let total_used = system_size + tool_defs_size + conversation_size;
-        let usage_pct = if self.total_window > 0 {
-            (total_used as f64 / self.total_window as f64) * 100.0
-        } else {
-            0.0
-        };
+        let total_used = system_size
+            .saturating_add(tool_defs_size)
+            .saturating_add(conversation_size);
+        let usage_pct = (total_used as f64 / self.total_window as f64) * 100.0;
 
         let output_fits = self.output_budget() > 0;
 
@@ -148,9 +180,15 @@ impl TokenBudget {
 }
 
 impl Default for TokenBudget {
-    /// Creates a budget for a 396K model with default allocations.
+    /// Creates a conservative 128K budget with default allocations.
     fn default() -> Self {
-        Self::new(396_000)
+        Self {
+            total_window: 128_000,
+            system_prompt_pct: 0.10,
+            tool_defs_pct: 0.05,
+            output_pct: 0.10,
+            safety_pct: 0.10,
+        }
     }
 }
 
@@ -247,9 +285,9 @@ impl TokenBudgetConfig {
     }
 
     /// Build a TokenBudget from this config.
-    pub fn build(&self, fallback_window: usize) -> TokenBudget {
+    pub fn build(&self, fallback_window: usize) -> Result<TokenBudget> {
         let window = self.total_window.unwrap_or(fallback_window);
-        TokenBudget::new(window).with_allocations(
+        TokenBudget::new(window)?.with_allocations(
             self.system_pct,
             self.tool_pct,
             self.output_pct,
@@ -264,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_default_budget() {
-        let budget = TokenBudget::new(100_000);
+        let budget = TokenBudget::new(100_000).unwrap_or_default();
         assert_eq!(budget.system_prompt_budget(), 10_000); // 10%
         assert_eq!(budget.tool_definitions_budget(), 5_000); // 5%
         assert_eq!(budget.output_budget(), 10_000); // 10%
@@ -273,14 +311,14 @@ mod tests {
     }
 
     #[test]
-    fn default_budget_uses_396k_context_window() {
+    fn default_budget_uses_conservative_context_window() {
         let budget = TokenBudget::default();
-        assert_eq!(budget.total_window, 396_000);
+        assert_eq!(budget.total_window(), 128_000);
     }
 
     #[test]
     fn test_allocation_ok() {
-        let budget = TokenBudget::new(100_000);
+        let budget = TokenBudget::new(100_000).unwrap_or_default();
         let all = budget.allocate(5_000, 2_000, 30_000);
         assert!(all.ok());
         assert!(!all.needs_compression());
@@ -288,18 +326,64 @@ mod tests {
 
     #[test]
     fn test_allocation_needs_compression() {
-        let budget = TokenBudget::new(100_000);
-        let all = budget.allocate(5_000, 2_000, 70_000); // exceeds 65K
+        let budget = TokenBudget::new(100_000).unwrap_or_default();
+        let all = budget.allocate(5_000, 2_000, 75_000); // exceeds 80K total input capacity
         assert!(!all.ok());
         assert!(all.needs_compression());
-        assert_eq!(all.conversation_excess, 5_000);
+        assert_eq!(all.conversation_excess, 2_000);
+    }
+
+    #[test]
+    fn system_and_tool_overflow_reduce_conversation_capacity() -> Result<()> {
+        let budget = TokenBudget::new(100_000)?;
+        let allocation = budget.allocate(15_000, 10_000, 50_000);
+
+        // With 20K reserved for output and safety, actual system and tool
+        // usage leaves 55K available to conversation history.
+        assert_eq!(allocation.conversation_excess, 0);
+        let over = budget.allocate(15_000, 10_000, 60_000);
+        assert_eq!(over.conversation_excess, 5_000);
+        assert!(over.needs_compression());
+        Ok(())
     }
 
     #[test]
     fn test_custom_allocations() {
-        let budget = TokenBudget::new(100_000).with_allocations(0.05, 0.05, 0.05, 0.05);
+        let budget = TokenBudget::new(100_000)
+            .and_then(|budget| budget.with_allocations(0.05, 0.05, 0.05, 0.05))
+            .unwrap_or_default();
         assert_eq!(budget.system_prompt_budget(), 5_000);
         assert_eq!(budget.conversation_budget(), 80_000); // 100% - 20% = 80%
+    }
+
+    #[test]
+    fn invalid_allocations_are_rejected() {
+        for allocations in [
+            [-0.1, 0.1, 0.1, 0.1],
+            [f64::NAN, 0.1, 0.1, 0.1],
+            [f64::INFINITY, 0.1, 0.1, 0.1],
+            [0.4, 0.4, 0.4, 0.0],
+        ] {
+            let result = TokenBudget::new(100).and_then(|budget| {
+                budget.with_allocations(
+                    allocations[0],
+                    allocations[1],
+                    allocations[2],
+                    allocations[3],
+                )
+            });
+            assert!(result.is_err(), "accepted allocations {allocations:?}");
+        }
+        assert!(TokenBudget::new(0).is_err());
+    }
+
+    #[test]
+    fn extreme_usage_counts_do_not_overflow() -> Result<()> {
+        let budget = TokenBudget::new(100)?;
+        let allocation = budget.allocate(usize::MAX, 1, 1);
+        assert!(allocation.usage_pct.is_finite());
+        assert!(!allocation.ok());
+        Ok(())
     }
 
     #[test]

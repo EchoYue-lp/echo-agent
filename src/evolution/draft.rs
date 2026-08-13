@@ -1,6 +1,6 @@
 //! Skill draft generation — creates SKILL.md files from detected candidates.
 //!
-//! Takes a [`SkillCandidate`] (produced by [`SkillCandidateDetector`]) and
+//! Takes a [`SkillCandidate`] (produced by [`super::candidate::SkillCandidateDetector`]) and
 //! generates a draft SKILL.md file at `.echo-agent/skills/_drafts/<name>/SKILL.md`.
 //! The draft is a *proposal* — a human reviews it before promoting to Active.
 //!
@@ -57,10 +57,14 @@ pub struct SkillDraftGenerator<'a> {
 impl<'a> SkillDraftGenerator<'a> {
     /// Create a new generator.
     pub fn new(echo_agent_dir: PathBuf, change_log: &'a dyn ChangeLog) -> Self {
+        let curator = Curator::new(
+            CuratorConfig::default(),
+            echo_agent_dir.join("curator_state.json"),
+        );
         Self {
             echo_agent_dir,
             change_log,
-            curator: Curator::default_path(CuratorConfig::default()),
+            curator,
             require_curator_transition: false,
         }
     }
@@ -99,26 +103,37 @@ impl<'a> SkillDraftGenerator<'a> {
     /// Generate a draft SKILL.md directly from a [`SkillCandidate`] struct.
     pub async fn generate_from_candidate(&self, candidate: &SkillCandidate) -> Result<DraftResult> {
         let name = &candidate.name;
-        let dir = self.echo_agent_dir.join(DRAFTS_DIR).join(name);
+        let drafts_root = self.echo_agent_dir.join(DRAFTS_DIR);
+        let dir = echo_core::utils::fs::join_path_segment(&drafts_root, name).map_err(|error| {
+            ReactError::Other(format!("Unsafe skill candidate name {name:?}: {error}"))
+        })?;
         let skill_md_path = dir.join("SKILL.md");
 
         // 2. Generate SKILL.md content.
         let content = render_skill_md(candidate);
 
         // 3. Write to disk.
-        let created = !skill_md_path.exists();
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(&skill_md_path, &content)?;
+        let previous = match std::fs::read(&skill_md_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let created = previous.is_none();
+        echo_core::utils::fs::atomic_write(&skill_md_path, content.as_bytes())?;
 
         // 4. Promote in the evolution-owned Curator lifecycle.
         match self.curator.promote_to_draft_at(name, Some(&skill_md_path)) {
             Ok(true) => {}
             Ok(false) if self.require_curator_transition => {
+                restore_draft_file(&skill_md_path, previous.as_deref())?;
                 return Err(ReactError::Other(format!(
                     "candidate '{name}' is not in Candidate lifecycle state"
                 )));
             }
-            Err(error) if self.require_curator_transition => return Err(error),
+            Err(error) if self.require_curator_transition => {
+                restore_draft_file(&skill_md_path, previous.as_deref())?;
+                return Err(error);
+            }
             Ok(false) => tracing::warn!("Candidate '{}' was not registered with Curator", name),
             Err(error) => {
                 tracing::warn!("Failed to promote '{}' to draft: {}", name, error);
@@ -134,7 +149,11 @@ impl<'a> SkillDraftGenerator<'a> {
             ))
             .trigger("skill_draft_generator".to_string())
             .build(self.change_log);
-        self.change_log.record(entry)?;
+        if let Err(error) = self.change_log.record(entry) {
+            let _ = self.curator.revert_draft_to_candidate(name);
+            restore_draft_file(&skill_md_path, previous.as_deref())?;
+            return Err(error);
+        }
 
         Ok(DraftResult {
             name: name.clone(),
@@ -142,6 +161,17 @@ impl<'a> SkillDraftGenerator<'a> {
             created,
         })
     }
+}
+
+fn restore_draft_file(path: &std::path::Path, previous: Option<&[u8]>) -> Result<()> {
+    if let Some(bytes) = previous {
+        echo_core::utils::fs::atomic_write(path, bytes)?;
+    } else if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 // ── Template rendering ─────────────────────────────────────────────────
@@ -339,6 +369,18 @@ mod tests {
         let content = std::fs::read_to_string(&result.skill_md_path).unwrap();
         assert!(content.contains("name: cargo-build"));
         assert!(content.contains("lifecycle: draft"));
+    }
+
+    #[tokio::test]
+    async fn draft_generation_rejects_path_escape_name() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let outside = dir.parent().map(|parent| parent.join("escaped-skill"));
+        let log = NullChangeLog;
+        let generator = SkillDraftGenerator::new(dir, &log);
+        let mut candidate = sample_candidate();
+        candidate.name = "../escaped-skill".to_string();
+        assert!(generator.generate_from_candidate(&candidate).await.is_err());
+        assert!(outside.is_none_or(|path| !path.exists()));
     }
 
     #[tokio::test]

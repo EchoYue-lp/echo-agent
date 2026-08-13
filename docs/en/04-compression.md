@@ -47,11 +47,10 @@ Best for: High-volume conversations where history is unimportant, or cost-sensit
 
 ```rust
 use echo_agent::prelude::*;
-use echo_agent::llm::DefaultLlmClient;
-use reqwest::Client;
+use echo_agent::llm::OpenAiClient;
 use std::sync::Arc;
 
-let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "qwen3.6-plus"));
+let llm = Arc::new(OpenAiClient::from_env("qwen3.6-plus")?);
 
 // Built-in summary prompt
 SummaryCompressor::new(llm.clone(), 6)
@@ -144,7 +143,7 @@ let compressor = HybridCompressor::builder()
 ### Configuration
 
 ```rust
-use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+use echo_agent::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
 
 let config = AdaptiveCompressionConfig {
     l1_snip_threshold_tokens: 80_000,
@@ -183,8 +182,8 @@ Tokens:    0 ──── 80k ──── 100k ──── 120k ──── 1
 `AdaptiveCompressor` implements `ContextCompressor` and integrates via `ContextManager::builder()` (new in v0.2.2):
 
 ```rust
-use echo_state::compression::ContextManager;
-use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+use echo_agent::compression::ContextManager;
+use echo_agent::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
 
 let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default())
     .with_llm(llm); // optional: enable L4
@@ -340,7 +339,7 @@ Each compression event also emits `tracing` log events at `info` level with fiel
 `CalibratedTokenizer` wraps any base tokenizer and improves accuracy over time by learning from actual API response data:
 
 ```rust
-use echo_core::tokenizer::{CalibratedTokenizer, HeuristicTokenizer, Tokenizer};
+use echo_agent::tokenizer::{CalibratedTokenizer, HeuristicTokenizer, Tokenizer};
 use std::sync::Arc;
 
 let base = Arc::new(HeuristicTokenizer);
@@ -434,8 +433,8 @@ When `SummaryCompressor`'s behavior doesn't fit (e.g., message filtering, increm
 
 ```rust
 use echo_agent::compression::{ContextCompressor, CompressionInput, CompressionOutput};
-use echo_core::error::Result;
-use echo_core::llm::types::Message;
+use echo_agent::error::Result;
+use echo_agent::llm::types::Message;
 use futures::future::BoxFuture;
 
 /// Keep only user messages (example)
@@ -478,7 +477,7 @@ Generate a `ContextCompressor` implementation from an async fn — no manual str
 
 ```rust
 use echo_agent::compression::{CompressionInput, CompressionOutput};
-use echo_core::error::Result;
+use echo_agent::error::Result;
 use echo_agent_macros::compressor;
 
 #[compressor]

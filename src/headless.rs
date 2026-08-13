@@ -16,6 +16,7 @@
 //!     exit_on_error: true,
 //!     output_format: "text".into(),
 //!     max_iterations: Some(10),
+//!     cancel_token: None,
 //! };
 //!
 //! let result = run_headless(config, |builder| builder).await;
@@ -25,7 +26,10 @@
 //! ```
 
 use crate::agent::Agent;
+use crate::agent::AgentEvent;
 use crate::agent::react::builder::ReactAgentBuilder;
+use futures::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 /// Configuration for headless (non-interactive) agent execution.
 pub struct HeadlessConfig {
@@ -40,6 +44,9 @@ pub struct HeadlessConfig {
 
     /// Max iterations before forcing stop (safety limit).
     pub max_iterations: Option<usize>,
+
+    /// Optional caller-owned cancellation token.
+    pub cancel_token: Option<CancellationToken>,
 }
 
 impl Default for HeadlessConfig {
@@ -49,6 +56,7 @@ impl Default for HeadlessConfig {
             exit_on_error: true,
             output_format: "text".into(),
             max_iterations: None,
+            cancel_token: None,
         }
     }
 }
@@ -66,12 +74,19 @@ pub struct HeadlessResult {
 
     /// Output format requested.
     pub format: String,
+
+    /// Whether a failed run should produce a non-zero process exit code.
+    pub exit_on_error: bool,
 }
 
 impl HeadlessResult {
     /// Compute the process exit code: 0 on success, 1 on failure.
     pub fn exit_code(&self) -> i32 {
-        if self.success { 0 } else { 1 }
+        if self.success || !self.exit_on_error {
+            0
+        } else {
+            1
+        }
     }
 
     /// Format the result for stdout according to the requested output format.
@@ -107,12 +122,14 @@ pub async fn run_headless<F>(config: HeadlessConfig, configure: F) -> HeadlessRe
 where
     F: FnOnce(ReactAgentBuilder) -> ReactAgentBuilder,
 {
+    let exit_on_error = config.exit_on_error;
     if config.prompt.is_empty() {
         return HeadlessResult {
             output: "Error: empty prompt".into(),
             success: false,
             model: String::new(),
             format: config.output_format,
+            exit_on_error,
         };
     }
 
@@ -135,26 +152,80 @@ where
                 success: false,
                 model: String::new(),
                 format: config.output_format,
+                exit_on_error,
             };
         }
     };
 
     let model = agent.model_name().to_string();
 
-    // Execute the prompt
-    match agent.execute(&config.prompt).await {
-        Ok(output) => HeadlessResult {
-            output,
-            success: true,
-            model,
-            format: config.output_format,
-        },
-        Err(e) => HeadlessResult {
-            output: format!("Error: {}", e),
-            success: false,
-            model,
-            format: config.output_format,
-        },
+    let cancel = config.cancel_token.unwrap_or_default();
+    let stream = match agent
+        .execute_stream_with_cancel(&config.prompt, cancel)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            return HeadlessResult {
+                output: format!("Error: {error}"),
+                success: false,
+                model,
+                format: config.output_format,
+                exit_on_error,
+            };
+        }
+    };
+    futures::pin_mut!(stream);
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(AgentEvent::FinalAnswer(output)) => {
+                return HeadlessResult {
+                    output,
+                    success: true,
+                    model,
+                    format: config.output_format,
+                    exit_on_error,
+                };
+            }
+            Ok(AgentEvent::Cancelled) => {
+                return HeadlessResult {
+                    output: "Cancelled".to_string(),
+                    success: false,
+                    model,
+                    format: config.output_format,
+                    exit_on_error,
+                };
+            }
+            Ok(AgentEvent::Error {
+                source, message, ..
+            }) => {
+                return HeadlessResult {
+                    output: format!("Error ({source}): {message}"),
+                    success: false,
+                    model,
+                    format: config.output_format,
+                    exit_on_error,
+                };
+            }
+            Err(error) => {
+                return HeadlessResult {
+                    output: format!("Error: {error}"),
+                    success: false,
+                    model,
+                    format: config.output_format,
+                    exit_on_error,
+                };
+            }
+            Ok(_) => {}
+        }
+    }
+
+    HeadlessResult {
+        output: "Error: agent event stream ended without a terminal event".to_string(),
+        success: false,
+        model,
+        format: config.output_format,
+        exit_on_error,
     }
 }
 
@@ -169,6 +240,7 @@ mod tests {
         assert!(config.exit_on_error);
         assert_eq!(config.output_format, "text");
         assert!(config.max_iterations.is_none());
+        assert!(config.cancel_token.is_none());
     }
 
     #[test]
@@ -178,6 +250,7 @@ mod tests {
             success: true,
             model: "test".into(),
             format: "text".into(),
+            exit_on_error: true,
         };
         assert_eq!(ok.exit_code(), 0);
 
@@ -186,8 +259,18 @@ mod tests {
             success: false,
             model: "test".into(),
             format: "text".into(),
+            exit_on_error: true,
         };
         assert_eq!(fail.exit_code(), 1);
+
+        let tolerated_failure = HeadlessResult {
+            output: "error".into(),
+            success: false,
+            model: "test".into(),
+            format: "text".into(),
+            exit_on_error: false,
+        };
+        assert_eq!(tolerated_failure.exit_code(), 0);
     }
 
     #[test]
@@ -197,6 +280,7 @@ mod tests {
             success: true,
             model: "test-model".into(),
             format: "json".into(),
+            exit_on_error: true,
         };
         let formatted = result.format_output();
         assert!(formatted.contains("\"success\": true"));
@@ -211,6 +295,7 @@ mod tests {
             success: true,
             model: "test-model".into(),
             format: "text".into(),
+            exit_on_error: true,
         };
         assert_eq!(result.format_output(), "hello world");
     }

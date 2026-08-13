@@ -23,6 +23,8 @@ const TOOL_NAME: &str = "exploratory_statistics";
     name = "exploratory_statistics",
     description = "Compute exploratory descriptive statistics for numeric columns: valid/missing counts, mean, sample standard deviation, min, quartiles, max, skewness, and excess kurtosis. This tool never returns p-values, confidence intervals, or significance conclusions. For formal inference, write a reviewable Python/R script using SciPy, statsmodels, or established R packages and execute it with run_code."
 )]
+// The derive macro uses these fields to generate parameter and schema types;
+// the zero-sized Tool value does not read them directly.
 #[allow(dead_code)]
 pub struct ExploratoryStatisticsTool {
     #[tool_param(description = "Absolute path to the data file (CSV, JSON, or Parquet)")]
@@ -192,7 +194,7 @@ fn standardized_moments(values: &[f64], mean: f64) -> (Option<f64>, Option<f64>)
     )
 }
 
-fn quantile(values: &[f64], probability: f64) -> Option<f64> {
+pub(crate) fn quantile(values: &[f64], probability: f64) -> Option<f64> {
     if values.is_empty() {
         return None;
     }

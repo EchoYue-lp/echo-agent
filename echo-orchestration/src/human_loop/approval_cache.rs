@@ -4,7 +4,7 @@
 //! 支持三种缓存粒度：
 //! - `Once`: 不缓存，每次都重新请求
 //! - `Session`: 缓存到会话结束，按 tool_name + args_hash 匹配
-//! - `SessionAllTools`: 缓存到会话结束，按 tool_name 匹配（忽略参数）
+//! - `SessionTool`: 缓存到会话结束，按 tool_name 匹配（忽略参数）
 //!
 //! ## TTL 支持
 //!
@@ -28,14 +28,14 @@ const DEFAULT_MAX_ENTRIES: usize = 10_000;
 /// 线程安全，使用 `std::sync::RwLock` 保护内部数据。
 /// Key 的生成方式：
 /// - `Session` scope: `tool_name + args_key`（默认完整 JSON；启用 hash 模式时使用 SHA256）
-/// - `SessionAllTools` scope: `tool_name`（所有参数均匹配）
+/// - `SessionTool` scope: `tool_name`（该工具的所有参数均匹配）
 ///
 /// 支持可选 TTL：缓存条目超过 TTL 后自动失效。
 #[derive(Debug)]
 pub struct SessionApprovalCache {
     /// tool_name -> (canonical_args_json -> 记录时间)
     approvals: Arc<RwLock<HashMap<String, HashMap<String, Instant>>>>,
-    /// tool_name -> 记录时间（SessionAllTools 粒度，忽略参数）
+    /// tool_name -> 记录时间（SessionTool 粒度，忽略参数）
     global_approvals: Arc<RwLock<HashMap<String, Instant>>>,
     /// 缓存 TTL（None = 永不过期）
     cache_ttl: Option<Duration>,
@@ -97,14 +97,15 @@ impl SessionApprovalCache {
     }
 
     /// 检查工具调用是否已被缓存审批
-    pub fn is_approved(&self, tool_name: &str, args: &Value) -> bool {
+    pub fn is_approved(&self, scope_id: &str, tool_name: &str, args: &Value) -> bool {
+        let tool_key = Self::tool_key(scope_id, tool_name);
         // 先检查全局审批
         {
             let global = self
                 .global_approvals
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(recorded_at) = global.get(tool_name)
+            if let Some(recorded_at) = global.get(&tool_key)
                 && self.is_entry_valid(recorded_at)
             {
                 return true;
@@ -114,7 +115,7 @@ impl SessionApprovalCache {
         // 再检查参数级审批
         let key = self.args_key(args);
         let approvals = self.approvals.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(entries) = approvals.get(tool_name)
+        if let Some(entries) = approvals.get(&tool_key)
             && let Some(recorded_at) = entries.get(&key)
             && self.is_entry_valid(recorded_at)
         {
@@ -125,7 +126,14 @@ impl SessionApprovalCache {
     }
 
     /// 记录一个审批决策
-    pub fn record_approval(&self, tool_name: &str, args: &Value, scope: ApprovalScope) {
+    pub fn record_approval(
+        &self,
+        scope_id: &str,
+        tool_name: &str,
+        args: &Value,
+        scope: ApprovalScope,
+    ) {
+        let tool_key = Self::tool_key(scope_id, tool_name);
         match scope {
             ApprovalScope::Once => {
                 // 不缓存
@@ -135,7 +143,7 @@ impl SessionApprovalCache {
                 let mut approvals = self.approvals.write().unwrap_or_else(|e| e.into_inner());
 
                 // 容量检查
-                let entry = approvals.entry(tool_name.to_string()).or_default();
+                let entry = approvals.entry(tool_key).or_default();
                 if entry.len() >= self.max_entries {
                     // 移除最旧的条目
                     if let Some(oldest_key) = entry
@@ -148,7 +156,7 @@ impl SessionApprovalCache {
                 }
                 entry.insert(key, Instant::now());
             }
-            ApprovalScope::SessionAllTools => {
+            ApprovalScope::SessionTool => {
                 let mut global = self
                     .global_approvals
                     .write()
@@ -163,23 +171,24 @@ impl SessionApprovalCache {
                 {
                     global.remove(&oldest_key);
                 }
-                global.insert(tool_name.to_string(), Instant::now());
+                global.insert(tool_key, Instant::now());
             }
         }
     }
 
     /// 撤销某个工具的所有缓存审批
-    pub fn revoke(&self, tool_name: &str) {
+    pub fn revoke(&self, scope_id: &str, tool_name: &str) {
+        let tool_key = Self::tool_key(scope_id, tool_name);
         {
             let mut approvals = self.approvals.write().unwrap_or_else(|e| e.into_inner());
-            approvals.remove(tool_name);
+            approvals.remove(&tool_key);
         }
         {
             let mut global = self
                 .global_approvals
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            global.remove(tool_name);
+            global.remove(&tool_key);
         }
     }
 
@@ -276,6 +285,10 @@ impl SessionApprovalCache {
         }
     }
 
+    fn tool_key(scope_id: &str, tool_name: &str) -> String {
+        format!("{}:{}:{}", scope_id.chars().count(), scope_id, tool_name)
+    }
+
     /// 计算 SHA256 十六进制摘要
     fn sha256_hex(input: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
@@ -339,7 +352,7 @@ mod tests {
     #[test]
     fn test_empty_cache_not_approved() {
         let cache = SessionApprovalCache::new();
-        assert!(!cache.is_approved("tool", &json!({"a": 1})));
+        assert!(!cache.is_approved("test-scope", "tool", &json!({"a": 1})));
     }
 
     #[test]
@@ -347,70 +360,101 @@ mod tests {
         let cache = SessionApprovalCache::new();
 
         let args = json!({"path": "/tmp/test"});
-        cache.record_approval("Read", &args, ApprovalScope::Session);
+        cache.record_approval("test-scope", "Read", &args, ApprovalScope::Session);
 
         // Same args → cached
-        assert!(cache.is_approved("Read", &json!({"path": "/tmp/test"})));
+        assert!(cache.is_approved("test-scope", "Read", &json!({"path": "/tmp/test"})));
         // Different args → not cached
-        assert!(!cache.is_approved("Read", &json!({"path": "/tmp/other"})));
+        assert!(!cache.is_approved("test-scope", "Read", &json!({"path": "/tmp/other"})));
     }
 
     #[test]
-    fn test_session_all_tools_scope() {
+    fn session_scope_does_not_cross_logical_boundaries() {
+        let cache = SessionApprovalCache::new();
+        let args = json!({"path": "/tmp/test"});
+        cache.record_approval(
+            "agent-a:conversation-a",
+            "Read",
+            &args,
+            ApprovalScope::Session,
+        );
+
+        assert!(cache.is_approved("agent-a:conversation-a", "Read", &args));
+        assert!(!cache.is_approved("agent-a:conversation-b", "Read", &args));
+        assert!(!cache.is_approved("agent-b:conversation-a", "Read", &args));
+    }
+
+    #[test]
+    fn test_session_tool_scope() {
         let cache = SessionApprovalCache::new();
 
-        cache.record_approval("Bash", &json!({}), ApprovalScope::SessionAllTools);
+        cache.record_approval("test-scope", "Bash", &json!({}), ApprovalScope::SessionTool);
 
         // Any args → cached
-        assert!(cache.is_approved("Bash", &json!({"cmd": "ls"})));
-        assert!(cache.is_approved("Bash", &json!({"cmd": "rm -rf /"})));
+        assert!(cache.is_approved("test-scope", "Bash", &json!({"cmd": "ls"})));
+        assert!(cache.is_approved("test-scope", "Bash", &json!({"cmd": "rm -rf /"})));
         // Different tool → not cached
-        assert!(!cache.is_approved("Read", &json!({})));
+        assert!(!cache.is_approved("test-scope", "Read", &json!({})));
     }
 
     #[test]
     fn test_once_scope_no_cache() {
         let cache = SessionApprovalCache::new();
 
-        cache.record_approval("tool", &json!({"a": 1}), ApprovalScope::Once);
+        cache.record_approval("test-scope", "tool", &json!({"a": 1}), ApprovalScope::Once);
 
-        assert!(!cache.is_approved("tool", &json!({"a": 1})));
+        assert!(!cache.is_approved("test-scope", "tool", &json!({"a": 1})));
     }
 
     #[test]
     fn test_revoke() {
         let cache = SessionApprovalCache::new();
 
-        cache.record_approval("tool1", &json!({}), ApprovalScope::SessionAllTools);
-        cache.record_approval("tool2", &json!({"x": 1}), ApprovalScope::Session);
+        cache.record_approval(
+            "test-scope",
+            "tool1",
+            &json!({}),
+            ApprovalScope::SessionTool,
+        );
+        cache.record_approval(
+            "test-scope",
+            "tool2",
+            &json!({"x": 1}),
+            ApprovalScope::Session,
+        );
 
-        cache.revoke("tool1");
-        assert!(!cache.is_approved("tool1", &json!({})));
-        assert!(cache.is_approved("tool2", &json!({"x": 1})));
+        cache.revoke("test-scope", "tool1");
+        assert!(!cache.is_approved("test-scope", "tool1", &json!({})));
+        assert!(cache.is_approved("test-scope", "tool2", &json!({"x": 1})));
     }
 
     #[test]
     fn test_clear() {
         let cache = SessionApprovalCache::new();
 
-        cache.record_approval("tool1", &json!({}), ApprovalScope::SessionAllTools);
-        cache.record_approval("tool2", &json!({}), ApprovalScope::Session);
+        cache.record_approval(
+            "test-scope",
+            "tool1",
+            &json!({}),
+            ApprovalScope::SessionTool,
+        );
+        cache.record_approval("test-scope", "tool2", &json!({}), ApprovalScope::Session);
 
         cache.clear();
-        assert!(!cache.is_approved("tool1", &json!({})));
-        assert!(!cache.is_approved("tool2", &json!({})));
+        assert!(!cache.is_approved("test-scope", "tool1", &json!({})));
+        assert!(!cache.is_approved("test-scope", "tool2", &json!({})));
     }
 
     #[test]
     fn test_clone_independent() {
         let cache = SessionApprovalCache::new();
-        cache.record_approval("tool", &json!({}), ApprovalScope::SessionAllTools);
+        cache.record_approval("test-scope", "tool", &json!({}), ApprovalScope::SessionTool);
 
         let cloned = cache.clone();
         cache.clear();
 
-        assert!(!cache.is_approved("tool", &json!({})));
-        assert!(cloned.is_approved("tool", &json!({})));
+        assert!(!cache.is_approved("test-scope", "tool", &json!({})));
+        assert!(cloned.is_approved("test-scope", "tool", &json!({})));
     }
 
     // ── TTL 测试 ────────────────────────────────────────────────────────────────
@@ -419,30 +463,36 @@ mod tests {
     fn test_ttl_entry_valid_before_expiry() {
         let cache = SessionApprovalCache::with_ttl(Duration::from_secs(3600));
         cache.record_approval(
+            "test-scope",
             "Read",
             &json!({"path": "/tmp/test"}),
             ApprovalScope::Session,
         );
 
         // 应该立即被缓存（刚添加）
-        assert!(cache.is_approved("Read", &json!({"path": "/tmp/test"})));
+        assert!(cache.is_approved("test-scope", "Read", &json!({"path": "/tmp/test"})));
     }
 
     #[test]
     fn test_ttl_global_entry_valid_before_expiry() {
         let cache = SessionApprovalCache::with_ttl(Duration::from_secs(3600));
-        cache.record_approval("Bash", &json!({}), ApprovalScope::SessionAllTools);
+        cache.record_approval("test-scope", "Bash", &json!({}), ApprovalScope::SessionTool);
 
-        assert!(cache.is_approved("Bash", &json!({"cmd": "ls"})));
+        assert!(cache.is_approved("test-scope", "Bash", &json!({"cmd": "ls"})));
     }
 
     #[test]
     fn test_ttl_default_no_expiry() {
         let cache = SessionApprovalCache::new();
-        cache.record_approval("tool", &json!({"a": 1}), ApprovalScope::Session);
+        cache.record_approval(
+            "test-scope",
+            "tool",
+            &json!({"a": 1}),
+            ApprovalScope::Session,
+        );
 
         // 默认无 TTL，应该始终有效
-        assert!(cache.is_approved("tool", &json!({"a": 1})));
+        assert!(cache.is_approved("test-scope", "tool", &json!({"a": 1})));
         assert_eq!(cache.stats().ttl, None);
     }
 
@@ -450,31 +500,46 @@ mod tests {
     fn test_ttl_expired_entry_not_approved() {
         // 使用极短 TTL 测试过期
         let cache = SessionApprovalCache::with_ttl(Duration::from_millis(1));
-        cache.record_approval("tool", &json!({"a": 1}), ApprovalScope::Session);
+        cache.record_approval(
+            "test-scope",
+            "tool",
+            &json!({"a": 1}),
+            ApprovalScope::Session,
+        );
 
         // 等待 TTL 过期
         std::thread::sleep(Duration::from_millis(5));
 
         // 过期后应该不再缓存
-        assert!(!cache.is_approved("tool", &json!({"a": 1})));
+        assert!(!cache.is_approved("test-scope", "tool", &json!({"a": 1})));
     }
 
     #[test]
     fn test_ttl_expired_global_entry_not_approved() {
         let cache = SessionApprovalCache::with_ttl(Duration::from_millis(1));
-        cache.record_approval("Bash", &json!({}), ApprovalScope::SessionAllTools);
+        cache.record_approval("test-scope", "Bash", &json!({}), ApprovalScope::SessionTool);
 
         std::thread::sleep(Duration::from_millis(5));
 
-        assert!(!cache.is_approved("Bash", &json!({"cmd": "ls"})));
+        assert!(!cache.is_approved("test-scope", "Bash", &json!({"cmd": "ls"})));
     }
 
     #[test]
     fn test_cleanup_expired() {
         let cache = SessionApprovalCache::with_ttl(Duration::from_millis(1));
 
-        cache.record_approval("tool1", &json!({"a": 1}), ApprovalScope::Session);
-        cache.record_approval("tool2", &json!({}), ApprovalScope::SessionAllTools);
+        cache.record_approval(
+            "test-scope",
+            "tool1",
+            &json!({"a": 1}),
+            ApprovalScope::Session,
+        );
+        cache.record_approval(
+            "test-scope",
+            "tool2",
+            &json!({}),
+            ApprovalScope::SessionTool,
+        );
 
         std::thread::sleep(Duration::from_millis(5));
 
@@ -487,19 +552,39 @@ mod tests {
     #[test]
     fn test_cleanup_no_ttl_is_noop() {
         let cache = SessionApprovalCache::new();
-        cache.record_approval("tool", &json!({"a": 1}), ApprovalScope::Session);
+        cache.record_approval(
+            "test-scope",
+            "tool",
+            &json!({"a": 1}),
+            ApprovalScope::Session,
+        );
 
         let removed = cache.cleanup_expired();
         assert_eq!(removed, 0);
-        assert!(cache.is_approved("tool", &json!({"a": 1})));
+        assert!(cache.is_approved("test-scope", "tool", &json!({"a": 1})));
     }
 
     #[test]
     fn test_stats() {
         let cache = SessionApprovalCache::with_ttl(Duration::from_secs(300));
-        cache.record_approval("tool1", &json!({"a": 1}), ApprovalScope::Session);
-        cache.record_approval("tool1", &json!({"a": 2}), ApprovalScope::Session);
-        cache.record_approval("tool2", &json!({}), ApprovalScope::SessionAllTools);
+        cache.record_approval(
+            "test-scope",
+            "tool1",
+            &json!({"a": 1}),
+            ApprovalScope::Session,
+        );
+        cache.record_approval(
+            "test-scope",
+            "tool1",
+            &json!({"a": 2}),
+            ApprovalScope::Session,
+        );
+        cache.record_approval(
+            "test-scope",
+            "tool2",
+            &json!({}),
+            ApprovalScope::SessionTool,
+        );
 
         let stats = cache.stats();
         assert_eq!(stats.per_tool_entries, 2);

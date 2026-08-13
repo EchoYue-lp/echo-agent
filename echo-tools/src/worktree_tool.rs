@@ -14,8 +14,7 @@ use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 
 use crate::git_worktree::{
-    ManagedWorktree, WorktreeConfig, create_worktree, list_worktrees, merge_worktree,
-    remove_worktree,
+    WorktreeConfig, create_worktree, list_worktrees, merge_worktree, remove_worktree,
 };
 
 // ── Enter Worktree ──────────────────────────────────────────────────────────
@@ -192,22 +191,22 @@ impl Tool for ExitWorktreeTool {
                     message: e,
                 })?;
 
+            let requested = std::fs::canonicalize(worktree_path).map_err(|error| {
+                ToolError::ExecutionFailed {
+                    tool: "exit_worktree".to_string(),
+                    message: format!("Failed to resolve worktree path: {error}"),
+                }
+            })?;
             let wt = worktrees
                 .iter()
-                .find(|w| w.path.to_string_lossy() == worktree_path)
+                .find(|worktree| {
+                    std::fs::canonicalize(&worktree.path).is_ok_and(|path| path == requested)
+                })
                 .cloned()
-                .unwrap_or_else(|| {
-                    // Worktree not found in list — construct from path, treat as managed
-                    let branch_name = Path::new(worktree_path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    ManagedWorktree {
-                        path: worktree_path.into(),
-                        branch: branch_name,
-                        managed: true,
-                    }
-                });
+                .ok_or_else(|| ToolError::ExecutionFailed {
+                    tool: "exit_worktree".to_string(),
+                    message: "Refusing to remove an unknown or unregistered worktree".to_string(),
+                })?;
 
             // Optionally merge before removal
             let merge_msg = if let Some(target) = merge_to {
@@ -231,7 +230,7 @@ impl Tool for ExitWorktreeTool {
             let msg = match merge_msg {
                 Some(m) => format!("{m}. Worktree at '{}' removed.", worktree_path),
                 None => format!(
-                    "Worktree at '{}' removed and branch '{}' deleted.",
+                    "Worktree at '{}' removed; branch '{}' was preserved.",
                     worktree_path, wt.branch
                 ),
             };

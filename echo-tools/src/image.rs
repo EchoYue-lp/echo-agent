@@ -129,7 +129,7 @@ fn read_image_from_file(path: &str, security: &SecurityConfig) -> Result<(String
 async fn fetch_image_from_url(url: &str, limits: &ResourceLimits) -> Result<(String, String)> {
     // SSRF protection: ssrf_safe_get resolves DNS once, validates addresses,
     // and connects on pinned IPs — closing the DNS-rebinding TOCTOU window.
-    let response = crate::security::ssrf_safe_get(
+    let response = crate::security::local_http_get(
         url,
         std::time::Duration::from_secs(limits.http_timeout_secs),
         5,

@@ -19,7 +19,7 @@ echo-agent 提供多层安全机制：工具权限控制、沙箱隔离、密钥
 | `Sensitive` | 敏感操作（密钥、环境变量） |
 
 ```rust
-use echo_core::tools::permission::ToolPermission;
+use echo_agent::tools::permission::ToolPermission;
 
 impl Tool for FileReadTool {
     fn permissions(&self) -> Vec<ToolPermission> {
@@ -45,7 +45,7 @@ impl Tool for ShellTool {
 工具通过 `risk_level()` 声明风险级别。`ToolRiskClassifier` 可自动按工具名分类：
 
 ```rust
-use echo_execution::risk::ToolRiskClassifier;
+use echo_agent::tools::risk::ToolRiskClassifier;
 
 let category = ToolRiskClassifier::classify("shell");  // ShellExec, level 3
 let category = ToolRiskClassifier::classify("read_file");  // ReadOnly, level 0
@@ -139,7 +139,7 @@ RuleBehavior::Ask { suggestions: vec!["确认执行".into()] }
 ### RuleRegistry — deny-first 评估
 
 ```rust
-use echo_core::tools::permission::*;
+use echo_agent::tools::permission::*;
 
 let mut registry = RuleRegistry::new();
 

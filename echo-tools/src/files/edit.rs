@@ -148,6 +148,12 @@ impl Tool for EditFileTool {
                         message: format!("Failed to read file: {}", e),
                     })?;
 
+            if old_content.is_empty() {
+                return Ok(ToolResult::invalid_arguments(
+                    "old_content must not be empty",
+                ));
+            }
+
             // Validate old_content exists in file
             if !original.contains(old_content) {
                 let suggestion = find_nearby_match(old_content, &original);
@@ -213,7 +219,13 @@ impl Tool for EditFileTool {
             }
 
             // Create git checkpoint before mutation
-            let checkpoint_tag = crate::git_checkpoint::create_checkpoint(&path);
+            let checkpoint_tag =
+                crate::git_checkpoint::create_checkpoint(&path).map_err(|error| {
+                    ToolError::ExecutionFailed {
+                        tool: "edit_file".to_string(),
+                        message: format!("Failed to create recovery checkpoint: {error}"),
+                    }
+                })?;
             if checkpoint_tag.is_some() {
                 crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
             }
@@ -260,9 +272,18 @@ impl Tool for EditFileTool {
 fn find_occurrence_lines(haystack: &str, needle: &str) -> Vec<usize> {
     let mut lines = Vec::new();
     let mut search_from = 0;
-    while let Some(pos) = haystack[search_from..].find(needle) {
+    while let Some(pos) = haystack
+        .get(search_from..)
+        .and_then(|text| text.find(needle))
+    {
         let abs_pos = search_from + pos;
-        let line_num = haystack[..abs_pos].lines().count() + 1;
+        let line_num = haystack
+            .get(..abs_pos)
+            .unwrap_or_default()
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            .saturating_add(1);
         lines.push(line_num);
         search_from = abs_pos + needle.len().max(1);
     }
@@ -385,6 +406,11 @@ mod tests {
             "fn main() {\n    println!(\"hi\");\n}\n\nfn main() {\n    println!(\"bye\");\n}\n";
         let lines = find_occurrence_lines(text, "fn main() {");
         assert_eq!(lines, vec![1, 5]);
+    }
+
+    #[test]
+    fn occurrence_lines_preserve_unicode_boundaries() {
+        assert_eq!(find_occurrence_lines("甲乙\n甲乙", "乙"), vec![1, 2]);
     }
 
     #[test]

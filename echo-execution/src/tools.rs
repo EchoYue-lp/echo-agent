@@ -5,7 +5,7 @@
 //! Uses `DashMap` internally so it can be shared via `Arc`.
 
 use dashmap::DashMap;
-use echo_core::error::{Result, ToolError};
+use echo_core::error::{AgentError, ReactError, Result, ToolError};
 use echo_core::llm::types::ToolDefinition;
 use echo_core::sandbox::SandboxExecutor;
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
@@ -15,12 +15,70 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+fn cancelled_error(tool_name: &str) -> ReactError {
+    ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+        "tool '{tool_name}'"
+    ))))
+}
+
+async fn acquire_permit(
+    semaphore: &Arc<Semaphore>,
+    ctx: &ToolContext,
+    tool_name: &str,
+) -> Result<OwnedSemaphorePermit> {
+    let acquire = Arc::clone(semaphore).acquire_owned();
+    if let Some(cancel) = ctx.cancel.as_ref() {
+        tokio::select! {
+            _ = cancel.cancelled() => Err(cancelled_error(tool_name)),
+            permit = acquire => permit.map_err(|error| ToolError::ExecutionFailed {
+                tool: tool_name.to_string(),
+                message: format!("Concurrency limit error: {error}"),
+            }.into()),
+        }
+    } else {
+        acquire.await.map_err(|error| {
+            ToolError::ExecutionFailed {
+                tool: tool_name.to_string(),
+                message: format!("Concurrency limit error: {error}"),
+            }
+            .into()
+        })
+    }
+}
+
+async fn wait_retry_delay(duration: Duration, ctx: &ToolContext, tool_name: &str) -> Result<()> {
+    if let Some(cancel) = ctx.cancel.as_ref() {
+        tokio::select! {
+            _ = cancel.cancelled() => Err(cancelled_error(tool_name)),
+            _ = tokio::time::sleep(duration) => Ok(()),
+        }
+    } else {
+        tokio::time::sleep(duration).await;
+        Ok(())
+    }
+}
+
+async fn cancel_aware<T>(
+    future: impl std::future::Future<Output = Result<T>>,
+    ctx: &ToolContext,
+    tool_name: &str,
+) -> Result<T> {
+    if let Some(cancel) = ctx.cancel.as_ref() {
+        tokio::select! {
+            _ = cancel.cancelled() => Err(cancelled_error(tool_name)),
+            result = future => result,
+        }
+    } else {
+        future.await
+    }
+}
 
 pub use echo_core::tools::{
     Tool, ToolContext, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolOutputChannel,
-    ToolParameters, ToolRecoveryAction, ToolRegistrar, ToolResult, ToolRiskLevel, ToolSideEffect,
-    ToolStreamEvent,
+    ToolParameters, ToolRecoveryAction, ToolRegistrar, ToolResult, ToolRiskLevel, ToolRunner,
+    ToolSideEffect, ToolStreamEvent,
 };
 
 fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32) -> u64 {
@@ -45,15 +103,50 @@ fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32)
         .min(30_000)
 }
 
+fn validate_schema(tool: &dyn Tool) -> Result<()> {
+    jsonschema::validator_for(&tool.parameters()).map_err(|error| {
+        ReactError::Config(Box::new(echo_core::error::ConfigError::ConfigFileError(
+            format!("tool '{}' has an invalid JSON Schema: {error}", tool.name()),
+        )))
+    })?;
+    Ok(())
+}
+
+fn validate_parameters_against_schema(tool: &dyn Tool, parameters: &ToolParameters) -> Result<()> {
+    let schema = tool.parameters();
+    let validator = jsonschema::validator_for(&schema).map_err(|error| {
+        ReactError::Config(Box::new(echo_core::error::ConfigError::ConfigFileError(
+            format!("tool '{}' has an invalid JSON Schema: {error}", tool.name()),
+        )))
+    })?;
+    let instance = serde_json::Value::Object(
+        parameters
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
+    if let Err(error) = validator.validate(&instance) {
+        return Err(ToolError::InvalidParameter {
+            name: tool.name().to_string(),
+            message: error.to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 impl ToolRegistrar for ToolManager {
     fn register(&mut self, tool: Box<dyn Tool>) {
         ToolManager::register(self, tool);
     }
 }
 
+type CachedToolDefinitions = Option<((u64, u64), Vec<ToolDefinition>)>;
+
 /// 工具管理器 — thread-safe tool registry and executor.
 pub struct ToolManager {
     tools: DashMap<String, Box<dyn Tool>>,
+    registration_lock: parking_lot::Mutex<()>,
     config: ToolExecutionConfig,
     /// Write/execute semaphore (limits concurrent write/execute tools).
     semaphore: Option<Arc<Semaphore>>,
@@ -62,7 +155,7 @@ pub struct ToolManager {
     /// Cached tool definitions: `(version, definitions)`.
     /// Invalidated by bumping `definitions_version`; rebuilt lazily on next access.
     /// Uses `parking_lot::RwLock` which does not poison on panic.
-    cached_definitions: RwLock<Option<(u64, Vec<ToolDefinition>)>>,
+    cached_definitions: RwLock<CachedToolDefinitions>,
     /// Monotonically increasing version counter. On register/unregister the
     /// version is bumped so that the next read rebuilds from the live tool set.
     definitions_version: AtomicU64,
@@ -280,8 +373,12 @@ impl Tool for ToolSearchTool {
 impl ToolManager {
     pub fn get_openai_tools(&self) -> Vec<ToolDefinition> {
         let current_version = self.definitions_version.load(Ordering::Acquire);
+        let dynamic_version = self.tools.iter().fold(0_u64, |revision, entry| {
+            revision.wrapping_add(entry.value().schema_revision())
+        });
+        let cache_key = (current_version, dynamic_version);
         if let Some(ref cached) = *self.cached_definitions.read()
-            && cached.0 == current_version
+            && cached.0 == cache_key
         {
             return cached.1.clone();
         }
@@ -296,7 +393,7 @@ impl ToolManager {
         // because consecutive requests with the same tool definitions share a stable
         // cacheable prefix: system prompt → sorted tool definitions → conversation history.
         definitions.sort_by(|a, b| a.function.name.cmp(&b.function.name));
-        *self.cached_definitions.write() = Some((current_version, definitions.clone()));
+        *self.cached_definitions.write() = Some((cache_key, definitions.clone()));
         definitions
     }
 
@@ -492,6 +589,7 @@ impl ToolManager {
     pub fn new() -> Self {
         Self {
             tools: DashMap::new(),
+            registration_lock: parking_lot::Mutex::new(()),
             semaphore: None,
             read_semaphore: None,
             config: ToolExecutionConfig::default(),
@@ -511,6 +609,7 @@ impl ToolManager {
             .map(|n| Arc::new(Semaphore::new(n.max(1))));
         Self {
             tools: DashMap::new(),
+            registration_lock: parking_lot::Mutex::new(()),
             semaphore,
             read_semaphore,
             config,
@@ -527,18 +626,75 @@ impl ToolManager {
 
     /// Register a tool (takes `&self` via DashMap interior mutability).
     pub fn register(&self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
-        self.invalidate_cache();
+        if let Err(error) = self.try_register(tool) {
+            tracing::error!(%error, "Tool registration rejected");
+        }
     }
 
     pub fn register_tools(&self, tools: Vec<Box<dyn Tool>>) {
+        if let Err(error) = self.try_register_tools(tools) {
+            tracing::error!(%error, "Tool batch registration rejected");
+        }
+    }
+
+    /// Register one tool without replacing an existing canonical name.
+    pub fn try_register(&self, tool: Box<dyn Tool>) -> Result<()> {
+        validate_schema(tool.as_ref())?;
+        let _registration = self.registration_lock.lock();
+        let name = tool.name().to_string();
+        match self.tools.entry(name.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(ReactError::Config(Box::new(
+                echo_core::error::ConfigError::ConfigFileError(format!(
+                    "tool '{name}' is already registered; use explicit replacement"
+                )),
+            ))),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(tool);
+                self.invalidate_cache();
+                Ok(())
+            }
+        }
+    }
+
+    /// Atomically register a batch, rejecting internal or existing collisions.
+    pub fn try_register_tools(&self, tools: Vec<Box<dyn Tool>>) -> Result<()> {
+        let _registration = self.registration_lock.lock();
+        let mut names = std::collections::HashSet::with_capacity(tools.len());
+        for tool in &tools {
+            validate_schema(tool.as_ref())?;
+            let name = tool.name();
+            if !names.insert(name.to_string()) {
+                return Err(ReactError::Config(Box::new(
+                    echo_core::error::ConfigError::ConfigFileError(format!(
+                        "tool batch contains duplicate name '{name}'"
+                    )),
+                )));
+            }
+            if self.tools.contains_key(name) {
+                return Err(ReactError::Config(Box::new(
+                    echo_core::error::ConfigError::ConfigFileError(format!(
+                        "tool '{name}' is already registered; use explicit replacement"
+                    )),
+                )));
+            }
+        }
         for tool in tools {
             self.tools.insert(tool.name().to_string(), tool);
         }
         self.invalidate_cache();
+        Ok(())
+    }
+
+    /// Explicitly replace a tool and return the displaced implementation.
+    pub fn replace(&self, tool: Box<dyn Tool>) -> Option<Box<dyn Tool>> {
+        let _registration = self.registration_lock.lock();
+        let old = self.tools.insert(tool.name().to_string(), tool);
+        self.invalidate_cache();
+        old
     }
 
     pub fn unregister(&self, tool_name: &str) -> Option<Box<dyn Tool>> {
+        let _registration = self.registration_lock.lock();
         let tool = self.tools.remove(tool_name).map(|(_, v)| v);
         if tool.is_some() {
             self.invalidate_cache();
@@ -559,7 +715,7 @@ impl ToolManager {
     /// (currently `ShellTool` and `RunCodeTool`) accept the executor;
     /// all others ignore it via the default `false` implementation.
     ///
-    /// Called from [`set_sandbox_manager`] at agent-setup time (P2).
+    /// Called by the agent builder at setup time after selecting a sandbox manager.
     pub fn apply_sandbox(&self, sandbox: Arc<dyn SandboxExecutor>) {
         for mut entry in self.tools.iter_mut() {
             entry.value_mut().set_sandbox(sandbox.clone());
@@ -624,6 +780,8 @@ impl ToolManager {
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        validate_parameters_against_schema(tool.as_ref(), &parameters)?;
+        tool.validate_parameters(&parameters).await?;
 
         // 并发控制：获取信号量许可（读/写分离）
         let is_read = tool.risk_level() == ToolRiskLevel::ReadOnly;
@@ -642,23 +800,13 @@ impl ToolManager {
 
         let _permit = if is_read {
             if let Some(sem) = &self.read_semaphore {
-                sem.acquire().await.ok()
+                Some(acquire_permit(sem, ctx, tool_name).await?)
             } else {
                 None
             }
         } else {
             if let Some(sem) = &self.semaphore {
-                match sem.acquire().await {
-                    Ok(permit) => Some(permit),
-                    Err(e) => {
-                        tracing::warn!("Failed to acquire semaphore permit: {}", e);
-                        return Err(ToolError::ExecutionFailed {
-                            tool: tool_name.to_string(),
-                            message: format!("Concurrency limit error: {}", e),
-                        }
-                        .into());
-                    }
-                }
+                Some(acquire_permit(sem, ctx, tool_name).await?)
             } else {
                 None
             }
@@ -680,22 +828,25 @@ impl ToolManager {
                     next_retry_after_ms.take(),
                     attempt,
                 );
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                wait_retry_delay(Duration::from_millis(delay_ms), ctx, tool_name).await?;
             }
 
-            let result = if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
-                match tokio::time::timeout(
-                    Duration::from_millis(self.config.timeout_ms),
-                    tool.execute_with_context(parameters.clone(), ctx),
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(_) => Err(ToolError::Timeout(tool_name.to_string()).into()),
+            let execution = async {
+                if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
+                    match tokio::time::timeout(
+                        Duration::from_millis(self.config.timeout_ms),
+                        tool.execute_with_context(parameters.clone(), ctx),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => Err(ToolError::Timeout(tool_name.to_string()).into()),
+                    }
+                } else {
+                    tool.execute_with_context(parameters.clone(), ctx).await
                 }
-            } else {
-                tool.execute_with_context(parameters.clone(), ctx).await
             };
+            let result = cancel_aware(execution, ctx, tool_name).await;
 
             match result {
                 Ok(result) if result.success => return Ok(result),
@@ -738,6 +889,7 @@ impl ToolManager {
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        validate_parameters_against_schema(tool.as_ref(), parameters)?;
         tool.validate_parameters(parameters).await
     }
 
@@ -771,32 +923,13 @@ impl ToolManager {
 
         let _permit = if is_read {
             if let Some(sem) = &self.read_semaphore {
-                match sem.acquire().await {
-                    Ok(permit) => Some(permit),
-                    Err(e) => {
-                        return Err(ToolError::ExecutionFailed {
-                            tool: tool_name.to_string(),
-                            message: format!("Concurrency limit error: {e}"),
-                        }
-                        .into());
-                    }
-                }
+                Some(acquire_permit(sem, ctx, tool_name).await?)
             } else {
                 None
             }
         } else {
             if let Some(sem) = &self.semaphore {
-                match sem.acquire().await {
-                    Ok(permit) => Some(permit),
-                    Err(e) => {
-                        tracing::warn!("Failed to acquire semaphore permit: {}", e);
-                        return Err(ToolError::ExecutionFailed {
-                            tool: tool_name.to_string(),
-                            message: format!("Concurrency limit error: {}", e),
-                        }
-                        .into());
-                    }
-                }
+                Some(acquire_permit(sem, ctx, tool_name).await?)
             } else {
                 None
             }
@@ -817,7 +950,7 @@ impl ToolManager {
                     next_retry_after_ms.take(),
                     attempt,
                 );
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                wait_retry_delay(Duration::from_millis(delay_ms), ctx, tool_name).await?;
             }
 
             let mut output_forwarded = false;
@@ -860,19 +993,22 @@ impl ToolManager {
                 .into())
             };
 
-            let result = if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
-                match tokio::time::timeout(
-                    Duration::from_millis(self.config.timeout_ms),
-                    consume_stream,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(ToolError::Timeout(tool_name.to_string()).into()),
+            let execution = async {
+                if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
+                    match tokio::time::timeout(
+                        Duration::from_millis(self.config.timeout_ms),
+                        consume_stream,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(ToolError::Timeout(tool_name.to_string()).into()),
+                    }
+                } else {
+                    consume_stream.await
                 }
-            } else {
-                consume_stream.await
             };
+            let result = cancel_aware(execution, ctx, tool_name).await;
 
             match result {
                 Ok(result) if result.success => return Ok(result),
@@ -941,6 +1077,94 @@ mod execute_with_context_tests {
     struct DelayedStreamingTool;
 
     struct InternallyTimedTool;
+
+    struct PendingTool {
+        name: &'static str,
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl Tool for PendingTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "waits until cancelled"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+                Ok(ToolResult::success("unreachable"))
+            })
+        }
+    }
+
+    struct SchemaTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for SchemaTool {
+        fn name(&self) -> &str {
+            "schema_tool"
+        }
+
+        fn description(&self) -> &str {
+            "schema validation fixture"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "required": ["count"],
+                "additionalProperties": false,
+                "properties": {
+                    "count": {"type": "integer", "minimum": 1, "maximum": 3}
+                }
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(ToolResult::success("executed"))
+            })
+        }
+    }
+
+    struct InvalidSchemaTool;
+
+    impl Tool for InvalidSchemaTool {
+        fn name(&self) -> &str {
+            "invalid_schema"
+        }
+
+        fn description(&self) -> &str {
+            "invalid schema fixture"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": 7})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("unreachable")) })
+        }
+    }
 
     impl Tool for InternallyTimedTool {
         fn name(&self) -> &str {
@@ -1398,6 +1622,185 @@ mod execute_with_context_tests {
         assert_eq!(
             result.failure.map(|failure| failure.category),
             Some(ToolFailureCategory::InvalidArguments)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schema_validation_prevents_execution() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new();
+        manager.try_register(Box::new(SchemaTool {
+            calls: Arc::clone(&calls),
+        }))?;
+
+        for parameters in [
+            ToolParameters::new(),
+            ToolParameters::from([("count".to_string(), serde_json::json!(4))]),
+            ToolParameters::from([
+                ("count".to_string(), serde_json::json!(2)),
+                ("unknown".to_string(), serde_json::json!(true)),
+            ]),
+        ] {
+            assert!(
+                manager
+                    .execute_tool("schema_tool", parameters)
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+
+        let valid = ToolParameters::from([("count".to_string(), serde_json::json!(2))]);
+        assert!(manager.execute_tool("schema_tool", valid).await?.success);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_schema_and_duplicate_registration_are_rejected_atomically()
+    -> echo_core::error::Result<()> {
+        let manager = ToolManager::new();
+        assert!(manager.try_register(Box::new(InvalidSchemaTool)).is_err());
+        manager.try_register(Box::new(NamedTool { name: "stable" }))?;
+        assert!(
+            manager
+                .try_register(Box::new(NamedTool { name: "stable" }))
+                .is_err()
+        );
+        assert!(
+            manager
+                .try_register_tools(vec![
+                    Box::new(NamedTool { name: "new" }),
+                    Box::new(NamedTool { name: "stable" }),
+                ])
+                .is_err()
+        );
+        assert!(!manager.list_tools().iter().any(|name| name == "new"));
+        assert_eq!(manager.list_tools(), vec!["stable"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_running_and_queued_tools() -> echo_core::error::Result<()> {
+        let manager = Arc::new(ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: Some(1),
+            max_read_concurrency: None,
+        }));
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        manager.try_register(Box::new(PendingTool {
+            name: "pending_first",
+            started: Arc::clone(&first_started),
+        }))?;
+        manager.try_register(Box::new(PendingTool {
+            name: "pending_second",
+            started: Arc::new(tokio::sync::Notify::new()),
+        }))?;
+
+        let first_cancel = Arc::new(tokio_util::sync::CancellationToken::new());
+        let first_ctx = ToolContext {
+            cancel: Some(Arc::clone(&first_cancel)),
+            ..ToolContext::default()
+        };
+        let first_manager = Arc::clone(&manager);
+        let first = tokio::spawn(async move {
+            first_manager
+                .execute_tool_with_context("pending_first", ToolParameters::new(), &first_ctx)
+                .await
+        });
+        first_started.notified().await;
+
+        let queued_cancel = Arc::new(tokio_util::sync::CancellationToken::new());
+        let queued_ctx = ToolContext {
+            cancel: Some(Arc::clone(&queued_cancel)),
+            ..ToolContext::default()
+        };
+        let queued_manager = Arc::clone(&manager);
+        let queued = tokio::spawn(async move {
+            queued_manager
+                .execute_tool_with_context("pending_second", ToolParameters::new(), &queued_ctx)
+                .await
+        });
+        queued_cancel.cancel();
+        let queued_result = queued.await.map_err(|error| {
+            ReactError::Other(format!("queued tool task failed to join: {error}"))
+        })?;
+        assert!(queued_result.is_err());
+
+        first_cancel.cancel();
+        let first_result = first.await.map_err(|error| {
+            ReactError::Other(format!("running tool task failed to join: {error}"))
+        })?;
+        assert!(first_result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_retry_delay_and_stream_wait() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = Arc::new(ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: true,
+            max_retries: 2,
+            retry_delay_ms: 30_000,
+            max_concurrency: None,
+            max_read_concurrency: None,
+        }));
+        manager.try_register(Box::new(RetryOnceTool {
+            calls: Arc::clone(&calls),
+        }))?;
+        manager.try_register(Box::new(DelayedStreamingTool))?;
+
+        let retry_cancel = Arc::new(tokio_util::sync::CancellationToken::new());
+        let retry_ctx = ToolContext {
+            cancel: Some(Arc::clone(&retry_cancel)),
+            ..ToolContext::default()
+        };
+        let retry_manager = Arc::clone(&manager);
+        let retry = tokio::spawn(async move {
+            retry_manager
+                .execute_tool_with_context("retry_once", ToolParameters::new(), &retry_ctx)
+                .await
+        });
+        while calls.load(AtomicOrdering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        retry_cancel.cancel();
+        assert!(
+            retry
+                .await
+                .map_err(|error| ReactError::Other(format!("retry task failed: {error}")))?
+                .is_err()
+        );
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+
+        let stream_cancel = Arc::new(tokio_util::sync::CancellationToken::new());
+        let stream_ctx = ToolContext {
+            cancel: Some(Arc::clone(&stream_cancel)),
+            ..ToolContext::default()
+        };
+        let stream_manager = Arc::clone(&manager);
+        let stream = tokio::spawn(async move {
+            stream_manager
+                .execute_tool_stream_with_context(
+                    "delayed_stream",
+                    ToolParameters::new(),
+                    &stream_ctx,
+                    None,
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        stream_cancel.cancel();
+        assert!(
+            stream
+                .await
+                .map_err(|error| ReactError::Other(format!("stream task failed: {error}")))?
+                .is_err()
         );
         Ok(())
     }

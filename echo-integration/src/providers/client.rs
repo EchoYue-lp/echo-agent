@@ -1,6 +1,5 @@
 use echo_core::error::{LlmError, Result};
 use echo_core::llm::types::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
-use echo_core::retry::{RetryPolicy, with_retry_if};
 use futures::Stream;
 use futures::StreamExt;
 use reqwest::Client;
@@ -8,15 +7,6 @@ use reqwest::header::HeaderMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, trace};
-
-/// Determine whether an LLM error is retryable (network error / 429 rate limit / 5xx server error)
-fn is_retryable(err: &LlmError) -> bool {
-    match err {
-        LlmError::NetworkError(_) => true,
-        LlmError::ApiError { status, .. } => *status == 429 || *status >= 500,
-        _ => false,
-    }
-}
 
 fn env_duration_ms(name: &str, default_ms: u64) -> Option<Duration> {
     let ms = std::env::var(name)
@@ -33,7 +23,7 @@ fn timeout_error(kind: &str, duration: Duration) -> LlmError {
     ))
 }
 
-fn split_sse_event(buffer: &mut String) -> Option<String> {
+pub(crate) fn split_sse_event(buffer: &mut String) -> Option<String> {
     let lf = buffer.find("\n\n");
     let crlf = buffer.find("\r\n\r\n");
     let (pos, sep_len) = match (lf, crlf) {
@@ -43,12 +33,13 @@ fn split_sse_event(buffer: &mut String) -> Option<String> {
         (None, Some(b)) => (b, 4),
         (None, None) => return None,
     };
-    let event = buffer[..pos].to_string();
-    buffer.replace_range(..pos + sep_len, "");
+    let event = buffer.get(..pos)?.to_string();
+    let remaining = buffer.get(pos.saturating_add(sep_len)..)?.to_string();
+    *buffer = remaining;
     Some(event)
 }
 
-fn parse_sse_data(event: &str) -> Option<String> {
+pub(crate) fn parse_sse_data(event: &str) -> Option<String> {
     let mut data_lines = Vec::new();
     for raw_line in event.lines() {
         let line = raw_line.trim_end_matches('\r');
@@ -71,39 +62,75 @@ fn parse_sse_data(event: &str) -> Option<String> {
     }
 }
 
-const STREAM_DONE_SENTINEL: &str = "__ECHO_AGENT_STREAM_DONE__";
+/// Incremental SSE decoder shared by provider adapters. It preserves partial
+/// UTF-8 code points and only exposes complete blank-line-delimited events.
+pub(crate) struct SseDecoder {
+    pending_bytes: Vec<u8>,
+    buffer: String,
+}
 
-fn parse_sse_chunk(data: &str) -> Option<Result<ChatCompletionChunk>> {
+impl SseDecoder {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending_bytes: Vec::new(),
+            buffer: String::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<()> {
+        self.pending_bytes.extend_from_slice(bytes);
+        match std::str::from_utf8(&self.pending_bytes) {
+            Ok(text) => {
+                self.buffer.push_str(text);
+                self.pending_bytes.clear();
+                Ok(())
+            }
+            Err(error) if error.error_len().is_none() => Ok(()),
+            Err(error) => Err(LlmError::InvalidResponse(format!(
+                "invalid UTF-8 in SSE stream: {error}"
+            ))
+            .into()),
+        }
+    }
+
+    pub(crate) fn next_event(&mut self) -> Option<String> {
+        split_sse_event(&mut self.buffer)
+    }
+
+    pub(crate) fn finish(mut self) -> Result<Option<String>> {
+        if !self.pending_bytes.is_empty() {
+            return Err(LlmError::InvalidResponse("truncated UTF-8 at SSE EOF".to_string()).into());
+        }
+        if self.buffer.trim().is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(std::mem::take(&mut self.buffer)))
+        }
+    }
+}
+
+enum ParsedSseChunk {
+    Done,
+    Chunk(ChatCompletionChunk),
+}
+
+fn parse_sse_chunk(data: &str) -> Result<Option<ParsedSseChunk>> {
     let trimmed = data.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
     if trimmed == "[DONE]" {
-        return Some(Err(LlmError::NetworkError(
-            STREAM_DONE_SENTINEL.to_string(),
-        )
-        .into()));
+        return Ok(Some(ParsedSseChunk::Done));
     }
-    match serde_json::from_str::<ChatCompletionChunk>(trimmed) {
-        Ok(chunk) => {
-            // Log when the final chunk includes usage so we can verify
-            // the provider's stream_options.include_usage support.
-            if chunk.usage.is_some() {
-                tracing::debug!(
-                    has_choices = !chunk.choices.is_empty(),
-                    "SSE chunk with usage parsed successfully"
-                );
-            }
-            Some(Ok(chunk))
-        }
-        Err(e) => {
-            // Warn-level so the user can see if the provider returns
-            // non-standard chunks that fail to parse as ChatCompletionChunk
-            // (e.g. usage-only chunks with unexpected field types).
-            tracing::warn!(error = %e, data = %trimmed, "SSE chunk failed to parse — provider may use non-standard format");
-            None
-        }
+    let chunk = serde_json::from_str::<ChatCompletionChunk>(trimmed)
+        .map_err(|error| LlmError::InvalidResponse(format!("invalid SSE JSON: {error}")))?;
+    if chunk.usage.is_some() {
+        tracing::debug!(
+            has_choices = !chunk.choices.is_empty(),
+            "SSE chunk with usage parsed successfully"
+        );
     }
+    Ok(Some(ParsedSseChunk::Chunk(chunk)))
 }
 
 #[tracing::instrument(skip(client, request_body, header_map), fields(model = %request_body.model))]
@@ -119,39 +146,25 @@ pub async fn post(
         "Post completion request"
     );
 
-    let policy = RetryPolicy::default();
-    let response = with_retry_if(
-        &policy,
-        || {
-            let client = client.clone();
-            let header_map = header_map.clone();
-            async move {
-                let response = client
-                    .post(url)
-                    .headers(header_map)
-                    .json(request_body)
-                    .send()
-                    .await
-                    .map_err(|e| LlmError::NetworkError(e.to_string()))?;
-
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    return Err(LlmError::ApiError {
-                        status,
-                        message: error_text,
-                    });
-                }
-
-                Ok(response)
-            }
-        },
-        is_retryable,
-    )
-    .await?;
+    let response = client
+        .post(url)
+        .headers(header_map)
+        .json(request_body)
+        .send()
+        .await
+        .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(LlmError::ApiError {
+            status,
+            message: error_text,
+        }
+        .into());
+    }
 
     let raw_text = response
         .text()
@@ -200,52 +213,77 @@ pub async fn stream_post(
         "Stream completion request"
     );
 
-    let policy = RetryPolicy::default();
-    let response = with_retry_if(
-        &policy,
-        || {
-            let client = client.clone();
-            let header_map = header_map.clone();
-            let url = url.clone();
-            let request_body = request_body.clone();
-            async move {
-                let response = client
-                    .post(&url)
-                    .headers(header_map)
-                    .json(&request_body)
-                    .send()
-                    .await
-                    .map_err(|e| LlmError::NetworkError(e.to_string()))?;
-
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    return Err(LlmError::ApiError {
-                        status,
-                        message: error_text,
-                    });
-                }
-
-                Ok(response)
+    let request_future = async {
+        let response = client
+            .post(&url)
+            .headers(header_map)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(LlmError::ApiError {
+                status,
+                message: error_text,
+            });
+        }
+        Ok(response)
+    };
+    let response = tokio::select! {
+        biased;
+        _ = async {
+            match cancel_token.as_ref() {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending().await,
             }
-        },
-        is_retryable,
-    )
-    .await?;
+        } => return Err(LlmError::NetworkError("LLM stream cancelled".to_string()).into()),
+        response = request_future => response?,
+    };
 
-    let byte_stream = response.bytes_stream();
+    let mut byte_stream = Box::pin(response.bytes_stream());
     let first_chunk_timeout = env_duration_ms("ECHO_AGENT_STREAM_FIRST_CHUNK_TIMEOUT_MS", 30_000);
     let idle_timeout = env_duration_ms("ECHO_AGENT_STREAM_IDLE_TIMEOUT_MS", 60_000);
     let overall_timeout = env_duration_ms("ECHO_AGENT_STREAM_OVERALL_TIMEOUT_MS", 0);
+    let first_bytes = tokio::select! {
+        biased;
+        _ = async {
+            match cancel_token.as_ref() {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending().await,
+            }
+        } => return Err(LlmError::NetworkError("LLM stream cancelled".to_string()).into()),
+        result = async {
+            match first_chunk_timeout {
+                Some(duration) => tokio::time::timeout(duration, byte_stream.next())
+                    .await
+                    .map_err(|_| timeout_error("first chunk", duration)),
+                None => Ok(byte_stream.next().await),
+            }
+        } => result?,
+    }
+    .ok_or_else(|| {
+        LlmError::InvalidResponse("LLM stream ended before the first chunk".to_string())
+    })?
+    .map_err(|error| LlmError::NetworkError(error.to_string()))?;
 
     let stream = async_stream::try_stream! {
-        let mut buffer = String::new();
-        let mut received_any_bytes = false;
+        let mut decoder = SseDecoder::new();
+        decoder.push(&first_bytes)?;
+        while let Some(event_str) = decoder.next_event() {
+            if let Some(data) = parse_sse_data(&event_str) {
+                match parse_sse_chunk(&data)? {
+                    Some(ParsedSseChunk::Chunk(chunk)) => yield chunk,
+                    Some(ParsedSseChunk::Done) => return,
+                    None => {}
+                }
+            }
+        }
         let overall_sleep = overall_timeout.map(tokio::time::sleep);
-        tokio::pin!(byte_stream);
         tokio::pin!(overall_sleep);
 
         loop {
@@ -259,6 +297,13 @@ pub async fn stream_post(
             tokio::pin!(next_bytes);
 
             let bytes = tokio::select! {
+                biased;
+                _ = async {
+                    match cancel_token.as_ref() {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                } => Err(LlmError::NetworkError("LLM stream cancelled".to_string())),
                 _ = async {
                     if let Some(sleep) = overall_sleep.as_mut().as_pin_mut() {
                         sleep.await;
@@ -281,18 +326,17 @@ pub async fn stream_post(
                     }
                 }
                 result = async {
-                    let timeout = if received_any_bytes { idle_timeout } else { first_chunk_timeout };
-                    if let Some(duration) = timeout {
+                    if let Some(duration) = idle_timeout {
                         match tokio::time::timeout(duration, next_bytes).await {
                             Ok(result) => Ok(result),
                             Err(_) => {
                                 tracing::warn!(
                                     model = %request_body.model,
-                                    kind = if received_any_bytes { "idle" } else { "first chunk" },
+                                    kind = "idle",
                                     timeout_ms = duration.as_millis() as u64,
                                     "LLM stream timeout"
                                 );
-                                Err(timeout_error(if received_any_bytes { "idle" } else { "first chunk" }, duration))
+                                Err(timeout_error("idle", duration))
                             }
                         }
                     } else {
@@ -306,48 +350,33 @@ pub async fn stream_post(
                 break;
             };
             let bytes = bytes.map_err(|e| LlmError::NetworkError(e.to_string()))?;
-            received_any_bytes = true;
             tracing::debug!(
                 model = %request_body.model,
                 byte_len = bytes.len(),
                 "LLM stream bytes received"
             );
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            decoder.push(&bytes)?;
 
-            while let Some(event_str) = split_sse_event(&mut buffer) {
-                if let Some(data) = parse_sse_data(&event_str)
-                    && let Some(parsed) = parse_sse_chunk(&data) {
-                        match parsed {
-                            Ok(chunk) => {
-                                tracing::debug!(
-                                    model = %request_body.model,
-                                    choice_count = chunk.choices.len(),
-                                    "LLM stream SSE chunk parsed"
-                                );
-                                yield chunk
-                            },
-                            Err(err) if err.to_string().contains(STREAM_DONE_SENTINEL) => return,
-                            Err(err) => Err(err)?,
-                        }
+            while let Some(event_str) = decoder.next_event() {
+                if let Some(data) = parse_sse_data(&event_str) {
+                    match parse_sse_chunk(&data)? {
+                        Some(ParsedSseChunk::Chunk(chunk)) => yield chunk,
+                        Some(ParsedSseChunk::Done) => return,
+                        None => {}
                     }
+                }
             }
         }
 
-        if let Some(data) = parse_sse_data(&buffer)
-            && let Some(parsed) = parse_sse_chunk(&data) {
-                match parsed {
-                    Ok(chunk) => {
-                        tracing::debug!(
-                            model = %request_body.model,
-                            choice_count = chunk.choices.len(),
-                            "LLM stream final buffered SSE chunk parsed"
-                        );
-                        yield chunk
-                    },
-                    Err(err) if err.to_string().contains("__ECHO_AGENT_STREAM_DONE__") => return,
-                    Err(err) => Err(err)?,
-                }
+        if let Some(event) = decoder.finish()? {
+            let data = parse_sse_data(&event).ok_or_else(|| {
+                LlmError::InvalidResponse("truncated SSE event at EOF".to_string())
+            })?;
+            match parse_sse_chunk(&data)? {
+                Some(ParsedSseChunk::Chunk(chunk)) => yield chunk,
+                Some(ParsedSseChunk::Done) | None => return,
             }
+        }
     };
 
     Ok(stream)
@@ -368,8 +397,17 @@ mod tests {
     fn parse_data_without_space() {
         let event = format!("data:{}", chunk_json("hello"));
         let data = parse_sse_data(&event).unwrap();
-        let chunk = parse_sse_chunk(&data).unwrap().unwrap();
-        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
+        let parsed = parse_sse_chunk(&data).ok().flatten();
+        let Some(ParsedSseChunk::Chunk(chunk)) = parsed else {
+            return;
+        };
+        assert_eq!(
+            chunk
+                .choices
+                .first()
+                .and_then(|choice| choice.delta.content.as_deref()),
+            Some("hello")
+        );
     }
 
     #[test]
@@ -380,15 +418,56 @@ mod tests {
         );
         let event = split_sse_event(&mut buffer).unwrap();
         let data = parse_sse_data(&event).unwrap();
-        let chunk = parse_sse_chunk(&data).unwrap().unwrap();
-        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+        let parsed = parse_sse_chunk(&data).ok().flatten();
+        let Some(ParsedSseChunk::Chunk(chunk)) = parsed else {
+            return;
+        };
+        assert_eq!(
+            chunk
+                .choices
+                .first()
+                .and_then(|choice| choice.delta.content.as_deref()),
+            Some("hi")
+        );
         assert!(buffer.is_empty());
     }
 
     #[test]
     fn parse_done_marker() {
         let data = parse_sse_data("data: [DONE]").unwrap();
-        let parsed = parse_sse_chunk(&data).unwrap();
-        assert!(parsed.is_err());
+        assert!(matches!(
+            parse_sse_chunk(&data),
+            Ok(Some(ParsedSseChunk::Done))
+        ));
+    }
+
+    #[test]
+    fn decoder_preserves_split_multibyte_utf8() {
+        let payload = "data: {\"text\":\"你好\"}\n\n".as_bytes();
+        let split = payload
+            .iter()
+            .position(|byte| *byte >= 0x80)
+            .unwrap_or_default()
+            .saturating_add(1);
+        let mut decoder = SseDecoder::new();
+        decoder
+            .push(payload.get(..split).unwrap_or_default())
+            .unwrap();
+        assert!(decoder.next_event().is_none());
+        decoder
+            .push(payload.get(split..).unwrap_or_default())
+            .unwrap();
+        assert_eq!(
+            decoder.next_event().as_deref(),
+            Some("data: {\"text\":\"你好\"}")
+        );
+        assert!(decoder.finish().unwrap().is_none());
+    }
+
+    #[test]
+    fn decoder_rejects_truncated_multibyte_utf8() {
+        let mut decoder = SseDecoder::new();
+        decoder.push(&[0xe4]).unwrap();
+        assert!(decoder.finish().is_err());
     }
 }

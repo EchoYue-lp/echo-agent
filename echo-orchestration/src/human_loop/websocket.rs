@@ -114,7 +114,7 @@ impl WebSocketHumanLoopProvider {
         let token_bg = auth_token.clone();
 
         tokio::spawn(async move {
-            info!("WebSocket 人工介入服务器已启动: ws://127.0.0.1:{port} (auth token: {token_bg})");
+            info!("WebSocket 人工介入服务器已启动: ws://127.0.0.1:{port}");
             loop {
                 match listener.accept().await {
                     Ok((stream, addr)) => {

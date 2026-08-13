@@ -24,7 +24,7 @@ pub(crate) enum NodeAction {
         use_execute: bool,
     },
     /// Nested subgraph execution — the node itself is a complete compiled Graph
-    Subgraph(super::graph::Graph),
+    Subgraph(Box<super::graph::Graph>),
     /// Custom async function
     Function(Box<dyn NodeFn>),
     /// No-op (used for router nodes)
@@ -51,10 +51,7 @@ where
 // ── Node ────────────────────────────────────────────────────────────────────
 
 /// Node definition in the graph
-#[allow(dead_code)]
 pub(crate) struct Node {
-    /// Unique node name
-    pub name: String,
     /// Execution logic
     pub action: NodeAction,
 }
@@ -62,13 +59,12 @@ pub(crate) struct Node {
 impl Node {
     /// Create an Agent node (defaults to execute, i.e., multi-turn with tools)
     pub fn agent(
-        name: impl Into<String>,
+        _name: impl Into<String>,
         agent: impl Agent + 'static,
         input_key: impl Into<String>,
         output_key: impl Into<String>,
     ) -> Self {
         Self {
-            name: name.into(),
             action: NodeAction::Agent {
                 agent: Arc::new(agent),
                 input_key: input_key.into(),
@@ -80,14 +76,13 @@ impl Node {
 
     /// Create an Agent node (configurable execute/chat mode)
     pub fn agent_with_mode(
-        name: impl Into<String>,
+        _name: impl Into<String>,
         agent: impl Agent + 'static,
         input_key: impl Into<String>,
         output_key: impl Into<String>,
         use_execute: bool,
     ) -> Self {
         Self {
-            name: name.into(),
             action: NodeAction::Agent {
                 agent: Arc::new(agent),
                 input_key: input_key.into(),
@@ -99,13 +94,12 @@ impl Node {
 
     /// Create an Agent node (pre-wrapped as Arc<dyn Agent>)
     pub fn agent_shared(
-        name: impl Into<String>,
+        _name: impl Into<String>,
         agent: Arc<dyn Agent>,
         input_key: impl Into<String>,
         output_key: impl Into<String>,
     ) -> Self {
         Self {
-            name: name.into(),
             action: NodeAction::Agent {
                 agent,
                 input_key: input_key.into(),
@@ -117,14 +111,13 @@ impl Node {
 
     /// Create an Agent node (pre-wrapped + configurable execute/chat)
     pub fn agent_shared_with_mode(
-        name: impl Into<String>,
+        _name: impl Into<String>,
         agent: Arc<dyn Agent>,
         input_key: impl Into<String>,
         output_key: impl Into<String>,
         use_execute: bool,
     ) -> Self {
         Self {
-            name: name.into(),
             action: NodeAction::Agent {
                 agent,
                 input_key: input_key.into(),
@@ -135,20 +128,18 @@ impl Node {
     }
 
     /// Create a function node
-    pub fn function<F>(name: impl Into<String>, f: F) -> Self
+    pub fn function<F>(_name: impl Into<String>, f: F) -> Self
     where
         F: for<'a> Fn(&'a SharedState) -> BoxFuture<'a, Result<()>> + Send + Sync + 'static,
     {
         Self {
-            name: name.into(),
             action: NodeAction::Function(Box::new(FnWrapper(f))),
         }
     }
 
     /// Create a passthrough (router) node
-    pub fn passthrough(name: impl Into<String>) -> Self {
+    pub fn passthrough(_name: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
             action: NodeAction::Passthrough,
         }
     }
@@ -157,10 +148,9 @@ impl Node {
     ///
     /// The subgraph shares the parent's `SharedState` and executes within
     /// the parent's step count limit.
-    pub fn subgraph(name: impl Into<String>, graph: super::graph::Graph) -> Self {
+    pub fn subgraph(_name: impl Into<String>, graph: super::graph::Graph) -> Self {
         Self {
-            name: name.into(),
-            action: NodeAction::Subgraph(graph),
+            action: NodeAction::Subgraph(Box::new(graph)),
         }
     }
 

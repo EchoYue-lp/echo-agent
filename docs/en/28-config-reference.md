@@ -99,7 +99,7 @@ precedence for diagnostics.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `llm_max_retries` | `usize` | `3` | Max retries after LLM failure |
+| `llm_max_retries` | `usize` | `3` | Max retries for request/start and pre-first-chunk failures; errors after streamed deltas are not replayed |
 | `llm_retry_delay_ms` | `u64` | `500` | Initial retry delay (exponential backoff) |
 
 #### Streaming & Callbacks
@@ -190,7 +190,7 @@ ReactAgentBuilder::new()
 ```rust
 ReactAgentBuilder::new()
     .enable_memory()                   // long-term memory
-    .enable_planning()                 // DAG task planning
+    .enable_tasks()                    // Revisioned task graph tools
     .enable_human_in_loop()            // approval gate (requires "human-loop" feature)
     .enable_subagent()                 // sub-agent dispatch (requires "subagent" feature)
     .enable_cot()                      // chain-of-thought
@@ -536,47 +536,29 @@ let config = AppConfig::load()?;  // loads echo-agent.yaml
 
 ---
 
-## Model Window Registry (v0.2.1)
+## Model Profile Overrides
 
-Dynamically register and query model context window sizes:
+Define provider or exact-model overrides without changing provider adapters:
 
 ```rust
-use echo_core::budget::{register_model_window, resolve_model_window};
+use echo_agent::prelude::*;
 
-// Register a custom model's window size
-register_model_window("my-custom-model", 128_000);
-
-// Query window size (unknown models fall back to heuristic estimation)
-let window = resolve_model_window("qwen3-max");  // from registry
-let fallback = resolve_model_window("unknown-model");  // heuristic
+let resolver = ModelProfileResolver::new().register_exact(
+    "custom",
+    "my-custom-model",
+    ModelProfileOverride {
+        context_window: Some(128_000),
+        ..Default::default()
+    },
+);
+let profile = resolver.resolve(
+    "custom",
+    "my-custom-model",
+    ProviderCapabilities::openai_compatible(),
+);
+assert_eq!(profile.context_window, Some(128_000));
 ```
 
-Built-in models have default window sizes pre-registered. Use `register_model_window()` to override or extend.
+Known models use provider-aware inference. Unknown models use the conservative framework fallback unless the application supplies an explicit profile override.
 
 ---
-
-## Global Event Bus (EventBus)
-
-Unified `tokio::broadcast` event channel for Webhook / Trace / UI / Audit to subscribe to the same event stream:
-
-```rust
-use echo_agent::event_bus::{GLOBAL_EVENT_BUS, BusEvent};
-
-// Subscribe to events
-let mut rx = GLOBAL_EVENT_BUS.subscribe();
-
-// Send an event
-GLOBAL_EVENT_BUS.send(AgentEvent::Token("hello".into()));
-
-// Send an event with run context
-GLOBAL_EVENT_BUS.send_for_run(event, "run-123");
-
-// Receive events
-while let Ok(bus_event) = rx.recv().await {
-    println!("Event: {:?}, run_id: {:?}", bus_event.event, bus_event.run_id);
-}
-```
-
-`BusEvent` includes `run_id` and `agent_id` for multi-agent event filtering.
-
-Capacity: 1024. Consumers that fall behind receive `RecvError::Lagged`.

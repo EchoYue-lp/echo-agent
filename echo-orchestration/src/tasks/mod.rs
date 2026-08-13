@@ -56,8 +56,9 @@ pub use runtime::{
     TaskSubagentContext,
 };
 pub use runtime_executor::{
-    RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome,
-    RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
+    RuntimeClaimAbandonment, RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig,
+    RuntimeDagOutcome, RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskClaimOutcome,
+    RuntimeTaskResolution,
 };
 pub use scheduler::{
     ConflictDetector, FileChangeRecord, ParallelStrategy, SchedulePlan, TaskConflict, TaskScheduler,
@@ -247,7 +248,7 @@ mod tests {
         manager.add_task(create_task("task2", "Task 2", vec!["task1"]));
         manager.add_task(create_task("task3", "Task 3", vec!["task2"]));
 
-        let chains = manager.get_dependency_chain("task3");
+        let chains = manager.get_dependency_chain("task3").unwrap_or_default();
         assert_eq!(chains.len(), 1, "should have one dependency chain");
         assert_eq!(
             chains[0],
@@ -268,7 +269,7 @@ mod tests {
         manager.add_task(create_task("task3", "Task 3", vec!["task1"]));
         manager.add_task(create_task("task4", "Task 4", vec!["task2", "task3"]));
 
-        let chains = manager.get_dependency_chain("task4");
+        let chains = manager.get_dependency_chain("task4").unwrap_or_default();
         assert_eq!(chains.len(), 2, "should have two dependency chains");
 
         // Verify the two chains
@@ -279,6 +280,15 @@ mod tests {
 
         assert!(chains.contains(&chain1), "should contain the first chain");
         assert!(chains.contains(&chain2), "should contain the second chain");
+    }
+
+    #[test]
+    fn dependency_chain_rejects_cycles_and_missing_nodes() {
+        let manager = TaskManager::new();
+        manager.add_task(create_task("task1", "Task 1", vec!["task2"]));
+        manager.add_task(create_task("task2", "Task 2", vec!["task1"]));
+        assert!(manager.get_dependency_chain("task1").is_err());
+        assert!(manager.get_dependency_chain("missing").is_err());
     }
 
     #[test]

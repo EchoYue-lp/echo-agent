@@ -3,7 +3,235 @@
 //! All public APIs return [`Result<T>`]; underlying errors are automatically converted
 //! to [`ReactError`] through `From`.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Stable failure domain carried across Agent event and adapter boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFailureCategory {
+    Llm,
+    Tool,
+    Parse,
+    Agent,
+    Config,
+    Mcp,
+    Memory,
+    Sandbox,
+    RuntimeState,
+    Channel,
+    Io,
+    Other,
+}
+
+/// Terminal lifecycle class independent of display text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTerminalKind {
+    Failed,
+    Cancelled,
+    TimedOut,
+    PermissionDenied,
+}
+
+/// Serializable non-Tool failure contract for Agent event consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentFailure {
+    pub category: AgentFailureCategory,
+    pub terminal_kind: AgentTerminalKind,
+    pub retryable: bool,
+    pub code: String,
+    pub http_status: Option<u16>,
+    pub message: String,
+}
+
+impl AgentFailure {
+    pub fn from_react_error(error: &ReactError) -> Self {
+        let (category, terminal_kind, retryable, code, http_status) = match error {
+            ReactError::Llm(inner) => match inner.as_ref() {
+                LlmError::NetworkError(_) => (
+                    AgentFailureCategory::Llm,
+                    AgentTerminalKind::Failed,
+                    true,
+                    "llm_network",
+                    None,
+                ),
+                LlmError::ApiError { status, .. } => (
+                    AgentFailureCategory::Llm,
+                    AgentTerminalKind::Failed,
+                    *status == 408 || *status == 429 || *status >= 500,
+                    "llm_api",
+                    Some(*status),
+                ),
+                LlmError::InvalidResponse(_) => (
+                    AgentFailureCategory::Llm,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "llm_invalid_response",
+                    None,
+                ),
+                LlmError::EmptyResponse => (
+                    AgentFailureCategory::Llm,
+                    AgentTerminalKind::Failed,
+                    true,
+                    "llm_empty_response",
+                    None,
+                ),
+                LlmError::SerializationError(_) => (
+                    AgentFailureCategory::Llm,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "llm_serialization",
+                    None,
+                ),
+            },
+            ReactError::Tool(_) => (
+                AgentFailureCategory::Tool,
+                AgentTerminalKind::Failed,
+                false,
+                "tool",
+                None,
+            ),
+            ReactError::Parse(_) => (
+                AgentFailureCategory::Parse,
+                AgentTerminalKind::Failed,
+                false,
+                "parse",
+                None,
+            ),
+            ReactError::Agent(inner) => match inner.as_ref() {
+                AgentError::Interrupted | AgentError::Cancelled(_) => (
+                    AgentFailureCategory::Agent,
+                    AgentTerminalKind::Cancelled,
+                    false,
+                    "agent_cancelled",
+                    None,
+                ),
+                AgentError::Timeout(_) => (
+                    AgentFailureCategory::Agent,
+                    AgentTerminalKind::TimedOut,
+                    true,
+                    "agent_timeout",
+                    None,
+                ),
+                AgentError::PermissionDenied(_) => (
+                    AgentFailureCategory::Agent,
+                    AgentTerminalKind::PermissionDenied,
+                    false,
+                    "agent_permission_denied",
+                    None,
+                ),
+                _ => (
+                    AgentFailureCategory::Agent,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "agent",
+                    None,
+                ),
+            },
+            ReactError::Config(_) => (
+                AgentFailureCategory::Config,
+                AgentTerminalKind::Failed,
+                false,
+                "config",
+                None,
+            ),
+            #[cfg(feature = "mcp")]
+            ReactError::Mcp(_) => (
+                AgentFailureCategory::Mcp,
+                AgentTerminalKind::Failed,
+                true,
+                "mcp",
+                None,
+            ),
+            ReactError::Memory(_) => (
+                AgentFailureCategory::Memory,
+                AgentTerminalKind::Failed,
+                false,
+                "memory",
+                None,
+            ),
+            ReactError::Sandbox(inner) => match inner.as_ref() {
+                SandboxError::Timeout(_) => (
+                    AgentFailureCategory::Sandbox,
+                    AgentTerminalKind::TimedOut,
+                    true,
+                    "sandbox_timeout",
+                    None,
+                ),
+                SandboxError::Cancelled(_) => (
+                    AgentFailureCategory::Sandbox,
+                    AgentTerminalKind::Cancelled,
+                    false,
+                    "sandbox_cancelled",
+                    None,
+                ),
+                SandboxError::PermissionDenied(_) => (
+                    AgentFailureCategory::Sandbox,
+                    AgentTerminalKind::PermissionDenied,
+                    false,
+                    "sandbox_permission_denied",
+                    None,
+                ),
+                _ => (
+                    AgentFailureCategory::Sandbox,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "sandbox",
+                    None,
+                ),
+            },
+            ReactError::RuntimeState(_) => (
+                AgentFailureCategory::RuntimeState,
+                AgentTerminalKind::Failed,
+                false,
+                "runtime_state",
+                None,
+            ),
+            #[cfg(feature = "channels")]
+            ReactError::Channel(_) => (
+                AgentFailureCategory::Channel,
+                AgentTerminalKind::Failed,
+                true,
+                "channel",
+                None,
+            ),
+            ReactError::Io(_) => (
+                AgentFailureCategory::Io,
+                AgentTerminalKind::Failed,
+                true,
+                "io",
+                None,
+            ),
+            ReactError::Other(_) => (
+                AgentFailureCategory::Other,
+                AgentTerminalKind::Failed,
+                false,
+                "other",
+                None,
+            ),
+        };
+        Self {
+            category,
+            terminal_kind,
+            retryable,
+            code: code.to_string(),
+            http_status,
+            message: error.to_string(),
+        }
+    }
+
+    pub fn message(source: &str, message: impl Into<String>) -> Self {
+        Self {
+            category: AgentFailureCategory::Other,
+            terminal_kind: AgentTerminalKind::Failed,
+            retryable: false,
+            code: source.to_string(),
+            http_status: None,
+            message: message.into(),
+        }
+    }
+}
 
 /// Top-level framework error, aggregating all subsystem errors
 ///
@@ -413,6 +641,73 @@ impl From<reqwest::Error> for ReactError {
 
 /// Convenience Result alias
 pub type Result<T> = std::result::Result<T, ReactError>;
+
+#[cfg(test)]
+mod agent_failure_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_terminal_and_retry_facts() -> std::result::Result<(), serde_json::Error> {
+        let cases = [
+            (
+                ReactError::Llm(Box::new(LlmError::ApiError {
+                    status: 429,
+                    message: "rate limited".to_string(),
+                })),
+                AgentFailureCategory::Llm,
+                AgentTerminalKind::Failed,
+                true,
+                Some(429),
+            ),
+            (
+                ReactError::Agent(Box::new(AgentError::Cancelled("stop".to_string()))),
+                AgentFailureCategory::Agent,
+                AgentTerminalKind::Cancelled,
+                false,
+                None,
+            ),
+            (
+                ReactError::Agent(Box::new(AgentError::Timeout("late".to_string()))),
+                AgentFailureCategory::Agent,
+                AgentTerminalKind::TimedOut,
+                true,
+                None,
+            ),
+            (
+                ReactError::Agent(Box::new(AgentError::PermissionDenied("no".to_string()))),
+                AgentFailureCategory::Agent,
+                AgentTerminalKind::PermissionDenied,
+                false,
+                None,
+            ),
+            (
+                ReactError::Parse(Box::new(ParseError::UnexpectedFormat("bad".to_string()))),
+                AgentFailureCategory::Parse,
+                AgentTerminalKind::Failed,
+                false,
+                None,
+            ),
+            (
+                ReactError::Io(std::io::Error::other("disk")),
+                AgentFailureCategory::Io,
+                AgentTerminalKind::Failed,
+                true,
+                None,
+            ),
+        ];
+        for (error, category, terminal, retryable, status) in cases {
+            let failure = AgentFailure::from_react_error(&error);
+            assert_eq!(failure.category, category);
+            assert_eq!(failure.terminal_kind, terminal);
+            assert_eq!(failure.retryable, retryable);
+            assert_eq!(failure.http_status, status);
+            let json = serde_json::to_string(&failure)?;
+            let decoded: AgentFailure = serde_json::from_str(&json)?;
+            assert_eq!(decoded, failure);
+        }
+        Ok(())
+    }
+}
 
 /// Runtime state error
 #[derive(Debug, Error)]

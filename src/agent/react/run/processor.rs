@@ -5,7 +5,7 @@
 use crate::agent::AgentEvent;
 use crate::llm::types::{ChatCompletionChunk, FunctionCall, ToolCall as LlmToolCall};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Process streaming response chunk, collect content and return events.
 ///
@@ -135,32 +135,46 @@ fn parse_tool_args(args_str: &str) -> Result<(Value, String), serde_json::Error>
 }
 
 /// Convert the collected tool_call_map into structured tool call lists.
+pub(crate) type ParsedToolStep = (String, String, Value);
+
 pub(crate) fn build_tool_calls_from_map(
     tool_call_map: &HashMap<u32, (String, String, String)>,
-) -> (Vec<LlmToolCall>, Vec<(String, String, Value)>) {
+) -> Result<(Vec<LlmToolCall>, Vec<ParsedToolStep>), String> {
     let mut sorted_indices: Vec<u32> = tool_call_map.keys().cloned().collect();
     sorted_indices.sort();
 
     let mut msg_tool_calls: Vec<LlmToolCall> = Vec::new();
-    let mut steps: Vec<(String, String, Value)> = Vec::new();
+    let mut steps: Vec<ParsedToolStep> = Vec::new();
+    let mut seen_ids = HashSet::new();
 
     for idx in &sorted_indices {
         let Some((id, name, args_str)) = tool_call_map.get(idx) else {
             continue;
         };
+        let canonical_id = if id.trim().is_empty() {
+            format!("call_{}", uuid::Uuid::new_v4())
+        } else {
+            id.clone()
+        };
+        if !seen_ids.insert(canonical_id.clone()) {
+            return Err(format!(
+                "duplicate tool call id '{}' in one model batch",
+                canonical_id
+            ));
+        }
         match parse_tool_args(args_str) {
             Ok((args, canonical_args)) => {
                 // Send the CANONICAL (repaired) args back to the provider so
                 // the assistant message always carries valid JSON.
                 msg_tool_calls.push(LlmToolCall {
-                    id: id.clone(),
+                    id: canonical_id.clone(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
                         name: name.clone(),
                         arguments: canonical_args,
                     },
                 });
-                steps.push((id.clone(), name.clone(), args));
+                steps.push((canonical_id, name.clone(), args));
             }
             Err(e) => {
                 tracing::warn!(
@@ -179,12 +193,12 @@ pub(crate) fn build_tool_calls_from_map(
         }
     }
 
-    (msg_tool_calls, steps)
+    Ok((msg_tool_calls, steps))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_tool_args, process_stream_chunk};
+    use super::{build_tool_calls_from_map, parse_tool_args, process_stream_chunk};
     use crate::llm::types::ChatCompletionChunk;
     use std::collections::HashMap;
 
@@ -239,6 +253,40 @@ mod tests {
         assert!(val.is_object());
         assert_eq!(echo, "{}");
         Ok(())
+    }
+
+    #[test]
+    fn tool_call_ids_are_non_empty_and_shared_across_projections() -> Result<(), String> {
+        let calls = HashMap::from([(0, (String::new(), "Read".to_string(), "{}".to_string()))]);
+        let (messages, steps) = build_tool_calls_from_map(&calls)?;
+        let message_id = messages.first().map(|call| call.id.as_str());
+        let step_id = steps.first().map(|(id, _, _)| id.as_str());
+        assert!(message_id.is_some_and(|id| !id.is_empty()));
+        assert_eq!(message_id, step_id);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_tool_call_ids_reject_the_entire_batch() {
+        let calls = HashMap::from([
+            (
+                0,
+                (
+                    "duplicate".to_string(),
+                    "Read".to_string(),
+                    "{}".to_string(),
+                ),
+            ),
+            (
+                1,
+                (
+                    "duplicate".to_string(),
+                    "Read".to_string(),
+                    "{}".to_string(),
+                ),
+            ),
+        ]);
+        assert!(build_tool_calls_from_map(&calls).is_err());
     }
 
     #[test]

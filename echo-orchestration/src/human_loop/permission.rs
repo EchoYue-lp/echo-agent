@@ -47,6 +47,7 @@ use echo_core::tools::permission::{PermissionMode, ToolPermission};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::policy::ApprovalScope;
 use echo_core::error::Result;
@@ -295,6 +296,9 @@ pub struct PermissionRequest {
     /// Agent 名称
     #[serde(default)]
     pub agent_name: Option<String>,
+    /// Maximum time to wait for the user response.
+    #[serde(default)]
+    pub timeout: Option<Duration>,
 }
 
 /// 权限上下文（额外的上下文信息）
@@ -331,6 +335,7 @@ impl PermissionRequest {
             request_id: None,
             session_id: None,
             agent_name: None,
+            timeout: None,
         }
     }
 
@@ -383,10 +388,35 @@ impl PermissionRequest {
         self
     }
 
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     /// 设置上下文
     pub fn with_context(mut self, context: PermissionContext) -> Self {
         self.context = context;
         self
+    }
+
+    pub(crate) fn into_human_loop_request(self) -> super::HumanLoopRequest {
+        super::HumanLoopRequest {
+            request_id: self.request_id,
+            session_id: self.session_id,
+            agent_name: self.agent_name,
+            kind: super::HumanLoopKind::Approval,
+            prompt: self.prompt,
+            tool_name: Some(self.tool_name),
+            args: Some(self.tool_input),
+            risk_level: Some(self.risk_level),
+            approval_context: Some(self.context),
+            suggestions: self.suggestions,
+            timeout: self.timeout,
+            task_id: None,
+            options: None,
+            context: None,
+            phase: None,
+        }
     }
 
     /// 生成默认建议选项
@@ -451,6 +481,9 @@ pub struct PermissionResponse {
     /// 修改后的输入（如果选择了 ModifyInput）
     #[serde(default)]
     pub updated_input: Option<Value>,
+    /// 本次允许决策应写入的会话缓存范围。
+    #[serde(default)]
+    pub approval_scope: Option<ApprovalScope>,
 }
 
 /// 权限响应决策
@@ -473,6 +506,7 @@ impl PermissionResponse {
             rule_updates: Vec::new(),
             feedback: None,
             updated_input: None,
+            approval_scope: None,
         }
     }
 
@@ -483,6 +517,7 @@ impl PermissionResponse {
             rule_updates: Vec::new(),
             feedback: None,
             updated_input: None,
+            approval_scope: None,
         }
     }
 
@@ -498,15 +533,17 @@ impl PermissionResponse {
             SuggestedAction::AllowOnce => Self::allowed(),
             SuggestedAction::AllowForSession => Self {
                 decision: PermissionResponseDecision::Allowed,
-                rule_updates: vec![PermissionUpdate::add_session_rule(matcher)],
+                rule_updates: Vec::new(),
                 feedback: None,
                 updated_input: None,
+                approval_scope: Some(ApprovalScope::Session),
             },
             SuggestedAction::AllowAlways => Self {
                 decision: PermissionResponseDecision::Allowed,
                 rule_updates: vec![PermissionUpdate::add_permanent_rule(matcher)],
                 feedback: None,
                 updated_input: None,
+                approval_scope: None,
             },
             SuggestedAction::DenyOnce => Self::denied(Some(suggestion.description.clone())),
             SuggestedAction::DenyAlways => Self {
@@ -516,18 +553,21 @@ impl PermissionResponse {
                 rule_updates: vec![PermissionUpdate::add_deny_rule(matcher)],
                 feedback: None,
                 updated_input: None,
+                approval_scope: None,
             },
             SuggestedAction::ModifyInput { updated_input } => Self {
                 decision: PermissionResponseDecision::Allowed,
                 rule_updates: Vec::new(),
                 feedback: None,
                 updated_input: Some(updated_input.clone()),
+                approval_scope: None,
             },
             SuggestedAction::Custom { response } => Self {
                 decision: PermissionResponseDecision::Allowed,
                 rule_updates: Vec::new(),
                 feedback: Some(response.clone()),
                 updated_input: None,
+                approval_scope: None,
             },
         }
     }
@@ -655,21 +695,22 @@ impl<P: super::HumanLoopProvider + 'static> PermissionRequestHandler
     for DefaultPermissionRequestHandler<P>
 {
     async fn handle(&self, request: PermissionRequest) -> Result<PermissionResponse> {
-        use super::{HumanLoopRequest, HumanLoopResponse};
+        use super::HumanLoopResponse;
 
-        let req = HumanLoopRequest::approval(&request.tool_name, request.tool_input.clone());
+        let tool_name = request.tool_name.clone();
+        let tool_input = request.tool_input.clone();
+        let req = request.into_human_loop_request();
 
         match self.provider.request(req).await? {
             HumanLoopResponse::Approved => Ok(PermissionResponse::allowed()),
             HumanLoopResponse::ApprovedWithScope { scope } => Ok(permission_response_with_scope(
-                &request.tool_name,
-                &request.tool_input,
+                &tool_name,
+                &tool_input,
                 scope,
             )),
             HumanLoopResponse::ModifiedArgs { args, scope } => {
                 // 保留用户修改的参数，传递给调用方
-                let mut response =
-                    permission_response_with_scope(&request.tool_name, &request.tool_input, scope);
+                let mut response = permission_response_with_scope(&tool_name, &tool_input, scope);
                 response.updated_input = Some(args);
                 Ok(response)
             }
@@ -689,25 +730,25 @@ impl<P: super::HumanLoopProvider + 'static> PermissionRequestHandler
 }
 
 fn permission_response_with_scope(
-    tool_name: &str,
-    tool_input: &Value,
+    _tool_name: &str,
+    _tool_input: &Value,
     scope: ApprovalScope,
 ) -> PermissionResponse {
     match scope {
         ApprovalScope::Once => PermissionResponse::allowed(),
         ApprovalScope::Session => PermissionResponse {
             decision: PermissionResponseDecision::Allowed,
-            rule_updates: vec![PermissionUpdate::add_session_rule(
-                PermissionResponse::build_matcher(tool_name, tool_input),
-            )],
+            rule_updates: Vec::new(),
             feedback: None,
             updated_input: None,
+            approval_scope: Some(ApprovalScope::Session),
         },
-        ApprovalScope::SessionAllTools => PermissionResponse {
+        ApprovalScope::SessionTool => PermissionResponse {
             decision: PermissionResponseDecision::Allowed,
-            rule_updates: vec![PermissionUpdate::add_session_rule(tool_name.to_string())],
+            rule_updates: Vec::new(),
             feedback: None,
             updated_input: None,
+            approval_scope: Some(ApprovalScope::SessionTool),
         },
     }
 }
@@ -815,7 +856,6 @@ mod tests {
 
     #[test]
     fn test_permission_response_from_suggestion_matcher() {
-        // 验证 matcher 使用 tool_name 而非 suggestion label
         let s = Suggestion::allow_for_session();
         let resp = PermissionResponse::from_suggestion(
             &s,
@@ -823,12 +863,8 @@ mod tests {
             &serde_json::json!({"cmd": "x"}),
         );
 
-        match &resp.rule_updates[0] {
-            PermissionUpdate::AddRule { matcher, .. } => {
-                assert_eq!(matcher, "DangerousTool(*)");
-            }
-            _ => panic!("Expected AddRule"),
-        }
+        assert!(resp.rule_updates.is_empty());
+        assert_eq!(resp.approval_scope, Some(ApprovalScope::Session));
     }
 
     #[test]
@@ -851,5 +887,37 @@ mod tests {
 
         assert_eq!(parsed.tool_name, "Bash");
         assert_eq!(parsed.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn permission_request_conversion_preserves_all_context() {
+        let request = PermissionRequest::new("Bash", serde_json::json!({"command": "pwd"}))
+            .with_request_id("request-1")
+            .with_session_id("conversation-1")
+            .with_agent_name("subagent-1")
+            .with_timeout(Duration::from_secs(30))
+            .with_risk_level(RiskLevel::High)
+            .with_suggestion(Suggestion::allow_for_session())
+            .with_context(PermissionContext {
+                working_directory: Some("/workspace".to_string()),
+                affected_files: vec!["src/lib.rs".to_string()],
+                estimated_impact: Some("executes a local command".to_string()),
+                metadata: serde_json::Map::new(),
+            });
+
+        let converted = request.into_human_loop_request();
+        assert_eq!(converted.request_id.as_deref(), Some("request-1"));
+        assert_eq!(converted.session_id.as_deref(), Some("conversation-1"));
+        assert_eq!(converted.agent_name.as_deref(), Some("subagent-1"));
+        assert_eq!(converted.timeout, Some(Duration::from_secs(30)));
+        assert_eq!(converted.risk_level, Some(RiskLevel::High));
+        assert_eq!(converted.suggestions.len(), 1);
+        assert_eq!(
+            converted
+                .approval_context
+                .as_ref()
+                .and_then(|context| context.working_directory.as_deref()),
+            Some("/workspace")
+        );
     }
 }

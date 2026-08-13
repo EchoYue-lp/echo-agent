@@ -28,7 +28,7 @@ use crate::compression::CompressionCheckpoint;
 use echo_core::compression::{CompressionInput, CompressionOutput, ContextCompressor};
 use echo_core::error::Result;
 use echo_core::llm::types::{Message, MessageContent, Role};
-use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
+use echo_core::tokenizer::Tokenizer;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -112,22 +112,27 @@ struct ToolGroup {
 /// (e.g. composed with other compressors in a pipeline).
 pub struct VisibilityHorizonCompressor {
     config: VisibilityHorizonConfig,
-    tokenizer: Box<dyn Tokenizer>,
 }
 
 impl VisibilityHorizonCompressor {
     pub fn new(config: VisibilityHorizonConfig) -> Self {
-        Self {
-            config,
-            tokenizer: Box::new(HeuristicTokenizer),
-        }
+        Self { config }
     }
 
     /// Core compaction: identify tool groups beyond the window, replace with summaries.
     ///
     /// Returns the evicted (original) messages for downstream memory promotion.
+    #[cfg(test)]
     fn compact_horizon(&self, messages: &mut Vec<Message>) -> Vec<Message> {
-        let groups = self.identify_tool_groups(messages);
+        self.compact_horizon_with(messages, &echo_core::tokenizer::HeuristicTokenizer)
+    }
+
+    fn compact_horizon_with(
+        &self,
+        messages: &mut Vec<Message>,
+        tokenizer: &dyn Tokenizer,
+    ) -> Vec<Message> {
+        let groups = self.identify_tool_groups(messages, tokenizer);
 
         // Filter groups beyond the active window
         let to_compact: Vec<&ToolGroup> = groups
@@ -193,7 +198,11 @@ impl VisibilityHorizonCompressor {
     }
 
     /// Identify all tool-call groups in the message list.
-    fn identify_tool_groups(&self, messages: &[Message]) -> Vec<ToolGroup> {
+    fn identify_tool_groups(
+        &self,
+        messages: &[Message],
+        tokenizer: &dyn Tokenizer,
+    ) -> Vec<ToolGroup> {
         let mut groups = Vec::new();
         let mut i = 0;
 
@@ -223,7 +232,7 @@ impl VisibilityHorizonCompressor {
 
                 while result_end < messages.len() && messages[result_end].role == Role::Tool {
                     let content = messages[result_end].content.as_text().unwrap_or_default();
-                    result_tokens += self.tokenizer.count_tokens(&content);
+                    result_tokens += tokenizer.count_tokens(&content);
 
                     // Heuristic: if content starts with "[Error" or "[error", count as failure
                     if content.trim_start().starts_with("[Error")
@@ -292,8 +301,8 @@ impl VisibilityHorizonCompressor {
         );
 
         // Ensure summary stays within token budget
-        let max_chars = self.config.compact_max_tokens * 4; // rough chars→tokens
-        if summary.len() > max_chars {
+        let max_chars = self.config.compact_max_tokens.saturating_mul(4);
+        if summary.chars().count() > max_chars {
             format!(
                 "[Horizon compact: {} | {} | {} tokens compacted]",
                 if group.tool_names.len() > 3 {
@@ -334,7 +343,7 @@ impl ContextCompressor for VisibilityHorizonCompressor {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
             let start = Instant::now();
-            let tokenizer = HeuristicTokenizer;
+            let tokenizer = input.tokenizer();
             let tokens_before: usize = input
                 .messages
                 .iter()
@@ -344,7 +353,7 @@ impl ContextCompressor for VisibilityHorizonCompressor {
             let original_count = input.messages.len();
 
             let mut messages = input.messages;
-            let evicted = self.compact_horizon(&mut messages);
+            let evicted = self.compact_horizon_with(&mut messages, tokenizer.as_ref());
 
             let tokens_after: usize = messages
                 .iter()
@@ -357,7 +366,12 @@ impl ContextCompressor for VisibilityHorizonCompressor {
                 .with_tokens(tokens_before, tokens_after)
                 .with_covered_range(0, original_count.saturating_sub(1))
                 .with_duration_ms(start.elapsed().as_millis() as u64)
-                .with_focus(input.focus_instructions.clone());
+                .with_focus(
+                    input
+                        .focus_instructions
+                        .clone()
+                        .or(input.current_query.clone()),
+                );
 
             Ok(CompressionOutput {
                 messages,
@@ -378,6 +392,7 @@ impl ContextCompressor for VisibilityHorizonCompressor {
 mod tests {
     use super::*;
     use echo_core::llm::types::ToolCall;
+    use echo_core::tokenizer::HeuristicTokenizer;
 
     /// Helper: create an assistant message with tool_calls.
     fn assistant_with_tools(calls: &[(&str, &str)]) -> Message {
@@ -700,6 +715,8 @@ mod tests {
             token_limit: 100_000,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
 
         let output = compressor.compress(input).await.unwrap();

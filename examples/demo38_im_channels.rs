@@ -65,7 +65,7 @@ async fn main() -> echo_agent::error::Result<()> {
             app_config.channels.qq.app_id.clone(),
             app_config.channels.qq.client_secret.clone(),
         );
-        manager.register(Box::new(QqChannel::new(qq_config)?));
+        manager.register(Box::new(QqChannel::new(qq_config)?))?;
         registered.push("qq");
         println!("  [+] 已注册 QQ Bot 通道");
     }
@@ -88,7 +88,7 @@ async fn main() -> echo_agent::error::Result<()> {
                 app_config.channels.feishu.app_secret.clone(),
             ),
         };
-        manager.register(Box::new(FeishuChannel::new(feishu_config)?));
+        manager.register(Box::new(FeishuChannel::new(feishu_config)?))?;
         registered.push("feishu");
         println!(
             "  [+] 已注册飞书通道（{} 模式）",
@@ -152,7 +152,7 @@ async fn main() -> echo_agent::error::Result<()> {
         )));
     }
     for result in start_results {
-        result?;
+        result.result?;
     }
 
     println!("  所有通道已启动: {:?}", manager.channel_ids());

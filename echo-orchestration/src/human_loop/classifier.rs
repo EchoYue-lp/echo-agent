@@ -59,14 +59,10 @@ pub struct RiskContext {
 }
 
 /// 分类器上下文 - 包含分类所需的所有信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClassifierContext {
     /// 对话历史
     pub messages: Vec<Message>,
-    /// Agent 名称
-    pub agent_name: String,
-    /// 会话 ID
-    pub session_id: String,
     /// 当前 allow 规则描述
     pub allow_rules: Vec<String>,
     /// 当前 soft_deny 规则描述
@@ -83,18 +79,8 @@ pub struct ClassifierContext {
 
 impl ClassifierContext {
     /// 创建空上下文
-    pub fn new(agent_name: String, session_id: String) -> Self {
-        Self {
-            messages: Vec::new(),
-            agent_name,
-            session_id,
-            allow_rules: Vec::new(),
-            soft_deny_rules: Vec::new(),
-            workspace_path: None,
-            project_type: None,
-            recent_files: Vec::new(),
-            risk_context: None,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// 添加消息历史
@@ -373,11 +359,10 @@ impl Classifier for RuleClassifier {
             }
         }
 
-        // 默认允许
-        Ok(ClassifierResult::allow(format!(
-            "工具 '{}' 未匹配任何规则，默认允许",
-            tool_name
-        )))
+        Ok(
+            ClassifierResult::block(format!("工具 '{}' 未匹配任何规则，需要用户确认", tool_name))
+                .with_confidence(0.0),
+        )
     }
 }
 
@@ -392,9 +377,6 @@ impl Classifier for RuleClassifier {
 pub struct LlmClassifier {
     /// LLM 客户端
     client: Arc<dyn LlmClient>,
-    /// 使用的模型名称
-    #[allow(dead_code)] // Used for logging/debugging; will be read in future integration
-    model: String,
     /// 拒绝跟踪器
     denial_tracker: Arc<Mutex<DenialTracker>>,
     /// 分类提示词模板
@@ -403,10 +385,9 @@ pub struct LlmClassifier {
 
 impl LlmClassifier {
     /// 创建 LLM 分类器
-    pub fn new(client: Arc<dyn LlmClient>, model: String) -> Self {
+    pub fn new(client: Arc<dyn LlmClient>) -> Self {
         Self {
             client,
-            model,
             denial_tracker: Arc::new(Mutex::new(DenialTracker::new())),
             prompt_template: Self::default_prompt_template(),
         }
@@ -433,7 +414,7 @@ impl LlmClassifier {
             .last()
             .map(|(idx, c)| idx + c.len_utf8())
             .unwrap_or(0);
-        format!("{}...(truncated)", &full[..end])
+        format!("{}...(truncated)", full.get(..end).unwrap_or_default())
     }
 
     /// 默认分类提示词模板
@@ -535,10 +516,7 @@ impl LlmClassifier {
         if let Some(json_str) = Self::extract_json(response)
             && let Ok(json) = serde_json::from_str::<Value>(&json_str)
         {
-            let should_block = json
-                .get("should_block")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let should_block = json.get("should_block").and_then(|v| v.as_bool())?;
             let reason = json
                 .get("reason")
                 .and_then(|v| v.as_str())
@@ -583,7 +561,7 @@ impl LlmClassifier {
                 if depth == 0
                     && let Some(s) = start
                 {
-                    return Some(trimmed[s..=i].to_string());
+                    return trimmed.get(s..=i).map(ToString::to_string);
                 }
             }
         }
@@ -620,7 +598,8 @@ impl Classifier for LlmClassifier {
         // 解析响应
         let content = response.content().unwrap_or_default();
         let result = Self::parse_response(&content).unwrap_or_else(|| {
-            ClassifierResult::allow("无法解析 LLM 响应，默认允许".to_string()).with_confidence(0.5)
+            ClassifierResult::block("无法可靠解析 LLM 权限响应，需要用户确认".to_string())
+                .with_confidence(0.0)
         });
 
         // 更新拒绝跟踪
@@ -688,10 +667,10 @@ impl Classifier for CompositeClassifier {
             }
         }
 
-        // 所有分类器都低置信度，默认允许
+        // 低置信度由 PermissionService 转交用户确认，不能静默放行。
         Ok(
-            ClassifierResult::allow("所有分类器低置信度，默认允许".to_string())
-                .with_confidence(0.5),
+            ClassifierResult::block("所有分类器置信度不足，需要用户确认".to_string())
+                .with_confidence(0.0),
         )
     }
 }
@@ -762,9 +741,7 @@ mod tests {
 
     #[test]
     fn test_classifier_context_new() {
-        let ctx = ClassifierContext::new("agent".to_string(), "session".to_string());
-        assert_eq!(ctx.agent_name, "agent");
-        assert_eq!(ctx.session_id, "session");
+        let ctx = ClassifierContext::new();
         assert!(ctx.messages.is_empty());
     }
 
@@ -781,7 +758,7 @@ mod tests {
         let classifier =
             RuleClassifier::new().with_allow_patterns(vec!["Read".to_string(), "Glob".to_string()]);
 
-        let ctx = ClassifierContext::new("agent".to_string(), "session".to_string());
+        let ctx = ClassifierContext::new();
         let result = classifier
             .classify("Read", &serde_json::json!({}), &ctx)
             .await
@@ -793,7 +770,7 @@ mod tests {
     async fn test_rule_classifier_deny() {
         let classifier = RuleClassifier::new().with_deny_patterns(vec!["Bash(rm:*)".to_string()]);
 
-        let ctx = ClassifierContext::new("agent".to_string(), "session".to_string());
+        let ctx = ClassifierContext::new();
         let result = classifier
             .classify(
                 "Bash(rm:rf)",
@@ -808,12 +785,13 @@ mod tests {
     #[tokio::test]
     async fn test_rule_classifier_default() {
         let classifier = RuleClassifier::new();
-        let ctx = ClassifierContext::new("agent".to_string(), "session".to_string());
+        let ctx = ClassifierContext::new();
         let result = classifier
             .classify("UnknownTool", &serde_json::json!({}), &ctx)
             .await
             .unwrap();
-        assert!(!result.should_block); // 默认允许
+        assert!(result.should_block);
+        assert_eq!(result.confidence, 0.0);
     }
 
     #[test]
@@ -829,6 +807,7 @@ mod tests {
             fn chat(&self, _request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
                 Box::pin(async move {
                     Ok(ChatResponse {
+                        usage: None,
                         message: Message::assistant(
                             "{\"should_block\": false, \"reason\": \"test\"}".to_string(),
                         ),
@@ -855,9 +834,9 @@ mod tests {
         }
 
         let client = Arc::new(MockClient);
-        let classifier = LlmClassifier::new(client, "model".to_string());
+        let classifier = LlmClassifier::new(client);
 
-        let ctx = ClassifierContext::new("agent".to_string(), "session".to_string())
+        let ctx = ClassifierContext::new()
             .with_allow_rules(vec!["Read:*".to_string()])
             .with_soft_deny_rules(vec!["Bash(rm:*)".to_string()]);
 

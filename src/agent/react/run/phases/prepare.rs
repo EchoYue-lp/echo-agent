@@ -26,6 +26,7 @@ pub(crate) async fn prepare_turn(
     label: &str,
     mode: StreamMode,
     recalled: usize,
+    user_prompt_hook_already_run: bool,
 ) -> Result<PrepareOutcome> {
     let agent = &snap.config.agent_name;
     match mode {
@@ -54,8 +55,9 @@ pub(crate) async fn prepare_turn(
         }
     }
 
-    // UserPromptSubmit hook
-    {
+    // Streaming preparation runs this hook before routing; the core receives
+    // that fact explicitly so lifecycle side effects remain exactly once.
+    if !user_prompt_hook_already_run {
         let hook_ctx = crate::skills::hooks::HookContext::for_user_prompt_submit(
             text,
             None,
@@ -122,6 +124,7 @@ mod tests {
             "",
             StreamMode::Execute,
             0,
+            false,
         )
         .await
         .expect("prepare_turn must succeed");
@@ -173,6 +176,7 @@ mod tests {
             "",
             StreamMode::Chat,
             7,
+            false,
         )
         .await
         .expect("prepare_turn must succeed");
@@ -204,6 +208,7 @@ mod tests {
             "",
             StreamMode::Chat,
             0,
+            false,
         )
         .await
         .expect("first prepare_turn must succeed");
@@ -215,6 +220,7 @@ mod tests {
             "",
             StreamMode::Chat,
             0,
+            false,
         )
         .await
         .expect("second prepare_turn must succeed");
@@ -285,6 +291,7 @@ mod tests {
             "",
             StreamMode::Execute,
             0,
+            false,
         )
         .await
         .expect("prepare_turn must succeed even when the hook blocks");

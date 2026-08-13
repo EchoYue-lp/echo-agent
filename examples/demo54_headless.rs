@@ -77,6 +77,7 @@ fn demo_config_custom() {
         exit_on_error: true,
         output_format: "json".into(),
         max_iterations: Some(10),
+        cancel_token: None,
     };
     println!("  prompt:         {:?}", config.prompt);
     println!("  exit_on_error:  {}", config.exit_on_error);
@@ -97,6 +98,7 @@ fn demo_text_output() {
         success: true,
         model: "deepseek-v4-flash".into(),
         format: "text".into(),
+        exit_on_error: true,
     };
 
     let formatted = result.format_output();
@@ -118,6 +120,7 @@ fn demo_json_output() {
         success: true,
         model: "qwen3-max".into(),
         format: "json".into(),
+        exit_on_error: true,
     };
 
     let formatted = result.format_output();
@@ -144,6 +147,7 @@ fn demo_exit_codes() {
         success: true,
         model: "test-model".into(),
         format: "text".into(),
+        exit_on_error: true,
     };
     println!("  Success case:");
     println!("    exit_code() = {}", ok_result.exit_code());
@@ -155,6 +159,7 @@ fn demo_exit_codes() {
         success: false,
         model: "test-model".into(),
         format: "text".into(),
+        exit_on_error: true,
     };
     println!("  Failure case:");
     println!("    exit_code() = {}", fail_result.exit_code());
@@ -174,6 +179,7 @@ fn demo_empty_prompt() {
         success: false,
         model: String::new(),
         format: "text".into(),
+        exit_on_error: true,
     };
 
     println!("  Empty prompt → success=false");
@@ -194,6 +200,7 @@ fn demo_cicd_pattern() {
     println!("      exit_on_error: true,");
     println!("      output_format: \"json\".into(),");
     println!("      max_iterations: Some(20),");
+    println!("      cancel_token: None,");
     println!("  }};");
     println!();
     println!("  let result = run_headless(config, |builder| {{");
@@ -212,6 +219,7 @@ fn demo_cicd_pattern() {
         success: true,
         model: "deepseek-v4-flash".into(),
         format: "json".into(),
+        exit_on_error: true,
     };
     println!("  Simulated CI output:");
     for line in simulated.format_output().lines() {

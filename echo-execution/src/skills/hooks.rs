@@ -19,9 +19,9 @@
 //! | `ToolPolicy` | [`HooksDefinition`] + [`HookRule`] — matcher → actions mapping (YAML-configurable) |
 //!
 //! Tool hooks are wired through the shared tool execution pipeline:
-//! - [`PreToolUseHookStage`](crate::tools::pipeline::PreToolUseHookStage)
+//! - `PreToolUseHookStage`
 //! - the permission stage for `PermissionRequest`
-//! - [`PostToolUseHookStage`](crate::tools::pipeline::PostToolUseHookStage), which routes
+//! - `PostToolUseHookStage`, which routes
 //!   successful and unsuccessful results to their distinct events
 //!
 //! ## Hook events

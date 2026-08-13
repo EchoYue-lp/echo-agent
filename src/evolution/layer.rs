@@ -495,7 +495,7 @@ impl MemoryLayerManager {
     /// `ForgetTool`) deleted from the per-agent namespace `[agent_name,
     /// "memories"]` while `remember` writes the unified `["agent", "memories"]`
     /// — so `forget` could never delete what `remember` stored. The layered
-    /// variant ([`LayeredForgetTool`]) routes here.
+    /// variant (`LayeredForgetTool`) routes here.
     pub async fn delete_memory(&self, key: &str) -> Result<bool> {
         let Some((layer, _entry)) = self.locate(key).await else {
             return Ok(false);

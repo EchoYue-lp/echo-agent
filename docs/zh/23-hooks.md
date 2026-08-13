@@ -235,7 +235,7 @@ DAG 任务执行的生命周期回调。实现 `TaskHooks` trait。
 
 ```rust
 use async_trait::async_trait;
-use echo_orchestration::tasks::{RetryDecision, TaskHookContext, TaskHooks};
+use echo_agent::tasks::{RetryDecision, TaskHookContext, TaskHooks};
 
 struct LoggingHooks;
 

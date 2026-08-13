@@ -5,16 +5,18 @@
 //! - list_tables: list all tables in the database
 //! - describe_table: view table structure
 
-use futures::future::BoxFuture;
+use base64::Engine;
+use futures::{StreamExt, future::BoxFuture};
 use serde_json::Value;
-use sqlx::any::AnyPoolOptions;
+use sha2::{Digest, Sha256};
+use sqlx::any::{AnyPoolOptions, AnyTypeInfoKind};
 use sqlx::{Column, Row};
 
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::artifact::{
     ToolOutputArtifactIdentity, ToolOutputArtifactRef, persist_tool_output,
 };
-use echo_core::tools::pagination::PageRequest;
+use echo_core::tools::pagination::{PageInfo, PageRequest};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 
@@ -169,25 +171,14 @@ impl Tool for SqlQueryTool {
                 }
             }
 
-            match execute_readonly_query(conn_url, query).await {
+            match execute_readonly_page(conn_url, query, &page_request).await {
                 Ok(data) => {
-                    let query_identity = serde_json::json!({
-                        "connection_url": conn_url,
-                        "query": query,
-                    });
-                    let (page, page_info) = match page_request.paginate(data.rows, &query_identity)
-                    {
-                        Ok(page) => page,
-                        Err(error) => {
-                            return Ok(ToolResult::invalid_arguments(error.to_string()));
-                        }
-                    };
                     let full_data = serde_json::json!({
                         "columns": data.columns,
-                        "rows": page,
-                        "page": &page_info,
+                        "rows": data.rows,
+                        "page": &data.page_info,
                     });
-                    sql_page_result(ctx, full_data, page_info)
+                    sql_page_result(ctx, full_data, data.page_info)
                 }
                 Err(e) => Ok(ToolResult::error(format!("Query failed: {}", e))),
             }
@@ -396,6 +387,174 @@ struct DbRows {
     rows: Vec<Vec<serde_json::Value>>,
 }
 
+struct DbPage {
+    columns: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+    page_info: PageInfo,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SqlCursor {
+    version: u8,
+    fingerprint: String,
+    offset: usize,
+    limit: usize,
+}
+
+fn sql_query_fingerprint(conn_url: &str, query: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(conn_url.as_bytes());
+    hasher.update([0]);
+    hasher.update(query.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn decode_sql_cursor(request: &PageRequest, conn_url: &str, query: &str) -> Result<usize> {
+    let Some(cursor) = request.cursor.as_deref() else {
+        return Ok(0);
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|error| ToolError::InvalidParameter {
+            name: "cursor".to_string(),
+            message: format!("invalid SQL cursor encoding: {error}"),
+        })?;
+    let decoded: SqlCursor =
+        serde_json::from_slice(&bytes).map_err(|error| ToolError::InvalidParameter {
+            name: "cursor".to_string(),
+            message: format!("invalid SQL cursor payload: {error}"),
+        })?;
+    if decoded.version != 1
+        || decoded.limit != request.limit
+        || decoded.fingerprint != sql_query_fingerprint(conn_url, query)
+    {
+        return Err(ToolError::InvalidParameter {
+            name: "cursor".to_string(),
+            message: "SQL cursor does not match this query and limit".to_string(),
+        }
+        .into());
+    }
+    Ok(decoded.offset)
+}
+
+fn encode_sql_cursor(cursor: &SqlCursor) -> Result<String> {
+    let bytes = serde_json::to_vec(cursor).map_err(|error| ToolError::ExecutionFailed {
+        tool: "sql_query".to_string(),
+        message: format!("failed to encode SQL cursor: {error}"),
+    })?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+async fn execute_readonly_page(
+    conn_url: &str,
+    query: &str,
+    request: &PageRequest,
+) -> Result<DbPage> {
+    ensure_drivers_installed();
+    let offset = decode_sql_cursor(request, conn_url, query)?;
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(conn_url)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: "database".to_string(),
+            message: format!("Database connection failed: {error}"),
+        })?;
+    let take = request.limit.saturating_add(1);
+    let rows = if conn_url.starts_with("sqlite") {
+        collect_bounded_rows(sqlx::query(query).fetch(&pool), offset, take).await?
+    } else {
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: "database".to_string(),
+                message: format!("Failed to begin transaction: {error}"),
+            })?;
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: "database".to_string(),
+                message: format!("Failed to set read-only mode: {error}"),
+            })?;
+        let rows =
+            collect_bounded_rows(sqlx::query(query).fetch(&mut *transaction), offset, take).await?;
+        transaction
+            .rollback()
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: "database".to_string(),
+                message: format!("Failed to close read-only transaction: {error}"),
+            })?;
+        rows
+    };
+    build_db_page(rows, request, offset, conn_url, query)
+}
+
+async fn collect_bounded_rows<S>(
+    mut stream: S,
+    offset: usize,
+    take: usize,
+) -> Result<Vec<sqlx::any::AnyRow>>
+where
+    S: futures::Stream<Item = std::result::Result<sqlx::any::AnyRow, sqlx::Error>> + Unpin,
+{
+    let mut rows = Vec::with_capacity(take);
+    let mut seen = 0usize;
+    while let Some(row) = stream.next().await {
+        let row = row.map_err(|error| ToolError::ExecutionFailed {
+            tool: "database".to_string(),
+            message: format!("Query execution failed: {error}"),
+        })?;
+        if seen < offset {
+            seen = seen.saturating_add(1);
+            continue;
+        }
+        rows.push(row);
+        if rows.len() >= take {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
+fn build_db_page(
+    mut rows: Vec<sqlx::any::AnyRow>,
+    request: &PageRequest,
+    offset: usize,
+    conn_url: &str,
+    query: &str,
+) -> Result<DbPage> {
+    let has_more = rows.len() > request.limit;
+    if has_more {
+        rows.truncate(request.limit);
+    }
+    let formatted = format_db_rows(&rows)?;
+    let next_offset = offset.saturating_add(formatted.rows.len());
+    let next_cursor = if has_more {
+        Some(encode_sql_cursor(&SqlCursor {
+            version: 1,
+            fingerprint: sql_query_fingerprint(conn_url, query),
+            offset: next_offset,
+            limit: request.limit,
+        })?)
+    } else {
+        None
+    };
+    Ok(DbPage {
+        columns: formatted.columns,
+        rows: formatted.rows,
+        page_info: PageInfo {
+            next_cursor,
+            truncated: has_more,
+            total_known: false,
+            total: None,
+            returned: next_offset.saturating_sub(offset),
+        },
+    })
+}
+
 impl DbRows {
     fn into_json(self) -> serde_json::Value {
         let total_rows = self.rows.len();
@@ -471,16 +630,13 @@ fn format_db_rows(rows: &[sqlx::any::AnyRow]) -> Result<DbRows> {
 
     for row in rows {
         let mut values: Vec<serde_json::Value> = Vec::with_capacity(col_count);
-        for i in 0..col_count {
-            let val = match row.try_get::<Option<String>, _>(i) {
-                Ok(None) => serde_json::Value::Null,
-                Ok(Some(s)) => serde_json::Value::String(s),
-                Err(_) => match row.try_get::<String, _>(i) {
-                    Ok(s) => serde_json::Value::String(s),
-                    Err(_) => serde_json::Value::String("?".to_string()),
-                },
-            };
-            values.push(val);
+        for (index, column) in row.columns().iter().enumerate() {
+            values.push(decode_db_cell(
+                row,
+                index,
+                column.name(),
+                column.type_info().kind(),
+            )?);
         }
         row_values.push(values);
     }
@@ -489,6 +645,65 @@ fn format_db_rows(rows: &[sqlx::any::AnyRow]) -> Result<DbRows> {
         columns,
         rows: row_values,
     })
+}
+
+fn decode_db_cell(
+    row: &sqlx::any::AnyRow,
+    index: usize,
+    column_name: &str,
+    kind: AnyTypeInfoKind,
+) -> Result<serde_json::Value> {
+    let decode_error = |error: sqlx::Error| ToolError::ExecutionFailed {
+        tool: "database".to_string(),
+        message: format!(
+            "Failed to decode column '{}' as {:?}: {error}",
+            column_name, kind
+        ),
+    };
+    let value = match kind {
+        AnyTypeInfoKind::Null => serde_json::Value::Null,
+        AnyTypeInfoKind::Bool => match row
+            .try_get::<Option<bool>, _>(index)
+            .map_err(decode_error)?
+        {
+            Some(value) => serde_json::Value::Bool(value),
+            None => serde_json::Value::Null,
+        },
+        AnyTypeInfoKind::SmallInt => {
+            serde_json::json!(row.try_get::<Option<i16>, _>(index).map_err(decode_error)?)
+        }
+        AnyTypeInfoKind::Integer => {
+            serde_json::json!(row.try_get::<Option<i32>, _>(index).map_err(decode_error)?)
+        }
+        AnyTypeInfoKind::BigInt => {
+            serde_json::json!(row.try_get::<Option<i64>, _>(index).map_err(decode_error)?)
+        }
+        AnyTypeInfoKind::Real => {
+            serde_json::json!(row.try_get::<Option<f32>, _>(index).map_err(decode_error)?)
+        }
+        AnyTypeInfoKind::Double => {
+            serde_json::json!(row.try_get::<Option<f64>, _>(index).map_err(decode_error)?)
+        }
+        AnyTypeInfoKind::Text => match row
+            .try_get::<Option<String>, _>(index)
+            .map_err(decode_error)?
+        {
+            Some(value) => serde_json::Value::String(value),
+            None => serde_json::Value::Null,
+        },
+        AnyTypeInfoKind::Blob => match row
+            .try_get::<Option<Vec<u8>>, _>(index)
+            .map_err(decode_error)?
+        {
+            Some(bytes) => serde_json::json!({
+                "type": "binary",
+                "encoding": "base64",
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+            None => serde_json::Value::Null,
+        },
+    };
+    Ok(value)
 }
 
 fn sql_page_result(
@@ -607,4 +822,102 @@ fn apply_sql_artifact(
         "returned_bytes".to_string(),
         result.output.len().to_string(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echo_core::error::ReactError;
+
+    #[tokio::test]
+    async fn sqlite_page_is_bounded_and_preserves_typed_cells() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(ReactError::from)?;
+        let database = directory.path().join("typed.sqlite");
+        let url = format!("sqlite://{}?mode=rwc", database.display());
+        ensure_drivers_installed();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: "database-test".to_string(),
+                message: error.to_string(),
+            })?;
+        sqlx::query(
+            "CREATE TABLE samples (id INTEGER, flag INTEGER, score REAL, label TEXT, payload BLOB, optional INTEGER)",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: "database-test".to_string(),
+            message: error.to_string(),
+        })?;
+        for id in 1_i64..=5_i64 {
+            sqlx::query(
+                "INSERT INTO samples (id, flag, score, label, payload, optional) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(id % 2 == 0)
+            .bind(id as f64 + 0.5)
+            .bind(format!("row-{id}"))
+            .bind(vec![u8::try_from(id).unwrap_or_default(), 255])
+            .bind((id != 1).then_some(id))
+            .execute(&pool)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: "database-test".to_string(),
+                message: error.to_string(),
+            })?;
+        }
+        pool.close().await;
+
+        let first_request = PageRequest {
+            limit: 2,
+            cursor: None,
+        };
+        let first = execute_readonly_page(
+            &url,
+            "SELECT id, flag, score, label, payload, optional FROM samples ORDER BY id",
+            &first_request,
+        )
+        .await?;
+        assert_eq!(first.rows.len(), 2);
+        assert_eq!(
+            first.rows.first().and_then(|row| row.first()),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            first.rows.first().and_then(|row| row.get(5)),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            first
+                .rows
+                .first()
+                .and_then(|row| row.get(4))
+                .and_then(|value| value.get("encoding")),
+            Some(&serde_json::json!("base64"))
+        );
+        let cursor = first.page_info.next_cursor.ok_or_else(|| {
+            ReactError::Other("first SQL page did not return a cursor".to_string())
+        })?;
+
+        let second = execute_readonly_page(
+            &url,
+            "SELECT id, flag, score, label, payload, optional FROM samples ORDER BY id",
+            &PageRequest {
+                limit: 2,
+                cursor: Some(cursor),
+            },
+        )
+        .await?;
+        assert_eq!(second.rows.len(), 2);
+        assert_eq!(
+            second.rows.first().and_then(|row| row.first()),
+            Some(&serde_json::json!(3))
+        );
+        assert!(second.page_info.next_cursor.is_some());
+        assert!(!second.page_info.total_known);
+        Ok(())
+    }
 }

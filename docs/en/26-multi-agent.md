@@ -19,7 +19,7 @@ Both are feature-gated behind `subagent`.
 │  │                      │  │                          │  │
 │  │  • Sync (blocking)   │  │  • ManagerSubagent         │  │
 │  │  • Fork (independent)│  │  • Pipeline              │  │
-│  │  • Teammate (mailbox)│  │  • Debate                │  │
+│  │  • Teammate (handle) │  │  • Debate                │  │
 │  │                      │  │  • Swarm                 │  │
 │  └─────────────────────┘  └──────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
@@ -46,7 +46,7 @@ SubAgent is the simpler pattern: a parent agent dispatches tasks to child agents
 |------|-------------------|---------------|----------|
 | **Sync** | None (shared state via mutex) | Return value | Simple delegation, blocking wait |
 | **Fork** | System prompt + tools + recent history | Return value | Independent subtask with parent context |
-| **Teammate** | None | Mailbox (async mpsc) | Parallel independent work |
+| **Teammate** | None | Join/cancel handle | Parallel independent work |
 
 ### Registration
 
@@ -237,7 +237,7 @@ let team = TeamAgentBuilder::new()
 |--------|----------|-----------|
 | Relationship | Parent-child | Peer-to-peer |
 | Direction | One-way dispatch | Bidirectional collaboration |
-| Context | Isolated (no sharing) | Isolated (mailbox communication) |
+| Context | Isolated (no sharing) | Isolated member executions |
 | Coordination | Parent decides | Strategy-driven |
 | Complexity | Simple | Advanced |
 | Use case | Tool-like delegation | Complex multi-step workflows |
@@ -250,22 +250,12 @@ let team = TeamAgentBuilder::new()
 
 ---
 
-## Mailbox Communication
+## Execution Lifecycle
 
-TeamAgent members communicate via async mailboxes (tokio::sync::mpsc):
-
-```rust
-pub enum MessageKind {
-    TaskAssigned { task_id: String, task: String },
-    TaskResult { task_id: String, result: String },
-    Query { question: String },
-    QueryResponse { answer: String },
-    Status { status: String },
-    Cancelled { reason: String },
-}
-```
-
-Each `TeamMember` gets a `Mailbox` with configurable capacity (default: 64 messages).
+Teammate dispatch returns a handle that owns join and cancellation. TeamAgent
+member execution uses the same canonical Subagent dispatcher, so lifecycle
+events, isolation, timeout, cancellation, usage, and terminal status are not
+reimplemented by a separate team protocol.
 
 ---
 
@@ -274,10 +264,7 @@ Each `TeamMember` gets a `Mailbox` with configurable capacity (default: 64 messa
 ```rust
 TeamConfig {
     max_concurrent: 5,           // Max concurrent subagents
-    default_timeout_secs: 300,   // 5 min timeout per task
-    allow_reassignment: true,    // Reassign on failure
-    cross_talk: false,           // Subagents can't talk to each other
-    mailbox_capacity: 64,        // Messages per mailbox
+    default_timeout_secs: 600,   // Aggregate team execution timeout
 }
 ```
 

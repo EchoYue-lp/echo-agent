@@ -1,7 +1,7 @@
 //! Conversation persistence trait and data types
 //!
 //! Provides structured storage for conversation history with multi-user,
-//! multi-agent isolation. Concrete implementation ([`SqliteConversationStore`])
+//! multi-agent isolation. Concrete implementation (`SqliteConversationStore`)
 //! lives in `echo_state`.
 
 use crate::error::Result;

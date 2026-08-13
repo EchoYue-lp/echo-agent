@@ -1,6 +1,7 @@
 //! QQ Bot ChannelPlugin implementation
 
 use super::super::super::types::*;
+use super::super::{DeliveryRequest, DeliverySender};
 use super::api::*;
 use async_trait::async_trait;
 use echo_core::error::ChannelError;
@@ -39,7 +40,8 @@ pub struct QqChannel {
     /// Shared HTTP client (connection pool reuse)
     http: reqwest::Client,
     token_manager: Option<Arc<TokenManager>>,
-    send_tx: Option<mpsc::Sender<OutboundMessage>>,
+    send_tx: Option<DeliverySender>,
+    send_handle: Option<JoinHandle<()>>,
     gateway_handle: Option<JoinHandle<()>>,
 }
 
@@ -56,6 +58,7 @@ impl QqChannel {
             http: reqwest_client(),
             token_manager: None,
             send_tx: None,
+            send_handle: None,
             gateway_handle: None,
         })
     }
@@ -81,6 +84,11 @@ impl ChannelPlugin for QqChannel {
     }
 
     async fn start(&mut self, handler: Arc<dyn MessageHandler>) -> Result<()> {
+        if self.gateway_handle.is_some() || self.send_handle.is_some() {
+            return Err(ReactError::Channel(Box::new(ChannelError::Other(
+                "QQ Bot channel is already started".to_string(),
+            ))));
+        }
         info!("Starting QQ Bot channel...");
 
         // 1. Initialize token manager
@@ -91,7 +99,7 @@ impl ChannelPlugin for QqChannel {
         self.token_manager = Some(token_manager.clone());
 
         // 2. Start background message sending task
-        let (send_tx, mut send_rx) = mpsc::channel::<OutboundMessage>(256);
+        let (send_tx, mut send_rx) = mpsc::channel::<DeliveryRequest>(256);
         let token_manager_clone = token_manager.clone();
 
         // 3. Create wrapper handler — calls inner handler then auto-sends reply
@@ -105,31 +113,25 @@ impl ChannelPlugin for QqChannel {
         // 4. Start message sending task
         let http_for_send = self.http.clone();
         let token_manager_clone2 = token_manager.clone();
-        let _send_task = tokio::spawn(async move {
-            loop {
-                if let Some(msg) = send_rx.recv().await {
-                    let token = match token_manager_clone.get_token().await {
-                        Ok(t) => t,
-                        Err(e) => {
-                            warn!("QQ Bot: failed to get token for sending: {:?}", e);
-                            continue;
-                        }
-                    };
-                    if let Err(e) = send_qq_message(
+        let send_handle = tokio::spawn(async move {
+            while let Some(request) = send_rx.recv().await {
+                let result = async {
+                    let token = token_manager_clone.get_token().await?;
+                    send_qq_message(
                         &http_for_send,
                         &token,
-                        &msg.to,
-                        &msg.chat_type,
-                        &msg.text,
-                        msg.reply_to.as_deref(),
+                        &request.message.to,
+                        &request.message.chat_type,
+                        &request.message.text,
+                        request.message.reply_to.as_deref(),
                     )
                     .await
-                    {
-                        warn!("QQ Bot: failed to send message: {:?}", e);
-                    }
                 }
+                .await;
+                let _ = request.receipt.send(result);
             }
         });
+        self.send_handle = Some(send_handle);
 
         // 5. Start Gateway connection loop (with exponential backoff reconnect)
         let http_for_gw = self.http.clone();
@@ -200,26 +202,35 @@ impl ChannelPlugin for QqChannel {
 
         if let Some(handle) = self.gateway_handle.take() {
             handle.abort();
+            let _ = handle.await;
         }
 
         self.send_tx = None;
+        if let Some(handle) = self.send_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        self.token_manager = None;
         info!("QQ Bot channel stopped");
         Ok(())
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
-        if let Some(tx) = &self.send_tx {
-            tx.send(msg).await.map_err(|e| {
-                ReactError::Channel(Box::new(ChannelError::SendError(format!(
-                    "Failed to queue message for sending: {}",
-                    e
-                ))))
-            })
-        } else {
-            Err(ReactError::Channel(Box::new(ChannelError::SendError(
+        let token_manager = self.token_manager.as_ref().ok_or_else(|| {
+            ReactError::Channel(Box::new(ChannelError::SendError(
                 "QQ Bot channel not started".to_string(),
-            ))))
-        }
+            )))
+        })?;
+        let token = token_manager.get_token().await?;
+        send_qq_message(
+            &self.http,
+            &token,
+            &msg.to,
+            &msg.chat_type,
+            &msg.text,
+            msg.reply_to.as_deref(),
+        )
+        .await
     }
 
     async fn health_check(&self) -> Result<()> {
@@ -242,7 +253,7 @@ impl ChannelPlugin for QqChannel {
 /// Wrapper: calls inner handler then automatically sends reply via send_tx
 struct QqMessageHandler {
     inner: Arc<dyn MessageHandler>,
-    send_tx: mpsc::Sender<OutboundMessage>,
+    send_tx: DeliverySender,
 }
 
 #[async_trait]

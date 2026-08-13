@@ -358,6 +358,7 @@ impl PluginManifest {
 
         // Validate component paths
         self.validate_paths(&mut errors);
+        self.validate_component_cardinality(&mut errors);
 
         // Validate config entries
         for (key, entry) in &self.config {
@@ -582,6 +583,23 @@ impl PluginManifest {
         if let Some(ref v) = self.components.output_styles {
             check("output_styles", v, errors);
         }
+    }
+
+    fn validate_component_cardinality(&self, errors: &mut Vec<ValidationError>) {
+        let check_single = |field: &str,
+                            value: &Option<StringOrArray>,
+                            errors: &mut Vec<ValidationError>| {
+            if matches!(value, Some(StringOrArray::Multiple(paths)) if paths.len() > 1) {
+                errors.push(ValidationError {
+                    field: format!("components.{field}"),
+                    message: "This component accepts exactly one configuration file".to_string(),
+                });
+            }
+        };
+        check_single("hooks", &self.components.hooks, errors);
+        check_single("mcp_servers", &self.components.mcp_servers, errors);
+        check_single("lsp_servers", &self.components.lsp_servers, errors);
+        check_single("monitors", &self.components.monitors, errors);
     }
 }
 
@@ -944,5 +962,21 @@ components:
             m.components.agents.as_ref().unwrap().as_paths(),
             vec!["./agents/a.md", "./agents/b.md"]
         );
+    }
+
+    #[test]
+    fn singular_config_components_reject_multiple_paths() {
+        for field in ["hooks", "mcp_servers", "lsp_servers", "monitors"] {
+            let yaml = format!(
+                "name: cardinality-test\ndescription: test\ncomponents:\n  {field}: [\"./a.yaml\", \"./b.yaml\"]\n"
+            );
+            let manifest = PluginManifest::from_yaml(&yaml).unwrap();
+            assert!(
+                manifest
+                    .validate()
+                    .iter()
+                    .any(|error| error.field == format!("components.{field}"))
+            );
+        }
     }
 }

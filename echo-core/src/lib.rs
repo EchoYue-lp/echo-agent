@@ -38,3 +38,14 @@ pub mod sandbox;
 pub mod tokenizer;
 pub mod tools;
 pub mod utils;
+
+/// Implementation dependencies used by code generated from `echo_macros`.
+/// This is public only so downstream macro expansion does not require users to
+/// duplicate framework implementation dependencies in their manifests.
+#[doc(hidden)]
+pub mod __macro_support {
+    pub use futures;
+    pub use schemars;
+    pub use serde;
+    pub use serde_json;
+}

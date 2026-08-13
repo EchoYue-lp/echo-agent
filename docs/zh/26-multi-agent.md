@@ -194,22 +194,11 @@ let team = TeamAgentBuilder::new()
 
 ---
 
-## 邮箱通信
+## 执行生命周期
 
-TeamAgent 成员通过异步邮箱通信（tokio::sync::mpsc）：
-
-```rust
-pub enum MessageKind {
-    TaskAssigned { task_id: String, task: String },
-    TaskResult { task_id: String, result: String },
-    Query { question: String },
-    QueryResponse { answer: String },
-    Status { status: String },
-    Cancelled { reason: String },
-}
-```
-
-每个 `TeamMember` 获得一个可配置容量的 `Mailbox`（默认：64 条消息）。
+Teammate dispatch 返回拥有等待与取消能力的 handle。TeamAgent 成员执行复用
+同一套 Subagent dispatcher，因此事件、隔离、超时、取消、usage 与终态不由
+另一套团队协议重复实现。
 
 ---
 

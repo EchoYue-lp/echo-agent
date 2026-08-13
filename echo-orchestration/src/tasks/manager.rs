@@ -381,27 +381,6 @@ impl TaskManager {
         !self.detect_circular_dependencies().is_empty()
     }
 
-    pub(crate) fn get_dependency_chain_recursive(
-        &self,
-        task_id: &str,
-        current_chain: &mut Vec<String>,
-        chains: &mut Vec<Vec<String>>,
-    ) {
-        current_chain.push(task_id.to_string());
-
-        if let Some(task) = self.tasks.get(task_id) {
-            if task.dependencies.is_empty() {
-                chains.push(current_chain.clone());
-            } else {
-                for dep_id in &task.dependencies {
-                    self.get_dependency_chain_recursive(dep_id, current_chain, chains);
-                }
-            }
-        }
-
-        current_chain.pop();
-    }
-
     // ── Run-Level Operations ──────────────────────────────────────────────────
 
     /// Get all tasks belonging to a specific run.

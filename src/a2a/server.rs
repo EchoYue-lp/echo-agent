@@ -208,12 +208,27 @@ impl A2AServer {
 
             match stream_result {
                 Ok(raw_stream) => {
-                    let identity = crate::agent::EventIdentity {
-                        conversation_id: None,
-                        run_id: Some(task_id.clone()),
-                        turn_id: task_id.clone(),
-                        execution_id: Some(task_id.clone()),
-                        parent_event_id: None,
+                    let identity = match crate::agent::EventIdentity::for_run(task_id.clone()) {
+                        Ok(identity) => identity,
+                        Err(error) => {
+                            let status = A2ATaskStatus::with_message(
+                                TaskState::Failed,
+                                A2AMessage::agent_text(format!("Invalid task identity: {error}")),
+                            );
+                            Self::update_task_state(
+                                &tasks,
+                                &task_id,
+                                TaskState::Failed,
+                                Some(&status),
+                            )
+                            .await;
+                            yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+                                task_id: task_id.clone(),
+                                status,
+                                is_final: true,
+                            });
+                            return;
+                        }
                     };
                     let mut event_stream =
                         crate::agent::envelope_event_stream(raw_stream, identity);
@@ -409,9 +424,43 @@ impl A2AServer {
 
         Self::update_task_state(&self.tasks, &task_id, TaskState::Working, None).await;
 
-        // working → completed / failed
+        // working → completed / failed / canceled
         let agent = self.agent.as_ref();
-        match agent.execute(&input_text).await {
+        let execution = async {
+            let mut stream = agent
+                .execute_stream_with_cancel(&input_text, cancel_token.clone())
+                .await?;
+            let mut final_output = None;
+            while let Some(event) = stream.next().await {
+                match event? {
+                    AgentEvent::FinalAnswer(output) => final_output = Some(output),
+                    AgentEvent::Cancelled => {
+                        return Err(crate::error::ReactError::Agent(Box::new(
+                            echo_core::error::AgentError::Cancelled(
+                                "A2A task cancelled".to_string(),
+                            ),
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            final_output.ok_or_else(|| {
+                crate::error::ReactError::Agent(Box::new(
+                    echo_core::error::AgentError::NoResponse {
+                        model: agent.model_name().to_string(),
+                        agent: agent.name().to_string(),
+                    },
+                ))
+            })
+        };
+        let execution_result = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => Err(crate::error::ReactError::Agent(Box::new(
+                echo_core::error::AgentError::Cancelled("A2A task cancelled".to_string())
+            ))),
+            result = execution => result,
+        };
+        match execution_result {
             Ok(output) => {
                 info!(task_id = %task_id, "A2A: task execution completed");
 
@@ -425,21 +474,29 @@ impl A2AServer {
                     append: false,
                 };
 
-                let completed_task = A2ATask {
-                    id: task_id.clone(),
-                    session_id: request.params.session_id.clone(),
-                    status: A2ATaskStatus::with_message(
-                        TaskState::Completed,
-                        result_message.clone(),
-                    ),
-                    history: vec![request.params.message.clone(), result_message],
-                    artifacts: vec![artifact],
-                };
-
-                {
+                let completed_task = {
                     let mut tasks = self.tasks.write().await;
-                    tasks.insert(task_id.clone(), completed_task.clone());
-                }
+                    let Some(task) = tasks.get_mut(&task_id) else {
+                        return A2ATaskResponse {
+                            jsonrpc: JSONRPC_VERSION.to_string(),
+                            id: Some(request.id.clone()),
+                            result: None,
+                            error: Some(A2AError {
+                                code: ERROR_CODE_TASK_NOT_FOUND as i32,
+                                message: format!("Task not found: {task_id}"),
+                            }),
+                        };
+                    };
+                    if task.status.state.can_transition_to(TaskState::Completed) {
+                        task.status = A2ATaskStatus::with_message(
+                            TaskState::Completed,
+                            result_message.clone(),
+                        );
+                        task.history.push(result_message);
+                        task.artifacts.push(artifact);
+                    }
+                    task.clone()
+                };
 
                 self.cancel_tokens.write().await.remove(&task_id);
 
@@ -451,6 +508,16 @@ impl A2AServer {
                 }
             }
             Err(e) => {
+                if cancel_token.is_cancelled() {
+                    let canceled = self.tasks.read().await.get(&task_id).cloned();
+                    self.cancel_tokens.write().await.remove(&task_id);
+                    return A2ATaskResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: Some(request.id.clone()),
+                        result: canceled,
+                        error: None,
+                    };
+                }
                 warn!(task_id = %task_id, error = %e, "A2A: task execution failed");
 
                 let failed_task = A2ATask {
@@ -464,10 +531,13 @@ impl A2AServer {
                     artifacts: Vec::new(),
                 };
 
+                let mut tasks = self.tasks.write().await;
+                if let Some(task) = tasks.get_mut(&task_id)
+                    && task.status.state.can_transition_to(TaskState::Failed)
                 {
-                    let mut tasks = self.tasks.write().await;
-                    tasks.insert(task_id.clone(), failed_task);
+                    *task = failed_task;
                 }
+                drop(tasks);
 
                 self.cancel_tokens.write().await.remove(&task_id);
 
@@ -629,6 +699,7 @@ impl A2AServer {
 mod tests {
     use super::*;
     use crate::agent::react::builder::ReactAgentBuilder;
+    use crate::testing::MockAgent;
 
     fn make_request(method: &str, message: &str, task_id: Option<&str>) -> String {
         let params = if let Some(id) = task_id {
@@ -691,6 +762,79 @@ mod tests {
         let resp: A2ATaskResponse = serde_json::from_str(&resp_json).unwrap();
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32001);
+    }
+
+    #[tokio::test]
+    async fn sync_send_cancellation_is_terminal_and_monotonic() -> std::result::Result<(), String> {
+        let card = AgentCard::builder("test", "http://localhost").build();
+        let server = Arc::new(A2AServer::from_boxed(
+            card,
+            Box::new(
+                MockAgent::new("slow")
+                    .with_delay_ms(500)
+                    .with_response("late success"),
+            ),
+        ));
+        let send_request = A2ATaskRequest {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: "send-request".to_string(),
+            method: METHOD_SEND.to_string(),
+            params: A2ATaskParams {
+                id: Some("cancel-race".to_string()),
+                session_id: None,
+                message: A2AMessage::user_text("slow task"),
+            },
+        };
+        let sender = Arc::clone(&server);
+        let send = tokio::spawn(async move { sender.handle_task_send(&send_request).await });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if server
+                    .cancel_tokens
+                    .read()
+                    .await
+                    .contains_key("cancel-race")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| "send task did not become cancellable".to_string())?;
+
+        let cancel_request = A2ATaskRequest {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: "cancel-request".to_string(),
+            method: METHOD_CANCEL.to_string(),
+            params: A2ATaskParams {
+                id: Some("cancel-race".to_string()),
+                session_id: None,
+                message: A2AMessage::user_text("cancel"),
+            },
+        };
+        let canceled = server.handle_task_cancel(&cancel_request).await;
+        assert_eq!(
+            canceled.result.as_ref().map(|task| task.status.state),
+            Some(TaskState::Canceled)
+        );
+
+        let send_response = send.await.map_err(|error| error.to_string())?;
+        assert_eq!(
+            send_response.result.as_ref().map(|task| task.status.state),
+            Some(TaskState::Canceled)
+        );
+        assert_eq!(
+            server
+                .tasks
+                .read()
+                .await
+                .get("cancel-race")
+                .map(|task| task.status.state),
+            Some(TaskState::Canceled)
+        );
+        Ok::<(), String>(())
     }
 
     #[tokio::test]

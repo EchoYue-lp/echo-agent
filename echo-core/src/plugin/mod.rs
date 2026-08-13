@@ -124,11 +124,11 @@ pub fn set_plugin_data_base_dir(dir: impl Into<PathBuf>) -> Result<(), PathBuf> 
 /// Convenience: set the plugin base directory to `~/<name>` (e.g. `.eko`).
 ///
 /// Recommended entry point for applications switching to their brand directory.
-/// Mirrors the facade `paths::set_user_data_dir_name` API so an application can
-/// align both in one startup block:
+/// Applications using the `echo_agent` facade can separately align its branded
+/// data directory during startup. This split-crate example has no facade
+/// dependency:
 ///
 /// ```no_run
-/// echo_agent::paths::set_user_data_dir_name(".eko").ok();
 /// echo_core::plugin::set_plugin_data_base_dir_name(".eko").ok();
 /// ```
 pub fn set_plugin_data_base_dir_name(name: impl AsRef<str>) -> Result<(), PathBuf> {

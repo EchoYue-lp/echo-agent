@@ -5,7 +5,8 @@ use cron::Schedule;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex;
 use tracing::debug;
 
 // ── CronTask ───────────────────────────────────────────────────────
@@ -60,6 +61,11 @@ impl CronTask {
     ///
     /// Returns `None` if the cron expression is invalid or has no future occurrences.
     pub fn next_run(&self) -> Option<DateTime<Utc>> {
+        self.next_run_after(&Utc::now())
+    }
+
+    /// Calculate the first fire time strictly after a caller-supplied boundary.
+    pub fn next_run_after(&self, after: &DateTime<Utc>) -> Option<DateTime<Utc>> {
         // The cron crate expects 7-field expressions; pad with seconds and year
         let expr = if self.cron_expr.split_whitespace().count() == 5 {
             format!("0 {} *", self.cron_expr)
@@ -67,7 +73,7 @@ impl CronTask {
             self.cron_expr.clone()
         };
         let schedule = Schedule::from_str(&expr).ok()?;
-        schedule.upcoming(Utc).next()
+        schedule.after(after).next()
     }
 
     /// Validate the cron expression.
@@ -92,10 +98,16 @@ impl CronTask {
 pub struct CronTaskStore {
     backend: Option<Arc<dyn echo_core::memory::Store>>,
     path: PathBuf,
+    mutation_lock: Arc<Mutex<()>>,
 }
 
 const STORE_NAMESPACE: &[&str] = &["scheduler", "cron_tasks"];
 const STORE_KEY: &str = "all_cron_tasks";
+
+fn cron_store_mutation_lock() -> Arc<Mutex<()>> {
+    static LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
+    Arc::clone(LOCK.get_or_init(|| Arc::new(Mutex::new(()))))
+}
 
 impl CronTaskStore {
     /// Create a file-based store (default: `~/.echo-agent/scheduler/tasks.json`).
@@ -104,18 +116,21 @@ impl CronTaskStore {
         Self {
             backend: None,
             path: PathBuf::from(home).join(".echo-agent/scheduler/tasks.json"),
+            mutation_lock: cron_store_mutation_lock(),
         }
     }
 
     /// Create a Store-backed store with automatic migration from file.
-    pub fn with_store(store: Arc<dyn echo_core::memory::Store>) -> Self {
-        let mut s = Self {
+    pub async fn with_store(
+        store: Arc<dyn echo_core::memory::Store>,
+    ) -> echo_core::error::Result<Self> {
+        let s = Self {
             backend: Some(store),
             path: PathBuf::new(),
+            mutation_lock: cron_store_mutation_lock(),
         };
-        // Auto-migrate from file if it exists
-        let _ = s.migrate_from_file();
-        s
+        s.migrate_from_file().await?;
+        Ok(s)
     }
 
     /// Set a custom file path (for testing).
@@ -125,13 +140,9 @@ impl CronTaskStore {
     }
 
     /// Load all cron tasks.
-    pub fn load_all(&self) -> echo_core::error::Result<Vec<CronTask>> {
+    pub async fn load_all(&self) -> echo_core::error::Result<Vec<CronTask>> {
         if let Some(ref backend) = self.backend {
-            let rt = tokio::runtime::Handle::try_current()
-                .map_err(|_| echo_core::error::ReactError::Other("No tokio runtime".into()))?;
-            let item = tokio::task::block_in_place(|| {
-                rt.block_on(backend.get(STORE_NAMESPACE, STORE_KEY))
-            })?;
+            let item = backend.get(STORE_NAMESPACE, STORE_KEY).await?;
             match item {
                 Some(store_item) => {
                     // Value is stored as serde_json::Value — extract the string
@@ -153,21 +164,15 @@ impl CronTaskStore {
     }
 
     /// Save all cron tasks.
-    pub fn save_all(&self, tasks: &[CronTask]) -> echo_core::error::Result<()> {
+    async fn save_all_unlocked(&self, tasks: &[CronTask]) -> echo_core::error::Result<()> {
         let json = serde_json::to_string_pretty(tasks).map_err(|e| {
             echo_core::error::ReactError::Other(format!("Failed to serialize cron tasks: {e}"))
         })?;
 
         if let Some(ref backend) = self.backend {
-            let rt = tokio::runtime::Handle::try_current()
-                .map_err(|_| echo_core::error::ReactError::Other("No tokio runtime".into()))?;
-            tokio::task::block_in_place(|| {
-                rt.block_on(backend.put(
-                    STORE_NAMESPACE,
-                    STORE_KEY,
-                    serde_json::Value::String(json),
-                ))
-            })?;
+            backend
+                .put(STORE_NAMESPACE, STORE_KEY, serde_json::Value::String(json))
+                .await?;
         } else {
             self.save_to_file(&json)?;
         }
@@ -175,70 +180,82 @@ impl CronTaskStore {
     }
 
     /// Add a task and persist.
-    pub fn add(&self, task: CronTask) -> echo_core::error::Result<()> {
-        let mut tasks = self.load_all()?;
+    pub async fn add(&self, task: CronTask) -> echo_core::error::Result<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let mut tasks = self.load_all().await?;
         tasks.push(task);
-        self.save_all(&tasks)
+        self.save_all_unlocked(&tasks).await
     }
 
     /// Remove a task by ID and persist. Returns true if found.
-    pub fn remove(&self, id: &str) -> echo_core::error::Result<bool> {
-        let mut tasks = self.load_all()?;
+    pub async fn remove(&self, id: &str) -> echo_core::error::Result<bool> {
+        let id = unique_id(id)?;
+        let _guard = self.mutation_lock.lock().await;
+        let mut tasks = self.load_all().await?;
         let before = tasks.len();
-        tasks.retain(|t| !t.id.starts_with(id));
+        tasks.retain(|task| task.id != id);
         let removed = tasks.len() < before;
         if removed {
-            self.save_all(&tasks)?;
+            self.save_all_unlocked(&tasks).await?;
         }
         Ok(removed)
     }
 
     /// Remove exactly one task by its complete ID and persist.
-    pub fn remove_exact(&self, id: &str) -> echo_core::error::Result<bool> {
-        let mut tasks = self.load_all()?;
-        let before = tasks.len();
-        tasks.retain(|task| task.id != id);
-        let removed = tasks.len() < before;
-        if removed {
-            self.save_all(&tasks)?;
-        }
-        Ok(removed)
+    pub async fn remove_exact(&self, id: &str) -> echo_core::error::Result<bool> {
+        self.remove(id).await
     }
 
     /// Update the status of a task by ID and persist.
-    pub fn set_status(&self, id: &str, status: CronTaskStatus) -> echo_core::error::Result<bool> {
-        let mut tasks = self.load_all()?;
+    pub async fn set_status(
+        &self,
+        id: &str,
+        status: CronTaskStatus,
+    ) -> echo_core::error::Result<bool> {
+        let id = unique_id(id)?;
+        let _guard = self.mutation_lock.lock().await;
+        let mut tasks = self.load_all().await?;
         let mut found = false;
         for task in &mut tasks {
-            if task.id.starts_with(id) {
+            if task.id == id {
                 task.status = status;
                 found = true;
                 break;
             }
         }
         if found {
-            self.save_all(&tasks)?;
+            self.save_all_unlocked(&tasks).await?;
         }
         Ok(found)
     }
 
     /// Update last_run info after a task fires.
-    pub fn update_last_run(&self, id: &str, result: &str) -> echo_core::error::Result<()> {
-        let mut tasks = self.load_all()?;
+    pub async fn update_last_run(&self, id: &str, result: &str) -> echo_core::error::Result<()> {
+        let id = unique_id(id)?;
+        let _guard = self.mutation_lock.lock().await;
+        let mut tasks = self.load_all().await?;
+        let mut found = false;
         for task in &mut tasks {
-            if task.id.starts_with(id) {
+            if task.id == id {
                 task.last_run_at = Some(echo_core::utils::time::now_local().to_rfc3339());
                 task.last_result = Some(result.chars().take(500).collect());
+                found = true;
                 break;
             }
         }
-        self.save_all(&tasks)
+        if !found {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Cron task '{id}' not found"
+            )));
+        }
+        self.save_all_unlocked(&tasks).await
     }
 
     /// Get a task by ID prefix.
-    pub fn get(&self, id: &str) -> echo_core::error::Result<Option<CronTask>> {
-        let tasks = self.load_all()?;
-        Ok(tasks.into_iter().find(|t| t.id.starts_with(id)))
+    pub async fn get(&self, id: &str) -> echo_core::error::Result<Option<CronTask>> {
+        let id = unique_id(id)?;
+        let tasks = self.load_all().await?;
+        Ok(tasks.into_iter().find(|task| task.id == id))
     }
 
     // ── Private helpers ────────────────────────────────────────────
@@ -266,31 +283,33 @@ impl CronTaskStore {
                 ))
             })?;
         }
-        std::fs::write(&self.path, json).map_err(|e| {
+        echo_core::utils::fs::atomic_write(&self.path, json.as_bytes()).map_err(|e| {
             echo_core::error::ReactError::Other(format!("Failed to write cron tasks file: {e}"))
         })?;
         Ok(())
     }
 
-    fn migrate_from_file(&mut self) -> echo_core::error::Result<()> {
+    async fn migrate_from_file(&self) -> echo_core::error::Result<()> {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let legacy_path = PathBuf::from(home).join(".echo-agent/scheduler/tasks.json");
         if !legacy_path.exists() {
             return Ok(());
         }
         debug!("Migrating cron tasks from file to Store backend");
-        let content = match std::fs::read_to_string(&legacy_path) {
-            Ok(c) => c,
-            Err(_) => return Ok(()),
-        };
+        let content = std::fs::read_to_string(&legacy_path).map_err(|error| {
+            echo_core::error::ReactError::Other(format!(
+                "Failed to read legacy cron tasks: {error}"
+            ))
+        })?;
         if content.trim().is_empty() {
             return Ok(());
         }
-        let tasks: Vec<CronTask> = match serde_json::from_str(&content) {
-            Ok(t) => t,
-            Err(_) => return Ok(()),
-        };
-        self.save_all(&tasks)?;
+        let tasks: Vec<CronTask> = serde_json::from_str(&content).map_err(|error| {
+            echo_core::error::ReactError::Other(format!(
+                "Failed to parse legacy cron tasks: {error}"
+            ))
+        })?;
+        self.save_all_unlocked(&tasks).await?;
         // Remove legacy file after successful migration
         let _ = std::fs::remove_file(&legacy_path);
         debug!(
@@ -299,6 +318,15 @@ impl CronTaskStore {
         );
         Ok(())
     }
+}
+
+fn unique_id(id: &str) -> echo_core::error::Result<&str> {
+    if id.trim().is_empty() {
+        return Err(echo_core::error::ReactError::Other(
+            "Cron task ID cannot be empty".into(),
+        ));
+    }
+    Ok(id)
 }
 
 impl Default for CronTaskStore {
@@ -335,8 +363,8 @@ mod tests {
         assert!(task.next_run().is_none());
     }
 
-    #[test]
-    fn remove_exact_does_not_remove_tasks_with_the_same_prefix() -> Result<(), String> {
+    #[tokio::test]
+    async fn remove_exact_does_not_remove_tasks_with_the_same_prefix() -> Result<(), String> {
         let temp = std::env::temp_dir().join(format!(
             "echo-scheduler-remove-exact-{}",
             uuid::Uuid::new_v4()
@@ -347,20 +375,50 @@ mod tests {
         exact.id = "plugin-monitor".to_string();
         let mut prefixed = CronTask::new("prefixed", "*/5 * * * *", "prefixed");
         prefixed.id = "plugin-monitor-longer".to_string();
-        store.add(exact).map_err(|error| error.to_string())?;
-        store.add(prefixed).map_err(|error| error.to_string())?;
+        store.add(exact).await.map_err(|error| error.to_string())?;
+        store
+            .add(prefixed)
+            .await
+            .map_err(|error| error.to_string())?;
 
         assert!(
             store
                 .remove_exact("plugin-monitor")
+                .await
                 .map_err(|error| error.to_string())?
         );
-        let remaining = store.load_all().map_err(|error| error.to_string())?;
+        let remaining = store.load_all().await.map_err(|error| error.to_string())?;
         assert_eq!(remaining.len(), 1);
         assert_eq!(
             remaining.first().map(|task| task.id.as_str()),
             Some("plugin-monitor-longer")
         );
+        std::fs::remove_dir_all(&temp).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn independent_file_store_instances_do_not_lose_concurrent_adds() -> Result<(), String> {
+        let temp = std::env::temp_dir().join(format!(
+            "echo-scheduler-concurrent-add-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp).map_err(|error| error.to_string())?;
+        let path = temp.join("cron-tasks.json");
+        let first = CronTaskStore::new().with_path(path.clone());
+        let second = CronTaskStore::new().with_path(path);
+
+        let (first_result, second_result) = tokio::join!(
+            first.add(CronTask::new("first", "*/5 * * * *", "first")),
+            second.add(CronTask::new("second", "*/5 * * * *", "second")),
+        );
+        first_result.map_err(|error| error.to_string())?;
+        second_result.map_err(|error| error.to_string())?;
+
+        let tasks = first.load_all().await.map_err(|error| error.to_string())?;
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().any(|task| task.name == "first"));
+        assert!(tasks.iter().any(|task| task.name == "second"));
         std::fs::remove_dir_all(&temp).map_err(|error| error.to_string())?;
         Ok(())
     }

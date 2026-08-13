@@ -3,7 +3,7 @@
 //! Data is organized as `namespace / key / value` triples, where namespace is a `&[&str]` slice
 //! (e.g. `&["alice", "memories"]`), naturally supporting multi-user/multi-agent isolation.
 //!
-//! Concrete implementations ([`InMemoryStore`], [`FileStore`]) live in `echo_state`.
+//! Concrete implementations (`InMemoryStore`, `FileStore`) live in `echo_state`.
 
 use crate::error::{MemoryError, Result};
 use futures::future::BoxFuture;

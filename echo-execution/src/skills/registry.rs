@@ -373,6 +373,7 @@ impl SkillRegistry {
         args: &[String],
         source: SkillSource,
     ) -> echo_core::error::Result<SkillContent> {
+        self.validate_activation_dependencies(name)?;
         // 1. Recursively activate dependencies first
         let deps_activated = self.activate_dependencies(name, source).await?;
 
@@ -459,6 +460,44 @@ impl SkillRegistry {
             instructions,
             resources,
         })
+    }
+
+    fn validate_activation_dependencies(&self, name: &str) -> echo_core::error::Result<()> {
+        fn visit(
+            registry: &SkillRegistry,
+            name: &str,
+            visiting: &mut HashSet<String>,
+            visited: &mut HashSet<String>,
+            path: &mut Vec<String>,
+        ) -> echo_core::error::Result<()> {
+            if visited.contains(name) {
+                return Ok(());
+            }
+            if !visiting.insert(name.to_string()) {
+                path.push(name.to_string());
+                let cycle = path.join(" -> ");
+                path.pop();
+                return Err(echo_core::error::ReactError::Other(format!(
+                    "Circular skill dependency detected: {cycle}"
+                )));
+            }
+            path.push(name.to_string());
+            if let Some(descriptor) = registry.descriptors.get(name) {
+                for dependency in &descriptor.depends_on {
+                    if registry.descriptors.contains_key(dependency) {
+                        visit(registry, dependency, visiting, visited, path)?;
+                    }
+                }
+            }
+            path.pop();
+            visiting.remove(name);
+            visited.insert(name.to_string());
+            Ok(())
+        }
+
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        visit(self, name, &mut visiting, &mut visited, &mut Vec::new())
     }
 
     /// Recursively activate unmet dependencies for a skill.
@@ -652,18 +691,14 @@ impl SkillRegistry {
 /// Strip YAML frontmatter from SKILL.md content.
 /// Returns body after the closing `---`, or None if no frontmatter found.
 ///
-/// Byte-index slicing on `---`/`\n---` is safe here because they are pure
-/// ASCII and never overlap with multi-byte UTF-8 boundary positions.
 fn strip_frontmatter(content: &str) -> Option<&str> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
         return None;
     }
-    // SAFETY: "---" is 3 ASCII bytes, so byte-index 3 is a valid char boundary
-    let after_first = &trimmed[3..];
+    let after_first = trimmed.get(3..)?;
     let end = after_first.find("\n---")?;
-    // SAFETY: "\n---" is 4 ASCII bytes
-    Some(&after_first[end + 4..])
+    after_first.get(end.saturating_add(4)..)
 }
 
 impl Default for SkillRegistry {
@@ -698,7 +733,9 @@ fn extract_body(content: &str) -> String {
         .trim_start_matches('\n');
 
     if let Some(close_idx) = after_open.find("\n---") {
-        let after_close = &after_open[close_idx + 4..];
+        let after_close = after_open
+            .get(close_idx.saturating_add(4)..)
+            .unwrap_or_default();
         after_close
             .trim_start_matches('\r')
             .trim_start_matches('\n')
@@ -790,6 +827,39 @@ mod tests {
             sandbox: None,
             depends_on: vec![],
         }
+    }
+
+    #[test]
+    fn activation_dependency_validation_rejects_cycles() {
+        let mut registry = SkillRegistry::new();
+        let mut a = make_descriptor("a", "A");
+        a.depends_on = vec!["b".to_string()];
+        let mut b = make_descriptor("b", "B");
+        b.depends_on = vec!["a".to_string()];
+        registry.register_descriptor(a);
+        registry.register_descriptor(b);
+
+        let error = registry
+            .validate_activation_dependencies("a")
+            .err()
+            .unwrap_or_else(|| echo_core::error::ReactError::Other("missing error".to_string()));
+        assert!(error.to_string().contains("a -> b -> a"));
+        assert!(registry.activated_names().is_empty());
+    }
+
+    #[test]
+    fn activation_dependency_validation_rejects_self_dependency() {
+        let mut registry = SkillRegistry::new();
+        let mut skill = make_descriptor("self", "Self");
+        skill.depends_on = vec!["self".to_string()];
+        registry.register_descriptor(skill);
+
+        let error = registry
+            .validate_activation_dependencies("self")
+            .err()
+            .unwrap_or_else(|| echo_core::error::ReactError::Other("missing error".to_string()));
+        assert!(error.to_string().contains("self -> self"));
+        assert!(registry.activated_names().is_empty());
     }
 
     #[test]

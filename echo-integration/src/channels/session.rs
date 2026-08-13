@@ -1,7 +1,7 @@
 //! Session Manager — IM channel session management
 //!
 //! Provides framework-level session lifecycle management:
-//! - Maintains independent sessions per user (isolated by channel_id + sender_id)
+//! - Maintains independent sessions per conversation (isolated by channel_id + chat_id)
 //! - Auto-reset on timeout (after idle period, next message starts a new session)
 //! - Keyword/command reset (user can reset by sending a specific command)
 //!
@@ -47,7 +47,6 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::info;
 
 // ── SessionConfig ────────────────────────────────────────────────────────────
 
@@ -86,7 +85,7 @@ impl Default for SessionConfig {
 impl SessionConfig {
     /// Set timeout in minutes
     pub fn with_timeout_minutes(mut self, minutes: u64) -> Self {
-        self.timeout = Duration::from_secs(minutes * 60);
+        self.timeout = Duration::from_secs(minutes.saturating_mul(60));
         self
     }
 
@@ -164,13 +163,14 @@ impl SessionConfig {
 
 // ── Session ──────────────────────────────────────────────────────────────────
 
-/// Session key: (channel_id, sender_id)
+/// Session key: (channel_id, chat_id)
 type SessionKey = (String, String);
 
 /// Single user session
 struct Session {
     handler: Arc<dyn MessageHandler>,
     last_active: Instant,
+    sender_id: String,
 }
 
 // ── SessionFactory ───────────────────────────────────────────────────────────
@@ -199,6 +199,7 @@ where
 /// Session end callback parameters
 pub struct SessionEndInfo {
     pub channel_id: String,
+    pub chat_id: String,
     pub sender_id: String,
     pub reason: SessionEndReason,
 }
@@ -257,95 +258,101 @@ impl SessionHandler {
     }
 
     /// Get or create a session (atomic operation, uses DashMap entry API to prevent race conditions)
-    fn get_or_create(&self, key: &SessionKey) -> Arc<Mutex<Session>> {
+    fn get_or_create(&self, key: &SessionKey, sender_id: &str) -> Arc<Mutex<Session>> {
         let handler = self.factory.clone();
+        let sender_id = sender_id.to_string();
         self.sessions
             .entry(key.clone())
             .or_insert_with(|| {
                 Arc::new(Mutex::new(Session {
                     handler: Arc::from(handler.create()),
                     last_active: Instant::now(),
+                    sender_id,
                 }))
             })
             .clone()
     }
 
-    fn notify_session_end(&self, channel_id: String, sender_id: String, reason: SessionEndReason) {
+    fn notify_session_end(
+        &self,
+        channel_id: String,
+        chat_id: String,
+        sender_id: String,
+        reason: SessionEndReason,
+    ) {
         if let Some(ref callback) = self.on_session_end {
             callback(SessionEndInfo {
                 channel_id,
+                chat_id,
                 sender_id,
                 reason,
             });
         }
     }
 
-    /// 共享 session 管理逻辑(reset/timeout/forward 准备),`handle` 和 `handle_stream` 共用。
-    ///
-    /// 返回:
-    /// - `Ok(Left(outbound))`:reset 命中,直接短路返回该 `OutboundMessage`。
-    /// - `Ok(Right(handler))`:正常路径,应 dispatch 给该 inner handler(handle 或 handle_stream)。
-    async fn resolve_session_dispatch(
-        &self,
-        msg: &InboundMessage,
-    ) -> echo_core::error::Result<futures::future::Either<OutboundMessage, Arc<dyn MessageHandler>>>
-    {
-        use futures::future::Either;
-
-        let key = (msg.channel_id.clone(), msg.sender_id.clone());
-
-        // ── Keyword/Command Reset ──
-        if self.config.is_reset(&msg.text) {
-            if let Some((old_key, _old_session)) = self.sessions.remove(&key) {
-                self.notify_session_end(old_key.0, old_key.1, SessionEndReason::CommandReset);
+    async fn prune_expired(&self) {
+        let sessions = self
+            .sessions
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        for (key, session) in sessions {
+            let Some(guard) = session.try_lock().ok() else {
+                continue;
+            };
+            if guard.last_active.elapsed() < self.config.timeout {
+                continue;
             }
-            info!(
-                "Session reset by command: ({}, {})",
-                msg.channel_id, msg.sender_id
-            );
-            return Ok(Either::Left(OutboundMessage::new(
-                &msg.channel_id,
-                &msg.sender_id,
-                msg.chat_type,
-                &self.config.reset_reply,
-            )));
+            let sender_id = guard.sender_id.clone();
+            drop(guard);
+            if self
+                .sessions
+                .remove_if(&key, |_, current| Arc::ptr_eq(current, &session))
+                .is_some()
+            {
+                self.notify_session_end(key.0, key.1, sender_id, SessionEndReason::TimeoutReplaced);
+            }
         }
-
-        // ── Get or create session (atomic) ──
-        let session = self.get_or_create(&key);
-        let mut guard = session.lock().await;
-
-        // ── Timeout Reset ──
-        if guard.last_active.elapsed() >= self.config.timeout {
-            info!(
-                "Session timeout for ({}, {}), elapsed {:?}",
-                msg.channel_id,
-                msg.sender_id,
-                guard.last_active.elapsed()
-            );
-            self.notify_session_end(
-                msg.channel_id.clone(),
-                msg.sender_id.clone(),
-                SessionEndReason::TimeoutReplaced,
-            );
-            guard.handler = Arc::from(self.factory.create());
-        }
-
-        guard.last_active = Instant::now();
-
-        // 返回 inner handler 的 Arc clone(供调用方 dispatch,cheap clone)
-        Ok(Either::Right(guard.handler.clone()))
     }
 }
 
 #[async_trait]
 impl MessageHandler for SessionHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
-        use futures::future::Either;
-        match self.resolve_session_dispatch(&msg).await? {
-            Either::Left(outbound) => Ok(outbound),
-            Either::Right(handler) => handler.handle(msg).await,
+        self.prune_expired().await;
+        let key = (msg.channel_id.clone(), msg.conversation_id().to_string());
+        let session = self.get_or_create(&key, &msg.sender_id);
+        let mut guard = session.lock().await;
+        if self.config.is_reset(&msg.text) {
+            guard.handler = Arc::from(self.factory.create());
+            guard.last_active = Instant::now();
+            self.notify_session_end(
+                msg.channel_id.clone(),
+                msg.chat_id.clone(),
+                msg.sender_id.clone(),
+                SessionEndReason::CommandReset,
+            );
+            return Ok(OutboundMessage::new(
+                &msg.channel_id,
+                msg.reply_target(),
+                msg.chat_type,
+                &self.config.reset_reply,
+            ));
         }
+        if guard.last_active.elapsed() >= self.config.timeout {
+            self.notify_session_end(
+                msg.channel_id.clone(),
+                msg.chat_id.clone(),
+                msg.sender_id.clone(),
+                SessionEndReason::TimeoutReplaced,
+            );
+            guard.handler = Arc::from(self.factory.create());
+        }
+        guard.last_active = Instant::now();
+        guard.sender_id = msg.sender_id.clone();
+        let result = guard.handler.handle(msg).await;
+        guard.last_active = Instant::now();
+        result
     }
 
     async fn handle_stream<'a>(
@@ -354,34 +361,48 @@ impl MessageHandler for SessionHandler {
     ) -> echo_core::error::Result<
         futures::stream::BoxStream<'a, echo_core::error::Result<OutboundMessage>>,
     > {
-        use futures::future::Either;
         use futures::stream::StreamExt;
-
-        match self.resolve_session_dispatch(&msg).await? {
-            Either::Left(outbound) => {
-                // reset 短路:只产 1 条 reset_reply
-                Ok(futures::stream::once(async move { Ok(outbound) }).boxed())
+        self.prune_expired().await;
+        let key = (msg.channel_id.clone(), msg.conversation_id().to_string());
+        let session = self.get_or_create(&key, &msg.sender_id);
+        let stream = async_stream::stream! {
+            let mut guard = session.lock().await;
+            if self.config.is_reset(&msg.text) {
+                guard.handler = Arc::from(self.factory.create());
+                guard.last_active = Instant::now();
+                self.notify_session_end(
+                    msg.channel_id.clone(), msg.chat_id.clone(), msg.sender_id.clone(),
+                    SessionEndReason::CommandReset,
+                );
+                yield Ok(OutboundMessage::new(
+                    &msg.channel_id, msg.reply_target(), msg.chat_type, &self.config.reset_reply,
+                ));
+                return;
             }
-            Either::Right(handler) => {
-                // 正常路径:透传给 inner handler 的 handle_stream(= AppChannel override)。
-                // handler(Arc<dyn MessageHandler>) 移进 async_stream 块,块持有的流借用 handler,
-                // 而 handler 由本块拥有、随 &self 的 'a 存活 —— 生命周期自洽。
-                let s = async_stream::stream! {
-                    let mut inner = match handler.handle_stream(msg).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            yield Err(e);
-                            return;
-                        }
-                    };
-                    use futures::StreamExt;
-                    while let Some(item) = inner.next().await {
-                        yield item;
-                    }
-                };
-                Ok(s.boxed())
+            if guard.last_active.elapsed() >= self.config.timeout {
+                self.notify_session_end(
+                    msg.channel_id.clone(), msg.chat_id.clone(), msg.sender_id.clone(),
+                    SessionEndReason::TimeoutReplaced,
+                );
+                guard.handler = Arc::from(self.factory.create());
             }
-        }
+            guard.last_active = Instant::now();
+            guard.sender_id = msg.sender_id.clone();
+            let handler = guard.handler.clone();
+            let mut inner = match handler.handle_stream(msg).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
+            while let Some(item) = inner.next().await {
+                yield item;
+            }
+            drop(inner);
+            guard.last_active = Instant::now();
+        };
+        Ok(stream.boxed())
     }
 
     async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
@@ -409,7 +430,7 @@ mod tests {
         async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
             Ok(OutboundMessage::new(
                 &msg.channel_id,
-                &msg.sender_id,
+                msg.reply_target(),
                 msg.chat_type,
                 "fallback",
             ))
@@ -423,7 +444,7 @@ mod tests {
         ) -> echo_core::error::Result<BoxStream<'a, echo_core::error::Result<OutboundMessage>>>
         {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            let (ch, to, ct) = (msg.channel_id, msg.sender_id, msg.chat_type);
+            let (ch, to, ct) = (msg.channel_id, msg.chat_id, msg.chat_type);
             let s = futures::stream::iter(vec![
                 Ok(OutboundMessage::new(&ch, &to, ct, "chunk1")),
                 Ok(OutboundMessage::new(&ch, &to, ct, "chunk2")),

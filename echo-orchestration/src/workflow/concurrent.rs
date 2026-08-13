@@ -113,12 +113,25 @@ impl Workflow for ConcurrentWorkflow {
             let mut step_outputs = Vec::with_capacity(agent_count);
             let mut results = Vec::with_capacity(agent_count);
 
-            for handle in handles {
-                let (agent_name, step_input, result, elapsed) = handle.await.map_err(|e| {
-                    echo_core::error::ReactError::Other(format!("task join error: {e}"))
-                })?;
-
-                let output = result?;
+            let mut first_error = None;
+            for handle in &mut handles {
+                let joined = handle.await;
+                let (agent_name, step_input, result, elapsed) = match joined {
+                    Ok(value) => value,
+                    Err(error) => {
+                        first_error.get_or_insert_with(|| {
+                            echo_core::error::ReactError::Other(format!("task join error: {error}"))
+                        });
+                        continue;
+                    }
+                };
+                let output = match result {
+                    Ok(output) => output,
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                };
                 info!(
                     workflow = "concurrent",
                     agent = %agent_name,
@@ -133,6 +146,14 @@ impl Workflow for ConcurrentWorkflow {
                     elapsed,
                 });
                 results.push(output);
+            }
+            if let Some(error) = first_error {
+                for handle in &handles {
+                    if !handle.is_finished() {
+                        handle.abort();
+                    }
+                }
+                return Err(error);
             }
 
             let merged = (self.merge)(results);

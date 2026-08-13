@@ -8,6 +8,7 @@ use echo_core::tools::{ExternalRunContext, NestedDelegationPolicy, ToolContext};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
 fn serialize_parent_result(
@@ -46,12 +47,6 @@ impl ParentContextFactory {
             .collect();
         SubagentContext::from_parent(&tool_defs, &messages, self.store.clone(), inheritance)
     }
-
-    /// Build a SubagentContext using the mode's default inheritance preset.
-    pub async fn build(&self, mode: &ExecutionMode) -> SubagentContext {
-        self.build_with_inheritance(&ContextInheritance::for_mode(mode))
-            .await
-    }
 }
 
 pub struct AgentDispatchTool {
@@ -72,14 +67,8 @@ pub struct AgentDispatchTool {
     /// When set, explicit Fork mode can inherit filtered conversation history.
     parent_context_factory: Option<Arc<ParentContextFactory>>,
     /// Snapshot of available subagents exposed to the LLM through the tool schema.
-    catalog: Arc<std::sync::RwLock<Vec<SubagentCatalogEntry>>>,
-}
-
-/// Compact subagent metadata exposed in `agent_tool` parameters.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SubagentCatalogEntry {
-    pub name: String,
-    pub description: String,
+    catalog: Arc<std::sync::RwLock<Vec<crate::agent::subagent::SubagentDefinition>>>,
+    catalog_revision: Arc<AtomicU64>,
 }
 
 impl AgentDispatchTool {
@@ -89,11 +78,12 @@ impl AgentDispatchTool {
         cancel: CancellationToken,
     ) -> Self {
         Self {
+            catalog: executor.registry().executable_catalog_handle(),
+            catalog_revision: executor.registry().catalog_revision_handle(),
             executor,
             parent_agent: parent_agent.into(),
             cancel: Arc::new(tokio::sync::Mutex::new(Some(cancel))),
             parent_context_factory: None,
-            catalog: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
     }
 
@@ -110,12 +100,6 @@ impl AgentDispatchTool {
     /// dispatches issued by this tool inherit cancellation.
     pub fn cancel_handle(&self) -> Arc<tokio::sync::Mutex<Option<CancellationToken>>> {
         self.cancel.clone()
-    }
-
-    /// Shared catalog handle. The parent agent updates this when subagents are
-    /// registered so cached tool definitions can expose concrete subagent names.
-    pub fn catalog_handle(&self) -> Arc<std::sync::RwLock<Vec<SubagentCatalogEntry>>> {
-        self.catalog.clone()
     }
 
     fn delegation_policy_from_context(
@@ -187,6 +171,7 @@ impl AgentDispatchTool {
         let cancel_handle = self.cancel.clone();
         let factory = self.parent_context_factory.clone();
         let runtime_context = Self::runtime_context_from_tool_ctx(ctx);
+        let active_message = ctx.and_then(|context| context.active_message.clone());
         let invocation_cancel = ctx.and_then(|context| context.cancel.clone());
         let delegation_policy = match Self::delegation_policy_from_context(ctx) {
             Ok(policy) => policy,
@@ -204,17 +189,25 @@ impl AgentDispatchTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("task".to_string()))?;
 
-            let mode_override =
-                parameters
-                    .get("mode")
-                    .and_then(|v| v.as_str())
-                    .and_then(|m| match m {
-                        "sync" => Some(ExecutionMode::Sync),
-                        "fork" => Some(ExecutionMode::Fork),
-                        "teammate" => Some(ExecutionMode::Teammate),
-                        "team" => Some(ExecutionMode::Team),
-                        _ => None,
-                    });
+            let mode_override = match parameters.get("mode") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(mode)) => Some(match mode.as_str() {
+                    "sync" => ExecutionMode::Sync,
+                    "fork" => ExecutionMode::Fork,
+                    "teammate" => ExecutionMode::Teammate,
+                    "team" => ExecutionMode::Team,
+                    _ => {
+                        return Ok(ToolResult::error(format!(
+                            "Invalid subagent execution mode '{mode}'"
+                        )));
+                    }
+                }),
+                Some(_) => {
+                    return Ok(ToolResult::error(
+                        "Subagent execution mode must be a string",
+                    ));
+                }
+            };
 
             let param_background = parameters
                 .get("background")
@@ -241,15 +234,21 @@ impl AgentDispatchTool {
             // Execution mode: keep caller's choice, but force Fork when the
             // target role declares worktree/workspace isolation (those paths
             // only exist on dispatch_fork today).
-            let mut exec_mode = mode_override.clone().unwrap_or(ExecutionMode::Sync);
-            let mut role_is_background = false;
-            if let Some(registered) = executor.registry().get(agent_name).await {
-                let def = &registered.definition;
-                if def.isolate_worktree || def.isolate_workspace {
-                    exec_mode = ExecutionMode::Fork;
+            let registered = executor.registry().get(agent_name).await.ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: "agent_tool".to_string(),
+                    message: format!("Subagent '{agent_name}' is not registered"),
                 }
-                role_is_background = def.is_background;
+            })?;
+            let mut exec_mode = mode_override
+                .clone()
+                .unwrap_or_else(|| registered.definition.execution_mode.clone());
+            let def = &registered.definition;
+            let isolation_forces_fork = def.isolate_worktree || def.isolate_workspace;
+            if isolation_forces_fork {
+                exec_mode = ExecutionMode::Fork;
             }
+            let role_is_background = def.is_background;
             let run_background = param_background || role_is_background;
 
             info!(
@@ -257,7 +256,7 @@ impl AgentDispatchTool {
                 task = %task,
                 mode = ?exec_mode,
                 background = run_background,
-                inherit_fork = matches!(mode_override, Some(ExecutionMode::Fork)),
+                inherit_fork = exec_mode == ExecutionMode::Fork,
                 delegate_depth = delegation_policy.delegate_depth,
                 max_delegate_depth = delegation_policy.max_delegate_depth,
                 "Dispatching task to subagent via SubagentExecutor"
@@ -266,8 +265,12 @@ impl AgentDispatchTool {
             // Build parent context if factory is available.
             // mode=fork → structured history inheritance; otherwise fresh.
             let parent_context = if let Some(ref f) = factory {
-                let ctx = if matches!(mode_override, Some(ExecutionMode::Fork)) {
-                    f.build(&ExecutionMode::Fork).await
+                let ctx = if exec_mode == ExecutionMode::Fork {
+                    let inheritance = ContextInheritance {
+                        inherit_history: def.inherit_history.or(Some(2)),
+                        ..ContextInheritance::fork_default()
+                    };
+                    f.build_with_inheritance(&inheritance).await
                 } else {
                     f.build_with_inheritance(&ContextInheritance::fresh_default())
                         .await
@@ -286,13 +289,17 @@ impl AgentDispatchTool {
             let req = crate::agent::subagent::DispatchRequest {
                 agent_name: agent_name.to_string(),
                 task: task.to_string(),
-                mode_override: Some(exec_mode),
+                mode_override: if isolation_forces_fork {
+                    Some(ExecutionMode::Fork)
+                } else {
+                    mode_override
+                },
                 cancel,
                 parent_agent: parent_agent.clone(),
                 parent_context,
                 delegation_policy,
                 runtime_context,
-                message: None,
+                message: active_message,
                 prompt_payload: None,
                 constraints,
                 background: run_background,
@@ -318,7 +325,7 @@ impl AgentDispatchTool {
                     Err(e) => {
                         warn!(target_agent = %agent_name, error = %e, "Background subagent start failed");
                         Ok(ToolResult::error(format!(
-                            "SubAgent '{}' background start failed: {}",
+                            "Subagent '{}' background start failed: {}",
                             agent_name, e
                         )))
                     }
@@ -337,7 +344,7 @@ impl AgentDispatchTool {
                             .map(ToolResult::success)
                             .unwrap_or_else(|error| {
                                 ToolResult::error(format!(
-                                    "SubAgent '{}' result serialization failed: {}",
+                                    "Subagent '{}' result serialization failed: {}",
                                     agent_name, error
                                 ))
                             }))
@@ -345,7 +352,7 @@ impl AgentDispatchTool {
                     Err(e) => {
                         warn!(target_agent = %agent_name, error = %e, "Subagent execution failed");
                         Ok(ToolResult::error(format!(
-                            "SubAgent '{}' execution failed: {}",
+                            "Subagent '{}' execution failed: {}",
                             agent_name, e
                         )))
                     }
@@ -361,19 +368,19 @@ impl Tool for AgentDispatchTool {
     }
 
     fn description(&self) -> &str {
-        "Dispatch tasks to specialized SubAgents in an isolated context. \
+        "Dispatch tasks to specialized Subagents in an isolated context. \
          Default is fresh context (no parent conversation). Use mode=fork only when \
-         the SubAgent needs shared background from this session. Set background=true \
-         to start the SubAgent without blocking (returns started + execution_id; \
+         the Subagent needs shared background from this session. Set background=true \
+         to start the Subagent without blocking (returns started + execution_id; \
          completion arrives via events / chat note). One call delegates one bounded \
          task. When the host provides a formal task planner, use that planner for \
          coordinated, dependent, or parallel multi-task work. Synchronous completion returns a \
          JSON result with status, summary, artifacts, verification, remaining_work, \
          and touched_files. Use only agent_name values listed in the schema.\n\
-         The SubAgent's result is not visible to the user — summarize it in your reply to the user.\n\
-         Tell the SubAgent clearly whether to write code or only do research, and the expected result format.\n\
-         Do not duplicate work the SubAgent is already doing (same searches, edits, or checks).\n\
-         To run multiple independent SubAgents in parallel, send a single message with multiple agent_tool calls."
+         The Subagent's result is not visible to the user — summarize it in your reply to the user.\n\
+         Tell the Subagent clearly whether to write code or only do research, and the expected result format.\n\
+         Do not duplicate work the Subagent is already doing (same searches, edits, or checks).\n\
+         To run multiple independent Subagents in parallel, send a single message with multiple agent_tool calls."
     }
 
     /// `agent_tool` dispatches a subagent that runs its own multi-step ReAct
@@ -426,7 +433,7 @@ impl Tool for AgentDispatchTool {
                 "mode": {
                     "type": "string",
                     "enum": ["sync", "fork", "teammate", "team"],
-                    "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = parallel mailbox agent; \"team\" = ManagerSubagent (requires TeamSpec)."
+                    "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = independent background Subagent with a join/cancel handle; \"team\" = ManagerSubagent (requires TeamSpec)."
                 },
                 "constraints": {
                     "type": "array",
@@ -440,6 +447,10 @@ impl Tool for AgentDispatchTool {
             },
             "required": ["agent_name", "task"]
         })
+    }
+
+    fn schema_revision(&self) -> u64 {
+        self.catalog_revision.load(Ordering::Acquire)
     }
 
     fn execute(
@@ -461,6 +472,9 @@ impl Tool for AgentDispatchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::subagent::{SubagentDefinition, SubagentExecutorConfig, SubagentRegistry};
+    use crate::testing::MockAgent;
+    use echo_core::llm::types::{ContentPart, Message};
 
     #[test]
     fn synchronous_parent_result_preserves_structured_contract() -> Result<(), String> {
@@ -575,6 +589,109 @@ mod tests {
         invocation_parent.cancel();
         if !child.is_cancelled() {
             return Err("invocation cancellation did not reach the subagent child".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cached_schema_tracks_shared_registry_revision() -> Result<(), String> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let executor = Arc::new(SubagentExecutor::new(
+            Arc::clone(&registry),
+            SubagentExecutorConfig::default(),
+        ));
+        let manager = crate::tools::ToolManager::new();
+        manager.register(Box::new(AgentDispatchTool::new(
+            executor,
+            "parent",
+            CancellationToken::new(),
+        )));
+
+        let initial = manager.get_tool_definitions();
+        let initial_schema = initial
+            .iter()
+            .find(|definition| definition.function.name == "agent_tool")
+            .map(|definition| &definition.function.parameters);
+        assert!(initial_schema.is_some());
+
+        registry
+            .register(
+                SubagentDefinition::new("researcher", "Research role"),
+                Box::new(MockAgent::new("researcher")),
+            )
+            .await;
+
+        let refreshed = manager.get_tool_definitions();
+        let names = refreshed
+            .iter()
+            .find(|definition| definition.function.name == "agent_tool")
+            .and_then(|definition| {
+                definition
+                    .function
+                    .parameters
+                    .pointer("/properties/agent_name/enum")
+            })
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(names, vec![Value::String("researcher".to_string())]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_message_attachments_reach_dispatched_subagent() -> Result<(), String> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let executor = Arc::new(SubagentExecutor::new(
+            Arc::clone(&registry),
+            SubagentExecutorConfig::default(),
+        ));
+        let agent = MockAgent::new("reader").with_response("## Summary\nread");
+        registry
+            .register(
+                SubagentDefinition::new("reader", "Reads attachments"),
+                Box::new(agent.clone()),
+            )
+            .await;
+        let tool = AgentDispatchTool::new(executor, "parent", CancellationToken::new());
+        let message = Message::user_multimodal(vec![
+            ContentPart::Text {
+                text: "inspect this".to_string(),
+            },
+            ContentPart::File {
+                name: "notes.txt".to_string(),
+                content: "aGVsbG8=".to_string(),
+            },
+        ]);
+        let ctx = ToolContext {
+            active_message: Some(message),
+            ..Default::default()
+        };
+        let parameters: ToolParameters = [
+            (
+                "agent_name".to_string(),
+                Value::String("reader".to_string()),
+            ),
+            ("task".to_string(), Value::String("inspect".to_string())),
+        ]
+        .into_iter()
+        .collect();
+        let result = tool
+            .execute_with_context(parameters, &ctx)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !result.success {
+            return Err(format!("dispatch failed: {}", result.output));
+        }
+        let received = agent
+            .last_message()
+            .ok_or_else(|| "subagent did not receive active message".to_string())?;
+        let has_file = received.content.parts().is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| matches!(part, ContentPart::File { name, .. } if name == "notes.txt"))
+        });
+        if !has_file {
+            return Err("subagent message lost file attachment".to_string());
         }
         Ok(())
     }

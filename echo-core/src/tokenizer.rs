@@ -1,6 +1,6 @@
 //! Token estimation trait and usage tracking.
 //!
-//! Provides a pluggable token counting capability for [`ContextManager`], replacing the
+//! Provides a pluggable token counting capability for a context manager, replacing the
 //! fixed `chars / 4` heuristic.
 //!
 //! # Built-in Implementations

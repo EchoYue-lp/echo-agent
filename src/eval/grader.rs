@@ -7,6 +7,7 @@
 use crate::agent::Agent;
 use crate::agent::config::DEFAULT_TOKEN_LIMIT;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// A single assertion to check against an agent's output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,61 +127,84 @@ impl LlmGrader {
 
         let prompt = sections.join("\n\n");
 
-        let response = agent.execute(&prompt).await;
-        let raw = response.unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"));
-
-        Self::parse_grading_response(&raw, assertions)
+        match agent.execute(&prompt).await {
+            Ok(raw) => Self::parse_grading_response(&raw, assertions),
+            Err(error) => Self::failed_report(assertions, format!("grader agent failed: {error}")),
+        }
     }
 
     /// Parse the grading response JSON, with graceful fallback.
     fn parse_grading_response(raw: &str, assertions: &[Assertion]) -> GradingReport {
         // Try to parse structured response
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-            let results: Vec<GradeResult> = parsed["results"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .map(|v| GradeResult {
-                            assertion_id: v["assertion_id"].as_str().unwrap_or("?").into(),
-                            passed: v["passed"].as_bool().unwrap_or(false),
-                            confidence: v["confidence"].as_f64().unwrap_or(0.0),
-                            evidence: v["evidence"].as_str().unwrap_or("").into(),
-                            reasoning: v["reasoning"].as_str().unwrap_or("").into(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let pass_count = results.iter().filter(|r| r.passed).count();
-            let pass_rate = if assertions.is_empty() {
-                1.0
-            } else {
-                pass_count as f64 / assertions.len() as f64
+            let Some(rows) = parsed.get("results").and_then(serde_json::Value::as_array) else {
+                return Self::failed_report(assertions, "grader response omitted results".into());
             };
-
-            GradingReport {
-                case_id: String::new(),
-                results,
-                pass_rate,
-                overall_assessment: parsed["overall_assessment"].as_str().unwrap_or("").into(),
+            let expected: HashSet<&str> = assertions.iter().map(|item| item.id.as_str()).collect();
+            let mut by_id = HashMap::with_capacity(rows.len());
+            for row in rows {
+                let Some(assertion_id) =
+                    row.get("assertion_id").and_then(serde_json::Value::as_str)
+                else {
+                    return Self::failed_report(
+                        assertions,
+                        "grader row omitted assertion_id".into(),
+                    );
+                };
+                if !expected.contains(assertion_id) || by_id.contains_key(assertion_id) {
+                    return Self::failed_report(
+                        assertions,
+                        format!(
+                            "grader returned unknown or duplicate assertion id {assertion_id:?}"
+                        ),
+                    );
+                }
+                let Some(confidence) = row.get("confidence").and_then(serde_json::Value::as_f64)
+                else {
+                    return Self::failed_report(
+                        assertions,
+                        format!("grader row {assertion_id:?} omitted confidence"),
+                    );
+                };
+                if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+                    return Self::failed_report(
+                        assertions,
+                        format!("grader row {assertion_id:?} has invalid confidence"),
+                    );
+                }
+                by_id.insert(
+                    assertion_id.to_string(),
+                    GradeResult {
+                        assertion_id: assertion_id.to_string(),
+                        passed: row
+                            .get("passed")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                        confidence,
+                        evidence: row
+                            .get("evidence")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        reasoning: row
+                            .get("reasoning")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                );
             }
-        } else {
-            // Fallback: check raw output for pass/fail indicators
+            if by_id.len() != assertions.len() {
+                return Self::failed_report(
+                    assertions,
+                    "grader response did not cover every assertion".into(),
+                );
+            }
             let results: Vec<GradeResult> = assertions
                 .iter()
-                .map(|a| {
-                    let passed = raw.to_lowercase().contains("passed") && raw.contains(&a.id);
-                    GradeResult {
-                        assertion_id: a.id.clone(),
-                        passed,
-                        confidence: 0.5,
-                        evidence: raw.chars().take(200).collect(),
-                        reasoning: String::new(),
-                    }
-                })
+                .filter_map(|assertion| by_id.remove(&assertion.id))
                 .collect();
-
-            let pass_count = results.iter().filter(|r| r.passed).count();
+            let pass_count = results.iter().filter(|result| result.passed).count();
             let pass_rate = if assertions.is_empty() {
                 1.0
             } else {
@@ -191,8 +215,32 @@ impl LlmGrader {
                 case_id: String::new(),
                 results,
                 pass_rate,
-                overall_assessment: "Fallback parsing applied".into(),
+                overall_assessment: parsed
+                    .get("overall_assessment")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .into(),
             }
+        } else {
+            Self::failed_report(assertions, "grader response was not valid JSON".into())
+        }
+    }
+
+    fn failed_report(assertions: &[Assertion], reason: String) -> GradingReport {
+        GradingReport {
+            case_id: String::new(),
+            results: assertions
+                .iter()
+                .map(|assertion| GradeResult {
+                    assertion_id: assertion.id.clone(),
+                    passed: false,
+                    confidence: 0.0,
+                    evidence: String::new(),
+                    reasoning: reason.clone(),
+                })
+                .collect(),
+            pass_rate: if assertions.is_empty() { 1.0 } else { 0.0 },
+            overall_assessment: reason,
         }
     }
 }

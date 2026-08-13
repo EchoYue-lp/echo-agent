@@ -7,7 +7,7 @@
 
 use futures::future::BoxFuture;
 use serde_json::Value;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use echo_core::error::{Result, ToolError};
@@ -43,12 +43,15 @@ impl VectorStore {
         Self { chunks: Vec::new() }
     }
 
-    fn add_chunks(&mut self, mut chunks: Vec<DocumentChunk>) {
+    fn add_chunks(&mut self, mut chunks: Vec<DocumentChunk>) -> usize {
         self.chunks.append(&mut chunks);
         // Evict oldest chunks when exceeding the limit
         if self.chunks.len() > MAX_CHUNKS {
             let excess = self.chunks.len() - MAX_CHUNKS;
             self.chunks.drain(0..excess);
+            excess
+        } else {
+            0
         }
     }
 
@@ -68,11 +71,24 @@ impl VectorStore {
     }
 }
 
-fn global_vector_store() -> Arc<RwLock<VectorStore>> {
-    static STORE: OnceLock<Arc<RwLock<VectorStore>>> = OnceLock::new();
-    STORE
-        .get_or_init(|| Arc::new(RwLock::new(VectorStore::new())))
-        .clone()
+/// Instance-scoped vector store shared by a configured index/search pair.
+#[derive(Clone)]
+pub struct RagStore {
+    inner: Arc<RwLock<VectorStore>>,
+}
+
+impl RagStore {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(VectorStore::new())),
+        }
+    }
+}
+
+impl Default for RagStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Cosine similarity
@@ -92,98 +108,38 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// Paragraph-aware text chunking
 fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
-    let paragraphs: Vec<&str> = text.split("\n\n").collect();
-    let mut chunks: Vec<String> = Vec::new();
-    let mut current = String::new();
-
-    for para in paragraphs {
-        let para = para.trim();
-        if para.is_empty() {
-            continue;
-        }
-
-        if current.len() + para.len() + 2 > chunk_size && !current.is_empty() {
-            chunks.push(current.trim().to_string());
-            current = String::new();
-        }
-
-        if para.len() > chunk_size {
-            // Oversized paragraph needs further sentence-level splitting
-            if !current.is_empty() {
-                chunks.push(current.trim().to_string());
-                current = String::new();
-            }
-            let sub_chunks = chunk_by_sentences(para, chunk_size, overlap);
-            chunks.extend(sub_chunks);
-        } else {
-            if !current.is_empty() {
-                current.push_str("\n\n");
-            }
-            current.push_str(para);
-        }
+    if chunk_size == 0 || overlap >= chunk_size {
+        return Vec::new();
     }
-
-    if !current.trim().is_empty() {
-        chunks.push(current.trim().to_string());
-    }
-
-    chunks
-}
-
-/// Chunk by sentences (handles oversized paragraphs)
-fn chunk_by_sentences(text: &str, chunk_size: usize, _overlap: usize) -> Vec<String> {
+    let characters: Vec<char> = text.chars().collect();
+    let step = chunk_size.saturating_sub(overlap);
     let mut chunks = Vec::new();
-    let mut current = String::new();
-
-    for ch in text.chars() {
-        current.push(ch);
-
-        if current.len() >= chunk_size
-            && (ch == '.' || ch == '!' || ch == '?' || ch == '。' || ch == '！' || ch == '？')
-        {
-            chunks.push(current.trim().to_string());
-            current = String::new();
+    let mut start = 0usize;
+    while start < characters.len() {
+        let end = start.saturating_add(chunk_size).min(characters.len());
+        let chunk: String = characters
+            .get(start..end)
+            .unwrap_or_default()
+            .iter()
+            .collect();
+        if !chunk.trim().is_empty() {
+            chunks.push(chunk);
         }
-    }
-
-    if !current.trim().is_empty() {
-        if !chunks.is_empty() && current.len() < chunk_size / 3 {
-            // Merge small remainder into previous chunk
-            if let Some(last) = chunks.pop() {
-                chunks.push(format!("{} {}", last, current.trim()));
-            }
-        } else {
-            chunks.push(current.trim().to_string());
+        if end == characters.len() {
+            break;
         }
+        start = start.saturating_add(step);
     }
-
     chunks
 }
 
 // ── Embedding helper ────────────────────────────────────────────────────────────────
 
-/// Global embedder for RAG tools. Must be set via [`set_rag_embedder`] before
-/// calling `rag_index` or `rag_search`.
-static GLOBAL_EMBEDDER: OnceLock<Arc<dyn echo_core::memory::Embedder>> = OnceLock::new();
-
-/// Set the embedder used by all RAG tools.
-///
-/// The first configured embedder wins. Repeated calls are ignored so startup
-/// wiring remains idempotent across shared registries.
-pub fn set_rag_embedder(embedder: Arc<dyn echo_core::memory::Embedder>) {
-    let _ = GLOBAL_EMBEDDER.set(embedder);
-}
-
 /// Generate embeddings for a batch of texts
-async fn generate_embeddings(texts: &[String]) -> Result<Vec<Vec<f32>>> {
-    let embedder = GLOBAL_EMBEDDER
-        .get()
-        .ok_or_else(|| ToolError::ExecutionFailed {
-            tool: "rag".to_string(),
-            message: "RAG embedder not configured — call echo_tools::rag::set_rag_embedder() first"
-                .to_string(),
-        })?;
-
+async fn generate_embeddings(
+    embedder: &dyn echo_core::memory::Embedder,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>> {
     let mut embeddings = Vec::with_capacity(texts.len());
 
     for text in texts {
@@ -202,7 +158,16 @@ async fn generate_embeddings(texts: &[String]) -> Result<Vec<Vec<f32>>> {
 
 // ── rag_index tool ──────────────────────────────────────────────────────────
 
-pub struct RagIndexTool;
+pub struct RagIndexTool {
+    embedder: Arc<dyn echo_core::memory::Embedder>,
+    store: RagStore,
+}
+
+impl RagIndexTool {
+    pub fn new(embedder: Arc<dyn echo_core::memory::Embedder>, store: RagStore) -> Self {
+        Self { embedder, store }
+    }
+}
 
 impl Tool for RagIndexTool {
     fn name(&self) -> &str {
@@ -266,7 +231,15 @@ impl Tool for RagIndexTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100) as usize;
 
-            // Chunk text
+            if chunk_size == 0 || overlap >= chunk_size {
+                return Err(ToolError::InvalidParameter {
+                    name: "overlap".to_string(),
+                    message:
+                        "chunk_size must be positive and overlap must be smaller than chunk_size"
+                            .to_string(),
+                }
+                .into());
+            }
             let texts = chunk_text(content, chunk_size, overlap);
             let total_chunks = texts.len();
 
@@ -277,7 +250,7 @@ impl Tool for RagIndexTool {
             }
 
             // Generate embeddings
-            let embeddings = match generate_embeddings(&texts).await {
+            let embeddings = match generate_embeddings(self.embedder.as_ref(), &texts).await {
                 Ok(e) => e,
                 Err(e) => {
                     return Ok(ToolResult::error(format!(
@@ -302,23 +275,35 @@ impl Tool for RagIndexTool {
                 })
                 .collect();
 
-            let store = global_vector_store();
-            store.write().await.add_chunks(chunks);
+            let evicted = self.store.inner.write().await.add_chunks(chunks);
 
-            Ok(ToolResult::success(format!(
+            let mut result = ToolResult::success(format!(
                 "Successfully indexed {} document chunks{}",
                 total_chunks,
                 source
                     .map(|s| format!(" (source: {})", s))
                     .unwrap_or_default()
-            )))
+            ));
+            result
+                .metadata
+                .insert("evicted_chunks".to_string(), evicted.to_string());
+            Ok(result)
         })
     }
 }
 
 // ── rag_search tool ─────────────────────────────────────────────────────────
 
-pub struct RagSearchTool;
+pub struct RagSearchTool {
+    embedder: Arc<dyn echo_core::memory::Embedder>,
+    store: RagStore,
+}
+
+impl RagSearchTool {
+    pub fn new(embedder: Arc<dyn echo_core::memory::Embedder>, store: RagStore) -> Self {
+        Self { embedder, store }
+    }
+}
 
 impl Tool for RagSearchTool {
     fn name(&self) -> &str {
@@ -364,24 +349,31 @@ impl Tool for RagSearchTool {
                 .unwrap_or(5) as usize;
 
             // Generate query embedding
-            let query_embedding = match generate_embeddings(&[query.to_string()]).await {
-                Ok(mut e) if !e.is_empty() => e.remove(0),
-                Ok(_) => {
-                    return Ok(ToolResult::error(
-                        "Embedding generation returned empty result".to_string(),
-                    ));
-                }
-                Err(e) => {
-                    return Ok(ToolResult::error(format!(
-                        "Embedding generation failed: {}",
-                        e
-                    )));
-                }
-            };
+            let query_embedding =
+                match generate_embeddings(self.embedder.as_ref(), &[query.to_string()]).await {
+                    Ok(e) => match e.into_iter().next() {
+                        Some(embedding) => embedding,
+                        None => {
+                            return Ok(ToolResult::error(
+                                "Embedding generation returned empty result".to_string(),
+                            ));
+                        }
+                    },
+                    Err(e) => {
+                        return Ok(ToolResult::error(format!(
+                            "Embedding generation failed: {}",
+                            e
+                        )));
+                    }
+                };
 
             // Search
-            let store = global_vector_store();
-            let results = store.read().await.search(&query_embedding, top_k);
+            let results = self
+                .store
+                .inner
+                .read()
+                .await
+                .search(&query_embedding, top_k);
 
             if results.is_empty() {
                 return Ok(ToolResult::success(

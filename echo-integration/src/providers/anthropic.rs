@@ -1,33 +1,25 @@
 //! Anthropic Messages API provider
 //!
-//! Implements [`LlmClient`](echo_core::llm::LlmClient) for Anthropic's `/v1/messages` endpoint.
+//! Implements [`LlmClient`] for Anthropic's `/v1/messages` endpoint.
 //! System messages are sent as a top-level `system` field (not in the messages array).
 
 use echo_core::error::{LlmError, Result};
 use echo_core::llm::capabilities::{ModelProfile, ProviderCapabilities};
 use echo_core::llm::types::{
     ChatCompletionResponse, ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
-    FunctionCall, Message, MessageContent, Role, ToolCall, Usage,
+    FunctionCall, Message, MessageContent, ReasoningBlock, Role, ToolCall, Usage,
 };
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
-use echo_core::retry::{RetryPolicy, with_retry_if};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 
 use super::anthropic_cache::AnthropicCachePlan;
+use super::client::{SseDecoder, parse_sse_data};
 use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{Instrument, info_span, warn};
-
-fn is_retryable(err: &LlmError) -> bool {
-    match err {
-        LlmError::NetworkError(_) => true,
-        LlmError::ApiError { status, .. } => *status == 429 || *status >= 500,
-        _ => false,
-    }
-}
 
 pub struct AnthropicClient {
     client: Arc<Client>,
@@ -37,6 +29,24 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
+    fn validate_request_features(request: &ChatRequest) -> Result<()> {
+        if request.tool_choice.is_some() {
+            return Err(LlmError::InvalidResponse(
+                "Anthropic tool_choice translation is not implemented; refusing to silently ignore it"
+                    .to_string(),
+            )
+            .into());
+        }
+        if request.response_format.is_some() {
+            return Err(LlmError::InvalidResponse(
+                "Anthropic structured response format translation is not implemented; refusing to silently ignore it"
+                    .to_string(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             client: Arc::new(Self::build_http_client()),
@@ -67,12 +77,14 @@ impl AnthropicClient {
     }
 
     fn convert_request(&self, request: &ChatRequest) -> AnthropicRequest {
-        let mut system: Option<String> = None;
+        let mut system_parts: Vec<String> = Vec::new();
         let mut messages = Vec::new();
 
         for msg in &request.messages {
             if msg.role == Role::System {
-                system = msg.content.as_text();
+                if let Some(text) = msg.content.as_text() {
+                    system_parts.push(text);
+                }
                 continue;
             }
 
@@ -92,6 +104,7 @@ impl AnthropicClient {
                 && let Some(ref tool_calls) = msg.tool_calls
             {
                 let mut blocks: Vec<ContentBlock> = Vec::new();
+                append_reasoning_blocks(&mut blocks, msg.reasoning_blocks.as_deref());
                 if let Some(ref text) = msg.content.as_text()
                     && !text.is_empty()
                 {
@@ -118,34 +131,53 @@ impl AnthropicClient {
 
             let content = match &msg.content {
                 MessageContent::Parts(parts) => {
-                    let blocks: Vec<ContentBlock> = parts
-                        .iter()
-                        .map(|part| match part {
-                            ContentPart::Text { text } => ContentBlock::Text {
-                                text: text.clone(),
-                                cache_control: None,
-                            },
-                            ContentPart::ImageUrl { image_url } => ContentBlock::Image {
-                                source: data_url_to_image_source(&image_url.url),
-                                cache_control: None,
-                            },
-                            // File attachments: dispatch by inferred media type.
-                            //   - application/pdf → document content block (the only
-                            //     type Anthropic accepts as base64 document source)
-                            //   - text-class (txt/md/json/xml/...) → decode and inline
-                            //     as text so the model can read it directly
-                            //   - other binary → name-only placeholder (the API has
-                            //     no generic binary attachment block)
-                            ContentPart::File { name, content } => {
-                                file_to_content_block(name, content)
-                            }
-                        })
-                        .collect();
+                    let mut blocks: Vec<ContentBlock> = Vec::new();
+                    if msg.role == Role::Assistant {
+                        append_reasoning_blocks(&mut blocks, msg.reasoning_blocks.as_deref());
+                    }
+                    blocks.extend(
+                        parts
+                            .iter()
+                            .map(|part| match part {
+                                ContentPart::Text { text } => ContentBlock::Text {
+                                    text: text.clone(),
+                                    cache_control: None,
+                                },
+                                ContentPart::ImageUrl { image_url } => ContentBlock::Image {
+                                    source: data_url_to_image_source(&image_url.url),
+                                    cache_control: None,
+                                },
+                                // File attachments: dispatch by inferred media type.
+                                //   - application/pdf → document content block (the only
+                                //     type Anthropic accepts as base64 document source)
+                                //   - text-class (txt/md/json/xml/...) → decode and inline
+                                //     as text so the model can read it directly
+                                //   - other binary → name-only placeholder (the API has
+                                //     no generic binary attachment block)
+                                ContentPart::File { name, content } => {
+                                    file_to_content_block(name, content)
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                    );
                     if blocks.is_empty() {
                         AnthropicContent::Text(String::new())
                     } else {
                         AnthropicContent::Blocks(blocks)
                     }
+                }
+                _ if msg.role == Role::Assistant && msg.reasoning_blocks.is_some() => {
+                    let mut blocks = Vec::new();
+                    append_reasoning_blocks(&mut blocks, msg.reasoning_blocks.as_deref());
+                    if let Some(text) = msg.content.as_text()
+                        && !text.is_empty()
+                    {
+                        blocks.push(ContentBlock::Text {
+                            text,
+                            cache_control: None,
+                        });
+                    }
+                    AnthropicContent::Blocks(blocks)
                 }
                 _ => AnthropicContent::Text(msg.content.as_text().unwrap_or_default()),
             };
@@ -221,7 +253,8 @@ impl AnthropicClient {
         });
 
         // Convert system prompt to blocks format with cache_control.
-        let system = system.map(|text| {
+        let system = (!system_parts.is_empty()).then(|| {
+            let text = system_parts.join("\n\n");
             AnthropicSystem::Blocks(vec![SystemBlock {
                 block_type: "text".to_string(),
                 text,
@@ -292,6 +325,8 @@ impl AnthropicClient {
 
     fn convert_response(&self, resp: AnthropicResponse) -> ChatResponse {
         let mut content_parts: Vec<String> = Vec::new();
+        let mut reasoning_parts: Vec<String> = Vec::new();
+        let mut reasoning_blocks: Vec<ReasoningBlock> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
         for block in &resp.content {
@@ -307,12 +342,25 @@ impl AnthropicClient {
                         },
                     });
                 }
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    reasoning_parts.push(thinking.clone());
+                    reasoning_blocks.push(ReasoningBlock::Signed {
+                        thinking: thinking.clone(),
+                        signature: signature.clone(),
+                    });
+                }
+                ContentBlock::RedactedThinking { data } => {
+                    reasoning_blocks.push(ReasoningBlock::Redacted { data: data.clone() });
+                }
                 _ => {}
             }
         }
 
         let finish_reason = match resp.stop_reason.as_deref() {
-            Some("end_turn") => Some("stop".to_string()),
+            Some("end_turn" | "stop_sequence") => Some("stop".to_string()),
             Some("tool_use") => Some("tool_calls".to_string()),
             Some("max_tokens") => Some("length".to_string()),
             other => other.map(String::from),
@@ -332,7 +380,8 @@ impl AnthropicClient {
             },
             tool_call_id: None,
             name: None,
-            reasoning_content: None,
+            reasoning_content: (!reasoning_parts.is_empty()).then(|| reasoning_parts.join("")),
+            reasoning_blocks: (!reasoning_blocks.is_empty()).then_some(reasoning_blocks),
         };
 
         // Extract token usage from Anthropic response
@@ -342,7 +391,7 @@ impl AnthropicClient {
             Usage {
                 prompt_tokens: Some(prompt),
                 completion_tokens: Some(completion),
-                total_tokens: Some(prompt + completion),
+                total_tokens: Some(prompt.saturating_add(completion)),
                 cache_creation_input_tokens: u.cache_creation_input_tokens,
                 cache_read_input_tokens: u.cache_read_input_tokens,
                 ..Default::default()
@@ -352,6 +401,7 @@ impl AnthropicClient {
         ChatResponse {
             message,
             finish_reason,
+            usage: usage.clone(),
             raw: ChatCompletionResponse {
                 id: String::new(),
                 choices: Vec::new(),
@@ -369,48 +419,42 @@ impl LlmClient for AnthropicClient {
         let model = self.model.clone();
         Box::pin(
             async move {
+                Self::validate_request_features(&request)?;
                 let body = self.convert_request(&request);
 
-                let policy = RetryPolicy::default();
-                let resp = with_retry_if(
-                    &policy,
-                    || {
-                        let client = self.client.clone();
-                        let base_url = self.base_url.clone();
-                        let api_key = self.api_key.clone();
-                        let body = &body;
-                        async move {
-                            let resp = client
-                                .post(&base_url)
-                                .header("x-api-key", &api_key)
-                                .header("anthropic-version", "2023-06-01")
-                                .header("anthropic-beta", "prompt-caching-2024-07-31")
-                                .header("content-type", "application/json")
-                                .json(body)
-                                .send()
-                                .await
-                                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
-
-                            let status = resp.status();
-                            if !status.is_success() {
-                                let text = resp.text().await.unwrap_or_default();
-                                return Err(LlmError::ApiError {
-                                    status: status.as_u16(),
-                                    message: text,
-                                });
-                            }
-
-                            Ok(resp)
+                let request_future = async {
+                    let resp = self.client
+                        .post(&self.base_url)
+                        .header("x-api-key", &self.api_key)
+                        .header("anthropic-version", "2023-06-01")
+                        .header("anthropic-beta", "prompt-caching-2024-07-31")
+                        .header("content-type", "application/json")
+                        .json(&body)
+                        .send()
+                        .await
+                        .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let text = resp.text().await.unwrap_or_default();
+                        return Err(LlmError::ApiError { status: status.as_u16(), message: text });
+                    }
+                    Ok(resp)
+                };
+                let resp = tokio::select! {
+                    biased;
+                    _ = async {
+                        match request.cancel_token.as_ref() {
+                            Some(token) => token.cancelled().await,
+                            None => std::future::pending().await,
                         }
-                    },
-                    is_retryable,
-                )
-                .await?;
+                    } => return Err(LlmError::NetworkError("Anthropic request cancelled".to_string()).into()),
+                    response = request_future => response?,
+                };
 
                 let anthropic_resp: AnthropicResponse = resp
                     .json()
                     .await
-                    .map_err(|e| LlmError::NetworkError(format!("Response parse error: {e}")))?;
+                    .map_err(|e| LlmError::InvalidResponse(format!("Response parse error: {e}")))?;
 
                 Ok(self.convert_response(anthropic_resp))
             }
@@ -425,48 +469,44 @@ impl LlmClient for AnthropicClient {
         let model = self.model.clone();
         Box::pin(
             async move {
+            Self::validate_request_features(&request)?;
             let mut body = self.convert_request(&request);
             body.stream = Some(true);
 
-            let policy = RetryPolicy::default();
-            let resp = with_retry_if(
-                &policy,
-                || {
-                    let client = self.client.clone();
-                    let base_url = self.base_url.clone();
-                    let api_key = self.api_key.clone();
-                    let body = &body;
-                    async move {
-                        let resp = client
-                            .post(&base_url)
-                            .header("x-api-key", &api_key)
-                            .header("anthropic-version", "2023-06-01")
-                            .header("content-type", "application/json")
-                            .json(body)
-                            .send()
-                            .await
-                            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
-
-                        let status = resp.status();
-                        if !status.is_success() {
-                            let text = resp.text().await.unwrap_or_default();
-                            return Err(LlmError::ApiError {
-                                status: status.as_u16(),
-                                message: text,
-                            });
-                        }
-
-                        Ok(resp)
+            let request_future = async {
+                let resp = self.client
+                    .post(&self.base_url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("anthropic-beta", "prompt-caching-2024-07-31")
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(LlmError::ApiError { status: status.as_u16(), message: text });
+                }
+                Ok(resp)
+            };
+            let resp = tokio::select! {
+                biased;
+                _ = async {
+                    match request.cancel_token.as_ref() {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending().await,
                     }
-                },
-                is_retryable,
-            )
-            .await?;
+                } => return Err(LlmError::NetworkError("Anthropic stream request cancelled".to_string()).into()),
+                response = request_future => response?,
+            };
 
             let byte_stream = resp.bytes_stream();
-            let mut buffer = String::new();
             // Track in-progress tool calls during streaming (index → accumulated args)
             let mut tool_call_args: std::collections::HashMap<usize, (String, String, String)> =
+                std::collections::HashMap::new();
+            let mut reasoning_blocks: std::collections::HashMap<usize, ReasoningBlock> =
                 std::collections::HashMap::new();
 
             // Track cumulative usage across streaming events
@@ -477,13 +517,24 @@ impl LlmClient for AnthropicClient {
 
             let stream = async_stream::stream! {
                 let mut byte_stream = std::pin::pin!(byte_stream);
-                while let Some(chunk_result) = byte_stream.next().await {
-                    // Check for cancellation
-                    if let Some(ref ct) = request.cancel_token
-                        && ct.is_cancelled() {
-                            tracing::info!("Anthropic stream cancelled by caller");
+                let mut decoder = SseDecoder::new();
+                loop {
+                    let chunk_result = tokio::select! {
+                        biased;
+                        _ = async {
+                            match request.cancel_token.as_ref() {
+                                Some(token) => token.cancelled().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            yield Err(LlmError::NetworkError("Anthropic stream cancelled".to_string()).into());
                             return;
                         }
+                        next = byte_stream.next() => next,
+                    };
+                    let Some(chunk_result) = chunk_result else {
+                        break;
+                    };
 
                     let chunk = match chunk_result {
                         Ok(c) => c,
@@ -493,21 +544,17 @@ impl LlmClient for AnthropicClient {
                         }
                     };
 
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    if let Err(error) = decoder.push(&chunk) {
+                        yield Err(error);
+                        return;
+                    }
 
-                    while let Some(line_end) = buffer.find('\n') {
-                        let line = buffer[..line_end].trim().to_string();
-                        buffer = buffer[line_end + 1..].to_string();
-
-                        if line.is_empty() || line.starts_with("event:") {
-                            continue;
-                        }
-
-                        if let Some(data) = line.strip_prefix("data: ") {
+                    while let Some(event) = decoder.next_event() {
+                        if let Some(data) = parse_sse_data(&event) {
                             if data == "[DONE]" {
                                 return;
                             }
-                            if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
+                            if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(&data) {
                                 match event {
                                     AnthropicStreamEvent::MessageStart { message } => {
                                         // Capture initial usage (input_tokens) from message_start
@@ -518,13 +565,24 @@ impl LlmClient for AnthropicClient {
                                         }
                                     }
                                     AnthropicStreamEvent::ContentBlockStart {
+                                        index,
                                         content_block:
                                             ContentBlockStartBody::ToolUse { id, name },
-                                        ..
                                     } => {
                                         // Start tracking a new tool_use block
-                                        let idx = tool_call_args.len();
-                                        tool_call_args.insert(idx, (id, name, String::new()));
+                                        tool_call_args.insert(index, (id, name, String::new()));
+                                    }
+                                    AnthropicStreamEvent::ContentBlockStart {
+                                        index,
+                                        content_block: ContentBlockStartBody::Thinking { thinking, signature },
+                                    } => {
+                                        reasoning_blocks.insert(index, ReasoningBlock::Signed { thinking, signature });
+                                    }
+                                    AnthropicStreamEvent::ContentBlockStart {
+                                        index,
+                                        content_block: ContentBlockStartBody::RedactedThinking { data },
+                                    } => {
+                                        reasoning_blocks.insert(index, ReasoningBlock::Redacted { data });
                                     }
                                     AnthropicStreamEvent::ContentBlockStart { .. } => {
                                         // text block start — no action needed
@@ -539,11 +597,28 @@ impl LlmClient for AnthropicClient {
                                                     role: Some("assistant".to_string()),
                                                     content: Some(text),
                                                     reasoning_content: None,
+                                                    reasoning_blocks: None,
                                                     tool_calls: None,
                                                 },
                                                 finish_reason: None,
                                                 usage: None,
                                             });
+                                        } else if let Some(thinking) = delta.thinking {
+                                            yield Ok(ChatChunk {
+                                                delta: DeltaMessage {
+                                                    role: Some("assistant".to_string()),
+                                                    content: None,
+                                                    reasoning_content: Some(thinking),
+                                                    reasoning_blocks: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                                usage: None,
+                                            });
+                                        } else if let Some(signature) = delta.signature {
+                                            if let Some(ReasoningBlock::Signed { signature: value, .. }) = reasoning_blocks.get_mut(&index) {
+                                                value.push_str(&signature);
+                                            }
                                         } else if let Some(partial) = delta.partial_json {
                                             // Accumulate tool_use arguments
                                             if let Some(entry) = tool_call_args.get_mut(&index) {
@@ -552,18 +627,38 @@ impl LlmClient for AnthropicClient {
                                         }
                                     }
                                     AnthropicStreamEvent::ContentBlockStop { index } => {
-                                        // Finalize tool call and emit
-                                        if let Some((id, name, args)) =
-                                            tool_call_args.remove(&index)
-                                        {
-                                            let parsed_args: serde_json::Value =
-                                                serde_json::from_str(&args)
-                                                    .unwrap_or(serde_json::Value::Null);
+                                        if let Some(block) = reasoning_blocks.remove(&index) {
                                             yield Ok(ChatChunk {
                                                 delta: DeltaMessage {
                                                     role: None,
                                                     content: None,
                                                     reasoning_content: None,
+                                                    reasoning_blocks: Some(vec![block]),
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                                usage: None,
+                                            });
+                                        }
+                                        // Finalize tool call and emit
+                                        if let Some((id, name, args)) =
+                                            tool_call_args.remove(&index)
+                                        {
+                                            let parsed_args = match serde_json::from_str::<serde_json::Value>(&args) {
+                                                Ok(value) => value,
+                                                Err(error) => {
+                                                    yield Err(LlmError::InvalidResponse(format!(
+                                                        "invalid Anthropic tool arguments for '{name}': {error}"
+                                                    )).into());
+                                                    return;
+                                                }
+                                            };
+                                            yield Ok(ChatChunk {
+                                                delta: DeltaMessage {
+                                                    role: None,
+                                                    content: None,
+                                                    reasoning_content: None,
+                                                    reasoning_blocks: None,
                                                     tool_calls: Some(vec![DeltaToolCall {
                                                         index: index as u32,
                                                         id: Some(id),
@@ -587,7 +682,7 @@ impl LlmClient for AnthropicClient {
                                             stream_output_tokens = u.output_tokens;
                                         }
                                         let finish = match delta.stop_reason.as_deref() {
-                                            Some("end_turn") => Some("stop".to_string()),
+                                            Some("end_turn" | "stop_sequence") => Some("stop".to_string()),
                                             Some("tool_use") => Some("tool_calls".to_string()),
                                             other => other.map(String::from),
                                         };
@@ -596,7 +691,7 @@ impl LlmClient for AnthropicClient {
                                             Some(Usage {
                                                 prompt_tokens: Some(stream_input_tokens),
                                                 completion_tokens: Some(stream_output_tokens),
-                                                total_tokens: Some(stream_input_tokens + stream_output_tokens),
+                                                total_tokens: Some(stream_input_tokens.saturating_add(stream_output_tokens)),
                                                 cache_creation_input_tokens: stream_cache_creation_input_tokens,
                                                 cache_read_input_tokens: stream_cache_read_input_tokens,
                                                 ..Default::default()
@@ -609,17 +704,41 @@ impl LlmClient for AnthropicClient {
                                                 role: None,
                                                 content: None,
                                                 reasoning_content: None,
+                                                reasoning_blocks: None,
                                                 tool_calls: None,
                                             },
                                             finish_reason: finish,
                                             usage,
                                         });
                                     }
-                                    _ => {}
+                                    AnthropicStreamEvent::Error { error } => {
+                                        yield Err(LlmError::InvalidResponse(format!(
+                                            "Anthropic stream error: {}",
+                                            error.message
+                                        )).into());
+                                        return;
+                                    }
+                                    AnthropicStreamEvent::Other => {}
                                 }
+                            } else {
+                                yield Err(LlmError::InvalidResponse(
+                                    "invalid Anthropic SSE event".to_string()
+                                ).into());
+                                return;
                             }
                         }
                     }
+                }
+                match decoder.finish() {
+                    Ok(None) => {}
+                    Ok(Some(event)) => {
+                        if parse_sse_data(&event).is_some() {
+                            yield Err(LlmError::InvalidResponse(
+                                "truncated Anthropic SSE event at EOF".to_string()
+                            ).into());
+                        }
+                    }
+                    Err(error) => yield Err(error),
                 }
             };
 
@@ -863,6 +982,12 @@ enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
+    #[serde(other)]
+    Other,
 }
 
 impl ContentBlock {
@@ -893,7 +1018,10 @@ impl ContentBlock {
                 cache_control: field,
                 ..
             } => *field = Some(cache_control),
-            ContentBlock::ToolUse { .. } => {}
+            ContentBlock::ToolUse { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. }
+            | ContentBlock::Other => {}
         }
     }
 
@@ -903,6 +1031,26 @@ impl ContentBlock {
             ContentBlock::ToolResult { content, .. } => is_runtime_context_text(content),
             _ => false,
         }
+    }
+}
+
+fn append_reasoning_blocks(
+    target: &mut Vec<ContentBlock>,
+    reasoning_blocks: Option<&[ReasoningBlock]>,
+) {
+    for block in reasoning_blocks.unwrap_or_default() {
+        target.push(match block {
+            ReasoningBlock::Signed {
+                thinking,
+                signature,
+            } => ContentBlock::Thinking {
+                thinking: thinking.clone(),
+                signature: signature.clone(),
+            },
+            ReasoningBlock::Redacted { data } => {
+                ContentBlock::RedactedThinking { data: data.clone() }
+            }
+        });
     }
 }
 
@@ -1045,6 +1193,11 @@ struct AnthropicUsage {
     cache_read_input_tokens: Option<u32>,
 }
 
+#[derive(Deserialize, Clone)]
+struct AnthropicDeltaUsage {
+    output_tokens: u32,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum AnthropicStreamEvent {
@@ -1052,8 +1205,7 @@ enum AnthropicStreamEvent {
     MessageStart { message: MessageStartBody },
     #[serde(rename = "content_block_start")]
     ContentBlockStart {
-        #[serde(rename = "index")]
-        _index: usize,
+        index: usize,
         content_block: ContentBlockStartBody,
     },
     #[serde(rename = "content_block_delta")]
@@ -1064,10 +1216,17 @@ enum AnthropicStreamEvent {
     MessageDelta {
         delta: MessageDeltaBody,
         #[serde(default)]
-        usage: Option<AnthropicUsage>,
+        usage: Option<AnthropicDeltaUsage>,
     },
+    #[serde(rename = "error")]
+    Error { error: AnthropicStreamError },
     #[serde(other)]
     Other,
+}
+
+#[derive(Deserialize)]
+struct AnthropicStreamError {
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -1081,6 +1240,15 @@ struct MessageStartBody {
 enum ContentBlockStartBody {
     #[serde(rename = "tool_use")]
     ToolUse { id: String, name: String },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        signature: String,
+    },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
     #[serde(other)]
     Other,
 }
@@ -1088,6 +1256,8 @@ enum ContentBlockStartBody {
 #[derive(Deserialize)]
 struct ContentDelta {
     text: Option<String>,
+    thinking: Option<String>,
+    signature: Option<String>,
     #[serde(rename = "partial_json")]
     partial_json: Option<String>,
 }
@@ -1117,7 +1287,10 @@ mod tests {
                 | ContentBlock::Image { cache_control, .. }
                 | ContentBlock::Document { cache_control, .. }
                 | ContentBlock::ToolResult { cache_control, .. } => cache_control.is_some(),
-                ContentBlock::ToolUse { .. } => false,
+                ContentBlock::ToolUse { .. }
+                | ContentBlock::Thinking { .. }
+                | ContentBlock::RedactedThinking { .. }
+                | ContentBlock::Other => false,
             }),
         }
     }
@@ -1169,6 +1342,124 @@ mod tests {
             body.get("metadata").is_none(),
             "metadata should be absent when user_id is None, got: {body}"
         );
+    }
+
+    #[test]
+    fn multiple_system_messages_are_preserved_in_order() {
+        let client = AnthropicClient::new("sk-test", "claude-sonnet-4-6");
+        let request = ChatRequest {
+            messages: vec![
+                Message::system("base rules".to_string()),
+                Message::system("restored context".to_string()),
+                Message::user("hello".to_string()),
+            ],
+            ..ChatRequest::default()
+        };
+        let body = serde_json::to_value(client.convert_request(&request)).expect("serialize");
+        assert_eq!(body["system"][0]["text"], "base rules\n\nrestored context");
+    }
+
+    #[test]
+    fn message_delta_usage_accepts_output_tokens_only() {
+        let raw = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":17}}"#;
+        let event = serde_json::from_str::<AnthropicStreamEvent>(raw).expect("message_delta");
+        match event {
+            AnthropicStreamEvent::MessageDelta { usage, .. } => {
+                assert_eq!(usage.map(|value| value.output_tokens), Some(17));
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
+    fn tool_start_keeps_provider_block_index() {
+        let raw = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-1","name":"read_file","input":{}}}"#;
+        let event = serde_json::from_str::<AnthropicStreamEvent>(raw).expect("tool start");
+        match event {
+            AnthropicStreamEvent::ContentBlockStart { index, .. } => assert_eq!(index, 1),
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
+    fn thinking_response_is_projected_to_reasoning_content() {
+        let raw = r#"{"content":[{"type":"thinking","thinking":"reason","signature":"sig"},{"type":"text","text":"answer"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":3}}"#;
+        let response = serde_json::from_str::<AnthropicResponse>(raw).expect("response");
+        let converted =
+            AnthropicClient::new("sk-test", "claude-sonnet-4-6").convert_response(response);
+        assert_eq!(
+            converted.message.reasoning_content.as_deref(),
+            Some("reason")
+        );
+        assert_eq!(
+            converted.message.content.as_text().as_deref(),
+            Some("answer")
+        );
+        assert_eq!(
+            converted.message.reasoning_blocks,
+            Some(vec![ReasoningBlock::Signed {
+                thinking: "reason".to_string(),
+                signature: "sig".to_string(),
+            }])
+        );
+        assert_eq!(
+            converted.usage.and_then(|usage| usage.total_tokens),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn signed_reasoning_blocks_are_replayed_before_tool_calls() {
+        let client = AnthropicClient::new("sk-test", "claude-sonnet-4-6");
+        let mut assistant = Message::assistant_with_tools(vec![ToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "read_file".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        assistant.reasoning_blocks = Some(vec![ReasoningBlock::Signed {
+            thinking: "reason".to_string(),
+            signature: "sig".to_string(),
+        }]);
+        let request = client.convert_request(&ChatRequest::new(vec![assistant]));
+
+        let blocks = request
+            .messages
+            .first()
+            .and_then(|message| match &message.content {
+                AnthropicContent::Blocks(blocks) => Some(blocks),
+                AnthropicContent::Text(_) => None,
+            });
+        assert!(matches!(
+            blocks.and_then(|values| values.first()),
+            Some(ContentBlock::Thinking { thinking, signature })
+                if thinking == "reason" && signature == "sig"
+        ));
+        assert!(matches!(
+            blocks.and_then(|values| values.get(1)),
+            Some(ContentBlock::ToolUse { name, .. }) if name == "read_file"
+        ));
+    }
+
+    #[test]
+    fn unsupported_request_features_fail_instead_of_being_dropped() {
+        let mut request = ChatRequest::new(vec![Message::user("hello".to_string())]);
+        request.tool_choice = Some("none".to_string());
+        let tool_error = AnthropicClient::validate_request_features(&request)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(tool_error.contains("tool_choice"));
+
+        request.tool_choice = None;
+        request.response_format = Some(echo_core::llm::types::ResponseFormat::JsonObject);
+        let format_error = AnthropicClient::validate_request_features(&request)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(format_error.contains("response format"));
     }
 
     /// Sprint 2: main think path sends `cache_hints: Some` with **empty**

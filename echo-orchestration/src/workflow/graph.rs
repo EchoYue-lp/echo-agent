@@ -47,18 +47,21 @@
 //! ```
 
 use super::WorkflowEvent;
-use super::checkpoint_store::{Checkpoint, CheckpointStore, InterruptType, MemoryCheckpointStore};
+use super::checkpoint_store::{
+    Checkpoint, CheckpointStore, InterruptType, MemoryCheckpointStore, WorkflowContinuation,
+};
 use super::node::Node;
 use super::state::SharedState;
 use crate::human_loop::ApprovalDecision;
 use echo_core::agent::Agent;
 use echo_core::error::{AgentError, ReactError, Result};
-use futures::future::BoxFuture;
+use futures::future::{BoxFuture, join_all};
 use futures::stream::BoxStream;
 use serde_json::Value;
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -168,21 +171,6 @@ impl InterruptState {
             prompt,
         }
     }
-
-    /// Create a ToolApproval interrupt
-    pub fn tool_approval(checkpoint: Checkpoint, tool_name: String, args: Value) -> Self {
-        let prompt = format!(
-            "Tool '{}' requires approval\nParameters: {}",
-            tool_name,
-            serde_json::to_string_pretty(&args).unwrap_or_default()
-        );
-        Self {
-            checkpoint,
-            interrupt_type: InterruptType::ToolApproval,
-            pending_node: tool_name,
-            prompt,
-        }
-    }
 }
 
 /// Return type of run_until_interrupt
@@ -194,6 +182,15 @@ pub enum RunUntilInterruptResult {
     Completed(GraphResult),
     /// Paused at an interrupt point
     Interrupted(InterruptState),
+    /// Approval was deferred; the checkpoint remains claimable.
+    Deferred(InterruptState),
+    /// Approval was rejected and the checkpoint was consumed.
+    Rejected {
+        state: SharedState,
+        path: Vec<String>,
+        steps: usize,
+        reason: Option<String>,
+    },
 }
 
 // ── GraphBuilder ────────────────────────────────────────────────────────────
@@ -209,6 +206,9 @@ pub struct GraphBuilder {
     finish_nodes: Vec<String>,
     /// Interrupt configuration
     interrupt_config: InterruptConfig,
+    duplicate_nodes: HashSet<String>,
+    explicit_revision: Option<String>,
+    node_timeout: Option<Duration>,
 }
 
 impl GraphBuilder {
@@ -221,6 +221,9 @@ impl GraphBuilder {
             entry_node: None,
             finish_nodes: Vec::new(),
             interrupt_config: InterruptConfig::default(),
+            duplicate_nodes: HashSet::new(),
+            explicit_revision: None,
+            node_timeout: None,
         }
     }
 
@@ -240,6 +243,9 @@ impl GraphBuilder {
         output_key: impl Into<String>,
     ) -> Self {
         let name = name.into();
+        if self.nodes.contains_key(&name) {
+            self.duplicate_nodes.insert(name.clone());
+        }
         self.nodes.insert(
             name.clone(),
             Node::agent(&name, agent, input_key, output_key),
@@ -260,6 +266,9 @@ impl GraphBuilder {
         use_execute: bool,
     ) -> Self {
         let name = name.into();
+        if self.nodes.contains_key(&name) {
+            self.duplicate_nodes.insert(name.clone());
+        }
         self.nodes.insert(
             name.clone(),
             Node::agent_with_mode(&name, agent, input_key, output_key, use_execute),
@@ -267,7 +276,7 @@ impl GraphBuilder {
         self
     }
 
-    /// Add a shared Agent node (Arc<dyn Agent>)
+    /// Add a shared Agent node (`Arc<dyn Agent>`).
     pub fn add_shared_agent_node(
         mut self,
         name: impl Into<String>,
@@ -276,6 +285,9 @@ impl GraphBuilder {
         output_key: impl Into<String>,
     ) -> Self {
         let name = name.into();
+        if self.nodes.contains_key(&name) {
+            self.duplicate_nodes.insert(name.clone());
+        }
         self.nodes.insert(
             name.clone(),
             Node::agent_shared(&name, agent, input_key, output_key),
@@ -293,6 +305,9 @@ impl GraphBuilder {
         use_execute: bool,
     ) -> Self {
         let name = name.into();
+        if self.nodes.contains_key(&name) {
+            self.duplicate_nodes.insert(name.clone());
+        }
         self.nodes.insert(
             name.clone(),
             Node::agent_shared_with_mode(&name, agent, input_key, output_key, use_execute),
@@ -306,6 +321,9 @@ impl GraphBuilder {
         F: for<'a> Fn(&'a SharedState) -> BoxFuture<'a, Result<()>> + Send + Sync + 'static,
     {
         let name = name.into();
+        if self.nodes.contains_key(&name) {
+            self.duplicate_nodes.insert(name.clone());
+        }
         self.nodes.insert(name.clone(), Node::function(&name, f));
         self
     }
@@ -313,6 +331,9 @@ impl GraphBuilder {
     /// Add a router node (no execution logic, only used as a convergence point for conditional branches)
     pub fn add_router_node(mut self, name: impl Into<String>) -> Self {
         let name = name.into();
+        if self.nodes.contains_key(&name) {
+            self.duplicate_nodes.insert(name.clone());
+        }
         self.nodes.insert(name.clone(), Node::passthrough(&name));
         self
     }
@@ -323,6 +344,9 @@ impl GraphBuilder {
     /// toward the parent's step limit.
     pub fn add_subgraph_node(mut self, name: impl Into<String>, subgraph: Graph) -> Self {
         let name = name.into();
+        if self.nodes.contains_key(&name) {
+            self.duplicate_nodes.insert(name.clone());
+        }
         self.nodes
             .insert(name.clone(), Node::subgraph(&name, subgraph));
         self
@@ -427,8 +451,30 @@ impl GraphBuilder {
         self
     }
 
+    /// Set an explicit revision when node behavior changes without a topology change.
+    pub fn revision(mut self, revision: impl Into<String>) -> Self {
+        self.explicit_revision = Some(revision.into());
+        self
+    }
+
+    /// Apply a deadline to every node execution, including fan-out branches.
+    pub fn node_timeout(mut self, timeout: Duration) -> Self {
+        self.node_timeout = Some(timeout);
+        self
+    }
+
     /// Build an immutable Graph
     pub fn build(self) -> Result<Graph> {
+        if !self.duplicate_nodes.is_empty() {
+            let mut duplicates = self.duplicate_nodes.into_iter().collect::<Vec<_>>();
+            duplicates.sort();
+            return Err(ReactError::Agent(Box::new(
+                AgentError::InitializationFailed(format!(
+                    "Graph contains duplicate node IDs: {}",
+                    duplicates.join(", ")
+                )),
+            )));
+        }
         let entry = self.entry_node.ok_or_else(|| {
             ReactError::Agent(Box::new(AgentError::InitializationFailed(
                 "Graph must have an entry node (call set_entry())".to_string(),
@@ -442,6 +488,30 @@ impl GraphBuilder {
                     entry
                 )),
             )));
+        }
+
+        for finish in &self.finish_nodes {
+            if !self.nodes.contains_key(finish) {
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::InitializationFailed(format!(
+                        "Finish node '{finish}' not found in graph"
+                    )),
+                )));
+            }
+        }
+        for interrupt in self
+            .interrupt_config
+            .before
+            .iter()
+            .chain(self.interrupt_config.after.iter())
+        {
+            if interrupt != "*" && !self.nodes.contains_key(interrupt) {
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::InitializationFailed(format!(
+                        "Interrupt node '{interrupt}' not found in graph"
+                    )),
+                )));
+            }
         }
 
         // Verify all nodes referenced by edges exist
@@ -462,6 +532,20 @@ impl GraphBuilder {
                 }
                 EdgeKind::Fixed(_) => {}
                 EdgeKind::Parallel { targets, then } => {
+                    if targets.is_empty() {
+                        return Err(ReactError::Agent(Box::new(
+                            AgentError::InitializationFailed(
+                                "Parallel edge must contain at least one target".to_string(),
+                            ),
+                        )));
+                    }
+                    if targets.iter().collect::<HashSet<_>>().len() != targets.len() {
+                        return Err(ReactError::Agent(Box::new(
+                            AgentError::InitializationFailed(
+                                "Parallel edge contains duplicate targets".to_string(),
+                            ),
+                        )));
+                    }
                     for t in targets {
                         if !self.nodes.contains_key(t) {
                             return Err(ReactError::Agent(Box::new(
@@ -504,6 +588,29 @@ impl GraphBuilder {
             entry.push(edge);
         }
 
+        let graph_revision = self.explicit_revision.unwrap_or_else(|| {
+            let mut nodes = self.nodes.keys().cloned().collect::<Vec<_>>();
+            nodes.sort();
+            let mut topology = format!("{}|{}|{}", self.name, entry, nodes.join(","));
+            let mut sources = edge_map.keys().cloned().collect::<Vec<_>>();
+            sources.sort();
+            for source in sources {
+                if let Some(edges) = edge_map.get(&source) {
+                    for edge in edges {
+                        let target = match &edge.kind {
+                            EdgeKind::Fixed(to) => format!("fixed:{to}"),
+                            EdgeKind::Conditional(_) => "conditional".to_string(),
+                            EdgeKind::Parallel { targets, then } => {
+                                format!("fanout:{}:{then}", targets.join(","))
+                            }
+                        };
+                        topology.push_str(&format!("|{source}>{target}"));
+                    }
+                }
+            }
+            format!("{:x}", Sha256::digest(topology.as_bytes()))
+        });
+
         Ok(Graph {
             name: self.name,
             nodes: self.nodes,
@@ -514,6 +621,8 @@ impl GraphBuilder {
             interrupt_config: self.interrupt_config,
             checkpoint_store: Arc::new(MemoryCheckpointStore::new()),
             cancel_token: None,
+            graph_revision,
+            node_timeout: self.node_timeout,
         })
     }
 
@@ -549,6 +658,10 @@ pub struct Graph {
     checkpoint_store: Arc<dyn CheckpointStore>,
     /// Optional cancellation token for cooperative cancellation between nodes.
     cancel_token: Option<CancellationToken>,
+    /// Stable hash or caller-supplied revision of this graph definition.
+    graph_revision: String,
+    /// Optional per-node execution deadline.
+    node_timeout: Option<Duration>,
 }
 
 /// Graph execution result
@@ -563,6 +676,145 @@ pub struct GraphResult {
 }
 
 impl Graph {
+    async fn execute_node(&self, node: &Node, state: &SharedState) -> Result<()> {
+        let execution = node.execute(state);
+        let timed = async {
+            if let Some(timeout) = self.node_timeout {
+                tokio::time::timeout(timeout, execution)
+                    .await
+                    .map_err(|_| {
+                        ReactError::Other(format!("Workflow node timed out after {timeout:?}"))
+                    })?
+            } else {
+                execution.await
+            }
+        };
+        if let Some(cancel) = &self.cancel_token {
+            tokio::select! {
+                result = timed => result,
+                () = cancel.cancelled() => Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                    format!("Graph '{}' node execution cancelled", self.name),
+                )))),
+            }
+        } else {
+            timed.await
+        }
+    }
+
+    fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
+        if checkpoint.graph_name != self.name {
+            return Err(ReactError::Other(format!(
+                "Checkpoint belongs to graph '{}', not '{}'",
+                checkpoint.graph_name, self.name
+            )));
+        }
+        if checkpoint.graph_revision != self.graph_revision {
+            return Err(ReactError::Other(format!(
+                "Checkpoint graph revision '{}' does not match '{}'",
+                checkpoint.graph_revision, self.graph_revision
+            )));
+        }
+        if checkpoint.workflow_run_id.is_empty() {
+            return Err(ReactError::Other(
+                "Checkpoint has no workflow run identity".to_string(),
+            ));
+        }
+        if checkpoint.current_node != Self::END
+            && !self.nodes.contains_key(&checkpoint.current_node)
+        {
+            return Err(ReactError::Other(format!(
+                "Checkpoint references unknown node '{}'",
+                checkpoint.current_node
+            )));
+        }
+        if let WorkflowContinuation::FanOut { targets, then } = &checkpoint.continuation
+            && (targets.is_empty()
+                || targets
+                    .iter()
+                    .any(|target| !self.nodes.contains_key(target))
+                || (then != Self::END && !self.nodes.contains_key(then)))
+        {
+            return Err(ReactError::Other(
+                "Checkpoint contains an invalid fan-out continuation".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn interrupt_state(checkpoint: Checkpoint) -> InterruptState {
+        let node = checkpoint.current_node.clone();
+        match checkpoint.interrupt_type {
+            InterruptType::BeforeNode => InterruptState::before_node(checkpoint, node),
+            InterruptType::AfterNode => InterruptState::after_node(checkpoint, node),
+        }
+    }
+
+    fn checkpoint(
+        &self,
+        current_node: String,
+        state: &SharedState,
+        path: Vec<String>,
+        step_count: usize,
+        interrupt_type: InterruptType,
+        continuation: WorkflowContinuation,
+    ) -> Checkpoint {
+        Checkpoint::new(
+            self.name.clone(),
+            current_node,
+            state,
+            path,
+            step_count,
+            interrupt_type,
+        )
+        .bind_execution(self.graph_revision.clone(), continuation)
+    }
+
+    async fn execute_parallel_route(
+        &self,
+        state: &SharedState,
+        targets: &[String],
+        path: &mut Vec<String>,
+        step_count: &mut usize,
+    ) -> Result<()> {
+        let remaining = self.max_steps.saturating_sub(*step_count);
+        if targets.len() > remaining {
+            return Err(ReactError::Agent(Box::new(
+                AgentError::MaxIterationsExceeded(self.max_steps),
+            )));
+        }
+        let mut branches = Vec::with_capacity(targets.len());
+        for target_name in targets {
+            let target_node = self.nodes.get(target_name).ok_or_else(|| {
+                ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
+                    "Parallel node '{target_name}' not found in graph '{}'",
+                    self.name
+                ))))
+            })?;
+            let branch_state = state.fork()?;
+            branch_state.set_current_node(target_name);
+            branches.push((target_name.clone(), target_node, branch_state));
+        }
+        let results = join_all(branches.iter().map(|(_, node, branch_state)| async move {
+            self.execute_node(node, branch_state).await
+        }))
+        .await;
+        for result in results {
+            result?;
+        }
+        if self.is_cancelled() {
+            return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                "Graph '{}' cancelled during parallel fan-out",
+                self.name
+            )))));
+        }
+        for (target_name, _, branch_state) in branches {
+            state.deep_merge(&branch_state)?;
+            path.push(target_name);
+            *step_count = step_count.saturating_add(1);
+        }
+        Ok(())
+    }
+
     /// Terminal marker node name
     pub const END: &'static str = "__end__";
 
@@ -629,7 +881,7 @@ impl Graph {
                 {
                     state.set_current_node(&current);
                     debug!(graph = %self.name, node = %current, "Executing finish node");
-                    node.execute(&state).await?;
+                    self.execute_node(node, &state).await?;
                     path.push(current.clone());
                     step_count += 1;
                 }
@@ -656,7 +908,7 @@ impl Graph {
 
             state.set_current_node(&current);
             debug!(graph = %self.name, node = %current, step = step_count, "Executing node");
-            node.execute(&state).await?;
+            self.execute_node(node, &state).await?;
             path.push(current.clone());
             step_count += 1;
 
@@ -683,27 +935,8 @@ impl Graph {
                     // after execution completes, merge back to the main state via deep_merge semantics:
                     // - Nested object fields are recursively merged rather than wholesale overwritten
                     // - Simple keys (non-object) are still overwritten by later branches
-                    for target_name in &targets {
-                        // Check cancellation between parallel branches
-                        if self.is_cancelled() {
-                            return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                                format!("Graph '{}' cancelled during parallel fan-out", self.name),
-                            ))));
-                        }
-                        if let Some(target_node) = self.nodes.get(target_name) {
-                            // Clone the current state as the branch's independent state
-                            let branch_state = state.fork()?;
-                            branch_state.set_current_node(target_name);
-                            debug!(graph = %self.name, node = %target_name, "Executing parallel branch");
-                            target_node.execute(&branch_state).await?;
-
-                            // deep_merge the branch state back into the main state
-                            state.deep_merge(&branch_state)?;
-
-                            path.push(target_name.clone());
-                            step_count += 1;
-                        }
-                    }
+                    self.execute_parallel_route(&state, &targets, &mut path, &mut step_count)
+                        .await?;
 
                     current = then;
                 }
@@ -768,13 +1001,13 @@ impl Graph {
             if self.interrupt_config.should_interrupt_before(&current) {
                 debug!(graph = %self.name, node = %current, "Interrupt before node");
 
-                let checkpoint = Checkpoint::new(
-                    self.name.clone(),
+                let checkpoint = self.checkpoint(
                     current.clone(),
                     &state,
                     path.clone(),
                     step_count,
                     InterruptType::BeforeNode,
+                    WorkflowContinuation::Node,
                 );
 
                 // Save the checkpoint
@@ -791,7 +1024,7 @@ impl Graph {
                 {
                     state.set_current_node(&current);
                     debug!(graph = %self.name, node = %current, "Executing finish node");
-                    node.execute(&state).await?;
+                    self.execute_node(node, &state).await?;
                     path.push(current.clone());
                     step_count += 1;
                 }
@@ -818,7 +1051,7 @@ impl Graph {
 
             state.set_current_node(&current);
             debug!(graph = %self.name, node = %current, step = step_count, "Executing node");
-            node.execute(&state).await?;
+            self.execute_node(node, &state).await?;
             path.push(current.clone());
             step_count += 1;
 
@@ -828,9 +1061,16 @@ impl Graph {
 
                 // Get the next node
                 let next = self.resolve_next(&current, &state).await?;
+                let continuation = match &next {
+                    NextStep::Single(_) => WorkflowContinuation::Node,
+                    NextStep::Parallel { targets, then } => WorkflowContinuation::FanOut {
+                        targets: targets.clone(),
+                        then: then.clone(),
+                    },
+                    NextStep::End => WorkflowContinuation::End,
+                };
 
-                let checkpoint = Checkpoint::new(
-                    self.name.clone(),
+                let checkpoint = self.checkpoint(
                     match next {
                         NextStep::Single(ref name) => name.clone(),
                         NextStep::Parallel { ref then, .. } => then.clone(),
@@ -840,6 +1080,7 @@ impl Graph {
                     path.clone(),
                     step_count,
                     InterruptType::AfterNode,
+                    continuation,
                 );
 
                 self.checkpoint_store.save(&checkpoint).await?;
@@ -863,28 +1104,8 @@ impl Graph {
                         "Executing parallel fan-out"
                     );
 
-                    // Parallel branch execution (using deep_merge to merge branch results)
-                    for target_name in &targets {
-                        // Check cancellation between parallel branches
-                        if self.is_cancelled() {
-                            return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                                format!("Graph '{}' cancelled during parallel fan-out", self.name),
-                            ))));
-                        }
-                        if let Some(target_node) = self.nodes.get(target_name) {
-                            // Clone state as branch-independent state
-                            let branch_state = state.fork()?;
-                            branch_state.set_current_node(target_name);
-                            debug!(graph = %self.name, node = %target_name, "Executing parallel branch");
-                            target_node.execute(&branch_state).await?;
-
-                            // deep_merge back to main state
-                            state.deep_merge(&branch_state)?;
-
-                            path.push(target_name.clone());
-                            step_count += 1;
-                        }
-                    }
+                    self.execute_parallel_route(&state, &targets, &mut path, &mut step_count)
+                        .await?;
 
                     current = then;
                 }
@@ -915,41 +1136,80 @@ impl Graph {
         checkpoint: Checkpoint,
         decision: ApprovalDecision,
     ) -> Result<RunUntilInterruptResult> {
-        // Check approval decision -- Rejected and Deferred must not continue execution
-        match &decision {
-            ApprovalDecision::Rejected { reason } => {
-                info!(
-                    graph = %self.name,
-                    checkpoint_id = %checkpoint.id,
-                    reason = reason.as_deref().unwrap_or("no reason"),
-                    "Resume rejected, aborting workflow"
-                );
-                return Ok(RunUntilInterruptResult::Completed(GraphResult {
-                    state: checkpoint.restore_state()?,
-                    path: checkpoint.path,
-                    steps: checkpoint.step_count,
-                }));
-            }
-            ApprovalDecision::Deferred => {
-                info!(
-                    graph = %self.name,
-                    checkpoint_id = %checkpoint.id,
-                    "Resume deferred, aborting workflow"
-                );
-                return Ok(RunUntilInterruptResult::Completed(GraphResult {
-                    state: checkpoint.restore_state()?,
-                    path: checkpoint.path,
-                    steps: checkpoint.step_count,
-                }));
-            }
-            _ => {} // Approved, ApprovedWithScope, Modified — continue
+        self.resume_with_updates(checkpoint, decision, None).await
+    }
+
+    async fn resume_with_updates(
+        &self,
+        checkpoint_reference: Checkpoint,
+        decision: ApprovalDecision,
+        state_updates: Option<std::collections::HashMap<String, Value>>,
+    ) -> Result<RunUntilInterruptResult> {
+        if matches!(decision, ApprovalDecision::Deferred) {
+            let checkpoint = self
+                .checkpoint_store
+                .load(&checkpoint_reference.id)
+                .await?
+                .ok_or_else(|| {
+                    ReactError::Other("Checkpoint is missing or consumed".to_string())
+                })?;
+            self.validate_checkpoint(&checkpoint)?;
+            info!(graph = %self.name, checkpoint_id = %checkpoint.id, "Resume deferred");
+            return Ok(RunUntilInterruptResult::Deferred(Self::interrupt_state(
+                checkpoint,
+            )));
+        }
+
+        let persisted = self
+            .checkpoint_store
+            .load(&checkpoint_reference.id)
+            .await?
+            .ok_or_else(|| ReactError::Other("Checkpoint is missing or consumed".to_string()))?;
+        self.validate_checkpoint(&persisted)?;
+        let checkpoint = self
+            .checkpoint_store
+            .claim(&checkpoint_reference.id)
+            .await?
+            .ok_or_else(|| {
+                ReactError::Other("Checkpoint is missing or already claimed".to_string())
+            })?;
+        self.validate_checkpoint(&checkpoint)?;
+
+        if let ApprovalDecision::Rejected { reason } = decision {
+            info!(
+                graph = %self.name,
+                checkpoint_id = %checkpoint.id,
+                reason = reason.as_deref().unwrap_or("no reason"),
+                "Resume rejected, aborting workflow"
+            );
+            return Ok(RunUntilInterruptResult::Rejected {
+                state: checkpoint.restore_state()?,
+                path: checkpoint.path,
+                steps: checkpoint.step_count,
+                reason,
+            });
         }
 
         // Restore state
         let state = checkpoint.restore_state()?;
-        let mut current = checkpoint.current_node;
-        let mut path = checkpoint.path;
+        if let Some(updates) = state_updates {
+            for (key, value) in updates {
+                state.set(key, value)?;
+            }
+        }
+        let mut current = checkpoint.current_node.clone();
+        let mut path = checkpoint.path.clone();
         let mut step_count = checkpoint.step_count;
+
+        match &checkpoint.continuation {
+            WorkflowContinuation::Node => {}
+            WorkflowContinuation::FanOut { targets, then } => {
+                self.execute_parallel_route(&state, targets, &mut path, &mut step_count)
+                    .await?;
+                current = then.clone();
+            }
+            WorkflowContinuation::End => current = Self::END.to_string(),
+        }
 
         info!(
             graph = %self.name,
@@ -983,12 +1243,10 @@ impl Graph {
                     && let Some(node) = self.nodes.get(&current)
                 {
                     state.set_current_node(&current);
-                    node.execute(&state).await?;
+                    self.execute_node(node, &state).await?;
                     path.push(current.clone());
                     step_count += 1;
                 }
-                // Delete checkpoint after successful completion
-                self.checkpoint_store.delete(&checkpoint.id).await?;
                 return Ok(RunUntilInterruptResult::Completed(GraphResult {
                     state,
                     path,
@@ -1005,7 +1263,7 @@ impl Graph {
             })?;
 
             state.set_current_node(&current);
-            node.execute(&state).await?;
+            self.execute_node(node, &state).await?;
             path.push(current.clone());
             step_count += 1;
 
@@ -1019,19 +1277,26 @@ impl Graph {
                     NextStep::End => "__end__".to_string(),
                 };
 
-                let new_checkpoint = Checkpoint::new(
-                    self.name.clone(),
-                    next_node_name,
-                    &state,
-                    path.clone(),
-                    step_count,
-                    InterruptType::AfterNode,
-                );
+                let continuation = match &next {
+                    NextStep::Single(_) => WorkflowContinuation::Node,
+                    NextStep::Parallel { targets, then } => WorkflowContinuation::FanOut {
+                        targets: targets.clone(),
+                        then: then.clone(),
+                    },
+                    NextStep::End => WorkflowContinuation::End,
+                };
+                let new_checkpoint = self
+                    .checkpoint(
+                        next_node_name,
+                        &state,
+                        path.clone(),
+                        step_count,
+                        InterruptType::AfterNode,
+                        continuation,
+                    )
+                    .continue_run(&checkpoint);
 
                 self.checkpoint_store.save(&new_checkpoint).await?;
-
-                // Delete the old checkpoint (the new one has been saved successfully)
-                self.checkpoint_store.delete(&checkpoint.id).await?;
 
                 let interrupt_state = InterruptState::after_node(new_checkpoint, current);
                 return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
@@ -1043,18 +1308,17 @@ impl Graph {
                 NextStep::Single(name) => {
                     // Check interrupt_before for the next node
                     if self.interrupt_config.should_interrupt_before(&name) {
-                        let new_checkpoint = Checkpoint::new(
-                            self.name.clone(),
-                            name.clone(),
-                            &state,
-                            path.clone(),
-                            step_count,
-                            InterruptType::BeforeNode,
-                        );
+                        let new_checkpoint = self
+                            .checkpoint(
+                                name.clone(),
+                                &state,
+                                path.clone(),
+                                step_count,
+                                InterruptType::BeforeNode,
+                                WorkflowContinuation::Node,
+                            )
+                            .continue_run(&checkpoint);
                         self.checkpoint_store.save(&new_checkpoint).await?;
-
-                        // Delete the old checkpoint (the new one has been saved successfully)
-                        self.checkpoint_store.delete(&checkpoint.id).await?;
 
                         let interrupt_state = InterruptState::before_node(new_checkpoint, name);
                         return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
@@ -1062,25 +1326,11 @@ impl Graph {
                     current = name;
                 }
                 NextStep::Parallel { targets, then } => {
-                    // Parallel branch execution, shared SharedState (sequential execution)
-                    for target_name in &targets {
-                        // Check cancellation between parallel branches
-                        if self.is_cancelled() {
-                            return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                                format!("Graph '{}' cancelled during parallel fan-out", self.name),
-                            ))));
-                        }
-                        if let Some(target_node) = self.nodes.get(target_name) {
-                            state.set_current_node(target_name);
-                            target_node.execute(&state).await?;
-                            path.push(target_name.clone());
-                            step_count += 1;
-                        }
-                    }
+                    self.execute_parallel_route(&state, &targets, &mut path, &mut step_count)
+                        .await?;
                     current = then;
                 }
                 NextStep::End => {
-                    self.checkpoint_store.delete(&checkpoint.id).await?;
                     return Ok(RunUntilInterruptResult::Completed(GraphResult {
                         state,
                         path,
@@ -1100,20 +1350,7 @@ impl Graph {
         checkpoint: Checkpoint,
         state_updates: std::collections::HashMap<String, Value>,
     ) -> Result<RunUntilInterruptResult> {
-        // Apply state updates to the checkpoint before resuming
-        let state = checkpoint.restore_state()?;
-        for (key, value) in &state_updates {
-            let _ = state.set(key, value.clone());
-        }
-
-        // Reuse the original checkpoint identity so subsequent save/delete
-        // operations still target the persisted checkpoint entry.
-        let mut modified_checkpoint = checkpoint;
-        modified_checkpoint.state_snapshot = state.to_json_value().map_err(|e| {
-            ReactError::Other(format!("Failed to serialize updated workflow state: {}", e))
-        })?;
-
-        self.resume(modified_checkpoint, ApprovalDecision::Approved)
+        self.resume_with_updates(checkpoint, ApprovalDecision::Approved, Some(state_updates))
             .await
     }
 
@@ -1168,7 +1405,8 @@ impl Graph {
             parent_cp.path.clone(),
             parent_cp.step_count,
             parent_cp.interrupt_type,
-        );
+        )
+        .bind_execution(self.graph_revision.clone(), parent_cp.continuation.clone());
 
         // Save fork checkpoint
         self.checkpoint_store.save(&fork_cp).await?;
@@ -1265,7 +1503,7 @@ impl Graph {
                             step_index: step_count,
                         };
                         let node_start = Instant::now();
-                        node.execute(&state_clone).await?;
+                        self.execute_node(node, &state_clone).await?;
                         yield WorkflowEvent::NodeEnd {
                             node_name: current.clone(),
                             step_index: step_count,
@@ -1301,7 +1539,7 @@ impl Graph {
                     step_index: step_count,
                 };
                 let node_start = Instant::now();
-                node.execute(&state_clone).await?;
+                self.execute_node(node, &state_clone).await?;
                 yield WorkflowEvent::NodeEnd {
                     node_name: current.clone(),
                     step_index: step_count,
@@ -1316,36 +1554,28 @@ impl Graph {
                         current = name;
                     }
                     NextStep::Parallel { targets, then } => {
-                        // Parallel branch execution (using deep_merge to merge branch results)
-                        for target_name in &targets {
-                            // Check cancellation between parallel branches
-                            if self.is_cancelled() {
-                                Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                                    format!("Graph '{}' cancelled during parallel fan-out", self.name),
-                                ))))?;
-                            }
-                            if let Some(target_node) = self.nodes.get(target_name) {
-                                // Clone state as branch-independent state
-                                let branch_state = state_clone.fork()?;
-                                branch_state.set_current_node(target_name);
-                                yield WorkflowEvent::NodeStart {
-                                    node_name: target_name.clone(),
-                                    step_index: step_count,
-                                };
-                                let branch_start = Instant::now();
-                                target_node.execute(&branch_state).await?;
-                                yield WorkflowEvent::NodeEnd {
-                                    node_name: target_name.clone(),
-                                    step_index: step_count,
-                                    elapsed: branch_start.elapsed(),
-                                };
-
-                                // deep_merge back to main state
-                                state_clone.deep_merge(&branch_state)?;
-
-                                path.push(target_name.clone());
-                                step_count += 1;
-                            }
+                        let branch_start = Instant::now();
+                        for (offset, target_name) in targets.iter().enumerate() {
+                            yield WorkflowEvent::NodeStart {
+                                node_name: target_name.clone(),
+                                step_index: step_count.saturating_add(offset),
+                            };
+                        }
+                        self.execute_parallel_route(
+                            &state_clone,
+                            &targets,
+                            &mut path,
+                            &mut step_count,
+                        )
+                        .await?;
+                        for (offset, target_name) in targets.iter().enumerate() {
+                            yield WorkflowEvent::NodeEnd {
+                                node_name: target_name.clone(),
+                                step_index: step_count
+                                    .saturating_sub(targets.len())
+                                    .saturating_add(offset),
+                                elapsed: branch_start.elapsed(),
+                            };
                         }
                         current = then;
                     }
@@ -1615,6 +1845,91 @@ mod tests {
             result.state.get::<String>("final"),
             Some("HELLO (len=5)".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn resume_after_parallel_source_executes_and_merges_all_branches() -> Result<()> {
+        let graph = GraphBuilder::new("parallel-resume")
+            .add_function_node("start", |state: &SharedState| {
+                Box::pin(async move {
+                    state
+                        .set("input", "hello")
+                        .map_err(|error| ReactError::Other(error.to_string()))
+                })
+            })
+            .add_function_node("upper", |state: &SharedState| {
+                Box::pin(async move {
+                    let input = state.get::<String>("input").ok_or_else(|| {
+                        ReactError::Other("parallel branch lost input".to_string())
+                    })?;
+                    state
+                        .set("upper", input.to_uppercase())
+                        .map_err(|error| ReactError::Other(error.to_string()))
+                })
+            })
+            .add_function_node("length", |state: &SharedState| {
+                Box::pin(async move {
+                    let input = state.get::<String>("input").ok_or_else(|| {
+                        ReactError::Other("parallel branch lost input".to_string())
+                    })?;
+                    state
+                        .set("length", input.chars().count())
+                        .map_err(|error| ReactError::Other(error.to_string()))
+                })
+            })
+            .add_function_node("merge", |state: &SharedState| {
+                Box::pin(async move {
+                    let upper = state
+                        .get::<String>("upper")
+                        .ok_or_else(|| ReactError::Other("upper branch was skipped".to_string()))?;
+                    let length = state.get::<usize>("length").ok_or_else(|| {
+                        ReactError::Other("length branch was skipped".to_string())
+                    })?;
+                    state
+                        .set("result", format!("{upper}:{length}"))
+                        .map_err(|error| ReactError::Other(error.to_string()))
+                })
+            })
+            .set_entry("start")
+            .add_parallel_edge(
+                "start",
+                vec!["upper".to_string(), "length".to_string()],
+                "merge",
+            )
+            .set_finish("merge")
+            .interrupt_after(vec!["start"])
+            .build()?;
+
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            RunUntilInterruptResult::Completed(_)
+            | RunUntilInterruptResult::Deferred(_)
+            | RunUntilInterruptResult::Rejected { .. } => {
+                return Err(ReactError::Other(
+                    "graph did not interrupt after parallel source".to_string(),
+                ));
+            }
+        };
+        assert!(matches!(
+            checkpoint.continuation,
+            WorkflowContinuation::FanOut { .. }
+        ));
+
+        let result = match graph.resume(checkpoint, ApprovalDecision::Approved).await? {
+            RunUntilInterruptResult::Completed(result) => result,
+            RunUntilInterruptResult::Interrupted(_) => {
+                return Err(ReactError::Other("resume interrupted twice".to_string()));
+            }
+            RunUntilInterruptResult::Deferred(_) | RunUntilInterruptResult::Rejected { .. } => {
+                return Err(ReactError::Other("resume did not complete".to_string()));
+            }
+        };
+        assert_eq!(
+            result.state.get::<String>("result").as_deref(),
+            Some("HELLO:5")
+        );
+        assert_eq!(result.path, vec!["start", "upper", "length", "merge"]);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1910,7 +2225,7 @@ mod tests {
         let interrupted = graph.run_until_interrupt(state).await.unwrap();
         let checkpoint = match interrupted {
             RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
-            RunUntilInterruptResult::Completed(_) => panic!("expected interrupt"),
+            _ => return,
         };
 
         assert_eq!(graph.list_checkpoints().await.unwrap().len(), 1);
@@ -1921,7 +2236,7 @@ mod tests {
         let resumed = graph.resume_with_state(checkpoint, updates).await.unwrap();
         let result = match resumed {
             RunUntilInterruptResult::Completed(result) => result,
-            RunUntilInterruptResult::Interrupted(_) => panic!("expected completed result"),
+            _ => return,
         };
 
         let seen: String = result.state.get("result").unwrap_or_default();
@@ -1929,6 +2244,112 @@ mod tests {
         assert!(
             graph.list_checkpoints().await.unwrap().is_empty(),
             "checkpoint should be deleted after successful resume"
+        );
+    }
+
+    fn interrupting_graph(name: &str, revision: &str, store: Arc<MemoryCheckpointStore>) -> Graph {
+        GraphBuilder::new(name)
+            .add_function_node("start", |state: &SharedState| {
+                Box::pin(async move {
+                    state
+                        .set(
+                            "executions",
+                            state
+                                .get::<u64>("executions")
+                                .unwrap_or(0)
+                                .saturating_add(1),
+                        )
+                        .map_err(Into::into)
+                })
+            })
+            .set_entry("start")
+            .set_finish("start")
+            .interrupt_before(vec!["start"])
+            .revision(revision)
+            .build()
+            .unwrap_or_else(|error| panic!("test graph must build: {error}"))
+            .with_checkpoint_store(store)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_is_claimed_once() {
+        let store = Arc::new(MemoryCheckpointStore::new());
+        let graph = interrupting_graph("claim-once", "v1", store);
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await {
+            Ok(RunUntilInterruptResult::Interrupted(interrupt)) => interrupt.checkpoint,
+            other => panic!("expected interrupt, got {other:?}"),
+        };
+        let replay = checkpoint.clone();
+        assert!(matches!(
+            graph.resume(checkpoint, ApprovalDecision::Approved).await,
+            Ok(RunUntilInterruptResult::Completed(_))
+        ));
+        assert!(
+            graph
+                .resume(replay, ApprovalDecision::Approved)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_graph_and_revision_drift_do_not_consume_checkpoint() {
+        let store = Arc::new(MemoryCheckpointStore::new());
+        let source = interrupting_graph("source", "v1", store.clone());
+        let checkpoint = match source.run_until_interrupt(SharedState::new()).await {
+            Ok(RunUntilInterruptResult::Interrupted(interrupt)) => interrupt.checkpoint,
+            other => panic!("expected interrupt, got {other:?}"),
+        };
+        let wrong_graph = interrupting_graph("other", "v1", store.clone());
+        assert!(
+            wrong_graph
+                .resume(checkpoint.clone(), ApprovalDecision::Approved)
+                .await
+                .is_err()
+        );
+        let wrong_revision = interrupting_graph("source", "v2", store.clone());
+        assert!(
+            wrong_revision
+                .resume(checkpoint.clone(), ApprovalDecision::Approved)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            source.resume(checkpoint, ApprovalDecision::Approved).await,
+            Ok(RunUntilInterruptResult::Completed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn deferred_preserves_and_rejected_consumes_checkpoint() {
+        let store = Arc::new(MemoryCheckpointStore::new());
+        let graph = interrupting_graph("decisions", "v1", store);
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await {
+            Ok(RunUntilInterruptResult::Interrupted(interrupt)) => interrupt.checkpoint,
+            other => panic!("expected interrupt, got {other:?}"),
+        };
+        assert!(matches!(
+            graph
+                .resume(checkpoint.clone(), ApprovalDecision::Deferred)
+                .await,
+            Ok(RunUntilInterruptResult::Deferred(_))
+        ));
+        assert!(matches!(
+            graph
+                .resume(
+                    checkpoint.clone(),
+                    ApprovalDecision::Rejected {
+                        reason: Some("user rejected".to_string()),
+                    },
+                )
+                .await,
+            Ok(RunUntilInterruptResult::Rejected { .. })
+        ));
+        assert!(
+            graph
+                .resume(checkpoint, ApprovalDecision::Approved)
+                .await
+                .is_err()
         );
     }
 }

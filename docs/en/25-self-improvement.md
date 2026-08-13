@@ -175,8 +175,8 @@ This is the core self-evolution capability added in `v0.2.x`, letting the Agent 
 Every memory carries structured metadata `MemoryMeta`: type, confidence, stability, risk, status, source, topic. Backward compatible — legacy untyped entries get default metadata on read.
 
 ```rust
-use echo_state::memory::typed_store::{TypedMemoryStore, MemoryFilter};
-use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType, MemoryStatus};
+use echo_agent::memory::typed_store::{TypedMemoryStore, MemoryFilter};
+use echo_agent::prelude::{MemoryMeta, MemorySource, MemoryType, MemoryStatus};
 
 let store = TypedMemoryStore::new(arc_store);
 

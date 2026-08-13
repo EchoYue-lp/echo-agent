@@ -1,8 +1,7 @@
 //! Tool execution pipeline — composable stages for tool call processing.
 //!
 //! Replaces the monolithic `execute_tool_feedback_raw` with a configurable
-//! pipeline of discrete stages. Each stage implements [`PipelineStage`] and
-//! can be added, removed, or reordered via [`ToolExecutionPipeline`].
+//! pipeline of discrete internal stages coordinated by `ToolExecutionPipeline`.
 
 use super::context::HookMessageBatches;
 use crate::error::{ReactError, Result};
@@ -35,6 +34,8 @@ pub(crate) struct ToolExecutionContext {
     pub blocked: bool,
     /// Reason for blocking (if blocked).
     pub block_reason: Option<String>,
+    /// Structured terminal facts when execution is blocked before the tool starts.
+    pub block_failure: Option<crate::tools::ToolFailure>,
     /// Execution duration in milliseconds.
     pub duration_ms: u64,
     /// Whether the agent is in plan mode (read-only tools only).
@@ -47,6 +48,15 @@ pub(crate) struct ToolExecutionContext {
     pub stream_tx: Option<mpsc::Sender<(String, String, ToolStreamEvent)>>,
 }
 
+impl ToolExecutionContext {
+    fn block(&mut self, category: crate::tools::ToolFailureCategory, reason: String) {
+        self.blocked = true;
+        self.block_reason = Some(reason.clone());
+        self.block_failure = Some(crate::tools::ToolFailure::new(category));
+        self.output = Some(reason);
+    }
+}
+
 // ── PipelineStage trait ────────────────────────────────────────────
 
 /// A single stage in the tool execution pipeline.
@@ -55,7 +65,6 @@ pub(crate) struct ToolExecutionContext {
 /// Returning `Err` short-circuits the pipeline (tool execution failure).
 /// Setting `ctx.blocked = true` causes subsequent stages to be skipped.
 #[async_trait]
-#[allow(dead_code)] // Internal trait, public for crate API consistency
 pub(crate) trait PipelineStage: Send + Sync {
     /// Human-readable name for logging and debugging.
     fn name(&self) -> &str;
@@ -101,12 +110,10 @@ impl PipelineStage for InterventionStage {
                 let reason = result
                     .block_reason
                     .unwrap_or_else(|| "blocked by intervention callback".into());
-                ctx.blocked = true;
-                ctx.block_reason = Some(format!(
-                    "Tool {} blocked by intervention: {}",
-                    ctx.tool_name, reason
-                ));
-                ctx.output = Some(ctx.block_reason.clone().unwrap_or_default());
+                ctx.block(
+                    crate::tools::ToolFailureCategory::Permanent,
+                    format!("Tool {} blocked by intervention: {}", ctx.tool_name, reason),
+                );
                 return Ok(());
             }
             if let Some(redirect) = result.redirect_to {
@@ -121,48 +128,6 @@ impl PipelineStage for InterventionStage {
             if let Some(injected) = result.injected_context {
                 ctx.hook_messages.pre.push(injected);
             }
-        }
-        Ok(())
-    }
-}
-
-/// Validates tool parameters with type checking.
-pub struct ParseValidateStage;
-
-#[async_trait]
-impl PipelineStage for ParseValidateStage {
-    fn name(&self) -> &str {
-        "parse_validate"
-    }
-
-    async fn run(
-        &self,
-        ctx: &mut ToolExecutionContext,
-        _snapshot: &crate::agent::snapshot::AgentRunSnapshot,
-    ) -> Result<()> {
-        // Convert raw input to type-safe ToolCallParams
-        let params = echo_core::tools::ToolCallParams::from_value(&ctx.input);
-        // Validate common required parameters based on tool name
-        match ctx.tool_name.as_str() {
-            "read_file" => {
-                if let Err(e) = params.validate_required("path", "string") {
-                    ctx.blocked = true;
-                    ctx.block_reason = Some(e);
-                }
-            }
-            "edit_file" | "write_file" | "append_file" | "create_file" => {
-                if let Err(e) = params.validate_required("path", "string") {
-                    ctx.blocked = true;
-                    ctx.block_reason = Some(e);
-                }
-            }
-            "shell" => {
-                if let Err(e) = params.validate_required("command", "string") {
-                    ctx.blocked = true;
-                    ctx.block_reason = Some(e);
-                }
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -184,12 +149,13 @@ impl PipelineStage for ToolVisibilityStage {
     ) -> Result<()> {
         if snapshot.tools.disabled_tools.contains(&ctx.tool_name) {
             snapshot.tools.tool_manager.record_tool_selection_failure();
-            ctx.blocked = true;
-            ctx.block_reason = Some(format!(
-                "Tool '{}' is not available in this invocation",
-                ctx.tool_name
-            ));
-            ctx.output = ctx.block_reason.clone();
+            ctx.block(
+                crate::tools::ToolFailureCategory::Unavailable,
+                format!(
+                    "Tool '{}' is not available in this invocation",
+                    ctx.tool_name
+                ),
+            );
         } else if snapshot
             .tools
             .visibility
@@ -197,12 +163,13 @@ impl PipelineStage for ToolVisibilityStage {
             .is_some_and(|visibility| !visibility.is_visible(&ctx.tool_name))
         {
             snapshot.tools.tool_manager.record_tool_selection_failure();
-            ctx.blocked = true;
-            ctx.block_reason = Some(format!(
-                "Tool '{}' is not activated in this invocation; use tool_search first",
-                ctx.tool_name
-            ));
-            ctx.output = ctx.block_reason.clone();
+            ctx.block(
+                crate::tools::ToolFailureCategory::Unavailable,
+                format!(
+                    "Tool '{}' is not activated in this invocation; use tool_search first",
+                    ctx.tool_name
+                ),
+            );
         }
         Ok(())
     }
@@ -246,12 +213,10 @@ impl PipelineStage for PreToolUseHookStage {
         ctx.permission_mode_override = hook_result.permission_mode_override;
 
         if hook_result.block {
-            ctx.blocked = true;
-            ctx.block_reason = Some(
-                hook_result
-                    .block_reason
-                    .unwrap_or_else(|| format!("Tool {} blocked by hook", ctx.tool_name)),
-            );
+            let reason = hook_result
+                .block_reason
+                .unwrap_or_else(|| format!("Tool {} blocked by hook", ctx.tool_name));
+            ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
             return Ok(());
         }
 
@@ -283,8 +248,7 @@ impl PipelineStage for PermissionStage {
             match decision {
                 PermissionDecision::Allow => return Ok(()),
                 PermissionDecision::Deny { reason } => {
-                    ctx.blocked = true;
-                    ctx.block_reason = Some(reason);
+                    ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
                     return Ok(());
                 }
                 PermissionDecision::Ask { .. } | PermissionDecision::RequireApproval => {}
@@ -303,11 +267,10 @@ impl PipelineStage for PermissionStage {
         };
         ctx.hook_messages.pre.extend(permission_hook.messages);
         if permission_hook.block {
-            ctx.blocked = true;
-            ctx.block_reason =
-                Some(permission_hook.block_reason.unwrap_or_else(|| {
-                    format!("Tool {} blocked by permission hook", ctx.tool_name)
-                }));
+            let reason = permission_hook
+                .block_reason
+                .unwrap_or_else(|| format!("Tool {} blocked by permission hook", ctx.tool_name));
+            ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
             return Ok(());
         }
         if let Some(mode) = permission_hook.permission_mode_override {
@@ -317,8 +280,7 @@ impl PipelineStage for PermissionStage {
             match decision {
                 PermissionDecision::Allow => return Ok(()),
                 PermissionDecision::Deny { reason } => {
-                    ctx.blocked = true;
-                    ctx.block_reason = Some(reason);
+                    ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
                     return Ok(());
                 }
                 PermissionDecision::Ask { .. } | PermissionDecision::RequireApproval => {}
@@ -327,20 +289,38 @@ impl PipelineStage for PermissionStage {
 
         #[cfg(feature = "human-loop")]
         let approval_modified = snapshot
-            .check_tool_approval(&ctx.tool_name, &ctx.input, ctx.permission_mode_override)
+            .check_tool_approval(
+                &ctx.call_id,
+                &ctx.tool_name,
+                &ctx.input,
+                ctx.permission_mode_override,
+            )
             .await
             .map_err(|error| ReactError::Other(error.to_string()))?;
 
         #[cfg(not(feature = "human-loop"))]
         let approval_modified = snapshot
-            .check_tool_approval(&ctx.tool_name, &ctx.input, ctx.permission_mode_override)
+            .check_tool_approval(
+                &ctx.call_id,
+                &ctx.tool_name,
+                &ctx.input,
+                ctx.permission_mode_override,
+            )
             .await
             .map_err(|_| ReactError::Other("Permission check failed".into()))?;
 
-        if let Some(modified) = approval_modified
-            && let Value::Object(map) = &modified
-        {
-            ctx.params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        if let Some(modified) = approval_modified {
+            let Value::Object(map) = &modified else {
+                return Err(ReactError::Other(format!(
+                    "Permission handler returned non-object input for tool '{}'",
+                    ctx.tool_name
+                )));
+            };
+            ctx.params = map
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            ctx.input = modified;
         }
         Ok(())
     }
@@ -384,8 +364,7 @@ impl PipelineStage for ReadBeforeEditStage {
                 None => false,
             };
             if !read {
-                ctx.blocked = true;
-                ctx.block_reason = Some(format!(
+                ctx.block(crate::tools::ToolFailureCategory::Unavailable, format!(
                     "Read-before-edit is enabled. File '{}' has not been read. Use read_file first.",
                     path
                 ));
@@ -411,11 +390,13 @@ impl PipelineStage for SkillPermissionStage {
     ) -> Result<()> {
         // Check if a skill is activated and has tool restrictions
         if !snapshot.tools.is_skill_tool_allowed(&ctx.tool_name) {
-            ctx.blocked = true;
-            ctx.block_reason = Some(format!(
-                "Tool '{}' is not permitted by the activated skill's allowed_tools whitelist",
-                ctx.tool_name
-            ));
+            ctx.block(
+                crate::tools::ToolFailureCategory::Unavailable,
+                format!(
+                    "Tool '{}' is not permitted by the activated skill's allowed_tools whitelist",
+                    ctx.tool_name
+                ),
+            );
         }
         Ok(())
     }
@@ -500,6 +481,7 @@ impl PipelineStage for ExecuteStage {
             message_id: snapshot.current_message_id.clone(),
             execution_id: snapshot.current_execution_id.clone(),
             call_id: Some(ctx.call_id.clone()),
+            active_message: snapshot.current_message.clone(),
             output_artifacts: snapshot.config.tool_output_artifacts.clone(),
             tool_visibility: snapshot.tools.visibility.clone(),
             cancel: snapshot.external_cancel.clone(),
@@ -607,7 +589,6 @@ impl PipelineStage for ExecuteStage {
                         &e,
                         may_have_side_effects,
                     )),
-                    bytes: None,
                     data: None,
                     truncated: false,
                     mime_type: None,
@@ -617,6 +598,17 @@ impl PipelineStage for ExecuteStage {
         };
 
         ctx.duration_ms = u64::try_from(execution_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        #[cfg(feature = "telemetry")]
+        {
+            crate::telemetry::Metrics::record_tool_execution(
+                &ctx.tool_name,
+                if result.success { "success" } else { "error" },
+            );
+            crate::telemetry::Metrics::record_tool_latency(
+                &ctx.tool_name,
+                execution_start.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         ctx.result = Some(result.clone());
 
         // Record file read if tool was read_file and succeeded
@@ -681,8 +673,10 @@ impl PipelineStage for PostToolUseHookStage {
         };
         ctx.hook_messages.post = post_result.messages;
         if post_result.block {
-            ctx.blocked = true;
-            ctx.block_reason = post_result.block_reason;
+            let reason = post_result.block_reason.unwrap_or_else(|| {
+                format!("Tool {} output blocked by post-use hook", ctx.tool_name)
+            });
+            ctx.block(crate::tools::ToolFailureCategory::PartialSideEffect, reason);
         }
         Ok(())
     }
@@ -918,25 +912,11 @@ pub struct ToolExecutionPipeline {
 }
 
 impl ToolExecutionPipeline {
-    #[allow(dead_code)]
-    /// Create a new empty pipeline.
-    pub fn new() -> Self {
-        Self { stages: Vec::new() }
-    }
-
-    #[allow(dead_code)]
-    /// Add a stage to the end of the pipeline.
-    pub(crate) fn with_stage(mut self, stage: Box<dyn PipelineStage>) -> Self {
-        self.stages.push(stage);
-        self
-    }
-
     /// Build a pipeline with all standard stages in the correct order.
     pub fn default_pipeline() -> Self {
         Self {
             stages: vec![
                 Box::new(InterventionStage),
-                Box::new(ParseValidateStage),
                 Box::new(ToolVisibilityStage),
                 Box::new(PlanModeStage),
                 Box::new(PreToolUseHookStage),
@@ -1006,8 +986,7 @@ impl PipelineStage for PlanModeStage {
             || ctx.tool_name == "shell"
             || ctx.tool_name == "delete_file"
         {
-            ctx.blocked = true;
-            ctx.block_reason = Some(format!(
+            ctx.block(crate::tools::ToolFailureCategory::Unavailable, format!(
                 "Plan mode: '{}' is blocked. Read and analyze only. Use /plan off to enable writes.",
                 ctx.tool_name
             ));
@@ -1204,6 +1183,7 @@ mod tests {
             output: None,
             blocked: false,
             block_reason: None,
+            block_failure: None,
             duration_ms: 0,
             plan_mode: false,
             permission_decision: None,
@@ -1223,6 +1203,7 @@ mod tests {
             output: None,
             blocked: false,
             block_reason: None,
+            block_failure: None,
             duration_ms: 0,
             plan_mode: false,
             permission_decision: None,

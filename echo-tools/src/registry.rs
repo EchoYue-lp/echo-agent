@@ -52,12 +52,10 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(GitBlameTool));
     }
 
-    // ── rag (all read-only) ───────────────────────────────────────────────
+    // ── rag (dependency-free read-only subset) ───────────────────────────
     #[cfg(feature = "rag")]
     {
-        use crate::rag::{RagChunkDocumentTool, RagIndexTool, RagSearchTool};
-        tool_manager.register(Box::new(RagIndexTool));
-        tool_manager.register(Box::new(RagSearchTool));
+        use crate::rag::RagChunkDocumentTool;
         tool_manager.register(Box::new(RagChunkDocumentTool));
     }
 
@@ -93,23 +91,20 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
     {
         use crate::image::ImageAnalysisTool;
         use crate::media::image_fetch::ImageFetchTool;
-        use crate::media::web_fetch_enhanced::WebFetchToolEnhanced;
         use crate::pdf::{PdfExtractTool, PdfInfoTool};
-        use crate::text::{TextExportTool, TextProcessTool, TextSearchTool, TextStatsTool};
+        use crate::text::{TextProcessTool, TextSearchTool, TextStatsTool};
         use crate::word::{WordInfoTool, WordReadTool, WordStructureTool};
         // Excel: EXCLUDED ExcelWriteTool; kept read/info/csv/profile.
-        use crate::excel::{ExcelInfoTool, ExcelProfileTool, ExcelReadTool, ExcelToCsvTool};
+        use crate::excel::{ExcelInfoTool, ExcelProfileTool, ExcelReadTool};
 
         tool_manager.register(Box::new(ImageAnalysisTool));
         if let Ok(tool) = ImageFetchTool::new() {
             tool_manager.register(Box::new(tool));
         }
-        tool_manager.register(Box::new(WebFetchToolEnhanced::new()));
         tool_manager.register(Box::new(PdfExtractTool));
         tool_manager.register(Box::new(PdfInfoTool));
         tool_manager.register(Box::new(ExcelReadTool));
         tool_manager.register(Box::new(ExcelInfoTool));
-        tool_manager.register(Box::new(ExcelToCsvTool));
         tool_manager.register(Box::new(ExcelProfileTool));
         tool_manager.register(Box::new(WordReadTool));
         tool_manager.register(Box::new(WordInfoTool));
@@ -117,7 +112,6 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(TextSearchTool));
         tool_manager.register(Box::new(TextStatsTool));
         tool_manager.register(Box::new(TextProcessTool));
-        tool_manager.register(Box::new(TextExportTool));
     }
 
     // ── data (read-only subset) ───────────────────────────────────────────
@@ -162,17 +156,14 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
     #[cfg(feature = "research")]
     {
         use crate::research::{
-            ArxivSearchTool, BibtexGenerateTool, ClinicalTrialsSearchTool, PdfFetchTool,
-            PubMedSearchTool, ResearchRecallTool, ResearchRememberTool, SemanticScholarSearchTool,
+            ArxivSearchTool, ClinicalTrialsSearchTool, PdfFetchTool, PubMedSearchTool,
+            SemanticScholarSearchTool,
         };
         tool_manager.register(Box::new(ArxivSearchTool));
         tool_manager.register(Box::new(SemanticScholarSearchTool));
         tool_manager.register(Box::new(PubMedSearchTool));
         tool_manager.register(Box::new(ClinicalTrialsSearchTool));
         tool_manager.register(Box::new(PdfFetchTool));
-        tool_manager.register(Box::new(BibtexGenerateTool));
-        tool_manager.register(Box::new(ResearchRememberTool));
-        tool_manager.register(Box::new(ResearchRecallTool));
     }
 
     #[cfg(not(any(
@@ -273,9 +264,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
 
     #[cfg(feature = "rag")]
     {
-        use crate::rag::{RagChunkDocumentTool, RagIndexTool, RagSearchTool};
-        tool_manager.register(Box::new(RagIndexTool));
-        tool_manager.register(Box::new(RagSearchTool));
+        use crate::rag::RagChunkDocumentTool;
         tool_manager.register(Box::new(RagChunkDocumentTool));
     }
 
@@ -308,7 +297,6 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         };
         use crate::image::ImageAnalysisTool;
         use crate::media::image_fetch::ImageFetchTool;
-        use crate::media::web_fetch_enhanced::WebFetchToolEnhanced;
         use crate::pdf::{PdfExtractTool, PdfInfoTool};
         use crate::text::{TextExportTool, TextProcessTool, TextSearchTool, TextStatsTool};
         use crate::word::{WordInfoTool, WordReadTool, WordStructureTool};
@@ -317,7 +305,6 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         if let Ok(tool) = ImageFetchTool::new() {
             tool_manager.register(Box::new(tool));
         }
-        tool_manager.register(Box::new(WebFetchToolEnhanced::new()));
         tool_manager.register(Box::new(PdfExtractTool));
         tool_manager.register(Box::new(PdfInfoTool));
         tool_manager.register(Box::new(ExcelReadTool));
@@ -387,7 +374,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
     {
         use crate::research::{
             ArxivSearchTool, BibtexGenerateTool, ClinicalTrialsSearchTool, PdfFetchTool,
-            PubMedSearchTool, ResearchRecallTool, ResearchRememberTool, SemanticScholarSearchTool,
+            PubMedSearchTool, SemanticScholarSearchTool,
         };
         tool_manager.register(Box::new(ArxivSearchTool));
         tool_manager.register(Box::new(SemanticScholarSearchTool));
@@ -395,8 +382,6 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(ClinicalTrialsSearchTool));
         tool_manager.register(Box::new(PdfFetchTool));
         tool_manager.register(Box::new(BibtexGenerateTool));
-        tool_manager.register(Box::new(ResearchRememberTool));
-        tool_manager.register(Box::new(ResearchRecallTool));
     }
 }
 

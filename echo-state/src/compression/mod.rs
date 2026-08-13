@@ -68,12 +68,26 @@ fn projection_marker_prefix(marker: &str) -> Option<String> {
 /// This is the "L3 Memory Promotion" mechanism.
 pub trait MemoryPromoter: Send + Sync {
     /// Process evicted messages and promote key facts to memory.
-    fn promote(&self, evicted: &[Message]) -> futures::future::BoxFuture<'_, ()>;
+    fn promote(
+        &self,
+        evicted: &[Message],
+    ) -> futures::future::BoxFuture<'_, Result<MemoryPromotionReceipt>>;
+}
+
+/// Durable outcome of one memory-promotion attempt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryPromotionReceipt {
+    pub submitted: usize,
+    pub promoted: usize,
+    pub deduplicated: usize,
 }
 
 /// Blanket implementation for `Arc<dyn MemoryPromoter>`.
 impl MemoryPromoter for Arc<dyn MemoryPromoter> {
-    fn promote(&self, evicted: &[Message]) -> futures::future::BoxFuture<'_, ()> {
+    fn promote(
+        &self,
+        evicted: &[Message],
+    ) -> futures::future::BoxFuture<'_, Result<MemoryPromotionReceipt>> {
         (**self).promote(evicted)
     }
 }
@@ -434,7 +448,12 @@ impl ContextManager {
             if removed >= keep_count {
                 break;
             }
-            if !protected.contains(&i) && self.messages[i].role != Role::System {
+            if !protected.contains(&i)
+                && self
+                    .messages
+                    .get(i)
+                    .is_some_and(|message| message.role != Role::System)
+            {
                 to_remove.push(i);
                 removed += 1;
             }
@@ -501,6 +520,12 @@ impl ContextManager {
     /// Dynamically replace the Tokenizer
     pub fn set_tokenizer(&mut self, tokenizer: Arc<dyn Tokenizer>) {
         self.tokenizer = tokenizer;
+    }
+
+    /// Atomically replace the live context limit and its derived token budget.
+    pub fn set_token_limit(&mut self, token_limit: usize, budget: Option<TokenBudget>) {
+        self.token_limit = token_limit;
+        self.budget = budget;
     }
 
     /// Clear the context buffer (preserves configured compressor and protection markers)
@@ -786,7 +811,16 @@ impl ContextManager {
         let mut result = compressed;
         for protected_msg in protected.into_iter().rev() {
             let trailing_slots = protected_msg.compressible_after + protected_msg.protected_after;
-            let insert_at = result.len().saturating_sub(trailing_slots);
+            let system_boundary = result
+                .iter()
+                .take_while(|message| message.role == Role::System)
+                .count();
+            let desired = result.len().saturating_sub(trailing_slots);
+            let insert_at = if protected_msg.message.role == Role::System {
+                desired.min(system_boundary)
+            } else {
+                desired.max(system_boundary)
+            };
             result.insert(insert_at, protected_msg.message);
         }
         result
@@ -831,12 +865,11 @@ impl ContextManager {
     /// broken tool-call pairs → fixed.
     ///
     /// Returns the number of evicted messages sent to the promoter.
-    async fn promote_and_sanitize(&mut self, evicted_messages: &[Message]) -> usize {
+    async fn promote_and_sanitize(&mut self, evicted_messages: &[Message]) -> Result<usize> {
         // ── Memory promotion ──
         let count = if let Some(ref promoter) = self.memory_promoter {
             if !evicted_messages.is_empty() {
-                promoter.promote(evicted_messages).await;
-                evicted_messages.len()
+                promoter.promote(evicted_messages).await?.promoted
             } else {
                 0
             }
@@ -848,7 +881,7 @@ impl ContextManager {
         let (sanitized, _fixes) = sanitize_tool_call_pairing(&self.messages);
         self.messages = sanitized;
 
-        count
+        Ok(count)
     }
 
     /// Set canonical context sources for re-injection after compression.
@@ -1030,6 +1063,7 @@ impl ContextManager {
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         let before_count = self.messages.len();
         let before_tokens = self.token_estimate();
+        let original_messages = self.messages.clone();
 
         let (compressible, protected) = self.split_protected(self.messages.clone());
 
@@ -1040,6 +1074,8 @@ impl ContextManager {
                     token_limit: self.token_limit,
                     current_query: None,
                     focus_instructions: None,
+                    cancel_token: None,
+                    tokenizer: Some(self.tokenizer.clone()),
                 })
                 .await?
         } else {
@@ -1049,6 +1085,8 @@ impl ContextManager {
                     token_limit: self.token_limit,
                     current_query: None,
                     focus_instructions: None,
+                    cancel_token: None,
+                    tokenizer: Some(self.tokenizer.clone()),
                 })
                 .await?
         };
@@ -1062,7 +1100,13 @@ impl ContextManager {
         self.messages = Self::merge_protected(output.messages, protected);
 
         // ── Memory promotion + sanitize ──
-        let memory_promotion_count = self.promote_and_sanitize(&evicted_messages).await;
+        let memory_promotion_count = match self.promote_and_sanitize(&evicted_messages).await {
+            Ok(count) => count,
+            Err(error) => {
+                self.messages = original_messages;
+                return Err(error);
+            }
+        };
 
         let checkpoint =
             checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
@@ -1093,7 +1137,7 @@ impl ContextManager {
 
     /// Force-compress with user-provided focus instructions.
     ///
-    /// The focus instructions are passed to the compressor via `CompressionInput::current_query`,
+    /// The focus instructions are passed via `CompressionInput::focus_instructions`,
     /// allowing LLM-based compressors (Summary, IncrementalSummary, Adaptive L4) to
     /// prioritize specific topics in their summaries.
     pub async fn force_compress_with_focus(
@@ -1103,6 +1147,7 @@ impl ContextManager {
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         let before_count = self.messages.len();
         let before_tokens = self.token_estimate();
+        let original_messages = self.messages.clone();
 
         let (compressible, protected) = self.split_protected(self.messages.clone());
 
@@ -1113,6 +1158,8 @@ impl ContextManager {
                     token_limit: self.token_limit,
                     current_query: None,
                     focus_instructions: Some(focus_instructions.to_string()),
+                    cancel_token: None,
+                    tokenizer: Some(self.tokenizer.clone()),
                 })
                 .await?
         } else {
@@ -1122,6 +1169,8 @@ impl ContextManager {
                     token_limit: self.token_limit,
                     current_query: None,
                     focus_instructions: Some(focus_instructions.to_string()),
+                    cancel_token: None,
+                    tokenizer: Some(self.tokenizer.clone()),
                 })
                 .await?
         };
@@ -1135,7 +1184,13 @@ impl ContextManager {
         self.messages = Self::merge_protected(output.messages, protected);
 
         // ── Memory promotion + sanitize ──
-        let memory_promotion_count = self.promote_and_sanitize(&evicted_messages).await;
+        let memory_promotion_count = match self.promote_and_sanitize(&evicted_messages).await {
+            Ok(count) => count,
+            Err(error) => {
+                self.messages = original_messages;
+                return Err(error);
+            }
+        };
 
         let checkpoint =
             checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
@@ -1173,6 +1228,7 @@ impl ContextManager {
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         let before_count = self.messages.len();
         let before_tokens = self.token_estimate();
+        let original_messages = self.messages.clone();
 
         let (compressible, protected) = self.split_protected(self.messages.clone());
 
@@ -1182,6 +1238,8 @@ impl ContextManager {
                 token_limit: self.token_limit,
                 current_query: None,
                 focus_instructions: None,
+                cancel_token: None,
+                tokenizer: Some(self.tokenizer.clone()),
             })
             .await?;
 
@@ -1194,7 +1252,13 @@ impl ContextManager {
         self.messages = Self::merge_protected(output.messages, protected);
 
         // ── Memory promotion + sanitize ──
-        let memory_promotion_count = self.promote_and_sanitize(&evicted_messages).await;
+        let memory_promotion_count = match self.promote_and_sanitize(&evicted_messages).await {
+            Ok(count) => count,
+            Err(error) => {
+                self.messages = original_messages;
+                return Err(error);
+            }
+        };
 
         let checkpoint =
             checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
@@ -1236,11 +1300,23 @@ impl ContextManager {
     /// Protected messages (containing registered markers, e.g. `<skill_content>`) are
     /// excluded from compression and re-inserted after system messages.
     ///
-    /// `current_query` is a reserved field; pass `None`.
+    /// `current_query` protects the active user task from losing focus during
+    /// summary-based compression.
     ///
     /// Returns a [`PrepareResult`] containing the prepared messages and optional
     /// compression stats (populated only when auto-compression was triggered).
     pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<PrepareResult> {
+        self.prepare_with_cancel(current_query, 0, None).await
+    }
+
+    /// Prepare model input while propagating one invocation cancellation token
+    /// through every nested compression provider call.
+    pub async fn prepare_with_cancel(
+        &mut self,
+        current_query: Option<&str>,
+        tool_tokens: usize,
+        cancel_token: Option<echo_core::compression::CancellationToken>,
+    ) -> Result<PrepareResult> {
         // ── Snapshot original messages for verification ──
         let original_messages = self.messages.clone();
 
@@ -1250,11 +1326,14 @@ impl ContextManager {
         // compressor may not need to fire at all.
         if let Some(ref horizon_compressor) = self.visibility_horizon {
             let before = self.messages.len();
+            let horizon_original = self.messages.clone();
             let horizon_input = CompressionInput {
                 messages: std::mem::take(&mut self.messages),
                 token_limit: self.token_limit,
                 current_query: current_query.map(String::from),
                 focus_instructions: None,
+                cancel_token: cancel_token.clone(),
+                tokenizer: Some(self.tokenizer.clone()),
             };
             match horizon_compressor.compress(horizon_input).await {
                 Ok(output) => {
@@ -1263,7 +1342,7 @@ impl ContextManager {
                     if evicted_count > 0
                         && let Some(ref promoter) = self.memory_promoter
                     {
-                        promoter.promote(&output.evicted).await;
+                        promoter.promote(&output.evicted).await?;
                     }
                     if compacted > 0 {
                         tracing::debug!(
@@ -1286,29 +1365,43 @@ impl ContextManager {
                     self.messages = output.messages;
                 }
                 Err(e) => {
+                    self.messages = horizon_original;
                     tracing::warn!(error = %e, "VisibilityHorizon pre-compaction failed, continuing with original messages");
                     // Don't fail prepare — horizon is best-effort
                 }
             }
         }
 
-        let estimated_tokens = Self::estimate_tokens(&self.messages, &*self.tokenizer);
+        let system_tokens = self
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .fold(0usize, |total, message| {
+                total.saturating_add(message.content.estimated_tokens(&*self.tokenizer))
+            });
+        let conversation_tokens = self
+            .messages
+            .iter()
+            .filter(|message| message.role != Role::System)
+            .fold(0usize, |total, message| {
+                total.saturating_add(message.content.estimated_tokens(&*self.tokenizer))
+            });
+        let estimated_tokens = system_tokens.saturating_add(conversation_tokens);
 
         // Compute effective token limit once so primary compression and any
         // verifier fallback obey the same budget-aware allowance.
         let effective_limit = if let Some(ref budget) = self.budget {
-            let allocation = budget.allocate(0, 0, estimated_tokens);
-            (estimated_tokens.saturating_sub(allocation.conversation_excess))
-                .max(self.token_limit / 2)
+            budget
+                .total_window()
+                .saturating_sub(budget.output_budget())
+                .saturating_sub(budget.safety_budget())
+                .saturating_sub(tool_tokens)
         } else {
             self.token_limit
         };
 
         let needs_compression = if let Some(ref budget) = self.budget {
-            // Budget-aware check: use percentage-based allocation
-            let system_tokens = 0; // system prompt tokens already counted in messages
-            let tool_tokens = 0; // tool defs not in messages
-            let allocation = budget.allocate(system_tokens, tool_tokens, estimated_tokens);
+            let allocation = budget.allocate(system_tokens, tool_tokens, conversation_tokens);
             allocation.needs_compression()
         } else {
             estimated_tokens > self.token_limit
@@ -1334,13 +1427,19 @@ impl ContextManager {
 
             let owned = std::mem::take(&mut self.messages);
             let (compressible, protected) = self.split_protected(owned);
+            let protected_tokens = protected.iter().fold(0usize, |total, value| {
+                total.saturating_add(value.message.content.estimated_tokens(&*self.tokenizer))
+            });
+            let compressor_limit = effective_limit.saturating_sub(protected_tokens);
 
             let compress_result = compressor
                 .compress(CompressionInput {
                     messages: compressible.clone(),
-                    token_limit: effective_limit,
+                    token_limit: compressor_limit,
                     current_query: current_query.map(String::from),
                     focus_instructions: None,
+                    cancel_token: cancel_token.clone(),
+                    tokenizer: Some(self.tokenizer.clone()),
                 })
                 .await;
 
@@ -1357,8 +1456,13 @@ impl ContextManager {
                     // so key facts can be extracted and stored for later recall.
                     let memory_promotion_count = if let Some(ref promoter) = self.memory_promoter {
                         if !evicted_messages.is_empty() {
-                            promoter.promote(&evicted_messages).await;
-                            evicted_messages.len()
+                            match promoter.promote(&evicted_messages).await {
+                                Ok(receipt) => receipt.promoted,
+                                Err(error) => {
+                                    self.messages = original_messages.clone();
+                                    return Err(error);
+                                }
+                            }
                         } else {
                             0
                         }
@@ -1408,9 +1512,11 @@ impl ContextManager {
                     match fallback
                         .compress(CompressionInput {
                             messages: compressible,
-                            token_limit: effective_limit,
+                            token_limit: compressor_limit,
                             current_query: current_query.map(String::from),
                             focus_instructions: None,
+                            cancel_token: cancel_token.clone(),
+                            tokenizer: Some(self.tokenizer.clone()),
                         })
                         .await
                     {
@@ -1479,12 +1585,20 @@ impl ContextManager {
                         // Re-compress original messages with SlidingWindow as safety net
                         let (orig_compressible, orig_protected) =
                             self.split_protected(original_messages.clone());
+                        let orig_protected_tokens =
+                            orig_protected.iter().fold(0usize, |total, value| {
+                                total.saturating_add(
+                                    value.message.content.estimated_tokens(&*self.tokenizer),
+                                )
+                            });
                         if let Ok(fb_output) = SlidingWindowCompressor::new(40)
                             .compress(CompressionInput {
                                 messages: orig_compressible,
-                                token_limit: effective_limit,
+                                token_limit: effective_limit.saturating_sub(orig_protected_tokens),
                                 current_query: current_query.map(String::from),
                                 focus_instructions: None,
+                                cancel_token: cancel_token.clone(),
+                                tokenizer: Some(self.tokenizer.clone()),
                             })
                             .await
                         {
@@ -1528,6 +1642,14 @@ impl ContextManager {
         if self.canonical_context.is_some() {
             self.reinject_canonical_context();
         }
+        if self.token_estimate() > effective_limit {
+            self.messages = original_messages;
+            return Err(echo_core::error::AgentError::ContextLimitExceeded(format!(
+                "prepared context exceeds its effective input budget: system={system_tokens}, tools={tool_tokens}, conversation={conversation_tokens}, effective_limit={effective_limit}, window={}",
+                self.token_limit
+            ))
+            .into());
+        }
         combined_checkpoint = self.finalize_checkpoint(combined_checkpoint);
 
         Ok(PrepareResult {
@@ -1539,11 +1661,9 @@ impl ContextManager {
     }
 
     fn estimate_tokens(messages: &[Message], tokenizer: &dyn Tokenizer) -> usize {
-        messages
-            .iter()
-            .filter_map(|m| m.content.as_text())
-            .map(|c| tokenizer.count_tokens(&c))
-            .sum()
+        messages.iter().fold(0usize, |total, message| {
+            total.saturating_add(message.content.estimated_tokens(tokenizer))
+        })
     }
 }
 
@@ -1843,6 +1963,57 @@ mod tests {
     use super::*;
     use crate::compression::compressor::SlidingWindowCompressor;
     use echo_core::error::Result;
+    use futures::future::BoxFuture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CharacterTokenizer;
+
+    impl Tokenizer for CharacterTokenizer {
+        fn count_tokens(&self, text: &str) -> usize {
+            text.chars().count()
+        }
+    }
+
+    struct LimitRecorder {
+        limit: Arc<AtomicUsize>,
+    }
+
+    impl ContextCompressor for LimitRecorder {
+        fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
+            self.limit.store(input.token_limit, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(CompressionOutput {
+                    evicted: input.messages,
+                    messages: Vec::new(),
+                    checkpoint: None,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_deducts_protected_context_and_uses_configured_tokenizer() -> Result<()> {
+        let recorded_limit = Arc::new(AtomicUsize::new(usize::MAX));
+        let mut ctx = ContextManager::builder(100)
+            .tokenizer(Arc::new(CharacterTokenizer))
+            .budget(TokenBudget::new(100)?)
+            .compressor(LimitRecorder {
+                limit: recorded_limit.clone(),
+            })
+            .with_system("12345".to_string())
+            .build();
+        ctx.add_protected_marker("<protected>".to_string());
+        ctx.push(Message::user("<protected>123456789".to_string()));
+        ctx.push(Message::user("x".repeat(100)));
+
+        let _ = ctx.prepare(None).await?;
+
+        // Output and safety reserve 20 tokens. The protected 20-token message
+        // is deducted before compression; the system prompt remains inside the
+        // compressor input and shares the remaining 60-token input capacity.
+        assert_eq!(recorded_limit.load(Ordering::SeqCst), 60);
+        Ok(())
+    }
 
     #[test]
     fn context_projection_replaces_existing_tagged_message() {
@@ -2142,13 +2313,13 @@ mod tests {
             skill_injections: Vec::new(),
             active_skill_names: Vec::new(),
         };
-        let mut ctx = ContextManager::builder(1)
+        let mut ctx = ContextManager::builder(64)
             .compressor(SlidingWindowCompressor::new(1))
             .with_system("canonical system".to_string())
             .canonical_context(canonical)
             .build();
         ctx.push(Message::user(
-            "enough conversation content to force compression".to_string(),
+            "enough conversation content to force compression ".repeat(80),
         ));
         ctx
     }
@@ -2475,12 +2646,22 @@ mod tests {
     }
 
     impl MemoryPromoter for TestPromoter {
-        fn promote(&self, evicted: &[Message]) -> futures::future::BoxFuture<'_, ()> {
+        fn promote(
+            &self,
+            evicted: &[Message],
+        ) -> futures::future::BoxFuture<'_, Result<MemoryPromotionReceipt>> {
             self.call_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.total_evicted
                 .fetch_add(evicted.len(), std::sync::atomic::Ordering::Relaxed);
-            Box::pin(async {})
+            let promoted = evicted.len();
+            Box::pin(async move {
+                Ok(MemoryPromotionReceipt {
+                    submitted: promoted,
+                    promoted,
+                    deduplicated: 0,
+                })
+            })
         }
     }
 

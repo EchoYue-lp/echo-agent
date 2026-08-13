@@ -1,7 +1,7 @@
 //! Text embedding interface
 //!
 //! Maps text to dense float vectors for semantic search.
-//! Concrete implementation ([`HttpEmbedder`]) lives in `echo_state`.
+//! Concrete implementation (`HttpEmbedder`) lives in `echo_state`.
 
 use crate::error::Result;
 use futures::future::BoxFuture;

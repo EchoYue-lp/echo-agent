@@ -24,7 +24,7 @@ echo-agent uses a **single Agent engine** architecture: all execution paths (for
 │                                                              │
 │  Composable capabilities:                                    │
 │  ├── ReAct loop (think → act → observe)                     │
-│  ├── Task planning (execute_with_planning)                  │
+│  ├── Revisioned task graph tools                            │
 │  ├── Subagent dispatch (SubagentExecutor)                   │
 │  ├── Self-review (ReviewTool)                               │
 │  └── Background tasks (TaskSpawner / DAG engine)            │
@@ -39,7 +39,7 @@ echo-agent uses a **single Agent engine** architecture: all execution paths (for
 |---------------|---------------|-------------|
 | `execute()` / `chat()` | `run_react_loop()` entry | Non-streaming execution |
 | `execute_stream()` / `chat_stream()` | `run_stream_channel()` via `lock_owned()` | Streaming execution, lock moved into spawned task |
-| `execute_with_planning()` | Method entry | Three-phase planning |
+| `task_create/task_update/task_list` | Tool calls | Revisioned task graph CRUD |
 | `chat_multimodal()` | Method entry | Multimodal conversation |
 
 This means: foreground chat and background tasks **automatically serialize** — callers don't need to manually manage any locks.
@@ -70,7 +70,7 @@ Built on top of the unified runtime, echo-agent provides the following composabl
 
 | Subsystem | Module | Description |
 |-----------|--------|-------------|
-| DAG Task Engine | `echo_orchestration::tasks` | Directed acyclic graph task orchestration with dependencies, parallelism, and retry |
+| DAG Task Engine | `echo_agent::tasks` | Directed acyclic graph task orchestration with dependencies, parallelism, and retry |
 | Background Task Handle | `tasks::background_task` | `BackgroundTask<T>` + `TaskSpawner` for non-blocking task management |
 | Progress Tracking | `tasks::progress` + `callbacks::ProgressBridge` | `PhasePlan` + `ProgressReporter` + Agent callback bridging |
 | Human Selection | `human_loop::Selection` | `HumanLoopProvider` Selection kind to pause tasks awaiting human choice |
@@ -84,7 +84,7 @@ Built on top of the unified runtime, echo-agent provides the following composabl
 `BackgroundTask<T>` provides non-blocking control over async tasks:
 
 ```rust,ignore
-use echo_orchestration::tasks::{TaskSpawner, TaskSpawnerConfig};
+use echo_agent::tasks::{TaskSpawner, TaskSpawnerConfig};
 
 let spawner = TaskSpawner::new(TaskSpawnerConfig::default());
 

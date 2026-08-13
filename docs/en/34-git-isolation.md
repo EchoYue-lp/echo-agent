@@ -36,10 +36,10 @@ Main repo (branch: main)
 
 ### Rust API
 
-The low-level API lives in `echo_tools::git_worktree`:
+The low-level API lives in `echo_agent::tools::git_worktree`:
 
 ```rust
-use echo_tools::git_worktree::{
+use echo_agent::tools::git_worktree::{
     create_worktree, remove_worktree, list_worktrees,
     merge_worktree, WorktreeConfig, ManagedWorktree,
 };
@@ -181,7 +181,7 @@ The integration is transparent: file-mutating tools (`write_file`, `delete_file`
 ### Core API
 
 ```rust
-use echo_tools::git_checkpoint::{
+use echo_agent::tools::git_checkpoint::{
     create_checkpoint,
     rollback_to_checkpoint,
     cleanup_old_checkpoints,
@@ -359,8 +359,8 @@ The two systems compose naturally. A typical multi-agent workflow:
 
 ```rust
 // Orchestration example
-use echo_tools::git_worktree::{create_worktree, remove_worktree, merge_worktree, WorktreeConfig};
-use echo_tools::git_checkpoint::{create_checkpoint, rollback_to_checkpoint, cleanup_old_checkpoints};
+use echo_agent::tools::git_worktree::{create_worktree, remove_worktree, merge_worktree, WorktreeConfig};
+use echo_agent::tools::git_checkpoint::{create_checkpoint, rollback_to_checkpoint, cleanup_old_checkpoints};
 
 // 1. Create isolated workspace
 let worktree = create_worktree(&repo_path, &WorktreeConfig {

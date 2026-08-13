@@ -3,18 +3,14 @@
 //! Contains all internal implementations of the ReAct loop:
 //! - `retry` — LLM retry logic + tool concurrent timeout calculation
 //! - `context` — Context management + long-term memory + persistence + auditing
-//! - `approval` — Tool execution approval (human-in-the-loop)
-//! - `execution` — Tool execution (invocation, guards, truncation)
-//! - `react_loop` — ReAct loop core (think / process_steps / run_react_loop)
+//! - `react_loop` — ReAct loop entry and context preparation
 //! - `direct` — Direct execution entry (run_direct / run_chat_direct)
 //! - `stream_channel` — Channel-based streaming execution (primary)
 //! - `processor` — SSE chunk → AgentEvent conversion
 //! - `types` — Shared types (StreamMode, StreamInit)
 
-pub(crate) mod approval;
 pub(crate) mod context;
 pub(crate) mod direct;
-pub(crate) mod execution;
 pub(crate) mod phases;
 /// Tool execution pipeline — composable 13-stage middleware for tool calls.
 pub mod pipeline;

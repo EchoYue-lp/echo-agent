@@ -6,8 +6,8 @@
 //! - 支持 Pod SecurityPolicy / SecurityStandards
 //!
 //! 适用于大规模并发和企业级部署。需要 `kubectl` 已配置集群访问。
-//! 当前实现不会像 Docker 一样逐 Pod 强制断网；当 `ResourceLimits.network=false`
-//! 时，会保留默认网络行为并输出能力告警。
+//! 当前实现不能像 Docker 一样逐 Pod 强制断网；因此当
+//! `ResourceLimits.network=false` 时会拒绝执行，避免违反调用方声明的隔离契约。
 
 use super::{
     CommandKind, ExecutionResult, IsolationLevel, ResourceLimits, SandboxCommand, SandboxExecutor,
@@ -22,7 +22,6 @@ use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 
 /// K8s 沙箱配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,13 +190,12 @@ impl K8sSandbox {
             )
         };
 
-        if let Some(l) = limits
-            && !l.network
-        {
-            warn!(
-                pod = %pod_name,
-                "K8sSandbox cannot fully disable per-pod network access; continuing with cluster defaults"
-            );
+        if limits.is_some_and(|limits| !limits.network) {
+            return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::PermissionDenied(
+                    "K8sSandbox cannot enforce network=false for an individual pod".to_string(),
+                ),
+            )));
         }
 
         // 构建 kubectl run 命令
@@ -508,5 +506,23 @@ mod tests {
         let cmd = SandboxCommand::code("php", "echo 'hi';");
         let inner = K8sSandbox::build_inner_command(&cmd);
         assert_eq!(inner, vec!["php", "-r", "echo 'hi';"]);
+    }
+
+    #[tokio::test]
+    async fn network_denial_fails_closed_before_kubectl() {
+        let sandbox = K8sSandbox::new(K8sConfig::default());
+        let limits = ResourceLimits {
+            network: false,
+            ..ResourceLimits::default()
+        };
+        let error = sandbox
+            .execute_with_limits(SandboxCommand::shell("echo test"), limits)
+            .await
+            .err();
+        assert!(matches!(
+            error,
+            Some(echo_core::error::ReactError::Sandbox(inner))
+                if matches!(*inner, SandboxError::PermissionDenied(_))
+        ));
     }
 }

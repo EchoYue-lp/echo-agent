@@ -58,17 +58,20 @@ impl TriggerAccuracy {
         let mut tn = 0usize; // correctly skipped
         let mut fn_count = 0usize; // should trigger but didn't
 
-        for (case, (_query, actual_agent)) in cases.iter().zip(actual_triggers.iter()) {
-            let did_trigger = actual_agent.is_some();
-            let correct_agent = actual_agent.as_deref() == Some(&case.expected_agent);
+        for (index, case) in cases.iter().enumerate() {
+            let actual = actual_triggers.get(index);
+            let query_matches = actual.is_some_and(|(query, _)| query == &case.query);
+            let actual_agent = actual.and_then(|(_, agent)| agent.as_deref());
+            let did_trigger = query_matches && actual_agent.is_some();
+            let correct_agent = query_matches && actual_agent == Some(case.expected_agent.as_str());
 
             match (case.should_trigger, did_trigger, correct_agent) {
                 // Should trigger, did trigger, correct agent → TP
                 (true, true, true) => tp += 1,
-                // Should trigger, did trigger, wrong agent → partial TP, also FP
+                // A wrong route is both a missed expected route and an unexpected route.
                 (true, true, false) => {
-                    tp += 1;
                     fp += 1;
+                    fn_count += 1;
                 }
                 // Should trigger, didn't trigger → FN
                 (true, false, _) => fn_count += 1,
@@ -78,6 +81,8 @@ impl TriggerAccuracy {
                 (false, false, _) => tn += 1,
             }
         }
+
+        fp = fp.saturating_add(actual_triggers.len().saturating_sub(cases.len()));
 
         let total = cases.len();
         let precision = if tp + fp > 0 {
@@ -118,9 +123,15 @@ impl TriggerAccuracy {
         multi_results: &[Vec<(String, Option<String>)>],
     ) -> Self {
         // Flatten to single-run results for standard metrics
-        let flat_actuals: Vec<(String, Option<String>)> = multi_results
+        let flat_actuals: Vec<(String, Option<String>)> = cases
             .iter()
-            .map(|runs| runs.first().cloned().unwrap_or_default())
+            .enumerate()
+            .map(|(index, case)| {
+                multi_results
+                    .get(index)
+                    .and_then(|runs| runs.first().cloned())
+                    .unwrap_or_else(|| (case.query.clone(), None))
+            })
             .collect();
         let mut result = Self::evaluate(cases, &flat_actuals);
 
@@ -136,8 +147,17 @@ impl TriggerAccuracy {
                         0.0
                     };
                 }
-                let triggered = runs.iter().filter(|(_, a)| a.is_some()).count();
-                triggered as f64 / runs.len() as f64
+                if runs.is_empty() || runs.len() != case.runs_per_query {
+                    return 0.0;
+                }
+                let correctly_routed = runs
+                    .iter()
+                    .filter(|(query, agent)| {
+                        query == &case.query
+                            && agent.as_deref() == Some(case.expected_agent.as_str())
+                    })
+                    .count();
+                correctly_routed as f64 / runs.len() as f64
             })
             .collect();
 

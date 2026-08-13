@@ -31,7 +31,7 @@
 //! manager.register(Box::new(QqChannel::new(QqConfig {
 //!     app_id: "your-app-id".into(),
 //!     client_secret: "your-secret".into(),
-//! })?));
+//! })?))?;
 //!
 //! // 3. Use AgentChannelHandler for auto-bridging
 //! let session_config = SessionConfig::default();
@@ -50,7 +50,7 @@
 //!
 //! // 4. Start
 //! for result in manager.start_all(handler_factory).await {
-//!     result?;
+//!     result.result?;
 //! }
 //! # Ok(())
 //! # }
@@ -117,7 +117,7 @@ impl MessageHandler for AgentChannelHandler {
 
         Ok(OutboundMessage::new(
             &msg.channel_id,
-            &msg.sender_id,
+            msg.reply_target(),
             msg.chat_type,
             &reply,
         ))

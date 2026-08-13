@@ -62,6 +62,13 @@ pub enum RuntimeTaskClaimOutcome {
     ReloadSnapshot,
 }
 
+/// Terminal settlement for a claim that cannot reach normal resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeClaimAbandonment {
+    Cancelled,
+    Failed { error: String },
+}
+
 /// Terminal result of driving one dynamic plan snapshot sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeDagOutcome {
@@ -120,6 +127,17 @@ pub trait RuntimeDagController: Send + Sync + 'static {
         task: Task,
         dispatch: Result<Self::DispatchOutput>,
     ) -> Result<RuntimeTaskResolution>;
+
+    /// Settle a claim whose dispatch cannot reach normal resolution. The
+    /// implementation must use compare-and-set semantics so a superseded
+    /// claim cannot overwrite newer work.
+    async fn abandon_claim(
+        &self,
+        run_id: &str,
+        claim: &TaskClaim,
+        task: &Task,
+        abandonment: RuntimeClaimAbandonment,
+    ) -> Result<()>;
 
     async fn block_task(&self, run_id: &str, task: &Task, reason: &str) -> Result<()>;
 
@@ -268,6 +286,10 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 return self.controller.interruption_outcome(run_id).await;
             }
 
+            if !state.paused.is_empty() {
+                return self.controller.interruption_outcome(run_id).await;
+            }
+
             if state.all_completed(&tasks) {
                 return Ok(RuntimeDagOutcome::Completed);
             }
@@ -337,31 +359,46 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             );
 
             let mut join_set = JoinSet::new();
+            let mut outstanding_claims: HashMap<String, (Task, TaskClaim)> = HashMap::new();
+            let mut wave_errors = Vec::new();
             for task in selected_tasks {
+                if cancel.is_cancelled() {
+                    break;
+                }
                 let controller = self.controller.clone();
                 let semaphore = subagent_semaphore.clone();
                 let task_cancel = cancel.clone();
-                let expected_revision = snapshot.revision;
-                let context = TaskSubagentContext::new(run_id.to_string())
-                    .with_cancel(task_cancel)
-                    .with_delegation_policy(self.config.delegation_policy);
+                let claim = match self
+                    .controller
+                    .claim_task(run_id, &task, snapshot.revision)
+                    .await
+                {
+                    Ok(RuntimeTaskClaimOutcome::Claimed(claim)) => claim,
+                    Ok(RuntimeTaskClaimOutcome::ReloadSnapshot) => continue,
+                    Err(error) => {
+                        wave_errors.push(error.to_string());
+                        break;
+                    }
+                };
+                let claim_id = claim.claim_id.clone();
+                outstanding_claims.insert(claim_id.clone(), (task.clone(), claim.clone()));
+                let dispatch_run_id = run_id.to_string();
+                let delegation_policy = self.config.delegation_policy;
                 join_set.spawn(async move {
-                    let permit = semaphore.acquire_owned().await.map_err(|error| {
-                        ReactError::Other(format!("Subagent semaphore closed: {error}"))
-                    })?;
-                    let claim = match controller
-                        .claim_task(&context.run_id, &task, expected_revision)
-                        .await?
-                    {
-                        RuntimeTaskClaimOutcome::Claimed(claim) => claim,
-                        RuntimeTaskClaimOutcome::ReloadSnapshot => return Ok(None),
+                    let dispatch = match semaphore.acquire_owned().await {
+                        Ok(permit) => {
+                            let context = TaskSubagentContext::new(dispatch_run_id)
+                                .with_cancel(task_cancel)
+                                .with_delegation_policy(delegation_policy);
+                            let result = controller.dispatch_task(context, claim, task).await;
+                            drop(permit);
+                            result
+                        }
+                        Err(error) => Err(ReactError::Other(format!(
+                            "Subagent semaphore closed: {error}"
+                        ))),
                     };
-                    let task_for_dispatch = task.clone();
-                    let result = controller
-                        .dispatch_task(context, claim.clone(), task_for_dispatch)
-                        .await;
-                    drop(permit);
-                    Ok::<_, ReactError>(Some((task, claim, result)))
+                    (claim_id, dispatch)
                 });
             }
 
@@ -374,15 +411,11 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     biased;
                     joined = join_set.join_next() => {
                         match joined {
-                            Some(Ok(Ok(Some(result)))) => wave_results.push(result),
-                            Some(Ok(Ok(None))) => {}
-                            Some(Ok(Err(error))) => {
-                                return Err(error);
-                            }
+                            Some(Ok(result)) => wave_results.push(result),
                             Some(Err(error)) => {
-                                return Err(ReactError::Other(format!(
+                                wave_errors.push(format!(
                                     "Subagent dispatch task failed to join: {error}"
-                                )));
+                                ));
                             }
                             None => {}
                         }
@@ -397,14 +430,12 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         join_set.abort_all();
                         while let Some(joined) = join_set.join_next().await {
                             match joined {
-                                Ok(Ok(Some(result))) => wave_results.push(result),
-                                Ok(Ok(None)) => {}
-                                Ok(Err(error)) => return Err(error),
+                                Ok(result) => wave_results.push(result),
                                 Err(error) if error.is_cancelled() => {}
                                 Err(error) => {
-                                    return Err(ReactError::Other(format!(
+                                    wave_errors.push(format!(
                                         "Subagent dispatch task failed to join: {error}"
-                                    )));
+                                    ));
                                 }
                             }
                         }
@@ -414,11 +445,37 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             }
 
             let mut pending_outcome = cancellation_observed.then_some(RuntimeDagOutcome::Cancelled);
-            for (task, claim, dispatch) in wave_results {
-                let resolution = self
+            for (claim_id, dispatch) in wave_results {
+                let Some((task, claim)) = outstanding_claims.remove(&claim_id) else {
+                    wave_errors.push(format!("dispatch returned unknown claim '{claim_id}'"));
+                    continue;
+                };
+                let resolution = match self
                     .controller
-                    .resolve_dispatch(run_id, claim, task.clone(), dispatch)
-                    .await?;
+                    .resolve_dispatch(run_id, claim.clone(), task.clone(), dispatch)
+                    .await
+                {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        let message = error.to_string();
+                        if let Err(abandon_error) = self
+                            .controller
+                            .abandon_claim(
+                                run_id,
+                                &claim,
+                                &task,
+                                RuntimeClaimAbandonment::Failed {
+                                    error: message.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            wave_errors.push(abandon_error.to_string());
+                        }
+                        wave_errors.push(message);
+                        continue;
+                    }
+                };
                 match resolution {
                     RuntimeTaskResolution::Completed
                     | RuntimeTaskResolution::Pending
@@ -438,6 +495,30 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         }
                     }
                 }
+            }
+
+            for (_claim_id, (task, claim)) in outstanding_claims {
+                let abandonment = if cancellation_observed || cancel.is_cancelled() {
+                    RuntimeClaimAbandonment::Cancelled
+                } else {
+                    RuntimeClaimAbandonment::Failed {
+                        error: wave_errors
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "dispatch ended without a result".to_string()),
+                    }
+                };
+                if let Err(error) = self
+                    .controller
+                    .abandon_claim(run_id, &claim, &task, abandonment)
+                    .await
+                {
+                    wave_errors.push(error.to_string());
+                }
+            }
+
+            if !wave_errors.is_empty() {
+                return Err(ReactError::Other(wave_errors.join("; ")));
             }
 
             // Resolve the whole wave before honoring a stop request so completed
@@ -522,6 +603,7 @@ mod tests {
         fail: Mutex<HashMap<TaskId, String>>,
         dispatch_delay: Mutex<HashMap<TaskId, Duration>>,
         wait_for_cancel: Mutex<HashSet<TaskId>>,
+        ignore_cancel: Mutex<HashSet<TaskId>>,
         insert_after: Mutex<Option<TaskId>>,
         reload_claim_once: Mutex<bool>,
     }
@@ -597,11 +679,11 @@ mod tests {
             if current.spec != task.spec || current.execution.status != TaskStatus::Pending {
                 return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
             }
-            let claim = TaskClaim {
-                revision: expected_revision,
-                attempt: current.execution.retry_count.saturating_add(1),
-                spec_hash: current.spec.stable_hash().map_err(ReactError::Other)?,
-            };
+            let claim = TaskClaim::new(
+                expected_revision,
+                current.execution.retry_count.saturating_add(1),
+                current.spec.stable_hash().map_err(ReactError::Other)?,
+            );
             current.execution.status = TaskStatus::Running;
             current.execution.claim = Some(claim.clone());
             Ok(RuntimeTaskClaimOutcome::Claimed(claim))
@@ -627,6 +709,14 @@ mod tests {
                 return Err(ReactError::Agent(Box::new(
                     echo_core::error::AgentError::Cancelled("cancelled by test".to_string()),
                 )));
+            }
+            let ignore_cancel = self
+                .ignore_cancel
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&task.spec.id);
+            if ignore_cancel {
+                std::future::pending::<()>().await;
             }
             let delay = self
                 .dispatch_delay
@@ -717,6 +807,40 @@ mod tests {
                     error: error.to_string(),
                 },
             })
+        }
+
+        async fn abandon_claim(
+            &self,
+            _run_id: &str,
+            claim: &TaskClaim,
+            task: &Task,
+            abandonment: RuntimeClaimAbandonment,
+        ) -> Result<()> {
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let snapshot = snapshot
+                .as_mut()
+                .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
+            let Some(current) = snapshot
+                .tasks
+                .iter_mut()
+                .find(|current| current.spec.id == task.spec.id)
+            else {
+                return Ok(());
+            };
+            if current.execution.claim.as_ref() != Some(claim)
+                || current.execution.status != TaskStatus::Running
+            {
+                return Ok(());
+            }
+            current.execution.status = match abandonment {
+                RuntimeClaimAbandonment::Cancelled => TaskStatus::Cancelled,
+                RuntimeClaimAbandonment::Failed { error } => TaskStatus::Failed(error),
+            };
+            current.execution.claim = None;
+            Ok(())
         }
 
         async fn block_task(&self, _run_id: &str, task: &Task, reason: &str) -> Result<()> {
@@ -893,6 +1017,67 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn reclaimed_physical_attempt_has_a_distinct_execution_id() {
+        let first = TaskClaim::new(7, 2, "same-spec".to_string());
+        let second = TaskClaim::new(7, 2, "same-spec".to_string());
+
+        assert_ne!(first.claim_id, second.claim_id);
+        assert_ne!(
+            first.execution_id("run", "task"),
+            second.execution_id("run", "task")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_abandons_a_non_cooperative_dispatch_claim() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "stuck",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        controller
+            .ignore_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("stuck".to_string());
+        let executor = RuntimeDagExecutor::new(
+            controller.clone(),
+            RuntimeDagExecutorConfig {
+                cancellation_grace_period: Duration::from_millis(10),
+                ..RuntimeDagExecutorConfig::default()
+            },
+        );
+        let cancel = CancellationToken::new();
+        let run_cancel = cancel.clone();
+        let run = tokio::spawn(async move { executor.execute("run", run_cancel).await });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while controller
+                .order
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("task was not dispatched".to_string()))?;
+        cancel.cancel();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), run)
+            .await
+            .map_err(|_| ReactError::Other("executor cancellation timed out".to_string()))?
+            .map_err(|error| ReactError::Other(format!("executor failed to join: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(
+            controller.statuses().get("stuck"),
+            Some(&TaskStatus::Cancelled)
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn claim_conflict_reloads_without_failing_or_dispatching_stale_work() -> Result<()> {
         let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
@@ -983,6 +1168,30 @@ mod tests {
                 "blocked: upstream task failed".to_string()
             ))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn executor_blocks_transitive_downstream_chain() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("a", TaskStatus::Pending, &[]),
+            runtime_task("b", TaskStatus::Pending, &["a"]),
+            runtime_task("c", TaskStatus::Pending, &["b"]),
+        ]));
+        controller
+            .fail
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("a".to_string(), "boom".to_string());
+        let executor =
+            RuntimeDagExecutor::new(controller.clone(), RuntimeDagExecutorConfig::default());
+
+        let outcome = executor.execute("run", CancellationToken::new()).await?;
+        assert!(matches!(outcome, RuntimeDagOutcome::Failed { .. }));
+        let statuses = controller.statuses();
+        for id in ["b", "c"] {
+            assert!(matches!(statuses.get(id), Some(TaskStatus::Blocked(_))));
+        }
         Ok(())
     }
 }

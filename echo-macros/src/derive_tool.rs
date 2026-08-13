@@ -142,7 +142,7 @@ impl syn::parse::Parse for ToolStructAttrs {
 }
 
 /// Parse `#[tool_param(skip)]` or `#[tool_param(description = "...")]` from a field.
-fn parse_tool_param_attrs(attrs: &[Attribute]) -> ToolParamAttrs {
+fn parse_tool_param_attrs(attrs: &[Attribute]) -> syn::Result<ToolParamAttrs> {
     let mut skip = false;
     let mut description: Option<String> = None;
 
@@ -150,11 +150,10 @@ fn parse_tool_param_attrs(attrs: &[Attribute]) -> ToolParamAttrs {
         if !attr.path().is_ident("tool_param") {
             continue;
         }
-        if let Ok(parsed) = attr.parse_args::<ToolParamRaw>() {
-            skip = skip || parsed.skip;
-            if parsed.description.is_some() {
-                description = parsed.description;
-            }
+        let parsed = attr.parse_args::<ToolParamRaw>()?;
+        skip = skip || parsed.skip;
+        if parsed.description.is_some() {
+            description = parsed.description;
         }
     }
 
@@ -163,7 +162,7 @@ fn parse_tool_param_attrs(attrs: &[Attribute]) -> ToolParamAttrs {
         description = super::extract_doc_comments(attrs);
     }
 
-    ToolParamAttrs { skip, description }
+    Ok(ToolParamAttrs { skip, description })
 }
 
 /// Raw parse of tool_param args (supports both `skip` and `description = "..."`)
@@ -229,6 +228,13 @@ pub fn derive_tool_impl(input: DeriveInput) -> syn::Result<TokenStream> {
     let struct_name_str = struct_ident.to_string();
     let params_ident = format_ident!("{}Params", struct_name_str);
 
+    if !input.generics.params.is_empty() || input.generics.where_clause.is_some() {
+        return Err(syn::Error::new_spanned(
+            &input.generics,
+            "#[derive(Tool)] does not support generic structs; use a concrete wrapper type",
+        ));
+    }
+
     // Extract struct-level #[tool(...)] attributes
     let tool_attrs = extract_tool_attrs(&input.attrs)?;
     let tool_name = &tool_attrs.name;
@@ -273,7 +279,7 @@ pub fn derive_tool_impl(input: DeriveInput) -> syn::Result<TokenStream> {
             syn::Error::new_spanned(field, "#[derive(Tool)] requires named fields")
         })?;
 
-        let param_attrs = parse_tool_param_attrs(&field.attrs);
+        let param_attrs = parse_tool_param_attrs(&field.attrs)?;
         if param_attrs.skip {
             continue; // Internal state, not exposed to LLM
         }
@@ -348,7 +354,7 @@ pub fn derive_tool_impl(input: DeriveInput) -> syn::Result<TokenStream> {
     // ── Build the generate block ──────────────────────────────────────────
     let generated = quote! {
         /// Auto-generated parameter struct for [`#struct_ident`].
-        #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
+        #[derive(#echo_crate::__macro_support::serde::Deserialize, #echo_crate::__macro_support::schemars::JsonSchema)]
         #[allow(non_camel_case_types)]
         pub struct #params_ident {
             #(#param_field_defs),*
@@ -359,9 +365,9 @@ pub fn derive_tool_impl(input: DeriveInput) -> syn::Result<TokenStream> {
             fn name(&self) -> &str { #tool_name }
             fn description(&self) -> &str { #tool_desc }
 
-            fn parameters(&self) -> ::serde_json::Value {
-                let schema = ::schemars::schema_for!(#params_ident);
-                ::serde_json::to_value(schema).unwrap_or_default()
+            fn parameters(&self) -> #echo_crate::__macro_support::serde_json::Value {
+                let schema = #echo_crate::__macro_support::schemars::schema_for!(#params_ident);
+                #echo_crate::__macro_support::serde_json::to_value(schema).unwrap_or_default()
             }
 
             #risk_level_override
@@ -371,7 +377,7 @@ pub fn derive_tool_impl(input: DeriveInput) -> syn::Result<TokenStream> {
             fn validate_parameters<'a>(
                 &'a self,
                 params: &'a #echo_crate::tools::ToolParameters,
-            ) -> ::futures::future::BoxFuture<'a, #echo_crate::error::Result<()>> {
+            ) -> #echo_crate::__macro_support::futures::future::BoxFuture<'a, #echo_crate::error::Result<()>> {
                 Box::pin(async move {
                     Self::deserialize_params(params)?;
                     Ok(())
@@ -381,7 +387,7 @@ pub fn derive_tool_impl(input: DeriveInput) -> syn::Result<TokenStream> {
             fn execute<'a>(
                 &'a self,
                 parameters: #echo_crate::tools::ToolParameters,
-            ) -> ::futures::future::BoxFuture<'a, #echo_crate::error::Result<#echo_crate::tools::ToolResult>> {
+            ) -> #echo_crate::__macro_support::futures::future::BoxFuture<'a, #echo_crate::error::Result<#echo_crate::tools::ToolResult>> {
                 Box::pin(async move {
                     let params = #struct_ident::deserialize_params(& parameters)?;
                     <Self as #echo_crate::tools::ToolRunner<#params_ident>>::run(self, params).await
@@ -392,8 +398,8 @@ pub fn derive_tool_impl(input: DeriveInput) -> syn::Result<TokenStream> {
         impl #struct_ident {
             #[doc(hidden)]
             fn deserialize_params(params: &#echo_crate::tools::ToolParameters) -> #echo_crate::error::Result<#params_ident> {
-                let value = ::serde_json::Value::Object(params.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
-                ::serde_json::from_value(value).map_err(|e| {
+                let value = #echo_crate::__macro_support::serde_json::Value::Object(params.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+                #echo_crate::__macro_support::serde_json::from_value(value).map_err(|e| {
                     let msg = e.to_string();
                     let field = msg
                         .strip_prefix("missing field `")
@@ -460,7 +466,7 @@ fn generate_unit_tool(
 
     Ok(quote! {
         /// Auto-generated empty parameter struct for [`#struct_ident`].
-        #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
+        #[derive(#echo_crate::__macro_support::serde::Deserialize, #echo_crate::__macro_support::schemars::JsonSchema)]
         #[allow(non_camel_case_types)]
         pub struct #params_ident {}
 
@@ -470,8 +476,8 @@ fn generate_unit_tool(
             fn name(&self) -> &str { #tool_name }
             fn description(&self) -> &str { #tool_desc }
 
-            fn parameters(&self) -> ::serde_json::Value {
-                ::serde_json::json!({
+            fn parameters(&self) -> #echo_crate::__macro_support::serde_json::Value {
+                #echo_crate::__macro_support::serde_json::json!({
                     "type": "object",
                     "properties": {},
                     "required": []
@@ -485,7 +491,7 @@ fn generate_unit_tool(
             fn execute<'a>(
                 &'a self,
                 _parameters: #echo_crate::tools::ToolParameters,
-            ) -> ::futures::future::BoxFuture<'a, #echo_crate::error::Result<#echo_crate::tools::ToolResult>> {
+            ) -> #echo_crate::__macro_support::futures::future::BoxFuture<'a, #echo_crate::error::Result<#echo_crate::tools::ToolResult>> {
                 Box::pin(async move {
                     <Self as #echo_crate::tools::ToolRunner<#params_ident>>::run(self, #params_ident {}).await
                 })

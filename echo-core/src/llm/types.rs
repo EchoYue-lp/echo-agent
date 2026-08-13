@@ -30,6 +30,16 @@ pub enum ContentPart {
     },
 }
 
+/// Provider-neutral reasoning block required for multi-turn replay.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReasoningBlock {
+    /// Reasoning text accompanied by a provider signature.
+    Signed { thinking: String, signature: String },
+    /// Opaque encrypted reasoning that must be replayed unchanged.
+    Redacted { data: String },
+}
+
 /// Image URL or Base64 data
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ImageUrl {
@@ -144,6 +154,36 @@ impl MessageContent {
             _ => None,
         }
     }
+
+    /// Conservatively estimate provider-visible input tokens, including
+    /// multimodal payloads that are intentionally omitted by [`Self::as_text`].
+    pub fn estimated_tokens(&self, tokenizer: &dyn crate::tokenizer::Tokenizer) -> usize {
+        match self {
+            MessageContent::Text(text) => tokenizer.count_tokens(text),
+            MessageContent::Empty => 0,
+            MessageContent::Parts(parts) => parts.iter().fold(0usize, |total, part| {
+                let part_tokens = match part {
+                    ContentPart::Text { text } => tokenizer.count_tokens(text),
+                    ContentPart::ImageUrl { image_url } => {
+                        if image_url.url.starts_with("data:") {
+                            // Base64 carries roughly three bytes per four characters;
+                            // charging one token per four characters is conservative
+                            // across supported vision providers.
+                            image_url.url.chars().count().div_ceil(4)
+                        } else if image_url.detail.as_deref() == Some("low") {
+                            100
+                        } else {
+                            1_100
+                        }
+                    }
+                    ContentPart::File { name, content } => tokenizer
+                        .count_tokens(name)
+                        .saturating_add(content.chars().count().div_ceil(4)),
+                };
+                total.saturating_add(part_tokens)
+            }),
+        }
+    }
 }
 
 // ── Message Role ────────────────────────────────────────────────────────────
@@ -249,6 +289,8 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     /// Reasoning content from models like Qwen3/DeepSeek (thinking process).
     pub reasoning_content: Option<String>,
+    /// Signed or redacted reasoning blocks needed for provider-valid replay.
+    pub reasoning_blocks: Option<Vec<ReasoningBlock>>,
 }
 
 impl Serialize for Message {
@@ -275,6 +317,9 @@ impl Serialize for Message {
         if let Some(ref rc) = self.reasoning_content {
             map.serialize_entry("reasoning_content", rc)?;
         }
+        if let Some(ref blocks) = self.reasoning_blocks {
+            map.serialize_entry("reasoning_blocks", blocks)?;
+        }
         map.end()
     }
 }
@@ -295,6 +340,8 @@ impl<'de> Deserialize<'de> for Message {
             tool_call_id: Option<String>,
             #[serde(default)]
             reasoning_content: Option<String>,
+            #[serde(default)]
+            reasoning_blocks: Option<Vec<ReasoningBlock>>,
         }
         let raw = RawMessage::deserialize(deserializer)?;
         let role: Role = serde_json::from_value(serde_json::Value::String(raw.role))
@@ -310,6 +357,7 @@ impl<'de> Deserialize<'de> for Message {
             name: raw.name,
             tool_call_id: raw.tool_call_id,
             reasoning_content: raw.reasoning_content,
+            reasoning_blocks: raw.reasoning_blocks,
         })
     }
 }
@@ -324,6 +372,7 @@ impl Message {
             name: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_blocks: None,
         }
     }
 
@@ -336,6 +385,7 @@ impl Message {
             name: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_blocks: None,
         }
     }
 
@@ -348,6 +398,7 @@ impl Message {
             name: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_blocks: None,
         }
     }
 
@@ -402,6 +453,7 @@ impl Message {
             name: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_blocks: None,
         }
     }
 
@@ -414,6 +466,7 @@ impl Message {
             name: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_blocks: None,
         }
     }
 
@@ -426,6 +479,7 @@ impl Message {
             name: Some(name),
             tool_call_id: Some(tool_call_id),
             reasoning_content: None,
+            reasoning_blocks: None,
         }
     }
 
@@ -536,6 +590,9 @@ pub struct ChatCompletionRequest {
     /// Maximum number of tokens to generate
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Reasoning-model output limit. Mutually exclusive with `max_tokens`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     /// Whether to enable streaming response
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
@@ -548,12 +605,12 @@ pub struct ChatCompletionRequest {
     /// OpenAI reasoning-effort for reasoning models (GPT-5 family, o-series).
     ///
     /// One of `"minimal"`, `"low"`, `"medium"`, `"high"`. Only emitted when the
-    /// resolved model speaks [`ThinkingProtocol::OpenaiReasoningEffort`];
+    /// resolved model speaks `ThinkingProtocol::OpenaiReasoningEffort`;
     /// sending it to a non-reasoning model returns a 400.
     #[serde(skip_serializing_if = "Option::is_none", rename = "reasoning_effort")]
     pub reasoning_effort: Option<String>,
     /// Qwen3/GLM `enable_thinking` toggle. Only emitted for models that speak
-    /// [`ThinkingProtocol::EnableThinkingFlag`].
+    /// `ThinkingProtocol::EnableThinkingFlag`.
     #[serde(skip_serializing_if = "Option::is_none", rename = "enable_thinking")]
     pub enable_thinking: Option<bool>,
     /// Qwen3 `thinking_budget` (integer token budget). Optional companion to
@@ -561,7 +618,7 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinking_budget")]
     pub thinking_budget: Option<u32>,
     /// GLM-4.5/4.6 `thinking:{type:"enabled"|"disabled"}` block. Only emitted
-    /// for models that speak [`ThinkingProtocol::GlmThinkingType`].
+    /// for models that speak `ThinkingProtocol::GlmThinkingType`.
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinking")]
     pub glm_thinking: Option<GlmThinkingBlock>,
     /// User identifier for KVCache isolation (DeepSeek, etc.).
@@ -841,6 +898,9 @@ pub struct DeltaMessage {
     /// Reasoning content delta (thinking process from models like Qwen3/DeepSeek)
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    /// Completed signed/redacted reasoning blocks for replay.
+    #[serde(default)]
+    pub reasoning_blocks: Option<Vec<ReasoningBlock>>,
     /// Tool call delta
     #[serde(default)]
     pub tool_calls: Option<Vec<DeltaToolCall>>,
@@ -1276,5 +1336,48 @@ mod tests {
         );
         assert!(chunk.choices.is_empty());
         assert_eq!(chunk.usage.unwrap().cached_prompt_tokens(), 50);
+    }
+
+    #[test]
+    fn multimodal_token_estimate_charges_non_text_parts() {
+        let tokenizer = crate::tokenizer::HeuristicTokenizer;
+        let content = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "hello".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "https://example.com/image.png".to_string(),
+                    detail: None,
+                },
+            },
+            ContentPart::File {
+                name: "note.txt".to_string(),
+                content: "YQ==".repeat(100),
+            },
+        ]);
+
+        assert!(content.estimated_tokens(&tokenizer) >= 1_200);
+    }
+
+    #[test]
+    fn message_round_trips_signed_and_redacted_reasoning_blocks() {
+        let mut message = Message::assistant("answer".to_string());
+        message.reasoning_blocks = Some(vec![
+            ReasoningBlock::Signed {
+                thinking: "reason".to_string(),
+                signature: "signature".to_string(),
+            },
+            ReasoningBlock::Redacted {
+                data: "opaque".to_string(),
+            },
+        ]);
+
+        let encoded = serde_json::to_string(&message).unwrap_or_default();
+        let decoded = serde_json::from_str::<Message>(&encoded).ok();
+        assert_eq!(
+            decoded.and_then(|value| value.reasoning_blocks),
+            message.reasoning_blocks
+        );
     }
 }

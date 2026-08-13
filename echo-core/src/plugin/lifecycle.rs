@@ -58,6 +58,7 @@ struct ManagedLifecycle {
     callbacks: Arc<dyn PluginLifecycle>,
     initialized: bool,
     active: bool,
+    cleanup_required: bool,
 }
 
 /// Owns lifecycle callbacks and drives them from enabled plugin state.
@@ -89,6 +90,7 @@ impl PluginLifecycleManager {
                 callbacks,
                 initialized: false,
                 active: false,
+                cleanup_required: false,
             },
         );
         Ok(())
@@ -101,17 +103,22 @@ impl PluginLifecycleManager {
             .get_mut(plugin_id)
             .ok_or_else(|| format!("No lifecycle callbacks registered for '{plugin_id}'"))?;
         if !lifecycle.initialized {
-            lifecycle
-                .callbacks
-                .init()
-                .map_err(|error| format!("Plugin '{plugin_id}' init failed: {error}"))?;
+            if lifecycle.cleanup_required {
+                return Err(format!(
+                    "Plugin '{plugin_id}' has unresolved lifecycle cleanup debt"
+                ));
+            }
+            if let Err(error) = lifecycle.callbacks.init() {
+                lifecycle.cleanup_required = true;
+                return Err(format!("Plugin '{plugin_id}' init failed: {error}"));
+            }
             lifecycle.initialized = true;
         }
         if !lifecycle.active {
-            lifecycle
-                .callbacks
-                .activate()
-                .map_err(|error| format!("Plugin '{plugin_id}' activation failed: {error}"))?;
+            if let Err(error) = lifecycle.callbacks.activate() {
+                lifecycle.cleanup_required = true;
+                return Err(format!("Plugin '{plugin_id}' activation failed: {error}"));
+            }
             lifecycle.active = true;
         }
         Ok(())
@@ -124,10 +131,10 @@ impl PluginLifecycleManager {
             .get_mut(plugin_id)
             .ok_or_else(|| format!("No lifecycle callbacks registered for '{plugin_id}'"))?;
         if lifecycle.active {
-            lifecycle
-                .callbacks
-                .deactivate()
-                .map_err(|error| format!("Plugin '{plugin_id}' deactivation failed: {error}"))?;
+            if let Err(error) = lifecycle.callbacks.deactivate() {
+                lifecycle.cleanup_required = true;
+                return Err(format!("Plugin '{plugin_id}' deactivation failed: {error}"));
+            }
             lifecycle.active = false;
         }
         Ok(())
@@ -148,32 +155,37 @@ impl PluginLifecycleManager {
 
     /// Remove callbacks for an uninstalled plugin after releasing their resources.
     ///
-    /// The entry is removed before callbacks run so a failed cleanup cannot leave a
-    /// stale registration that prevents the plugin from being registered again.
+    /// Failed cleanup retains ownership so callers can retry instead of
+    /// replacing callbacks that may still own live resources.
     pub fn unregister(&mut self, plugin_id: &str) -> Result<bool, String> {
-        let Some(mut lifecycle) = self.plugins.remove(plugin_id) else {
+        let Some(lifecycle) = self.plugins.get_mut(plugin_id) else {
             return Ok(false);
         };
         let mut errors = Vec::new();
-        if lifecycle.active {
+        if lifecycle.active || lifecycle.cleanup_required {
             if let Err(error) = lifecycle.callbacks.deactivate() {
                 errors.push(format!(
                     "Plugin '{plugin_id}' deactivation failed during unregister: {error}"
                 ));
+            } else {
+                lifecycle.active = false;
             }
-            lifecycle.active = false;
         }
-        if lifecycle.initialized {
+        if lifecycle.initialized || lifecycle.cleanup_required {
             if let Err(error) = lifecycle.callbacks.shutdown() {
                 errors.push(format!(
                     "Plugin '{plugin_id}' shutdown failed during unregister: {error}"
                 ));
+            } else {
+                lifecycle.initialized = false;
             }
-            lifecycle.initialized = false;
         }
         if errors.is_empty() {
+            lifecycle.cleanup_required = false;
+            self.plugins.remove(plugin_id);
             Ok(true)
         } else {
+            lifecycle.cleanup_required = true;
             Err(errors.join("; "))
         }
     }
@@ -362,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_unregister_still_removes_stale_registration() -> Result<(), String> {
+    fn failed_unregister_retains_cleanup_ownership() -> Result<(), String> {
         let mut manager = PluginLifecycleManager::new();
         manager.register("example", Arc::new(FailingCleanupLifecycle))?;
         manager.activate("example")?;
@@ -373,7 +385,11 @@ mod tests {
             .ok_or_else(|| "failing cleanup unexpectedly succeeded".to_string())?;
         assert!(error.contains("injected deactivate failure"));
         assert!(error.contains("injected shutdown failure"));
-        manager.register("example", Arc::new(NoopLifecycle))?;
+        assert!(
+            manager
+                .register("example", Arc::new(NoopLifecycle))
+                .is_err()
+        );
         Ok(())
     }
 }

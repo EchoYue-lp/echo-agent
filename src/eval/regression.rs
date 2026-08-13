@@ -77,7 +77,10 @@ impl RegressionSuite {
         };
 
         EvalCase {
-            id: format!("regression_{}", &run.run_id[..12.min(run.run_id.len())]),
+            id: format!(
+                "regression_{}",
+                run.run_id.chars().take(12).collect::<String>()
+            ),
             name: format!(
                 "Regression: {}",
                 run.input.chars().take(60).collect::<String>()

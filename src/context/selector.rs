@@ -84,7 +84,10 @@ impl ContextSelector {
 
         // Sort by score descending
         let mut scored: Vec<(PathBuf, f64)> = scores.into_iter().collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| a.0.as_os_str().cmp(b.0.as_os_str()))
+        });
         scored
     }
 
@@ -137,5 +140,16 @@ mod tests {
 
         let scored = selector.score_files("some task", &symbols, &recent, &git);
         assert_eq!(scored.len(), 2);
+    }
+
+    #[test]
+    fn equal_scores_are_ordered_by_path() {
+        let selector = ContextSelector::new();
+        let recent = vec![PathBuf::from("src/z.rs"), PathBuf::from("src/a.rs")];
+        let scored = selector.score_files("task", &HashMap::new(), &recent, &[]);
+        assert_eq!(
+            scored.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+            vec![&PathBuf::from("src/a.rs"), &PathBuf::from("src/z.rs")]
+        );
     }
 }

@@ -49,10 +49,6 @@ pub trait Skill: Send + Sync {
     fn system_prompt_injection(&self) -> Option<String> {
         None
     }
-
-    /// Shut down the skill, releasing any held resources.
-    /// Default implementation does nothing.
-    fn shutdown(&self) {}
 }
 
 /// Metadata snapshot for an installed code-based skill.

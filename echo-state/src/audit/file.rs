@@ -15,15 +15,14 @@ use std::sync::Mutex;
 pub struct FileAuditLogger {
     path: PathBuf,
     writer: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+    retention: echo_core::utils::retention::ContentRetentionPolicy,
 }
 
 impl FileAuditLogger {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         if let Some(parent) = path.parent() {
-            // 使用 tokio 异步创建目录，避免阻塞异步运行时
-            let parent = parent.to_path_buf();
-            tokio::task::block_in_place(|| std::fs::create_dir_all(&parent))?;
+            std::fs::create_dir_all(parent)?;
         }
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -32,14 +31,26 @@ impl FileAuditLogger {
         Ok(Self {
             path,
             writer: Mutex::new(Some(std::io::BufWriter::new(file))),
+            retention: echo_core::utils::retention::ContentRetentionPolicy::default(),
         })
+    }
+
+    pub fn with_retention_policy(
+        mut self,
+        retention: echo_core::utils::retention::ContentRetentionPolicy,
+    ) -> Self {
+        self.retention = retention;
+        self
     }
 }
 
 impl AuditLogger for FileAuditLogger {
     fn log<'a>(&'a self, event: AuditEvent) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let line = serde_json::to_string(&event)
+            let mut value = serde_json::to_value(&event)
+                .map_err(|e| echo_core::error::ReactError::Other(e.to_string()))?;
+            self.retention.sanitize_json(&mut value);
+            let line = serde_json::to_string(&value)
                 .map_err(|e| echo_core::error::ReactError::Other(e.to_string()))?;
 
             // Recover from a poisoned lock (another thread panicked while holding it)
@@ -57,7 +68,7 @@ impl AuditLogger for FileAuditLogger {
 
     fn query<'a>(&'a self, filter: AuditFilter) -> BoxFuture<'a, Result<Vec<AuditEvent>>> {
         Box::pin(async move {
-            let content = std::fs::read_to_string(&self.path).unwrap_or_default();
+            let content = std::fs::read_to_string(&self.path)?;
             let mut events: Vec<AuditEvent> = Vec::new();
 
             for line in content.lines() {
@@ -65,7 +76,12 @@ impl AuditLogger for FileAuditLogger {
                 if line.is_empty() {
                     continue;
                 }
-                if let Ok(event) = serde_json::from_str::<AuditEvent>(line) {
+                {
+                    let event = serde_json::from_str::<AuditEvent>(line).map_err(|error| {
+                        echo_core::error::ReactError::Other(format!(
+                            "invalid audit record: {error}"
+                        ))
+                    })?;
                     let mut keep = true;
                     if let Some(ref sid) = filter.session_id
                         && event.session_id.as_deref() != Some(sid)
@@ -99,5 +115,48 @@ impl AuditLogger for FileAuditLogger {
 
             Ok(events)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echo_core::audit::AuditEventType;
+
+    #[tokio::test]
+    async fn durable_audit_redacts_nested_secrets_and_bounds_unicode() -> Result<()> {
+        let temp = std::env::temp_dir().join(format!(
+            "echo-audit-retention-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let path = temp.join("audit.jsonl");
+        let logger = FileAuditLogger::new(&path)?.with_retention_policy(
+            echo_core::utils::retention::ContentRetentionPolicy {
+                max_string_chars: 64,
+                max_array_items: 10,
+            },
+        );
+        logger
+            .log(AuditEvent::now(
+                Some("session".to_string()),
+                "agent".to_string(),
+                AuditEventType::ToolCall {
+                    tool: "shell".to_string(),
+                    input: serde_json::json!({
+                        "nested": {"auth": "Bearer abcdefghijklmnopqrstuvwxyz"}
+                    }),
+                    output: "中文字符".repeat(40),
+                    success: true,
+                    duration_ms: 1,
+                },
+            ))
+            .await?;
+        let bytes = std::fs::read_to_string(path)?;
+        assert!(!bytes.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(bytes.contains("[REDACTED]"));
+        assert!(bytes.contains("[TRUNCATED]"));
+        let _ = std::fs::remove_dir_all(temp);
+        Ok(())
     }
 }

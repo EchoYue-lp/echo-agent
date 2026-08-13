@@ -298,9 +298,6 @@ pub struct ToolResult {
     /// Structured failure and recovery facts when `success` is false.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub failure: Option<ToolFailure>,
-    /// Optional binary output (mutually exclusive with `output` in practice).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub bytes: Option<Vec<u8>>,
     /// Optional structured data (JSON). When present, callers can render it
     /// directly instead of parsing the `output` string.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -325,7 +322,6 @@ impl ToolResult {
             output: output.into(),
             error: None,
             failure: None,
-            bytes: None,
             data: None,
             truncated: false,
             mime_type: None,
@@ -345,7 +341,6 @@ impl ToolResult {
             output,
             error: None,
             failure: None,
-            bytes: None,
             data: Some(data),
             truncated: false,
             mime_type: None,
@@ -361,7 +356,6 @@ impl ToolResult {
             output: output.into(),
             error: None,
             failure: None,
-            bytes: None,
             data: None,
             truncated: false,
             mime_type: None,
@@ -379,34 +373,11 @@ impl ToolResult {
             output: String::new(),
             error: Some(error.into()),
             failure: Some(ToolFailure::new(ToolFailureCategory::Permanent)),
-            bytes: None,
             data: None,
             truncated: false,
             mime_type: None,
             metadata: HashMap::new(),
         }
-    }
-
-    /// Construct a successful result that carries binary payload.
-    pub fn binary(bytes: Vec<u8>) -> Self {
-        Self {
-            kind: ToolResultKind::Text,
-            success: true,
-            output: String::new(),
-            error: None,
-            failure: None,
-            bytes: Some(bytes),
-            data: None,
-            truncated: false,
-            mime_type: None,
-            metadata: HashMap::new(),
-        }
-    }
-
-    /// Attach binary payload without forcing call sites to rewrite struct literals.
-    pub fn with_bytes(mut self, bytes: Vec<u8>) -> Self {
-        self.bytes = Some(bytes);
-        self
     }
 
     /// Override the text output on an existing result.
@@ -743,6 +714,10 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     /// JSON Schema describing accepted parameters.
     fn parameters(&self) -> serde_json::Value;
+    /// Monotonic revision for tools whose schema depends on runtime metadata.
+    fn schema_revision(&self) -> u64 {
+        0
+    }
     /// Execute the tool with untyped JSON parameters.
     ///
     /// **Default implementation** delegates to [`Self::execute_with_context`]
@@ -770,7 +745,7 @@ pub trait Tool: Send + Sync {
     /// honor `ctx.working_dir` / `ctx.resolve_path` when building
     /// `SandboxCommand`s or resolving file paths.
     ///
-    /// The framework's [`ToolManager::execute_tool_with_context`] always
+    /// The framework's `ToolManager::execute_tool_with_context` always
     /// routes through this method, so a per-agent `working_dir` is naturally
     /// delivered to tools without the (shared, stateless) ToolManager holding
     /// any session state — avoiding cross-session cwd contamination.
@@ -822,7 +797,7 @@ pub trait Tool: Send + Sync {
     /// Tools that opt out of the outer batch timeout are long-running by
     /// design and normally own a more appropriate deadline (for example, a
     /// Subagent dispatch timeout). Keep that established behavior as the
-    /// default while exposing the decision explicitly to [`ToolManager`],
+    /// default while exposing the decision explicitly to `ToolManager`,
     /// which otherwise applies the ordinary per-tool timeout as well.
     fn manages_own_timeout(&self) -> bool {
         self.exempt_from_batch_timeout()
@@ -1015,6 +990,9 @@ pub struct ToolContext {
     pub execution_id: Option<String>,
     /// Stable identity for this logical tool call and all of its retry attempts.
     pub call_id: Option<String>,
+    /// User message that triggered the current turn. Delegation tools forward
+    /// this typed value so binary attachments remain intact.
+    pub active_message: Option<crate::llm::types::Message>,
     /// Optional application-selected root and retention policy for complete
     /// tool-output artifacts. Streaming tools should use this instead of
     /// retaining unbounded output in memory.
@@ -1039,6 +1017,7 @@ impl std::fmt::Debug for ToolContext {
             .field("message_id", &self.message_id)
             .field("execution_id", &self.execution_id)
             .field("call_id", &self.call_id)
+            .field("has_active_message", &self.active_message.is_some())
             .field("output_artifacts", &self.output_artifacts)
             .field(
                 "visible_tool_count",
@@ -1246,6 +1225,7 @@ mod tool_context_tests {
             cancel: None,
             trace_sink: None,
             delegation_policy: None,
+            active_message: None,
             // No cache_user_id field — if it still exists, this fails to compile.
         };
     }

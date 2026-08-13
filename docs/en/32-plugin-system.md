@@ -450,18 +450,10 @@ so DOM variables, frontend state, TUI rendering, and persisted backend state do
 not diverge. Output-style activation follows the same persisted preference
 model and updates the replaceable Agent context projection.
 
-You can also wire only specific component types:
-
-```rust
-// Wire skills only
-integrator.wire_skills(&mut agent, &skill_dirs).await;
-
-// Wire hooks only
-integrator.wire_hooks(&agent, &hooks_defs).await;
-
-// Wire MCP servers only (requires mcp feature)
-integrator.wire_mcp(&mut agent, &mcp_files).await;
-```
+`wire_all` is the only component wiring authority. It returns source-owned
+receipts and compensates the entire candidate generation if any framework
+component fails. Use `PluginIntegrator::unwire` with those receipts during
+disable, replacement, or shutdown.
 
 ---
 
@@ -778,37 +770,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
-
----
-
-## NativePlugin (Legacy Interface)
-
-For code-level extensions that need to inject custom Rust logic, the `NativePlugin` trait is retained:
-
-```rust
-use echo_agent::plugin::NativePlugin;
-
-struct MyNativePlugin;
-
-impl NativePlugin for MyNativePlugin {
-    fn id(&self) -> &str { "my-native-plugin" }
-    fn name(&self) -> &str { "My Native Plugin" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn capabilities(&self) -> Vec<PluginCapability> {
-        vec![PluginCapability::Tool]
-    }
-    fn init(&mut self) -> Result<(), String> {
-        // Custom initialization logic
-        Ok(())
-    }
-    fn shutdown(&mut self) -> Result<(), String> {
-        // Custom cleanup logic
-        Ok(())
-    }
-}
-```
-
-> **Tip**: For most use cases, prefer file-based plugins with `manifest.yaml`. Use `NativePlugin` only when runtime Rust logic is required.
 
 ---
 

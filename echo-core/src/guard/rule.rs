@@ -49,10 +49,14 @@ impl Guard for RuleGuard {
             }
 
             if let Some(max_len) = self.max_length
-                && content.len() > max_len
+                && content.chars().count() > max_len
             {
                 return Ok(GuardResult::Block {
-                    reason: format!("Content length {} exceeds limit {}", content.len(), max_len),
+                    reason: format!(
+                        "Content length {} exceeds limit {}",
+                        content.chars().count(),
+                        max_len
+                    ),
                 });
             }
 
@@ -187,6 +191,10 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_blocked());
+
+        let unicode = RuleGuardBuilder::new("unicode").max_length(2).build();
+        let result = unicode.check("中文", GuardDirection::Input).await.unwrap();
+        assert!(!result.is_blocked());
     }
 
     #[tokio::test]

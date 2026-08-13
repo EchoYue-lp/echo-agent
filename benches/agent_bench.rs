@@ -78,7 +78,7 @@ fn bench_workflow_build_simple(c: &mut Criterion) {
 /// Benchmark: Token budget allocation calculation (CPU-bound micro-benchmark)
 fn bench_token_budget_allocate(c: &mut Criterion) {
     c.bench_function("token_budget_allocate", |b| {
-        let budget = echo_core::budget::TokenBudget::new(128_000);
+        let budget = echo_core::budget::TokenBudget::new(128_000).unwrap_or_default();
         b.iter(|| {
             let alloc = budget.allocate(5000, 3000, 40000);
             black_box(alloc.ok())

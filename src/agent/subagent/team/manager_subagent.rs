@@ -9,10 +9,10 @@
 //! mirror the DAG skip-completed-on-retry pattern (`task_runtime/executor.rs:456`).
 //! `store = None` → pure in-memory single-pass (today's behavior, backward-compat).
 
-use super::{Team, TeamMember};
+use super::{Team, TeamDispatchFn, TeamMember};
 use crate::state::{TaskNode, TaskNodeStatus};
+use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 // ── Checkpoint node id helpers ───────────────────────────────────────────────
@@ -34,6 +34,14 @@ fn subagent_node_id(run_id: &str, idx: usize) -> String {
 /// never read; timeouts come from the outer `TeamAgent::execute` wrapper and
 /// the `SubagentExecutor` dispatch timeout).
 pub struct ManagerSubagentOrchestrator;
+
+struct SubTaskExecutionContext<'a> {
+    max_concurrent: usize,
+    run_id: Option<&'a str>,
+    store: Option<&'a dyn crate::state::RuntimeStateStore>,
+    prior_nodes: &'a HashMap<String, TaskNode>,
+    member_dispatch: Option<&'a TeamDispatchFn>,
+}
 
 impl Default for ManagerSubagentOrchestrator {
     fn default() -> Self {
@@ -71,6 +79,18 @@ impl ManagerSubagentOrchestrator {
         run_id: Option<&str>,
         store: Option<&dyn crate::state::RuntimeStateStore>,
     ) -> Result<String, String> {
+        self.run_with_dispatch(team, task, run_id, store, None)
+            .await
+    }
+
+    pub(crate) async fn run_with_dispatch(
+        &self,
+        team: &Team,
+        task: &str,
+        run_id: Option<&str>,
+        store: Option<&dyn crate::state::RuntimeStateStore>,
+        member_dispatch: Option<&TeamDispatchFn>,
+    ) -> Result<String, String> {
         let manager_name = team.leader_name().ok_or("No leader in team")?;
         let subagents: Vec<&TeamMember> = team.subagents().collect();
         if subagents.is_empty() {
@@ -82,7 +102,7 @@ impl ManagerSubagentOrchestrator {
         {
             st.load_nodes(rid)
                 .await
-                .unwrap_or_default()
+                .map_err(|error| format!("Failed to load Team checkpoints: {error}"))?
                 .into_iter()
                 .map(|n| (n.id.clone(), n))
                 .collect()
@@ -122,13 +142,15 @@ impl ManagerSubagentOrchestrator {
                 .filter_map(|v| v.get("task").and_then(|t| t.as_str()).map(String::from))
                 .collect();
             if reused.is_empty() {
-                self.plan_sub_tasks(team, manager_name, task).await?
+                self.plan_sub_tasks(team, manager_name, task, member_dispatch)
+                    .await?
             } else {
                 debug!(count = reused.len(), "Reusing stored plan");
                 reused
             }
         } else {
-            self.plan_sub_tasks(team, manager_name, task).await?
+            self.plan_sub_tasks(team, manager_name, task, member_dispatch)
+                .await?
         };
 
         // Checkpoint: write plan node (ordered [{idx, task}] array for idx binding).
@@ -143,24 +165,57 @@ impl ManagerSubagentOrchestrator {
             let node = TaskNode::new(plan_node_id(rid), "team_plan")
                 .with_status(TaskNodeStatus::Success)
                 .with_outputs(plan_outputs);
-            let _ = st.save_node(rid, &node).await;
+            st.save_node(rid, &node)
+                .await
+                .map_err(|error| format!("Failed to save Team plan checkpoint: {error}"))?;
         }
         debug!(sub_task_count = sub_tasks.len(), "Plan ready");
 
         // ── Phase 2: fan-out subagents (skip Success; reset+rerun Running/Failed) ──
         let results = self
-            .execute_sub_tasks(&sub_tasks, subagents, run_id, store, &prior_nodes)
-            .await;
+            .execute_sub_tasks(
+                &sub_tasks,
+                subagents,
+                SubTaskExecutionContext {
+                    max_concurrent: team.config.max_concurrent,
+                    run_id,
+                    store,
+                    prior_nodes: &prior_nodes,
+                    member_dispatch,
+                },
+            )
+            .await?;
+
+        let failures: Vec<String> = results
+            .iter()
+            .filter_map(|(sub_task, result)| {
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("{sub_task}: {error}"))
+            })
+            .collect();
+        if !failures.is_empty() {
+            return Err(format!(
+                "Team execution failed for {} sub-task(s): {}",
+                failures.len(),
+                failures.join("; ")
+            ));
+        }
 
         // ── Phase 3: synthesize (runs unless fast-pathed above) ──
-        let synthesis = self.synthesize(team, manager_name, task, &results).await?;
+        let synthesis = self
+            .synthesize(team, manager_name, task, &results, member_dispatch)
+            .await?;
 
         // Checkpoint: write synthesis node.
         if let (Some(rid), Some(st)) = (run_id, store) {
             let node = TaskNode::new(synth_node_id(rid), "team_synthesis")
                 .with_status(TaskNodeStatus::Success)
                 .with_outputs(serde_json::Value::String(synthesis.clone()));
-            let _ = st.save_node(rid, &node).await;
+            st.save_node(rid, &node)
+                .await
+                .map_err(|error| format!("Failed to save Team synthesis checkpoint: {error}"))?;
         }
         Ok(synthesis)
     }
@@ -171,6 +226,7 @@ impl ManagerSubagentOrchestrator {
         team: &Team,
         manager_name: &str,
         task: &str,
+        member_dispatch: Option<&TeamDispatchFn>,
     ) -> Result<Vec<String>, String> {
         let manager = team.get_member(manager_name).ok_or("Manager not found")?;
 
@@ -189,11 +245,9 @@ impl ManagerSubagentOrchestrator {
             task
         );
 
-        let output = manager
-            .agent
-            .execute(&planning_prompt)
+        let output = execute_member(manager, &planning_prompt, member_dispatch)
             .await
-            .map_err(|e| format!("Manager planning failed: {e}"))?;
+            .map_err(|error| format!("Manager planning failed: {error}"))?;
 
         let sub_tasks: Vec<String> = output
             .lines()
@@ -218,121 +272,108 @@ impl ManagerSubagentOrchestrator {
         &self,
         sub_tasks: &[String],
         subagents: Vec<&TeamMember>,
-        run_id: Option<&str>,
-        store: Option<&dyn crate::state::RuntimeStateStore>,
-        prior_nodes: &HashMap<String, TaskNode>,
-    ) -> Vec<(String, Result<String, String>)> {
+        context: SubTaskExecutionContext<'_>,
+    ) -> Result<Vec<(String, Result<String, String>)>, String> {
         let subagent_count = subagents.len();
         if subagent_count == 0 {
-            return sub_tasks
-                .iter()
-                .cloned()
-                .map(|task| {
-                    (
-                        task,
-                        Err("Manager-subagent team has no executable subagents".to_string()),
-                    )
-                })
-                .collect();
+            return Err("Manager-subagent team has no executable subagents".to_string());
         }
-        // Each spawned task carries its sub_task index for deterministic
-        // checkpoint id binding (idx travels in the tuple, not derived from
-        // handle position — handles may be reordered by the runtime).
         type SubagentOutcome = (usize, String, Result<String, String>);
-        let mut handles: Vec<tokio::task::JoinHandle<SubagentOutcome>> = Vec::new();
+        let mut reused = Vec::new();
+        let mut pending = Vec::new();
 
         for (i, sub_task) in sub_tasks.iter().enumerate() {
             let Some(subagent) = subagents.get(i % subagent_count).copied() else {
                 continue;
             };
             let subagent_name = subagent.name.clone();
-            let agent = Arc::clone(&subagent.agent);
             let task = sub_task.clone();
             let idx = i;
 
             // Skip-on-resume: if this subagent_idx already Success, reuse its output.
-            if let Some(rid) = run_id {
+            if let Some(rid) = context.run_id {
                 let wid = subagent_node_id(rid, i);
-                if let Some(node) = prior_nodes.get(&wid) {
+                if let Some(node) = context.prior_nodes.get(&wid) {
                     if node.status == TaskNodeStatus::Success {
                         if let Some(out) = node.outputs.as_str() {
                             info!(subagent = %subagent_name, idx = i, "Reusing stored subagent result");
                             let stored: Result<String, String> = Ok(out.to_string());
-                            handles.push(tokio::spawn(async move { (idx, task, stored) }));
+                            reused.push((idx, task, stored));
                             continue;
                         }
                     } else {
                         // State-reset defense (patch #3): Running/Failed/Blocked
                         // → reset to Pending before re-running, overwriting stale
                         // state. Only when a store is configured.
-                        if let Some(st) = store {
+                        if let Some(st) = context.store {
                             let reset = TaskNode::new(wid.clone(), format!("team_subagent_{i}"))
                                 .with_status(TaskNodeStatus::Pending);
-                            let _ = st.save_node(rid, &reset).await;
+                            st.save_node(rid, &reset).await.map_err(|error| {
+                                format!("Failed to reset Team subagent checkpoint: {error}")
+                            })?;
                         }
                     }
                 }
             }
 
-            handles.push(tokio::spawn(async move {
-                let result = agent
-                    .execute(&task)
+            pending.push(async move {
+                let result = execute_member(subagent, &task, context.member_dispatch)
                     .await
-                    .map_err(|e| format!("Subagent {subagent_name} failed: {e}"));
+                    .map_err(|error| format!("Subagent {subagent_name} failed: {error}"));
                 (idx, task, result)
-            }));
+            });
         }
 
         let mut results: Vec<(String, Result<String, String>)> =
             vec![(String::new(), Err("uninitialized".to_string())); sub_tasks.len()];
-        for handle in handles {
-            match handle.await {
-                Ok((idx, task, result)) => {
-                    let subagent_name = subagents
-                        .get(idx % subagent_count)
-                        .map(|subagent| subagent.name.clone())
-                        .unwrap_or_else(|| "unknown-subagent".to_string());
-                    match &result {
-                        Ok(_) => {
-                            info!(subagent = %subagent_name, idx, "Subagent completed sub-task")
-                        }
-                        Err(e) => {
-                            warn!(subagent = %subagent_name, idx, error = %e, "Subagent failed")
-                        }
-                    }
-                    // Checkpoint per-subagent (Success or Failed).
-                    if let (Some(rid), Some(st)) = (run_id, store) {
-                        let status = match &result {
-                            Ok(_) => TaskNodeStatus::Success,
-                            Err(_) => TaskNodeStatus::Failed,
-                        };
-                        let outputs = match &result {
-                            Ok(o) => serde_json::Value::String(o.clone()),
-                            Err(_) => serde_json::Value::Null,
-                        };
-                        let node = TaskNode::new(
-                            subagent_node_id(rid, idx),
-                            format!("team_subagent_{idx}"),
-                        )
-                        .with_status(status)
-                        .with_outputs(outputs);
-                        let _ = st.save_node(rid, &node).await;
-                    }
-                    if let Some(slot) = results.get_mut(idx) {
-                        *slot = (task, result);
-                    } else {
-                        warn!(idx, "Subagent result index exceeded planned sub-task count");
-                    }
+        let max_concurrent = context.max_concurrent.max(1);
+        let outcomes = stream::iter(pending)
+            .buffer_unordered(max_concurrent)
+            .collect::<Vec<SubagentOutcome>>()
+            .await;
+        for (idx, task, result) in reused.into_iter().chain(outcomes) {
+            let subagent_name = subagents
+                .get(idx % subagent_count)
+                .map(|subagent| subagent.name.clone())
+                .unwrap_or_else(|| "unknown-subagent".to_string());
+            match &result {
+                Ok(_) => {
+                    info!(subagent = %subagent_name, idx, "Subagent completed sub-task")
                 }
                 Err(e) => {
-                    warn!("Subagent spawned task panicked: {e}");
+                    warn!(subagent = %subagent_name, idx, error = %e, "Subagent failed")
                 }
             }
+            // Checkpoint per-subagent (Success or Failed).
+            if let (Some(rid), Some(st)) = (context.run_id, context.store) {
+                let status = match &result {
+                    Ok(_) => TaskNodeStatus::Success,
+                    Err(_) => TaskNodeStatus::Failed,
+                };
+                let outputs = match &result {
+                    Ok(o) => serde_json::Value::String(o.clone()),
+                    Err(_) => serde_json::Value::Null,
+                };
+                let node =
+                    TaskNode::new(subagent_node_id(rid, idx), format!("team_subagent_{idx}"))
+                        .with_status(status)
+                        .with_outputs(outputs);
+                st.save_node(rid, &node)
+                    .await
+                    .map_err(|error| format!("Failed to save Team subagent checkpoint: {error}"))?;
+            }
+            if let Some(slot) = results.get_mut(idx) {
+                *slot = (task, result);
+            } else {
+                warn!(idx, "Subagent result index exceeded planned sub-task count");
+            }
         }
-        // Strip the placeholder entries for indices that never resolved (panic
-        // path); keep results in sub_task order.
-        results.retain(|(t, _)| !t.is_empty());
-        results
+        if let Some(missing_idx) = results.iter().position(|(task, _)| task.is_empty()) {
+            return Err(format!(
+                "Team subagent result missing for planned sub-task index {missing_idx}"
+            ));
+        }
+        Ok(results)
     }
 
     /// Phase 3: The manager synthesizes the final answer.
@@ -342,6 +383,7 @@ impl ManagerSubagentOrchestrator {
         manager_name: &str,
         original_task: &str,
         results: &[(String, Result<String, String>)],
+        member_dispatch: Option<&TeamDispatchFn>,
     ) -> Result<String, String> {
         let manager = team.get_member(manager_name).ok_or("Manager not found")?;
 
@@ -369,23 +411,41 @@ impl ManagerSubagentOrchestrator {
              - Base the answer only on the subagent results provided — do not invent findings."
         );
 
-        manager
-            .agent
-            .execute(&synthesis_prompt)
+        execute_member(manager, &synthesis_prompt, member_dispatch)
             .await
-            .map_err(|e| format!("Manager synthesis failed: {e}"))
+            .map_err(|error| format!("Manager synthesis failed: {error}"))
+    }
+}
+
+async fn execute_member(
+    member: &TeamMember,
+    task: &str,
+    dispatch: Option<&TeamDispatchFn>,
+) -> Result<String, String> {
+    if let Some(dispatch) = dispatch {
+        let result = dispatch(member.name.clone(), task.to_string()).await?;
+        if result.outcome.status != crate::agent::subagent::SubagentStatus::Completed {
+            return Err(format!(
+                "subagent '{}' ended with status {:?}: {}",
+                member.name, result.outcome.status, result.output
+            ));
+        }
+        Ok(result.output)
+    } else {
+        member
+            .agent
+            .execute(task)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentEvent;
-    use crate::error::Result;
     use crate::state::RuntimeStateStore;
     use crate::testing::MockAgent;
     use futures::future::BoxFuture;
-    use futures::stream::{self, BoxStream};
     use std::collections::HashMap as StdHashMap;
     use std::sync::{Arc, Mutex};
 
@@ -511,12 +571,7 @@ mod tests {
             .collect();
         // Box clones of the Arc-wrapped mock agents into the team.
         // MockAgent is Clone (shares call history via internal Arc<Mutex>).
-        let mut team = Team::new(
-            "team_test".to_string(),
-            "test",
-            "manager",
-            Default::default(),
-        );
+        let mut team = Team::new("team_test".to_string(), "test", Default::default());
         team.add_member(
             "manager",
             TeamRole::Leader,
@@ -576,6 +631,44 @@ mod tests {
                 n.id
             );
         }
+    }
+
+    #[tokio::test]
+    async fn member_failure_is_not_projected_as_successful_synthesis()
+    -> std::result::Result<(), String> {
+        use crate::agent::subagent::SubagentDefinition;
+        use crate::agent::subagent::team::{Team, TeamRole};
+        use crate::testing::FailingMockAgent;
+
+        let manager = MockAgent::new("manager")
+            .with_response("subtask A")
+            .with_response("SHOULD NOT SYNTHESIZE");
+        let mut team = Team::new("team-failure", "failure test", Default::default());
+        team.add_member(
+            "manager",
+            TeamRole::Leader,
+            Box::new(manager.clone()),
+            SubagentDefinition::simple_sync("manager"),
+        );
+        team.add_member(
+            "failing",
+            TeamRole::Subagent,
+            Box::new(FailingMockAgent::new("failing", "member failed")),
+            SubagentDefinition::simple_sync("failing"),
+        );
+
+        let error = ManagerSubagentOrchestrator::new()
+            .run(&team, "do thing", None, None)
+            .await
+            .err()
+            .ok_or_else(|| "team unexpectedly reported success".to_string())?;
+        assert!(error.contains("member failed"), "unexpected error: {error}");
+        assert_eq!(
+            manager.call_count(),
+            1,
+            "manager synthesis must not run after member failure"
+        );
+        Ok::<(), String>(())
     }
 
     #[tokio::test]
@@ -725,15 +818,5 @@ mod tests {
             .find(|n| n.id == "team_run-synmiss_plan")
             .unwrap();
         assert_eq!(plan.status, TaskNodeStatus::Success);
-    }
-
-    /// Compile-time guard: stub agent impl unused here (MockAgent covers it).
-    #[allow(dead_code)]
-    fn _ensure_agent_event_imported(_: AgentEvent) {}
-    #[allow(dead_code)]
-    fn _ensure_boxstream_imported(_: BoxStream<'static, Result<AgentEvent>>) {}
-    #[allow(dead_code)]
-    fn _ensure_stream_imported() {
-        let _ = stream::once(async { Ok::<_, ()>(()) });
     }
 }

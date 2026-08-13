@@ -250,8 +250,8 @@ fn detect_iqr_outliers(values: &[f64], k: f64, col_name: &str) -> serde_json::Va
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    let q1 = sorted[n / 4.min(n - 1)];
-    let q3 = sorted[3 * n / 4.min(n - 1)];
+    let q1 = crate::statistics::quantile(&sorted, 0.25).unwrap_or_default();
+    let q3 = crate::statistics::quantile(&sorted, 0.75).unwrap_or(q1);
     let iqr = q3 - q1;
     let lower = q1 - k * iqr;
     let upper = q3 + k * iqr;
@@ -576,6 +576,14 @@ mod tests {
         assert!(output["columns"].is_array());
 
         cleanup(&path);
+    }
+
+    #[test]
+    fn iqr_handles_exactly_four_values() {
+        let result = detect_iqr_outliers(&[1.0, 2.0, 3.0, 100.0], 1.5, "value");
+        assert_eq!(result["n_valid"], 4);
+        assert!(result["q1"].is_number());
+        assert!(result["q3"].is_number());
     }
 
     #[tokio::test]

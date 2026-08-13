@@ -6,7 +6,7 @@
 //! into another inline wrapper.
 //!
 //! `run_code` is an agent-controlled arbitrary-code primitive, so it always
-//! requires an OS-level or stronger [`SandboxExecutor`]. Interactive terminals
+//! requires an OS-level or stronger [`echo_core::sandbox::SandboxExecutor`]. Interactive terminals
 //! remain a separate user-controlled capability and are not gated here.
 //!
 //! Modeled on `ShellTool` (`shell.rs`): holds `Option<Arc<dyn SandboxExecutor>>`

@@ -11,7 +11,6 @@ use crate::error::Result;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 /// Guard check direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +47,13 @@ pub enum GuardResult {
     /// Multiple warnings collected from all guards.
     Warn {
         /// Warning reason list
+        reasons: Vec<String>,
+    },
+    /// Content was safely transformed and must replace the original payload.
+    Transform {
+        /// Replacement content to pass to subsequent guards and consumers.
+        content: String,
+        /// Reasons describing the transformation.
         reasons: Vec<String>,
     },
 }
@@ -115,51 +121,23 @@ impl GuardManager {
         self.guards.is_empty()
     }
 
-    /// Run all guard checks in parallel.
+    /// Run the guard chain and return its decision, including transformed content.
     ///
-    /// - All guards start simultaneously (subject to concurrency cap), rather than running serially.
-    /// - Once a `Block` result is detected, cancel other in-flight checks (via `CancellationToken`).
-    /// - Collect all `Warn` reasons into `Vec<String>`.
-    ///
-    /// The concurrency cap is 16 to prevent spawning an excessive number of tasks
-    /// when many guards are registered.
+    /// Guards run in registration order because a transforming guard changes the
+    /// content that every subsequent guard must inspect.
     pub async fn check_all(&self, content: &str, direction: GuardDirection) -> Result<GuardResult> {
         if self.guards.is_empty() {
             return Ok(GuardResult::Pass);
         }
 
-        // Concurrency limit to avoid spawning unbounded tasks
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(16));
-        let cancel = CancellationToken::new();
-        let mut handles = Vec::with_capacity(self.guards.len());
+        let mut current = content.to_string();
+        let mut warnings = Vec::new();
+        let mut transformed = false;
 
         for guard in &self.guards {
-            let guard = guard.clone();
-            let content = content.to_string();
-            let cancel_child = cancel.clone();
-            let permit = semaphore.clone().acquire_owned().await;
-            handles.push(tokio::spawn(async move {
-                let _permit = permit; // hold until task completes
-                let result = tokio::select! {
-                    _ = cancel_child.cancelled() => {
-                        return (guard.name().to_string(), Ok(GuardResult::Pass));
-                    }
-                    r = guard.check(&content, direction) => r,
-                };
-                (guard.name().to_string(), result)
-            }));
-        }
-
-        let mut warnings = Vec::new();
-
-        for (i, handle) in handles.into_iter().enumerate() {
-            let (guard_name, result) = handle.await.map_err(|e| {
-                crate::error::ReactError::Other(format!("Guard task {} panicked: {}", i, e))
-            })?;
-
-            match result {
+            let guard_name = guard.name();
+            match guard.check(&current, direction).await {
                 Ok(GuardResult::Block { reason }) => {
-                    cancel.cancel(); // cancel other in-flight checks
                     tracing::warn!(
                         guard = guard_name,
                         direction = %direction,
@@ -171,6 +149,11 @@ impl GuardManager {
                 Ok(GuardResult::Warn { reasons }) => {
                     warnings.extend(reasons);
                 }
+                Ok(GuardResult::Transform { content, reasons }) => {
+                    current = content;
+                    transformed = true;
+                    warnings.extend(reasons);
+                }
                 Ok(GuardResult::Pass) => {}
                 Err(e) => {
                     tracing::error!(guard = guard_name, error = %e, "Guard check error");
@@ -179,10 +162,87 @@ impl GuardManager {
             }
         }
 
-        if !warnings.is_empty() {
+        if transformed {
+            Ok(GuardResult::Transform {
+                content: current,
+                reasons: warnings,
+            })
+        } else if !warnings.is_empty() {
             Ok(GuardResult::Warn { reasons: warnings })
         } else {
             Ok(GuardResult::Pass)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ReplaceGuard;
+
+    impl Guard for ReplaceGuard {
+        fn name(&self) -> &str {
+            "replace"
+        }
+
+        fn check<'a>(
+            &'a self,
+            content: &'a str,
+            _direction: GuardDirection,
+        ) -> BoxFuture<'a, Result<GuardResult>> {
+            Box::pin(async move {
+                Ok(GuardResult::Transform {
+                    content: content.replace("secret", "[redacted]"),
+                    reasons: vec!["redacted secret".to_string()],
+                })
+            })
+        }
+    }
+
+    struct RejectUnredactedGuard;
+
+    impl Guard for RejectUnredactedGuard {
+        fn name(&self) -> &str {
+            "reject-unredacted"
+        }
+
+        fn check<'a>(
+            &'a self,
+            content: &'a str,
+            _direction: GuardDirection,
+        ) -> BoxFuture<'a, Result<GuardResult>> {
+            Box::pin(async move {
+                if content.contains("secret") {
+                    Ok(GuardResult::Block {
+                        reason: "unredacted secret".to_string(),
+                    })
+                } else {
+                    Ok(GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn transformations_feed_subsequent_guards() -> Result<()> {
+        let manager = GuardManager::from_guards(vec![
+            Arc::new(ReplaceGuard),
+            Arc::new(RejectUnredactedGuard),
+        ]);
+
+        let result = manager.check_all("a secret", GuardDirection::Input).await?;
+        match result {
+            GuardResult::Transform { content, reasons } => {
+                assert_eq!(content, "a [redacted]");
+                assert_eq!(reasons, vec!["redacted secret"]);
+            }
+            other => {
+                return Err(crate::error::ReactError::Other(format!(
+                    "expected transform, got {other:?}"
+                )));
+            }
+        }
+        Ok(())
     }
 }

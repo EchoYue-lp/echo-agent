@@ -1,15 +1,14 @@
 //! Agent configuration
 
 use crate::agent::AgentCallback;
-use crate::agent::react::loop_detector::LoopDetectorConfig;
 use crate::llm::ResponseFormat;
 use crate::tools::ToolExecutionConfig;
 use echo_core::budget::TokenBudgetConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Default token limit for agent context (396000 tokens, matches TokenBudget default).
-pub const DEFAULT_TOKEN_LIMIT: usize = 396_000;
+/// Conservative context limit used when no model profile or explicit limit is available.
+pub const DEFAULT_TOKEN_LIMIT: usize = 128_000;
 
 /// Agent role enum, determining its responsibility scope in a multi-agent system.
 ///
@@ -108,6 +107,7 @@ pub struct AgentConfig {
     pub(crate) register_agent_dispatch_tool: bool,
     /// Context token limit; auto-triggers compression when exceeded (`usize::MAX` means no limit)
     pub(crate) token_limit: usize,
+    pub(crate) token_limit_explicit: bool,
     /// Streaming channel buffer size (default 256). When full, events are dropped with a warning.
     pub(crate) stream_buffer_size: usize,
     pub(crate) callbacks: Vec<Arc<dyn AgentCallback>>,
@@ -168,12 +168,6 @@ pub struct AgentConfig {
     pub(crate) working_dir: std::sync::Mutex<Option<PathBuf>>,
     /// Token budget configuration for fine-grained context window management
     pub(crate) token_budget_config: TokenBudgetConfig,
-    /// Whether to enable notebook tracking for reproducibility (default false).
-    /// When enabled, each tool invocation is recorded as a NotebookCell
-    /// that can be exported as Markdown or JSON.
-    pub(crate) enable_notebook: bool,
-    /// Loop detection configuration.
-    pub(crate) loop_detector_config: LoopDetectorConfig,
     /// Permission mode for tool execution (default, auto-edit, full-auto, strict).
     pub(crate) permission_mode: String,
     /// How often to checkpoint the React loop state (in iterations).
@@ -232,6 +226,7 @@ impl AgentConfig {
             ),
             register_agent_dispatch_tool: false,
             token_limit: DEFAULT_TOKEN_LIMIT,
+            token_limit_explicit: false,
             stream_buffer_size: 256,
             callbacks: Vec::new(),
             llm_max_retries: 3,
@@ -260,8 +255,6 @@ impl AgentConfig {
             project_root: None,
             working_dir: std::sync::Mutex::new(None),
             token_budget_config: TokenBudgetConfig::default(),
-            enable_notebook: false,
-            loop_detector_config: LoopDetectorConfig::default(),
             permission_mode: "default".to_string(),
             react_checkpoint_interval: 0,
             verifier_enabled: false,
@@ -606,6 +599,7 @@ impl AgentConfig {
     /// * `limit` - Context token limit; auto-triggers compression when exceeded (`usize::MAX` means no limit)
     pub fn token_limit(mut self, limit: usize) -> Self {
         self.token_limit = limit;
+        self.token_limit_explicit = true;
         self
     }
 
@@ -801,19 +795,6 @@ impl AgentConfig {
     /// When enabled, the Agent can use remember/recall/forget tools, with automatic context injection support
     pub fn enable_memory(mut self, enabled: bool) -> Self {
         self.enable_memory = enabled;
-        self
-    }
-
-    /// Enable or disable notebook tracking for reproducibility
-    ///
-    /// # Parameters
-    /// * `enable` - `true` to enable notebook tracking, `false` to disable
-    ///
-    /// # Description
-    /// When enabled, each tool invocation is recorded as a `NotebookCell`,
-    /// and the full session can be exported as Markdown or JSON.
-    pub fn enable_notebook(mut self, enable: bool) -> Self {
-        self.enable_notebook = enable;
         self
     }
 
@@ -1019,17 +1000,6 @@ impl AgentConfig {
     /// Maximum token count, `None` means use model default
     pub fn get_max_tokens(&self) -> Option<u32> {
         self.max_tokens
-    }
-
-    /// Set loop detector configuration.
-    pub fn loop_detector(mut self, config: LoopDetectorConfig) -> Self {
-        self.loop_detector_config = config;
-        self
-    }
-
-    /// Get loop detector configuration.
-    pub fn get_loop_detector_config(&self) -> &LoopDetectorConfig {
-        &self.loop_detector_config
     }
 
     /// Set the permission mode (default, auto-edit, full-auto, strict).

@@ -134,7 +134,7 @@ impl PluginRegistry {
         }
 
         // Load persisted enabled/disabled state
-        self.load_state();
+        self.load_state()?;
         Ok(total)
     }
 
@@ -187,8 +187,11 @@ impl PluginRegistry {
         }
 
         let mut count = 0;
-        for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
+        let mut paths = std::fs::read_dir(dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
             if !path.is_dir() {
                 continue;
             }
@@ -232,6 +235,17 @@ impl PluginRegistry {
                         user_config,
                         resolved_components: None,
                     };
+                    if let Some(existing) = self.plugins.get(&id) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            format!(
+                                "plugin name collision for '{id}': {} ({:?}) and {} ({scope:?})",
+                                existing.root.display(),
+                                existing.scope,
+                                path.display()
+                            ),
+                        ));
+                    }
                     self.plugins.insert(id, entry);
                     count += 1;
                 }
@@ -310,8 +324,22 @@ impl PluginRegistry {
             ));
         }
 
-        // Copy directory recursively
-        copy_dir_recursive(src, &dest).map_err(|e| format!("Failed to copy plugin: {e}"))?;
+        let staging = target_dir.join(format!(".{}.{}.staging", plugin_id, uuid::Uuid::new_v4()));
+        if let Err(error) = copy_dir_recursive(src, &staging) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("Failed to stage plugin copy: {error}"));
+        }
+        if let Err(errors) = Self::validate_plugin_dir(&staging) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!(
+                "Staged plugin validation failed: {}",
+                errors.join("; ")
+            ));
+        }
+        if let Err(error) = std::fs::rename(&staging, &dest) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("Failed to commit staged plugin: {error}"));
+        }
 
         let user_config = manifest.user_config_defaults();
         let enabled =
@@ -416,27 +444,42 @@ impl PluginRegistry {
             .cloned()
             .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
 
-        // Remove plugin directory
+        let tombstone = entry
+            .root
+            .with_extension(format!("plugin-uninstall-{}", uuid::Uuid::new_v4()));
         if entry.root.exists() {
-            std::fs::remove_dir_all(&entry.root)
-                .map_err(|e| format!("Failed to remove plugin directory: {e}"))?;
+            std::fs::rename(&entry.root, &tombstone)
+                .map_err(|error| format!("Failed to stage plugin removal: {error}"))?;
         }
-
-        // Only remove the in-memory entry after the filesystem operation has
-        // succeeded. A failed delete must leave the live registry truthful.
         self.plugins.remove(plugin_id);
-
-        // Remove data directory unless keeping
+        if let Err(error) = self.save_state() {
+            self.plugins.insert(plugin_id.to_string(), entry.clone());
+            let restore_error = if tombstone.exists() {
+                std::fs::rename(&tombstone, &entry.root).err()
+            } else {
+                None
+            };
+            return Err(match restore_error {
+                Some(restore_error) => format!(
+                    "{error}; additionally failed to restore plugin directory: {restore_error}"
+                ),
+                None => error,
+            });
+        }
+        if tombstone.exists()
+            && let Err(error) = std::fs::remove_dir_all(&tombstone)
+        {
+            tracing::warn!(path = %tombstone.display(), %error, "plugin uninstall tombstone cleanup deferred");
+        }
         if !keep_data {
             let data = PluginEntry::data_dir_for(plugin_id, &self.data_dir);
-            if data.exists() {
-                let _ = std::fs::remove_dir_all(&data);
+            if data.exists()
+                && let Err(error) = std::fs::remove_dir_all(&data)
+            {
+                tracing::warn!(path = %data.display(), %error, "plugin data cleanup deferred");
             }
         }
-
-        self.save_state().map_err(|error| {
-            format!("Plugin files were removed, but registry state could not be saved: {error}")
-        })
+        Ok(())
     }
 
     // ── Enable / Disable ───────────────────────────────────────────────
@@ -930,20 +973,22 @@ impl PluginRegistry {
     }
 
     /// Load persisted state and merge with discovered plugins.
-    fn load_state(&mut self) {
+    fn load_state(&mut self) -> std::io::Result<()> {
         let state: RegistryState = match std::fs::read_to_string(&self.state_file) {
             Ok(content) => match serde_json::from_str(&content) {
                 Ok(state) => state,
                 Err(error) => {
-                    tracing::warn!(
-                        path = %self.state_file.display(),
-                        %error,
-                        "Ignoring invalid plugin registry state"
-                    );
-                    return;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "invalid plugin registry state {}: {error}",
+                            self.state_file.display()
+                        ),
+                    ));
                 }
             },
-            Err(_) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
         };
 
         // Merge enabled/disabled state and validated config from persisted file.
@@ -965,6 +1010,7 @@ impl PluginRegistry {
                 }
             }
         }
+        Ok(())
     }
 
     /// Get the persistent data directory for a plugin.
@@ -1219,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn test_uninstall_keeps_registry_entry_when_directory_delete_fails() {
+    fn uninstall_commits_registry_before_deferred_tombstone_cleanup() {
         let tmp = std::env::temp_dir().join("echo-plugin-test-uninstall-failure");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -1242,8 +1288,9 @@ mod tests {
             },
         );
 
-        assert!(reg.uninstall("remove-me", true).is_err());
-        assert!(reg.get("remove-me").is_some());
+        reg.uninstall("remove-me", true).unwrap();
+        assert!(reg.get("remove-me").is_none());
+        assert!(!tmp.join("not-a-directory").exists());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1507,7 +1554,7 @@ config:
         restored
             .scan_scope_dir(PluginScope::User, &plugins)
             .map_err(|error| error.to_string())?;
-        restored.load_state();
+        restored.load_state().map_err(|error| error.to_string())?;
         assert!(
             restored
                 .get("configurable")
@@ -1520,6 +1567,53 @@ config:
                 .and_then(serde_json::Value::as_str),
             Some("http://localhost:9000")
         );
+        std::fs::remove_dir_all(&temporary).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn scan_rejects_cross_scope_name_collision() -> Result<(), String> {
+        let temporary = std::env::temp_dir().join(format!(
+            "echo-plugin-scope-collision-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let user = temporary.join("user");
+        let project = temporary.join("project");
+        create_test_plugin(&user, "same-name");
+        create_test_plugin(&project, "same-name");
+        let mut registry = test_registry(&temporary);
+        registry
+            .scan_scope_dir(PluginScope::User, &user)
+            .map_err(|error| error.to_string())?;
+        let error = registry
+            .scan_scope_dir(PluginScope::Project, &project)
+            .err()
+            .ok_or_else(|| "plugin collision unexpectedly succeeded".to_string())?;
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        std::fs::remove_dir_all(&temporary).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn scan_surfaces_corrupt_registry_state() -> Result<(), String> {
+        let temporary = std::env::temp_dir().join(format!(
+            "echo-plugin-corrupt-state-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let plugins = temporary.join("plugins");
+        create_test_plugin(&plugins, "enabled-by-default");
+        let state_file = temporary.join("registry.json");
+        std::fs::write(&state_file, "{broken").map_err(|error| error.to_string())?;
+        let mut registry =
+            PluginRegistry::with_paths(state_file, temporary.join("data"), Some(temporary.clone()));
+        registry
+            .scan_scope_dir(PluginScope::User, &plugins)
+            .map_err(|error| error.to_string())?;
+        let error = registry
+            .load_state()
+            .err()
+            .ok_or_else(|| "corrupt registry state unexpectedly loaded".to_string())?;
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         std::fs::remove_dir_all(&temporary).map_err(|error| error.to_string())?;
         Ok(())
     }

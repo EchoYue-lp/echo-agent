@@ -14,6 +14,7 @@
 //! ```
 
 use echo_core::llm::types::Message;
+use echo_core::utils::time::now_secs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -163,13 +164,6 @@ impl SnapshotManager {
     pub fn clear(&mut self) {
         self.snapshots.clear();
     }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 // ── 单元测试 ──────────────────────────────────────────────────────────────────

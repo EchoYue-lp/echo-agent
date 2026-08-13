@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
 | **内存安全** | 编译时保证 | GC | GC | GC |
 | **ReAct 循环** | 内置 | 内置 | 内置 | 内置 |
 | **工具系统** | `#[tool]` 宏 + JSON Schema | 装饰器 | 装饰器 | 函数调用 |
-| **多 Agent** | SubAgent + Handoff | 图结构 | Crew 模式 | 对话模式 |
+| **多 Agent** | Subagent 调度 + 团队 | 图结构 | Crew 模式 | 对话模式 |
 | **流式输出** | 原生 async stream | 回调 | 有限 | 回调 |
 | **MCP 协议** | 原生（stdio/SSE/HTTP） | 通过 LangChain | 无 | 无 |
 | **IM 通道** | QQ + 飞书内置 | 无 | 无 | 无 |
@@ -135,7 +135,7 @@ cargo run --example demo38_im_channels --features channels  # IM 通道
 
 ## 功能矩阵
 
-echo-agent 提供 **67 个注册工具**，跨越 8 个 crate，通过一行 `use echo_agent::prelude::*` 即可全部使用。
+echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导出通用 trait 与 builder；具体工具使用 `echo_agent::tools::files::*` 等稳定路径，启用相应 feature 后可通过 `echo_agent::tools::register_all_tools` 批量注册。
 
 ### 核心
 
@@ -161,8 +161,7 @@ echo-agent 提供 **67 个注册工具**，跨越 8 个 crate，通过一行 `us
 | 能力 | 描述 | API 预览 |
 |------|------|---------|
 | **SubAgent** | Sync / Fork / Teammate 三种模式 | `agent.register_agent(sub)` |
-| **Agent Handoff** | 上下文感知的 Agent 间切换 | `HandoffManager::new()` |
-| **任务规划** | Plan → Execute → Summarize（内置于 ReactAgent） | `agent.execute_with_planning(task)` |
+| **任务图** | 单一依赖图上的版本化任务 CRUD | `.enable_tasks()` |
 | **自我审查** | LLM 质量评估作为工具 | `ReviewTool::new(critic)` |
 | **图工作流** | 线性、条件、循环、并行扇出/扇入 | `GraphBuilder::new("pipeline")` |
 | **DAG 任务** | 依赖感知的任务调度 | `TaskManager::default()` |
@@ -217,7 +216,6 @@ echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "
 | `plan-execute` | Plan-and-Execute | — |
 | `self-reflection` | 自反思 Agent | — |
 | `subagent` | 多 Agent 编排 | — |
-| `handoff` | Agent 切换 | — |
 | `a2a` | Agent-to-Agent 协议 | — |
 | `topology` | Agent 拓扑可视化 | — |
 | `telemetry` | OpenTelemetry 追踪 | `opentelemetry` |
@@ -351,7 +349,7 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 - **67 个注册工具** — ReAct 循环、数据分析、论文检索、Web、媒体、RAG、数据库等
 - **33 个可运行示例** — 每个功能都有 `cargo run` 即可运行的 Demo
 - **全模块单元测试** — 覆盖核心路径的测试
-- **8 个 crate，1 行导入** — 模块化 Workspace，但只需 `use echo_agent::prelude::*`
+- **8 个 crate，1 个 facade** — 通用类型使用 `echo_agent::prelude::*`，具体工具使用 `echo_agent::tools::<domain>`
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
 - **IM 集成** — QQ Bot（WebSocket）& 飞书（Webhook）开箱即用
 - **声明式工作流** — 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
@@ -499,7 +497,7 @@ Bypass → Plan → Rules(deny-first) → ProtectedPaths → Cache(TTL) → Deni
 三种执行模式：
 - **Sync** — 父 Agent 阻塞等待子 Agent 返回
 - **Fork** — 子 Agent 在后台运行，父 Agent 继续执行
-- **Teammate** — 协作模式，共享 Mailbox
+- **Teammate** — 独立后台 Subagent，通过 handle 等待或取消
 
 ```rust
 let orchestrator = Orchestrator::new();
@@ -531,20 +529,19 @@ agent.add_tools(tools);
 
 支持三种传输方式：**stdio**、**SSE**、**HTTP**。
 
-### 12. 任务规划 — 内置的 Plan-Execute-Summarize 工作流
+### 12. 任务图 — 版本化 TaskRun graph
 
-ReactAgent 包含三阶段规划工作流：Plan → Execute → Summarize。无需独立的 Agent 类型。
+ReactAgent 提供 `task_create`、`task_update`、`task_list`，共同操作一个版本化任务图。Plan 是可编辑、可审阅的 artifact；产品特定的执行策略由应用层适配器提供。
 
 > **注意**: 需要启用 `tasks` feature。
 
 ```rust,ignore
 let agent = ReactAgentBuilder::new()
     .model("qwen3.7-max")
-    .enable_planning()  // 启用 plan、create_task、update_task 工具
+    .enable_tasks()  // 启用版本化任务图 CRUD 工具
     .build()?;
 
-// Agent 会自动规划任务、执行步骤并总结结果
-let result = agent.execute_with_planning("研究量子计算趋势").await?;
+let result = agent.execute("为量子计算趋势研究创建任务图").await?;
 ```
 
 ### 13. 流式输出 — 实时逐 Token 输出
@@ -787,7 +784,6 @@ agent.set_circuit_breaker(cb_config);
 | 18 | [`demo18_semantic_memory`](examples/demo18_semantic_memory.rs) | 语义记忆 |
 | 19 | [`demo19_guard`](examples/demo19_guard.rs) | 护栏系统 |
 | 20 | [`demo20_audit`](examples/demo20_audit.rs) | 审计日志 |
-| 21 | [`demo21_handoff`](examples/demo21_handoff.rs) | Agent Handoff |
 | 22 | [`demo22_plan_execute`](examples/demo22_plan_execute.rs) | Plan-and-Execute |
 | 23 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A 协议 |
 | 24 | [`demo24_topology`](examples/demo24_topology.rs) | 拓扑可视化 |

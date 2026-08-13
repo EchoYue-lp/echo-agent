@@ -168,7 +168,7 @@ impl SharedState {
     /// Set a value (auto-serialized to JSON).
     ///
     /// Returns Result (`StateResult<()>`) -- no longer panics on serialization failure or lock poison.
-    /// For a backward-compatible void-returning API, use [`Self::set_unwrap`].
+    /// Callers must handle the returned error instead of discarding failed state updates.
     pub fn set<T: Serialize>(&self, key: impl Into<String>, value: T) -> StateResult<()> {
         let key = key.into();
         let v = serde_json::to_value(value).map_err(|e| StateError::Serialize(e.to_string()))?;

@@ -98,7 +98,7 @@ use echo_agent::workflow::pipelines::{
 use echo_agent::workflow::shared_agent;
 use echo_agent::agent::ReactAgentBuilder;
 
-# async fn example() -> echo_core::error::Result<()> {
+# async fn example() -> echo_agent::error::Result<()> {
 let agent = shared_agent(
     ReactAgentBuilder::simple("qwen3-max", "数据分析师")?
 );
@@ -243,7 +243,7 @@ use echo_agent::workflow::pipelines::{WritingPipelineConfig, run_writing_pipelin
 use echo_agent::workflow::shared_agent;
 use echo_agent::agent::ReactAgentBuilder;
 
-# async fn example() -> echo_core::error::Result<()> {
+# async fn example() -> echo_agent::error::Result<()> {
 let agent = shared_agent(
     ReactAgentBuilder::simple("qwen3-max", "写作助手")?
 );

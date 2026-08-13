@@ -443,6 +443,8 @@ async fn demo_context_manager_integration() {
         token_limit: 0,
         current_query: None,
         focus_instructions: None,
+        cancel_token: None,
+        tokenizer: None,
     };
 
     let output: CompressionOutput = compressor2.compress(input).await.unwrap();

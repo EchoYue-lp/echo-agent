@@ -194,23 +194,28 @@ pub struct ModelProfile {
 
 /// 根据厂商和模型名称推断上下文窗口大小。
 /// 未匹配到已知模式时返回 None。
-pub fn infer_context_window(_provider: &str, model_name: &str) -> Option<u32> {
+pub fn infer_context_window(provider: &str, model_name: &str) -> Option<u32> {
+    let provider = provider.trim().to_ascii_lowercase();
     let lower = model_name.to_ascii_lowercase();
-    if lower.starts_with("gpt-5.6") {
+    if matches!(provider.as_str(), "openai" | "azure-openai") && lower.starts_with("gpt-5.6") {
         // GPT-5.6 Sol/Terra/Luna expose a 1.05M context window.
         Some(1_050_000)
-    } else if lower.starts_with("claude-fable-5")
-        || lower.starts_with("claude-opus-4-8")
-        || lower.starts_with("claude-sonnet-5")
-        || lower.starts_with("deepseek-v4")
-        || lower.starts_with("qwen3.7-max")
-        || lower.starts_with("qwen3.7-plus")
+    } else if provider == "anthropic"
+        && (lower.starts_with("claude-fable-5")
+            || lower.starts_with("claude-opus-4-8")
+            || lower.starts_with("claude-sonnet-5"))
+        || provider == "deepseek" && lower.starts_with("deepseek-v4")
+        || matches!(
+            provider.as_str(),
+            "dashscope" | "qwen" | "aliyun" | "alibaba"
+        ) && (lower.starts_with("qwen3.7-max") || lower.starts_with("qwen3.7-plus"))
+        || provider == "zhipu" && lower.starts_with("glm-5.2")
     {
         Some(1_000_000)
-    } else if lower.starts_with("kimi-k2.7") || lower.starts_with("kimi-k2.6") {
+    } else if provider == "moonshot"
+        && (lower.starts_with("kimi-k2.7") || lower.starts_with("kimi-k2.6"))
+    {
         Some(256_000)
-    } else if lower.starts_with("glm-5.2") {
-        Some(1_000_000)
     } else {
         None
     }
@@ -634,6 +639,8 @@ mod tests {
             Some(256_000)
         );
         assert_eq!(infer_context_window("zhipu", "glm-5.2"), Some(1_000_000));
+        assert_eq!(infer_context_window("custom", "gpt-5.6-sol"), None);
+        assert_eq!(infer_context_window("openai", "claude-sonnet-5"), None);
         assert_eq!(infer_context_window("custom", "unknown-model"), None);
     }
 

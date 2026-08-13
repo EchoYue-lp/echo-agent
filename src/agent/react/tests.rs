@@ -478,10 +478,10 @@ async fn mock_agent_execute_and_chat_share_response_queue() {
     assert_eq!(agent.call_count(), 2);
 }
 
-/// When the response queue is exhausted, chat() should return a default response
+/// Callers can explicitly opt into a reusable default response.
 #[tokio::test]
 async fn mock_agent_chat_falls_back_to_default_when_queue_empty() {
-    let agent = MockAgent::new("test");
+    let agent = MockAgent::new("test").with_default_success("mock agent response");
 
     let r = agent.chat("Any message").await.unwrap();
     assert_eq!(
@@ -594,7 +594,7 @@ fn react_agent_builder_with_memory() {
 fn react_agent_builder_with_planning() {
     let agent = crate::agent::ReactAgentBuilder::new()
         .model("qwen3-max")
-        .enable_planning()
+        .enable_tasks()
         .build()
         .unwrap();
 
@@ -1067,7 +1067,20 @@ fn react_agent_no_human_in_loop_without_flag() {
 #[tokio::test]
 #[cfg(feature = "human-loop")]
 async fn add_need_appeal_tool_does_not_nest_runtime_with_permission_service() {
-    let provider = Arc::new(crate::human_loop::HumanLoopManager::new());
+    struct AllowProvider;
+    impl crate::human_loop::HumanLoopProvider for AllowProvider {
+        fn request(
+            &self,
+            _req: crate::human_loop::HumanLoopRequest,
+        ) -> futures::future::BoxFuture<
+            '_,
+            crate::error::Result<crate::human_loop::HumanLoopResponse>,
+        > {
+            Box::pin(async { Ok(crate::human_loop::HumanLoopResponse::Approved) })
+        }
+    }
+
+    let provider = Arc::new(AllowProvider);
     let service = Arc::new(crate::human_loop::PermissionService::from_provider(
         provider.clone() as Arc<dyn crate::human_loop::HumanLoopProvider>,
     ));
@@ -1079,7 +1092,10 @@ async fn add_need_appeal_tool_does_not_nest_runtime_with_permission_service() {
     // Before fix, this would trigger Handle::current().block_on(...) panic in async context.
     agent.add_need_appeal_tool(Box::new(MockTool::new("dangerous_tool")));
 
-    agent.flush_pending_permission_rules(service.as_ref()).await;
+    let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+    let _ = snapshot
+        .check_tool_approval("call-1", "dangerous_tool", &serde_json::json!({}), None)
+        .await;
 
     let rules = service.all_rules().await;
     assert!(rules.iter().any(|rule| {
@@ -1351,7 +1367,8 @@ async fn plugin_skill_variables_cover_frontmatter_hooks_and_body() -> Result<(),
 }
 
 #[tokio::test]
-async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
+async fn execute_tool_injects_pre_and_post_hook_messages_into_context() -> crate::error::Result<()>
+{
     let config = AgentConfig::minimal("model", "agent");
     let mut agent = ReactAgent::new(config);
     agent.add_tool(Box::new(
@@ -1381,7 +1398,20 @@ async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
     hooks.register("hook-skill", "/tmp", hook_def);
     drop(hooks);
 
-    let result = agent.execute_tool("test_tool", &json!({})).await.unwrap();
+    let input = json!({});
+    let result = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent)
+        .execute_tool_with_policy(
+            "hook-test".to_string(),
+            "test_tool",
+            &crate::tools::ToolParameters::new(),
+            &input,
+            None,
+        )
+        .await;
+    let result = match result {
+        Ok(output) => output,
+        Err(failure) => return Err(failure.error),
+    };
     assert_eq!(result, "tool ok");
 
     let messages: Vec<String> = agent
@@ -1393,27 +1423,37 @@ async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
     assert!(
         messages
             .iter()
-            .any(|m| m.contains(&String::from("pre-hook guidance")))
+            .any(|m| m.contains(&String::from("pre-hook guidance"))),
+        "pre-hook context missing from {messages:?}"
     );
     assert!(
         messages
             .iter()
             .any(|m| m.contains(&String::from("post-hook guidance")))
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn shell_skill_uses_agent_sandbox_manager_when_present() {
+async fn shell_skill_uses_agent_sandbox_manager_when_present() -> crate::error::Result<()> {
     let config = AgentConfig::minimal("model", "agent");
     let mut agent = ReactAgent::new(config);
     agent.set_sandbox_manager(Arc::new(SandboxManager::local_only()));
     agent.add_skill(Box::new(ShellSkill::new()));
 
-    let result = agent
-        .execute_tool("shell", &json!({"command": "echo sandboxed"}))
+    let input = json!({"command": "echo sandboxed"});
+    let params = match input.clone() {
+        serde_json::Value::Object(values) => values.into_iter().collect(),
+        _ => crate::tools::ToolParameters::new(),
+    };
+    let result = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent)
+        .execute_tool_with_policy("shell-test".to_string(), "shell", &params, &input, None)
         .await;
-    assert!(result.is_ok());
-    assert!(result.unwrap().contains(&String::from("sandboxed")));
+    match result {
+        Ok(output) => assert!(output.contains(&String::from("sandboxed"))),
+        Err(failure) => return Err(failure.error),
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -1640,7 +1680,9 @@ async fn truncate_tool_output_no_limit() {
     let config = AgentConfig::new("model", "agent", "prompt");
     let agent = ReactAgent::new(config);
     let long_text = "a".repeat(10000);
-    let result = agent.truncate_tool_output(long_text.clone()).await;
+    let result = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent)
+        .truncate_tool_output(long_text.clone())
+        .await;
     assert_eq!(
         result.len(),
         long_text.len(),
@@ -1653,7 +1695,9 @@ async fn truncate_tool_output_within_limit() {
     let config = AgentConfig::new("model", "agent", "prompt").max_tool_output_tokens(100000);
     let agent = ReactAgent::new(config);
     let short_text = "hello world".to_string();
-    let result = agent.truncate_tool_output(short_text.clone()).await;
+    let result = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent)
+        .truncate_tool_output(short_text.clone())
+        .await;
     assert_eq!(result, short_text, "Should not truncate when within limit");
 }
 
@@ -1664,7 +1708,9 @@ async fn truncate_tool_output_exceeds_limit() {
         .tool_output_artifacts(None);
     let agent = ReactAgent::new(config);
     let long_text = "a ".repeat(500);
-    let result = agent.truncate_tool_output(long_text).await;
+    let result = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent)
+        .truncate_tool_output(long_text)
+        .await;
     assert!(
         result.contains(&String::from("[Output truncated")),
         "Should show truncation notice when over limit"
@@ -1751,7 +1797,8 @@ async fn invocation_history_is_inserted_before_current_input() -> Result<(), Str
 
     agent
         .prepare_stream_context(StreamMode::Chat, "current input", &history)
-        .await;
+        .await
+        .map_err(|error| error.to_string())?;
 
     let messages = agent.memory.context.lock().await.messages().to_vec();
     let position = |needle: &str| {
@@ -1774,13 +1821,145 @@ async fn invocation_history_is_inserted_before_current_input() -> Result<(), Str
     Ok(())
 }
 
+#[tokio::test]
+async fn corrupt_runtime_checkpoint_blocks_restore_without_overwrite() -> Result<(), String> {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let checkpoint_dir = temp
+        .path()
+        .join("runtime_state")
+        .join("corrupt-conversation");
+    std::fs::create_dir_all(&checkpoint_dir).map_err(|error| error.to_string())?;
+    let checkpoint_path = checkpoint_dir.join("checkpoint.json");
+    let corrupt = b"{ truncated checkpoint";
+    std::fs::write(&checkpoint_path, corrupt).map_err(|error| error.to_string())?;
+
+    let config = AgentConfig::new("test-model", "restore-barrier", "system prompt")
+        .conversation_id("corrupt-conversation");
+    let mut agent = ReactAgent::new(config);
+    let store =
+        crate::state::FileRuntimeStateStore::new(temp.path()).map_err(|error| error.to_string())?;
+    agent.set_state_store(Arc::new(store));
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("preserve me".to_string()));
+
+    let result = agent.restore_thread_context().await;
+    assert!(result.is_err());
+    assert!(
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .messages()
+            .iter()
+            .any(|message| {
+                message
+                    .text_content()
+                    .is_some_and(|content| content == "preserve me")
+            })
+    );
+    assert_eq!(
+        std::fs::read(&checkpoint_path).map_err(|error| error.to_string())?,
+        corrupt
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cold_chat_restores_persisted_checkpoint() -> Result<(), String> {
+    use crate::state::RuntimeStateStore;
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let store = Arc::new(
+        crate::state::FileRuntimeStateStore::new(temp.path()).map_err(|error| error.to_string())?,
+    );
+    let mut checkpoint = crate::state::AgentCheckpoint::new("cold-chat");
+    checkpoint.messages_json = serde_json::to_string(&vec![
+        Message::system("system prompt".to_string()),
+        Message::user("persisted turn".to_string()),
+    ])
+    .map_err(|error| error.to_string())?;
+    store
+        .save_checkpoint(&checkpoint)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let config = AgentConfig::new("test-model", "cold-chat-agent", "system prompt")
+        .conversation_id("cold-chat");
+    let mut agent = ReactAgent::new(config);
+    agent.set_state_store(store);
+    agent
+        .restore_chat_context_if_cold()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    assert!(agent.get_messages().await.iter().any(|message| {
+        message
+            .text_content()
+            .is_some_and(|content| content == "persisted turn")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn warm_chat_history_is_not_replaced_by_checkpoint() -> Result<(), String> {
+    use crate::state::RuntimeStateStore;
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let store = Arc::new(
+        crate::state::FileRuntimeStateStore::new(temp.path()).map_err(|error| error.to_string())?,
+    );
+    let mut checkpoint = crate::state::AgentCheckpoint::new("warm-chat");
+    checkpoint.messages_json = serde_json::to_string(&vec![
+        Message::system("system prompt".to_string()),
+        Message::user("stale persisted turn".to_string()),
+    ])
+    .map_err(|error| error.to_string())?;
+    store
+        .save_checkpoint(&checkpoint)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let config = AgentConfig::new("test-model", "warm-chat-agent", "system prompt")
+        .conversation_id("warm-chat");
+    let mut agent = ReactAgent::new(config);
+    agent.set_state_store(store);
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("live turn".to_string()));
+    agent
+        .restore_chat_context_if_cold()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let messages = agent.get_messages().await;
+    assert!(messages.iter().any(|message| {
+        message
+            .text_content()
+            .is_some_and(|content| content == "live turn")
+    }));
+    assert!(!messages.iter().any(|message| {
+        message
+            .text_content()
+            .is_some_and(|content| content == "stale persisted turn")
+    }));
+    Ok(())
+}
+
 // ── recall_long_term_memories injects into the current user turn ─────────────
 
 /// Recalled memories are dynamic per turn, so they must not be appended as
 /// permanent system messages where they destabilize the provider's prompt-cache
 /// prefix. The current turn owns one replaceable projection before the request.
 #[tokio::test]
-async fn recall_injects_memories_into_current_user_message() {
+async fn recall_injects_memories_into_current_user_message() -> Result<(), String> {
     use crate::agent::react::run::types::StreamMode;
     use crate::memory::InMemoryStore;
     use serde_json::json;
@@ -1800,13 +1979,14 @@ async fn recall_injects_memories_into_current_user_message() {
             json!({ "content": "user prefers Rust over Python", "importance": 0.9 }),
         )
         .await
-        .expect("seed memory put");
+        .map_err(|error| error.to_string())?;
     agent.set_memory_store(store);
 
     // Drive prepare_stream_context with a query that should hit the seeded fact.
     let recalled = agent
         .prepare_stream_context(StreamMode::Chat, "Rust", &[])
-        .await;
+        .await
+        .map_err(|error| error.to_string())?;
     assert!(
         recalled >= 1,
         "expected at least one memory to be recalled, got {recalled}"
@@ -1881,7 +2061,8 @@ async fn recall_injects_memories_into_current_user_message() {
     drop(ctx);
     agent
         .prepare_stream_context(StreamMode::Chat, "unrelated-query", &[])
-        .await;
+        .await
+        .map_err(|error| error.to_string())?;
     let ctx = agent.memory.context.lock().await;
     let runtime_contexts: Vec<_> = ctx
         .messages()
@@ -1901,6 +2082,7 @@ async fn recall_injects_memories_into_current_user_message() {
             .text_content()
             .is_none_or(|content| !content.contains("user prefers Rust over Python"))
     }));
+    Ok(())
 }
 
 // ── save_transcript_projection ──────────────────────────────────────────────

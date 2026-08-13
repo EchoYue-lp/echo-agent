@@ -521,7 +521,7 @@ pub fn create_safe_regex(pattern: &str, limits: &ResourceLimits) -> Result<regex
 /// Validate URL target address, rejecting requests to private/link-local IPs (SSRF protection).
 ///
 /// Returns the validated hostname and the resolved public IP addresses. Callers that
-/// connect using these addresses (via [`pin_request_to_addrs`]) close the DNS-rebinding
+/// connect using these addresses (via `pin_request_to_addrs`) close the DNS-rebinding
 /// TOCTOU window that a standalone `validate_url` + independent client resolution leaves open.
 ///
 /// Note: this function still resolves DNS once; to be fully rebinding-safe, use the
@@ -539,6 +539,13 @@ pub fn validate_url(url_str: &str) -> Result<()> {
 /// validated IPs instead of resolving a second time (which DNS-rebinding would
 /// exploit to point at `127.0.0.1` / `169.254.169.254`).
 pub fn validate_url_with_addrs(url_str: &str) -> Result<(String, Vec<std::net::IpAddr>)> {
+    resolve_url_with_addrs(url_str, true)
+}
+
+fn resolve_url_with_addrs(
+    url_str: &str,
+    reject_private: bool,
+) -> Result<(String, Vec<std::net::IpAddr>)> {
     let host = extract_host(url_str)?.to_string();
 
     // Resolve hostname to IP address
@@ -553,7 +560,7 @@ pub fn validate_url_with_addrs(url_str: &str) -> Result<(String, Vec<std::net::I
     let mut public: Vec<std::net::IpAddr> = Vec::new();
     for addr in addrs {
         let ip = addr.ip();
-        if is_private_ip(&ip) {
+        if reject_private && is_private_ip(&ip) {
             return Err(ToolError::AccessDenied {
                 path: url_str.to_string(),
                 reason: format!(
@@ -718,7 +725,36 @@ pub async fn ssrf_safe_get(
     timeout: Duration,
     max_redirects: usize,
 ) -> Result<reqwest::Response> {
-    ssrf_safe_request(url, timeout, max_redirects, reqwest::Method::GET).await
+    http_request_with_policy(
+        url,
+        timeout,
+        max_redirects,
+        reqwest::Method::GET,
+        None,
+        None,
+        true,
+    )
+    .await
+}
+
+/// Perform a local-assistant HTTP GET. Private and loopback targets are valid
+/// because users commonly run local services, while scheme validation, DNS
+/// pinning and bounded per-hop redirect handling remain enforced.
+pub async fn local_http_get(
+    url: &str,
+    timeout: Duration,
+    max_redirects: usize,
+) -> Result<reqwest::Response> {
+    http_request_with_policy(
+        url,
+        timeout,
+        max_redirects,
+        reqwest::Method::GET,
+        None,
+        None,
+        false,
+    )
+    .await
 }
 
 /// SSRF-safe request (any method) with IP pinning and per-hop redirect validation.
@@ -728,7 +764,17 @@ pub async fn ssrf_safe_request(
     max_redirects: usize,
     method: reqwest::Method,
 ) -> Result<reqwest::Response> {
-    ssrf_safe_request_full(url, timeout, max_redirects, method, None, None).await
+    http_request_with_policy(url, timeout, max_redirects, method, None, None, true).await
+}
+
+/// Local-assistant request variant that permits private and loopback targets.
+pub async fn local_http_request(
+    url: &str,
+    timeout: Duration,
+    max_redirects: usize,
+    method: reqwest::Method,
+) -> Result<reqwest::Response> {
+    http_request_with_policy(url, timeout, max_redirects, method, None, None, false).await
 }
 
 /// SSRF-safe request with an optional JSON body and extra headers.
@@ -748,7 +794,16 @@ pub async fn ssrf_safe_request_with_body(
     body: &serde_json::Value,
     headers: Option<&HashMap<String, String>>,
 ) -> Result<reqwest::Response> {
-    ssrf_safe_request_full(url, timeout, max_redirects, method, Some(body), headers).await
+    http_request_with_policy(
+        url,
+        timeout,
+        max_redirects,
+        method,
+        Some(body),
+        headers,
+        true,
+    )
+    .await
 }
 
 /// Core SSRF-safe pipeline shared by the body and bodyless variants.
@@ -756,18 +811,19 @@ pub async fn ssrf_safe_request_with_body(
 /// `body` and `headers` are only applied on the first hop. Redirects are
 /// followed bodyless to avoid replaying a (possibly secret-laden) payload to
 /// a redirect destination the validator may not have seen.
-async fn ssrf_safe_request_full(
+async fn http_request_with_policy(
     url: &str,
     timeout: Duration,
     max_redirects: usize,
     method: reqwest::Method,
     body: Option<&serde_json::Value>,
     headers: Option<&HashMap<String, String>>,
+    reject_private: bool,
 ) -> Result<reqwest::Response> {
     let mut current = url.to_string();
     let mut first_hop = true;
     for _ in 0..=max_redirects {
-        let (host, addrs) = validate_url_with_addrs(&current)?;
+        let (host, addrs) = resolve_url_with_addrs(&current, reject_private)?;
         let client = pinned_client(&host, &addrs, timeout)?;
         let mut req = client.request(method.clone(), &current);
         // Attach body + headers only on the first hop; see fn doc.
@@ -797,18 +853,13 @@ async fn ssrf_safe_request_full(
                     tool: "security".to_string(),
                     message: "redirect without Location header".to_string(),
                 })?;
-            current = if location.starts_with("http://") || location.starts_with("https://") {
-                location.to_string()
-            } else {
-                // Relative redirect: resolve against the current URL's origin.
-                let origin_end = current
-                    .find("://")
-                    .and_then(|i| current[i + 3..].find('/').map(|j| i + 3 + j))
-                    .unwrap_or(current.len());
-                // origin_end indexes into a `&str` derived from a URL that is
-                // ASCII up to the first path separator; byte index is safe.
-                format!("{}{}", &current[..origin_end], location)
-            };
+            current = reqwest::Url::parse(&current)
+                .and_then(|base| base.join(location))
+                .map_err(|error| ToolError::InvalidParameter {
+                    name: "url".to_string(),
+                    message: format!("invalid redirect target: {error}"),
+                })?
+                .to_string();
             continue;
         }
         return Ok(response);

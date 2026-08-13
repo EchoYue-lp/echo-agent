@@ -1,11 +1,7 @@
 //! Subagent core types — definitions, execution modes, and results
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::usage::LlmUsageStats;
@@ -456,8 +452,8 @@ pub fn split_subagent_output(raw: &str) -> (String, Vec<String>) {
 pub fn parse_subagent_outcome(
     raw: &str,
     status: SubagentStatus,
-    execution_id: Option<&str>,
-    working_dir: Option<&Path>,
+    _execution_id: Option<&str>,
+    _working_dir: Option<&Path>,
 ) -> SubagentOutcome {
     let reported = extract_markdown_section(raw, "Result")
         .and_then(extract_fenced_json)
@@ -515,7 +511,7 @@ pub fn parse_subagent_outcome(
                     kind: String::new(),
                     bytes: None,
                     sha256: None,
-                    producer_execution_id: execution_id.map(str::to_string),
+                    producer_execution_id: None,
                     available: false,
                 })
                 .collect(),
@@ -526,8 +522,12 @@ pub fn parse_subagent_outcome(
     };
 
     normalize_outcome(&mut outcome);
-    hydrate_artifacts(&mut outcome.artifacts, execution_id, working_dir);
-    normalize_outcome(&mut outcome);
+    for artifact in &mut outcome.artifacts {
+        artifact.bytes = None;
+        artifact.sha256 = None;
+        artifact.producer_execution_id = None;
+        artifact.available = false;
+    }
     outcome
 }
 
@@ -595,55 +595,6 @@ pub(crate) fn normalize_outcome(outcome: &mut SubagentOutcome) {
         MAX_RESULT_ITEMS,
         MAX_PATH_CHARS,
     );
-}
-
-fn hydrate_artifacts(
-    artifacts: &mut [SubagentArtifact],
-    execution_id: Option<&str>,
-    working_dir: Option<&Path>,
-) {
-    for artifact in artifacts {
-        artifact.producer_execution_id = execution_id.map(str::to_string);
-        let raw_path = PathBuf::from(&artifact.path);
-        let resolved = if raw_path.is_absolute() {
-            raw_path
-        } else if let Some(root) = working_dir {
-            root.join(raw_path)
-        } else {
-            raw_path
-        };
-        let Ok(metadata) = resolved.metadata() else {
-            artifact.available = false;
-            artifact.bytes = None;
-            artifact.sha256 = None;
-            continue;
-        };
-        if !metadata.is_file() {
-            artifact.available = false;
-            artifact.bytes = None;
-            artifact.sha256 = None;
-            continue;
-        }
-        artifact.path = resolved.to_string_lossy().to_string();
-        artifact.bytes = Some(metadata.len());
-        artifact.sha256 = hash_file(&resolved);
-        artifact.available = artifact.sha256.is_some();
-    }
-}
-
-fn hash_file(path: &Path) -> Option<String> {
-    let mut file = File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        let chunk = buffer.get(..read)?;
-        hasher.update(chunk);
-    }
-    Some(format!("{:x}", hasher.finalize()))
 }
 
 fn extract_markdown_section<'a>(raw: &'a str, heading: &str) -> Option<&'a str> {
@@ -879,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_result_ignores_model_status_and_hydrates_artifact() -> Result<(), String> {
+    fn structured_result_does_not_attest_model_reported_artifact() -> Result<(), String> {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let artifact_path = dir.path().join("report.txt");
         std::fs::write(&artifact_path, "result").map_err(|error| error.to_string())?;
@@ -896,9 +847,9 @@ mod tests {
             .artifacts
             .first()
             .ok_or_else(|| "artifact missing".to_string())?;
-        assert!(artifact.available);
-        assert_eq!(artifact.sha256.as_deref().map(str::len), Some(64));
-        assert_eq!(artifact.producer_execution_id.as_deref(), Some("task-1:1"));
+        assert!(!artifact.available);
+        assert!(artifact.sha256.is_none());
+        assert!(artifact.producer_execution_id.is_none());
         assert!(matches!(
             outcome.verification.first(),
             Some(SubagentVerification {

@@ -174,8 +174,8 @@ let entries = saver.list(Some("2026-05-29")).await?;
 每条记忆都带结构化元数据 `MemoryMeta`：类型、置信度、稳定性、风险、状态、来源、主题。向后兼容——未类型化的旧条目读取时自动获得默认元数据。
 
 ```rust
-use echo_state::memory::typed_store::{TypedMemoryStore, MemoryFilter};
-use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType, MemoryStatus};
+use echo_agent::memory::typed_store::{TypedMemoryStore, MemoryFilter};
+use echo_agent::prelude::{MemoryMeta, MemorySource, MemoryType, MemoryStatus};
 
 let store = TypedMemoryStore::new(arc_store);
 

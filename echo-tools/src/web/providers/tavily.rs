@@ -129,7 +129,13 @@ impl SearchProvider for TavilyProvider {
             .into());
         }
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::http_body::read_bounded_text(
+                response,
+                crate::http_body::MAX_API_RESPONSE_BYTES,
+                "web_search",
+                None,
+            )
+            .await?;
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
                 message: format!(
@@ -141,14 +147,13 @@ impl SearchProvider for TavilyProvider {
             .into());
         }
 
-        let tavily_resp: TavilyResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "web_search".into(),
-                    message: format!("Tavily response parsing failed: {}", e),
-                })?;
+        let tavily_resp: TavilyResponse = crate::http_body::read_bounded_json(
+            response,
+            crate::http_body::MAX_API_RESPONSE_BYTES,
+            "web_search",
+            None,
+        )
+        .await?;
 
         Ok(tavily_resp
             .results

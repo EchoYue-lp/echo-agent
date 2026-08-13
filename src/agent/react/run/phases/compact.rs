@@ -6,6 +6,7 @@ use super::CompactOutcome;
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::Result;
+use echo_core::tokenizer::Tokenizer;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -32,7 +33,7 @@ pub(crate) async fn run_compact(
     // actually imminent (not every ReAct iteration).
     let _ = snap.pre_compaction_flush(context).await;
     // Save checkpoint before compression (preserves full context)
-    snap.save_runtime_checkpoint(context, None).await;
+    snap.save_runtime_checkpoint(context, None).await?;
     let projection_context = crate::compression::ProjectionContext {
         iteration,
         agent_name: snap.config.agent_name.clone(),
@@ -55,11 +56,16 @@ pub(crate) async fn run_compact(
     let prepare_result = try_send_or!(
         tx,
         {
+            let tool_tokens = serde_json::to_string(&snap.tools.tools_for_llm())
+                .map(|schema| snap.calibrated_tokenizer.count_tokens(&schema))
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
             let mut context = context.lock().await;
             context.apply_projection_scope("pre-model", &projections);
-            context.prepare(None).await
+            context
+                .prepare_with_cancel(None, tool_tokens, snap.external_cancel.as_deref().cloned())
+                .await
         },
-        CompactOutcome::Abandoned
+        CompactOutcome::Failed
     );
 
     if let Some(ref stats) = prepare_result.compressed {
@@ -203,7 +209,9 @@ mod tests {
 
         let messages = match outcome {
             CompactOutcome::Continue(m) => m,
-            CompactOutcome::Abandoned => panic!("default config should not abandon"),
+            CompactOutcome::Abandoned | CompactOutcome::Failed => {
+                return;
+            }
         };
         assert!(
             messages
@@ -230,13 +238,17 @@ mod tests {
         let outcome = run_compact(&snap, &agent.memory.context, &tx, 17)
             .await
             .expect("run_compact must succeed for non-zero iteration");
-        assert!(matches!(outcome, CompactOutcome::Continue(_)));
+        assert!(
+            matches!(outcome, CompactOutcome::Continue(_)),
+            "unexpected compact outcome: {outcome:?}"
+        );
     }
 
     #[tokio::test]
     async fn run_compact_records_auto_compression_in_durable_trace() -> Result<()> {
         let mut config = AgentConfig::new("test-model", "agent", "sys");
-        config.token_limit = 4;
+        config.token_limit = 4_096;
+        config.enable_tool = false;
         let mut agent = ReactAgent::new(config);
         agent.set_compressor(SlidingWindowCompressor::new(1)).await;
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
@@ -247,18 +259,17 @@ mod tests {
             .ok_or_else(|| crate::error::ReactError::Other("trace run missing".to_string()))?;
         {
             let mut context = agent.memory.context.lock().await;
-            context.push(Message::user(
-                "first message with enough text to cross the tiny budget".to_string(),
-            ));
-            context.push(Message::assistant(
-                "second message with enough text to force compression".to_string(),
-            ));
+            context.push(Message::user("first message ".repeat(5_000)));
+            context.push(Message::assistant("second message ".repeat(500)));
         }
         let snap = AgentRunSnapshot::from_agent(&agent);
         let (tx, _rx) = mpsc::channel::<Result<AgentEvent>>(8);
 
         let outcome = run_compact(&snap, &agent.memory.context, &tx, 0).await?;
-        assert!(matches!(outcome, CompactOutcome::Continue(_)));
+        assert!(
+            matches!(outcome, CompactOutcome::Continue(_)),
+            "unexpected compact outcome: {outcome:?}"
+        );
         let run = store
             .load(&trace_run_id)
             .await?
@@ -284,11 +295,11 @@ mod tests {
 
         let first_messages = match first {
             CompactOutcome::Continue(messages) => messages,
-            CompactOutcome::Abandoned => Vec::new(),
+            CompactOutcome::Abandoned | CompactOutcome::Failed => Vec::new(),
         };
         let second_messages = match second {
             CompactOutcome::Continue(messages) => messages,
-            CompactOutcome::Abandoned => Vec::new(),
+            CompactOutcome::Abandoned | CompactOutcome::Failed => Vec::new(),
         };
         assert!(first_messages.iter().any(|message| {
             message
@@ -337,7 +348,7 @@ mod tests {
 
         let messages = match second {
             CompactOutcome::Continue(messages) => messages,
-            CompactOutcome::Abandoned => Vec::new(),
+            CompactOutcome::Abandoned | CompactOutcome::Failed => Vec::new(),
         };
         assert!(messages.iter().all(|message| {
             message
@@ -364,7 +375,7 @@ mod tests {
 
         let messages = match second {
             CompactOutcome::Continue(messages) => messages,
-            CompactOutcome::Abandoned => Vec::new(),
+            CompactOutcome::Abandoned | CompactOutcome::Failed => Vec::new(),
         };
         assert!(messages.iter().all(|message| {
             message

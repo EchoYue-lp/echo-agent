@@ -131,7 +131,13 @@ impl Tool for PubMedSearchTool {
 
             let status = response.status();
             if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
+                let body = crate::http_body::read_bounded_text(
+                    response,
+                    crate::http_body::MAX_API_RESPONSE_BYTES,
+                    TOOL_NAME,
+                    None,
+                )
+                .await?;
                 return Err(ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
                     message: format!("PubMed ESearch error ({}): {}", status, body),
@@ -139,13 +145,13 @@ impl Tool for PubMedSearchTool {
                 .into());
             }
 
-            let json: Value = response
-                .json()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to parse ESearch response: {}", e),
-                })?;
+            let json: Value = crate::http_body::read_bounded_json(
+                response,
+                crate::http_body::MAX_API_RESPONSE_BYTES,
+                TOOL_NAME,
+                None,
+            )
+            .await?;
 
             let id_list = json
                 .get("esearchresult")
@@ -192,13 +198,13 @@ impl Tool for PubMedSearchTool {
                         message: format!("PubMed EFetch request failed: {}", e),
                     })?;
 
-            let xml_text = response
-                .text()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to read EFetch response: {}", e),
-                })?;
+            let xml_text = crate::http_body::read_bounded_text(
+                response,
+                crate::http_body::MAX_API_RESPONSE_BYTES,
+                TOOL_NAME,
+                None,
+            )
+            .await?;
 
             let papers = parse_pubmed_xml(&xml_text)?;
 

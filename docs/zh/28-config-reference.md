@@ -97,7 +97,7 @@ project root 外部的 symlink 会被忽略。`InstructionResolver` 会返回来
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `llm_max_retries` | `usize` | `3` | LLM 失败后最大重试次数 |
+| `llm_max_retries` | `usize` | `3` | 请求、建流和首个 chunk 前失败的最大重试次数；已收到增量后的错误不会重放 |
 | `llm_retry_delay_ms` | `u64` | `500` | 初始重试延迟（指数退避） |
 
 #### 流式与回调
@@ -188,7 +188,7 @@ ReactAgentBuilder::new()
 ```rust
 ReactAgentBuilder::new()
     .enable_memory()                   // 长期记忆
-    .enable_planning()                 // DAG 任务规划
+    .enable_tasks()                    // 版本化任务图工具
     .enable_human_in_loop()            // 审批守卫（需要 "human-loop" feature）
     .enable_subagent()                 // 子 Agent 调度（需要 "subagent" feature）
     .enable_cot()                      // 链式思考
@@ -534,47 +534,29 @@ let config = AppConfig::load()?;  // 加载 echo-agent.yaml
 
 ---
 
-## 模型窗口注册表（v0.2.1 新增）
+## 模型 Profile 覆盖
 
-动态注册和查询模型的上下文窗口大小：
+为 provider 或精确模型定义覆盖项，无需修改 provider adapter：
 
 ```rust
-use echo_core::budget::{register_model_window, resolve_model_window};
+use echo_agent::prelude::*;
 
-// 注册自定义模型的窗口大小
-register_model_window("my-custom-model", 128_000);
-
-// 查询窗口大小（未知模型回退到启发式估计）
-let window = resolve_model_window("qwen3-max");  // 从注册表查
-let fallback = resolve_model_window("unknown-model");  // 启发式估计
+let resolver = ModelProfileResolver::new().register_exact(
+    "custom",
+    "my-custom-model",
+    ModelProfileOverride {
+        context_window: Some(128_000),
+        ..Default::default()
+    },
+);
+let profile = resolver.resolve(
+    "custom",
+    "my-custom-model",
+    ProviderCapabilities::openai_compatible(),
+);
+assert_eq!(profile.context_window, Some(128_000));
 ```
 
-内置模型已有默认窗口大小注册。可通过 `register_model_window()` 覆盖或扩展。
+已知模型使用 provider-aware 推断；未知模型使用保守的框架回退值，应用也可以显式提供 profile 覆盖。
 
 ---
-
-## 全局事件总线（EventBus）
-
-统一的 `tokio::broadcast` 事件通道，供 Webhook / Trace / UI / Audit 订阅同一事件流：
-
-```rust
-use echo_agent::event_bus::{GLOBAL_EVENT_BUS, BusEvent};
-
-// 订阅事件
-let mut rx = GLOBAL_EVENT_BUS.subscribe();
-
-// 发送事件
-GLOBAL_EVENT_BUS.send(AgentEvent::Token("hello".into()));
-
-// 发送带 run 上下文的事件
-GLOBAL_EVENT_BUS.send_for_run(event, "run-123");
-
-// 接收事件
-while let Ok(bus_event) = rx.recv().await {
-    println!("Event: {:?}, run_id: {:?}", bus_event.event, bus_event.run_id);
-}
-```
-
-`BusEvent` 包含 `run_id` 和 `agent_id`，支持多 Agent 场景下的事件过滤。
-
-容量 1024，消费端落后时收到 `RecvError::Lagged`。

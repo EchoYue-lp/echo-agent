@@ -15,7 +15,7 @@
 use futures::future::BoxFuture;
 
 use crate::error::ToolError;
-use crate::tasks::{TaskSpawner, TaskSpawnerConfig};
+use crate::tasks::TaskSpawner;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -33,14 +33,6 @@ impl SpawnBackgroundTaskTool {
     /// Create a new tool with the given task spawner.
     pub fn new(spawner: Arc<TaskSpawner>) -> Self {
         Self { spawner }
-    }
-
-    /// Create a new tool with a default spawner.
-    #[allow(dead_code)]
-    pub fn with_default_spawner() -> Self {
-        Self {
-            spawner: Arc::new(TaskSpawner::new(TaskSpawnerConfig::default())),
-        }
     }
 }
 

@@ -28,8 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "0 9 * * 1",
         "Generate weekly analytics report",
     );
-    store.add(daily.clone())?;
-    store.add(weekly.clone())?;
+    store.add(daily.clone()).await?;
+    store.add(weekly.clone()).await?;
     println!(
         "✅ Added 2 cron tasks: '{}' and '{}'\n",
         daily.name, weekly.name
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(format!("Executed: {}", name))
         })
     });
-    let runner = Arc::new(SchedulerRunner::new(store, cancel, fire_fn));
+    let runner = Arc::new(SchedulerRunner::new(store, cancel, fire_fn).await?);
     println!("🤖 SchedulerRunner created (fire fn prints task name)\n");
 
     // ── 6. Manually trigger a task via run_once() ─────────────────────

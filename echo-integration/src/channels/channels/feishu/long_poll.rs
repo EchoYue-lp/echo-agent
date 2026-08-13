@@ -45,6 +45,8 @@ const MAX_BACKOFF_SECS: u64 = 300;
 
 /// Stable connection threshold (seconds) — exceeding this time means the connection is stable, reset backoff
 const STABLE_THRESHOLD_SECS: u64 = 60;
+const MAX_FRAGMENT_COUNT: usize = 256;
+const MAX_FRAGMENT_BYTES: usize = 2 * 1024 * 1024;
 
 // Type aliases to simplify complex type signatures
 type WsConn =
@@ -113,6 +115,7 @@ pub struct WsClient {
     fragment_cache: FragmentCache,
     /// Processed event dedup cache (event message_id -> processing time)
     processed_events: Arc<DashMap<String, Instant>>,
+    event_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     /// Running flag
     running: Arc<Mutex<bool>>,
 }
@@ -126,6 +129,7 @@ impl WsClient {
             service_id: 0,
             fragment_cache: Arc::new(DashMap::new()),
             processed_events: Arc::new(DashMap::new()),
+            event_locks: Arc::new(DashMap::new()),
             running: Arc::new(Mutex::new(false)),
         }
     }
@@ -405,44 +409,51 @@ impl WsClient {
             msg_id, msg_type
         );
 
-        // [Critical] Send response frame immediately (must be within 3 seconds, so respond first then process)
-        self.send_response_frame(sink, frame.clone(), true).await?;
-
-        // Then process message asynchronously
+        // Process first: success acknowledgement must mean recoverable work completed.
         if msg_type == MESSAGE_TYPE_EVENT {
             // Extract the Feishu event's message_id from payload for dedup
             let event_message_id = Self::extract_event_message_id(&payload_str);
 
+            let event_lock = event_message_id.as_ref().map(|event_mid| {
+                self.event_locks
+                    .entry(event_mid.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone()
+            });
+            let _event_guard = if let Some(lock) = &event_lock {
+                Some(lock.lock().await)
+            } else {
+                None
+            };
+
             // Dedup: check if this event has already been processed
-            if let Some(ref event_mid) = event_message_id {
-                if self.processed_events.contains_key(event_mid) {
-                    info!(
-                        "[V3] Feishu WebSocket: duplicate event detected, message_id={}, skipping",
-                        event_mid
-                    );
-                    return Ok(());
-                }
-                self.processed_events
-                    .insert(event_mid.clone(), Instant::now());
+            if let Some(ref event_mid) = event_message_id
+                && self.processed_events.contains_key(event_mid)
+            {
+                info!(
+                    "[V3] Feishu WebSocket: duplicate event detected, message_id={}, skipping",
+                    event_mid
+                );
+                return Ok(());
             }
 
             // Periodically clean up expired dedup cache entries
             self.cleanup_processed_events();
 
-            let handler_clone = handler.clone();
-            let payload_owned = payload_str.to_string();
-            tokio::spawn(async move {
-                let start = chrono::Utc::now().timestamp_millis();
-                if let Err(e) = Self::process_event_async(payload_owned, handler_clone).await {
-                    warn!("[V3] Feishu WebSocket: async processing error: {:?}", e);
+            if let Err(error) = Self::process_event_async(payload_str.to_string(), handler).await {
+                if let Some(event_mid) = &event_message_id {
+                    self.event_locks.remove(event_mid);
                 }
-                let end = chrono::Utc::now().timestamp_millis();
-                info!(
-                    "[V3] Feishu WebSocket: async processing done in {}ms",
-                    end - start
-                );
-            });
+                return Err(error);
+            }
+            if let Some(event_mid) = event_message_id {
+                self.processed_events
+                    .insert(event_mid.clone(), Instant::now());
+                self.event_locks.remove(&event_mid);
+            }
         }
+
+        self.send_response_frame(sink, frame, true).await?;
 
         Ok(())
     }
@@ -470,6 +481,18 @@ impl WsClient {
         seq: i32,
         payload: Option<Vec<u8>>,
     ) -> Option<Option<Vec<u8>>> {
+        let count = usize::try_from(sum).ok()?;
+        let index = usize::try_from(seq).ok()?;
+        if msg_id.is_empty()
+            || count == 0
+            || count > MAX_FRAGMENT_COUNT
+            || index >= count
+            || payload
+                .as_ref()
+                .is_some_and(|part| part.len() > MAX_FRAGMENT_BYTES)
+        {
+            return None;
+        }
         let cache_key = msg_id.to_string();
 
         // Clean up timed-out incomplete fragments (5 minutes without completion is considered lost)
@@ -479,7 +502,7 @@ impl WsClient {
 
         // Initialize cache
         if !self.fragment_cache.contains_key(&cache_key) {
-            let fragments: Vec<Option<Vec<u8>>> = vec![None; sum as usize];
+            let fragments: Vec<Option<Vec<u8>>> = vec![None; count];
             self.fragment_cache
                 .insert(cache_key.clone(), (Instant::now(), fragments));
         }
@@ -487,9 +510,17 @@ impl WsClient {
         // Update fragment
         if let Some(mut entry) = self.fragment_cache.get_mut(&cache_key) {
             let (_, fragments) = entry.value_mut();
-            if seq >= 0 && seq < sum {
-                fragments[seq as usize] = payload;
+            let current_bytes = fragments
+                .iter()
+                .filter_map(Option::as_ref)
+                .fold(0usize, |total, part| total.saturating_add(part.len()));
+            let incoming_bytes = payload.as_ref().map_or(0, Vec::len);
+            if current_bytes.saturating_add(incoming_bytes) > MAX_FRAGMENT_BYTES {
+                drop(entry);
+                self.fragment_cache.remove(&cache_key);
+                return None;
             }
+            fragments[index] = payload;
 
             let all_received = fragments.iter().all(|f| f.is_some());
             if all_received {

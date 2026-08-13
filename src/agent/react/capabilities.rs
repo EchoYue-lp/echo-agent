@@ -22,8 +22,6 @@ use crate::skills::external::resource_tool::ReadSkillResourceTool;
 use crate::skills::external::run_script_tool::RunSkillScriptTool;
 use crate::skills::{Skill, SkillInfo};
 use crate::tools::Tool;
-#[cfg(feature = "subagent")]
-use crate::tools::builtin::agent_dispatch::SubagentCatalogEntry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -70,20 +68,16 @@ impl ReactAgent {
     /// If a tool with the same name exists, it is removed and the new tool is registered.
     /// Returns the old tool if it was replaced.
     pub fn replace_tool(&mut self, tool: Box<dyn Tool>) -> Option<Box<dyn Tool>> {
-        let name = tool.name().to_string();
-        let old = self.tools.tool_manager.unregister(&name);
-        self.tools.tool_manager.register(tool);
-        old
+        self.tools.tool_manager.replace(tool)
     }
 
     /// Register a tool that requires human approval before execution.
     ///
     /// This API is intentionally synchronous so it can be used during agent setup.
     /// When a `PermissionService` is present, the approval rule is first buffered in
-    /// `pending_permission_rules` and then flushed at the next async permission check.
+    /// `pending_permission_rules` and transferred into the next invocation snapshot.
     /// This avoids calling `block_on()` inside a running Tokio runtime.
     ///
-    /// If no `PermissionService` is configured, the method falls back to the legacy
     /// Registers a permission rule requiring approval for the tool.
     pub fn add_need_appeal_tool(&mut self, tool: Box<dyn Tool>) {
         #[cfg(feature = "human-loop")]
@@ -319,7 +313,6 @@ impl ReactAgent {
             .subagent_registry
             .register_sync(def.clone(), agent)
         {
-            self.update_dispatch_catalog(&def);
             info!(agent = %self.config.agent_name, subagent = %name, "Subagent registered");
         }
     }
@@ -346,7 +339,6 @@ impl ReactAgent {
             .subagent_registry
             .register_definition_sync(def.clone());
         if inserted {
-            self.update_dispatch_catalog(&def);
             info!(
                 agent = %self.config.agent_name,
                 subagent = %name,
@@ -368,35 +360,7 @@ impl ReactAgent {
             .subagent_registry
             .register_factory_sync(def.clone(), factory)
         {
-            self.update_dispatch_catalog(&def);
             info!(agent = %self.config.agent_name, subagent = %name, "Subagent factory registered");
-        }
-    }
-
-    #[cfg(feature = "subagent")]
-    fn update_dispatch_catalog(&self, def: &SubagentDefinition) {
-        if let Some(handle) = &self.dispatch_catalog_handle {
-            match handle.write() {
-                Ok(mut catalog) => {
-                    if let Some(entry) = catalog.iter_mut().find(|entry| entry.name == def.name) {
-                        entry.description = def.description.clone();
-                    } else {
-                        catalog.push(SubagentCatalogEntry {
-                            name: def.name.clone(),
-                            description: def.description.clone(),
-                        });
-                    }
-                    catalog.sort_by(|a, b| a.name.cmp(&b.name));
-                }
-                Err(err) => {
-                    warn!(
-                        agent = %self.config.agent_name,
-                        error = %err,
-                        "failed to update subagent dispatch catalog"
-                    );
-                }
-            }
-            self.tools.tool_manager.invalidate_definition_cache();
         }
     }
 
@@ -406,35 +370,14 @@ impl ReactAgent {
     pub async fn unregister_subagent(&mut self, name: &str) -> bool {
         let existed = self.tools.subagent_registry.contains(name).await;
         self.tools.subagent_registry.remove(name).await;
-        if let Some(handle) = &self.dispatch_catalog_handle {
-            match handle.write() {
-                Ok(mut catalog) => catalog.retain(|entry| entry.name != name),
-                Err(error) => {
-                    warn!(
-                        agent = %self.config.agent_name,
-                        subagent = %name,
-                        %error,
-                        "failed to remove Subagent from dispatch catalog"
-                    );
-                }
-            }
-            self.tools.tool_manager.invalidate_definition_cache();
-        }
         existed
     }
 
-    /// Refresh this Agent's model-facing dispatch catalog from authoritative
-    /// registry definitions.
-    ///
-    /// A shared [`SubagentRegistry`] owns execution targets, while each Agent's
-    /// `agent_tool` keeps a local schema projection so tool definitions can be
-    /// produced synchronously. Product runtimes call this after registering the
-    /// shared definitions or creating a fresh delegation-capable Agent.
+    /// Refresh the cached tool schema for legacy callers. The dispatch catalog
+    /// itself is read from the shared registry and ignores the supplied copy.
     #[cfg(feature = "subagent")]
-    pub fn sync_subagent_dispatch_catalog(&self, definitions: &[SubagentDefinition]) {
-        for definition in definitions {
-            self.update_dispatch_catalog(definition);
-        }
+    pub fn sync_subagent_dispatch_catalog(&self, _definitions: &[SubagentDefinition]) {
+        self.tools.tool_manager.invalidate_definition_cache();
     }
 
     /// Batch register subagents
@@ -484,8 +427,20 @@ impl ReactAgent {
     /// Set the token limit (context window budget) at runtime.
     /// When set to a finite value, this enables token budget tracking and
     /// may trigger compression. Set to `usize::MAX` to disable.
-    pub fn set_token_limit(&mut self, token_limit: usize) {
+    pub fn set_token_limit(&mut self, token_limit: usize) -> crate::error::Result<()> {
+        let mut context = self.memory.context.try_lock().map_err(|_| {
+            crate::error::AgentError::ContextLimitExceeded(
+                "cannot change the context window while an agent turn is active".to_string(),
+            )
+        })?;
+        let budget = if self.config.token_budget_config.enabled {
+            Some(self.config.token_budget_config.build(token_limit)?)
+        } else {
+            None
+        };
+        context.set_token_limit(token_limit, budget);
         self.config.token_limit = token_limit;
+        Ok(())
     }
 
     /// Set agent-level default tools hidden from the LLM on subsequent runs.

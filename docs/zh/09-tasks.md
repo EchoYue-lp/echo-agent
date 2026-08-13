@@ -183,7 +183,7 @@ graph TD
 
 ## 复合任务执行（CompositePlan）
 
-> 模块：`echo_orchestration::tasks::composite`（feature = `tasks`）
+> 模块：`echo_agent::tasks::composite`（feature = `tasks`）
 
 复合任务将多个异构步骤串联或并联执行，支持步骤间的上游结果传递，适用于"先搜索、再摘要、后报告"等多阶段流水线。
 

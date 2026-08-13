@@ -276,7 +276,7 @@ See [Tool Permissions](./tool-permissions.md) for the full permission model, rul
 Raw JSON parameters from the LLM can be extracted and validated type-safely via `ToolCallParams`:
 
 ```rust
-use echo_core::tools::{ToolCallParams, ParamValue};
+use echo_agent::tools::{ToolCallParams, ParamValue};
 
 let params = ToolCallParams::from_value(&raw_json);
 
@@ -299,7 +299,7 @@ Implement the `Tool` trait (note: no longer uses `#[async_trait]`; `execute` ret
 use echo_agent::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 use echo_agent::tools::permission::ToolPermission;
 use echo_agent::error::Result;
-use echo_core::tools::ToolCallParams;
+use echo_agent::tools::ToolCallParams;
 use serde_json::{Value, json};
 use futures::future::BoxFuture;
 
@@ -477,7 +477,7 @@ Type-safe enum controlling how the LLM uses tools:
 | `Function { name }` | Force call to a specific tool | `{"type":"function","function":{"name":"..."}}` |
 
 ```rust
-use echo_core::llm::ToolChoice;
+use echo_agent::llm::ToolChoice;
 
 // Let the model decide
 let choice = ToolChoice::Auto;

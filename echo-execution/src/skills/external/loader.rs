@@ -429,16 +429,19 @@ fn parse_frontmatter(content: &str) -> Result<RawFrontmatter> {
         .ok_or_else(|| ReactError::Other("SKILL.md frontmatter missing closing ---".to_string()))?;
 
     // Verify the closing --- is actually at the start of a line (not mid-line)
-    let yaml_str = &after_open[..close_idx];
+    let yaml_str = after_open.get(..close_idx).unwrap_or_default();
 
     // Ensure there's no trailing content on the closing --- line
     // (the --- should be followed only by whitespace, \r, or \n)
-    let after_close_start = &after_open[close_idx + 4..]; // skip "\n---"
+    let after_close_start = after_open
+        .get(close_idx.saturating_add(4)..)
+        .unwrap_or_default(); // skip "\n---"
     // The first non-whitespace after "---" should be the markdown body or end of file
     // If there's text on the same line as "---", it's not a proper separator
-    let close_line_remainder = &after_close_start[..after_close_start
+    let close_line_end = after_close_start
         .find('\n')
-        .unwrap_or(after_close_start.len())];
+        .unwrap_or(after_close_start.len());
+    let close_line_remainder = after_close_start.get(..close_line_end).unwrap_or_default();
     if !close_line_remainder.trim().is_empty() {
         return Err(ReactError::Other(
             "SKILL.md frontmatter closing --- has trailing content on same line".to_string(),
@@ -472,7 +475,9 @@ pub fn extract_instructions(content: &str) -> String {
         .trim_start_matches('\n');
 
     if let Some(close_idx) = after_open.find("\n---") {
-        let after_close = &after_open[close_idx + 4..];
+        let after_close = after_open
+            .get(close_idx.saturating_add(4)..)
+            .unwrap_or_default();
         after_close
             .trim_start_matches('\r')
             .trim_start_matches('\n')

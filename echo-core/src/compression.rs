@@ -4,9 +4,12 @@
 
 use crate::error::Result;
 use crate::llm::types::Message;
+use crate::tokenizer::{HeuristicTokenizer, Tokenizer};
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+pub use tokio_util::sync::CancellationToken;
 
 /// A replaceable, marker-tagged message projected into model context.
 #[derive(Debug, Clone)]
@@ -46,6 +49,19 @@ pub struct CompressionInput {
     pub current_query: Option<String>,
     /// Focus instructions — user-provided guidance on what to prioritize in summaries
     pub focus_instructions: Option<String>,
+    /// Cancellation for every provider call performed by this compression pass.
+    pub cancel_token: Option<CancellationToken>,
+    /// Tokenizer shared with the caller's budget calculation.
+    pub tokenizer: Option<Arc<dyn Tokenizer>>,
+}
+
+impl CompressionInput {
+    /// Return the configured tokenizer, falling back to the framework default.
+    pub fn tokenizer(&self) -> Arc<dyn Tokenizer> {
+        self.tokenizer
+            .clone()
+            .unwrap_or_else(|| Arc::new(HeuristicTokenizer))
+    }
 }
 
 /// Compression pipeline output

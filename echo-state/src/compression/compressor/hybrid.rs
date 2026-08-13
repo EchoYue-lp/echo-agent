@@ -4,7 +4,6 @@ use crate::compression::{
 };
 use echo_core::error::Result;
 use echo_core::llm::types::Message;
-use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use futures::future::BoxFuture;
 use std::time::Instant;
 
@@ -37,7 +36,6 @@ pub struct HybridCompressor {
     stages: Vec<Box<dyn ContextCompressor>>,
     /// When true, skip remaining stages if tokens are already at or below the limit.
     short_circuit: bool,
-    tokenizer: HeuristicTokenizer,
 }
 
 impl ContextCompressor for HybridCompressor {
@@ -49,6 +47,7 @@ impl ContextCompressor for HybridCompressor {
         Box::pin(async move {
             let start = Instant::now();
             let token_limit = input.token_limit;
+            let tokenizer = input.tokenizer();
             let current_query = input.current_query.clone();
             let focus_instructions = input.focus_instructions.clone();
             let mut messages = input.messages;
@@ -59,7 +58,7 @@ impl ContextCompressor for HybridCompressor {
             let tokens_before: usize = messages
                 .iter()
                 .filter_map(|m| m.content.as_text())
-                .map(|c| self.tokenizer.count_tokens(&c))
+                .map(|c| tokenizer.count_tokens(&c))
                 .sum();
 
             for (i, stage) in self.stages.iter().enumerate() {
@@ -68,7 +67,7 @@ impl ContextCompressor for HybridCompressor {
                     let current_tokens: usize = messages
                         .iter()
                         .filter_map(|m| m.content.as_text())
-                        .map(|c| self.tokenizer.count_tokens(&c))
+                        .map(|c| tokenizer.count_tokens(&c))
                         .sum();
                     if current_tokens <= token_limit {
                         tracing::debug!(
@@ -88,11 +87,14 @@ impl ContextCompressor for HybridCompressor {
                         token_limit,
                         current_query: current_query.clone(),
                         focus_instructions: focus_instructions.clone(),
+                        cancel_token: input.cancel_token.clone(),
+                        tokenizer: Some(tokenizer.clone()),
                     })
                     .await?;
                 // Collect stage info from checkpoint if available
                 if let Some(ref cp) = output.checkpoint {
-                    let stage_info = format!("{}(id={})", cp.strategy, &cp.checkpoint_id[..8]);
+                    let checkpoint_preview: String = cp.checkpoint_id.chars().take(8).collect();
+                    let stage_info = format!("{}(id={checkpoint_preview})", cp.strategy);
                     stage_names.push(stage_info);
                     if cp.summary.is_some() {
                         last_summary = cp.summary.clone();
@@ -107,7 +109,7 @@ impl ContextCompressor for HybridCompressor {
             let tokens_after: usize = messages
                 .iter()
                 .filter_map(|m| m.content.as_text())
-                .map(|c| self.tokenizer.count_tokens(&c))
+                .map(|c| tokenizer.count_tokens(&c))
                 .sum();
 
             let hybrid_strategy = format!("Hybrid({})", stage_names.join("+"));
@@ -163,7 +165,6 @@ impl HybridCompressorBuilder {
         HybridCompressor {
             stages: self.stages,
             short_circuit: self.short_circuit.unwrap_or(true),
-            tokenizer: HeuristicTokenizer,
         }
     }
 }
@@ -190,7 +191,6 @@ impl HybridCompressor {
                 Box::new(SlidingWindowCompressor::new(window)),
             ],
             short_circuit: true,
-            tokenizer: HeuristicTokenizer,
         }
     }
 }
@@ -231,6 +231,8 @@ mod tests {
             token_limit: 1000, // Very high — first stage result will be under this
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
 
         let output = compressor.compress(input).await.unwrap();
@@ -262,6 +264,8 @@ mod tests {
             token_limit: 1000,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
 
         let output = compressor.compress(input).await.unwrap();

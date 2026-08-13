@@ -286,7 +286,13 @@ impl Tool for DeleteFileTool {
             }
 
             // Create git checkpoint before deletion
-            let checkpoint_tag = crate::git_checkpoint::create_checkpoint(&path);
+            let checkpoint_tag =
+                crate::git_checkpoint::create_checkpoint(&path).map_err(|error| {
+                    ToolError::ExecutionFailed {
+                        tool: "delete_file".to_string(),
+                        message: format!("Failed to create recovery checkpoint: {error}"),
+                    }
+                })?;
             if checkpoint_tag.is_some() {
                 crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
             }
@@ -686,7 +692,12 @@ impl Tool for WriteFileTool {
 
             // Create git checkpoint before mutation (only if file already exists)
             let checkpoint_tag = if path.exists() {
-                let tag = crate::git_checkpoint::create_checkpoint(&path);
+                let tag = crate::git_checkpoint::create_checkpoint(&path).map_err(|error| {
+                    ToolError::ExecutionFailed {
+                        tool: "write_file".to_string(),
+                        message: format!("Failed to create recovery checkpoint: {error}"),
+                    }
+                })?;
                 if tag.is_some() {
                     crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
                 }

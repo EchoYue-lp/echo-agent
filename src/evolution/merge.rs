@@ -22,10 +22,6 @@ pub use echo_execution::skills::external::SkillDescriptor;
 /// Threshold above which a merge proposal is generated.
 const MERGE_THRESHOLD: f64 = 0.75;
 
-/// Threshold above which a merge is strongly recommended.
-#[allow(dead_code)]
-const STRONG_MERGE_THRESHOLD: f64 = 0.90;
-
 /// Namespace for storing merge proposals.
 const MERGE_NAMESPACE: &[&str] = &["agent", "evolution", "merges"];
 
@@ -213,15 +209,13 @@ impl SkillSimilarityDetector {
 
 /// Executes skill merges by updating descriptors and marking skills as deprecated.
 pub struct SkillMerger {
-    #[allow(dead_code)]
-    store: Arc<dyn Store>,
     curator: Curator,
 }
 
 impl SkillMerger {
     /// Create a new merger.
-    pub fn new(store: Arc<dyn Store>, curator: Curator) -> Self {
-        Self { store, curator }
+    pub fn new(curator: Curator) -> Self {
+        Self { curator }
     }
 
     /// Execute a merge proposal: update the primary skill descriptor and
@@ -262,24 +256,86 @@ impl SkillMerger {
             primary_descriptor.allowed_tools = merged_tools.into_iter().collect();
         }
 
-        // Mark the deprecated skill in the evolution-owned Curator.
-        let _ = self
+        primary_descriptor.triggers.sort();
+        primary_descriptor.paths.sort();
+        primary_descriptor.allowed_tools.sort();
+
+        let original = tokio::fs::read_to_string(&primary_descriptor.location).await?;
+        let updated = update_skill_frontmatter(&original, primary_descriptor)?;
+        echo_core::utils::fs::atomic_write(&primary_descriptor.location, updated.as_bytes())?;
+
+        let previous_meta = self.curator.skill(&proposal.deprecated_skill)?;
+        let deprecated = self
             .curator
-            .deprecate_skill(&proposal.deprecated_skill, Some(&proposal.primary_skill));
+            .deprecate_skill(&proposal.deprecated_skill, Some(&proposal.primary_skill))?;
+        if !deprecated {
+            echo_core::utils::fs::atomic_write(&primary_descriptor.location, original.as_bytes())?;
+            return Err(echo_core::error::ReactError::Other(format!(
+                "skill {:?} is not in a lifecycle state that can be deprecated",
+                proposal.deprecated_skill
+            )));
+        }
 
         // Record the merge in the change log.
         let merge_key = format!("{}__{}", proposal.skill_a, proposal.skill_b);
         let entry = ChangeEntryBuilder::new(EntityType::Skill, &merge_key, ChangeType::Merge)
+            .before(serde_json::json!({"primary_path": primary_descriptor.location, "primary_content": original, "deprecated_meta": previous_meta}))
+            .after(serde_json::json!({"primary_path": primary_descriptor.location, "primary_content": updated, "deprecated_by": proposal.primary_skill}))
             .reason(format!(
                 "Merged {} into {}",
                 proposal.deprecated_skill, proposal.primary_skill
             ))
             .trigger("skill_merger".to_string())
             .build(change_log);
-        change_log.record(entry)?;
+        if let Err(error) = change_log.record(entry) {
+            let file_restore = echo_core::utils::fs::atomic_write(
+                &primary_descriptor.location,
+                original.as_bytes(),
+            );
+            let state_restore = self
+                .curator
+                .restore_skill(&proposal.deprecated_skill, previous_meta);
+            file_restore?;
+            state_restore?;
+            return Err(error);
+        }
 
         Ok(())
     }
+}
+
+fn update_skill_frontmatter(content: &str, descriptor: &SkillDescriptor) -> Result<String> {
+    let rest = content.strip_prefix("---\n").ok_or_else(|| {
+        echo_core::error::ReactError::Other("SKILL.md is missing YAML frontmatter".to_string())
+    })?;
+    let end = rest.find("\n---\n").ok_or_else(|| {
+        echo_core::error::ReactError::Other("SKILL.md frontmatter is not closed".to_string())
+    })?;
+    let body = rest.get(end.saturating_add(5)..).ok_or_else(|| {
+        echo_core::error::ReactError::Other("invalid SKILL.md frontmatter boundary".to_string())
+    })?;
+    let yaml = rest.get(..end).ok_or_else(|| {
+        echo_core::error::ReactError::Other("invalid SKILL.md frontmatter".to_string())
+    })?;
+    let mut value: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)
+        .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?;
+    let mapping = value.as_mapping_mut().ok_or_else(|| {
+        echo_core::error::ReactError::Other("SKILL.md frontmatter must be a mapping".to_string())
+    })?;
+    for (key, values) in [
+        ("triggers", &descriptor.triggers),
+        ("paths", &descriptor.paths),
+        ("allowed-tools", &descriptor.allowed_tools),
+    ] {
+        mapping.insert(
+            serde_yaml_ng::Value::String(key.to_string()),
+            serde_yaml_ng::to_value(values)
+                .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?,
+        );
+    }
+    let rendered = serde_yaml_ng::to_string(&value)
+        .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?;
+    Ok(format!("---\n{}---\n{}", rendered, body))
 }
 
 // ── Similarity helpers ──────────────────────────────────────────────────
@@ -514,18 +570,29 @@ mod tests {
         assert!(proposal.similarity_score >= MERGE_THRESHOLD);
     }
 
-    fn make_merger(store: Arc<dyn Store>) -> SkillMerger {
+    fn make_merger(_store: Arc<dyn Store>) -> SkillMerger {
         use crate::evolution::curator::{Curator, CuratorConfig};
         let config = CuratorConfig::default();
-        let state_path = std::env::temp_dir().join("echo-agent-test-curator-state.json");
+        let state_path = std::env::temp_dir().join(format!(
+            "echo-agent-test-curator-state-{}.json",
+            uuid::Uuid::new_v4()
+        ));
         let curator = Curator::new(config, state_path);
-        SkillMerger::new(store, curator)
+        SkillMerger::new(curator)
     }
 
     #[tokio::test]
-    async fn test_execute_merge() {
+    async fn test_execute_merge() -> std::result::Result<(), String> {
         let store = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
         let merger = make_merger(store);
+        let root = std::env::temp_dir().join(format!("echo-agent-merge-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let primary_path = root.join("primary-SKILL.md");
+        std::fs::write(
+            &primary_path,
+            "---\nname: git-workflow\ndescription: Git workflow\n---\nBody\n",
+        )
+        .map_err(|error| error.to_string())?;
 
         let mut primary = make_descriptor(
             "git-workflow",
@@ -541,6 +608,12 @@ mod tests {
             vec!["Read", "Write"],
             "Git operations",
         );
+        primary.location = primary_path.clone();
+
+        merger
+            .curator
+            .touch_skill("git-ops", true)
+            .map_err(|error| error.to_string())?;
 
         let proposal = SkillMergeProposal {
             skill_a: "git-workflow".to_string(),
@@ -561,7 +634,7 @@ mod tests {
         merger
             .execute_merge(&proposal, &mut primary, Some(&deprecated), &change_log)
             .await
-            .unwrap();
+            .map_err(|error| error.to_string())?;
 
         // Primary should now have merged triggers.
         assert!(primary.triggers.contains(&"git".to_string()));
@@ -577,5 +650,9 @@ mod tests {
         assert!(primary.allowed_tools.contains(&"Bash".to_string()));
         assert!(primary.allowed_tools.contains(&"Read".to_string()));
         assert!(primary.allowed_tools.contains(&"Write".to_string()));
+        let persisted = std::fs::read_to_string(primary_path).map_err(|error| error.to_string())?;
+        assert!(persisted.contains("push"));
+        std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
+        Ok::<(), String>(())
     }
 }

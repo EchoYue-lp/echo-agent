@@ -39,10 +39,16 @@ use std::sync::{Arc, Mutex};
 
 // ── MockAgent ─────────────────────────────────────────────────────────────────
 
+/// One step in a cancellation-aware Agent event script.
+pub enum MockAgentStep {
+    Event(Box<AgentEvent>),
+    Error(String),
+    Delay(std::time::Duration),
+}
+
 /// A scriptable Mock Agent.
 ///
-/// Returns preset responses in order; once the queue is exhausted, each call
-/// returns `"mock agent response"`.
+/// Returns preset responses in order and fails closed when exhausted.
 /// Messages from both `execute()` and `chat()` are recorded, and can be inspected
 /// via [`calls()`](MockAgent::calls).
 /// `reset()` clears the call history, simulating the conversation-reset semantics
@@ -52,6 +58,7 @@ pub struct MockAgent {
     model_name: String,
     system_prompt: String,
     responses: Arc<Mutex<VecDeque<String>>>,
+    event_scripts: Arc<Mutex<VecDeque<Vec<MockAgentStep>>>>,
     calls: Arc<Mutex<Vec<String>>>,
     /// Multimodal messages received via `execute_stream_message_with_cancel`
     /// (records whether dispatch forwarded attachments to the subagent).
@@ -63,6 +70,7 @@ pub struct MockAgent {
     working_dirs: Arc<Mutex<Vec<Option<std::path::PathBuf>>>>,
     /// Artificial delay before returning (for background-dispatch tests).
     delay_ms: u64,
+    default_success: Option<String>,
 }
 
 // All observable state is behind Arc<Mutex>, so cloning shares call/message
@@ -75,11 +83,13 @@ impl Clone for MockAgent {
             model_name: self.model_name.clone(),
             system_prompt: self.system_prompt.clone(),
             responses: self.responses.clone(),
+            event_scripts: self.event_scripts.clone(),
             calls: self.calls.clone(),
             messages: self.messages.clone(),
             invocation_contexts: self.invocation_contexts.clone(),
             working_dirs: self.working_dirs.clone(),
             delay_ms: self.delay_ms,
+            default_success: self.default_success.clone(),
         }
     }
 }
@@ -92,11 +102,13 @@ impl MockAgent {
             model_name: "mock-model".to_string(),
             system_prompt: "You are a mock agent".to_string(),
             responses: Arc::new(Mutex::new(VecDeque::new())),
+            event_scripts: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(Vec::new())),
             invocation_contexts: Arc::new(Mutex::new(Vec::new())),
             working_dirs: Arc::new(Mutex::new(Vec::new())),
             delay_ms: 0,
+            default_success: None,
         }
     }
 
@@ -136,6 +148,28 @@ impl MockAgent {
             }
         }
         self
+    }
+
+    /// Append one complete neutral event script for the next streaming call.
+    pub fn with_event_script(self, steps: Vec<MockAgentStep>) -> Self {
+        self.event_scripts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push_back(steps);
+        self
+    }
+
+    /// Explicitly allow calls after the script is exhausted.
+    pub fn with_default_success(mut self, text: impl Into<String>) -> Self {
+        self.default_success = Some(text.into());
+        self
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.responses
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
     }
 
     /// Total number of times called
@@ -199,12 +233,65 @@ impl MockAgent {
             .clone()
     }
 
-    fn next_response(&self) -> String {
+    fn next_response(&self) -> Result<String> {
         self.responses
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .pop_front()
-            .unwrap_or_else(|| "mock agent response".to_string())
+            .or_else(|| self.default_success.clone())
+            .ok_or_else(|| {
+                ReactError::Agent(Box::new(AgentError::SubagentError(
+                    "MockAgent response script exhausted".to_string(),
+                )))
+            })
+    }
+
+    fn next_event_stream<'a>(
+        &'a self,
+        cancel: CancellationToken,
+    ) -> Result<BoxStream<'a, Result<AgentEvent>>> {
+        let scripted = self
+            .event_scripts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front();
+        let steps = match scripted {
+            Some(steps) => steps,
+            None => vec![MockAgentStep::Event(Box::new(AgentEvent::FinalAnswer(
+                self.next_response()?,
+            )))],
+        };
+        let initial_delay = self.delay_ms;
+        let events = async_stream::stream! {
+            if initial_delay > 0 {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        yield Ok(AgentEvent::Cancelled);
+                        return;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(initial_delay)) => {}
+                }
+            }
+            for step in steps {
+                match step {
+                    MockAgentStep::Event(event) => yield Ok(*event),
+                    MockAgentStep::Error(message) => {
+                        yield Err(ReactError::Agent(Box::new(AgentError::SubagentError(message))));
+                        return;
+                    }
+                    MockAgentStep::Delay(delay) => {
+                        tokio::select! {
+                            _ = cancel.cancelled() => {
+                                yield Ok(AgentEvent::Cancelled);
+                                return;
+                            }
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(events))
     }
 }
 
@@ -230,7 +317,7 @@ impl Agent for MockAgent {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(task.to_string());
-            Ok(self.next_response())
+            self.next_response()
         })
     }
 
@@ -239,9 +326,25 @@ impl Agent for MockAgent {
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
-            let answer = self.execute(task).await?;
-            let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
-            Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(task.to_string());
+            self.next_event_stream(CancellationToken::new())
+        })
+    }
+
+    fn execute_stream_with_cancel<'a>(
+        &'a self,
+        task: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(task.to_string());
+            self.next_event_stream(cancel)
         })
     }
 
@@ -252,7 +355,7 @@ impl Agent for MockAgent {
     fn execute_stream_message_with_cancel<'a>(
         &'a self,
         message: echo_core::llm::types::Message,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
             self.messages
@@ -265,16 +368,14 @@ impl Agent for MockAgent {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(text);
-            let answer = self.next_response();
-            let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
-            Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
+            self.next_event_stream(cancel)
         })
     }
 
     fn execute_stream_with_invocation_context<'a>(
         &'a self,
         task: &'a str,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
         invocation: echo_core::agent::AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
@@ -282,7 +383,7 @@ impl Agent for MockAgent {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .push(invocation);
-            self.execute_stream(task).await
+            self.execute_stream_with_cancel(task, cancel).await
         })
     }
 
@@ -310,7 +411,7 @@ impl Agent for MockAgent {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(message.to_string());
-            Ok(self.next_response())
+            self.next_response()
         })
     }
 
@@ -319,9 +420,25 @@ impl Agent for MockAgent {
         message: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
-            let answer = self.chat(message).await?;
-            let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
-            Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(message.to_string());
+            self.next_event_stream(CancellationToken::new())
+        })
+    }
+
+    fn chat_stream_with_cancel<'a>(
+        &'a self,
+        message: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(message.to_string());
+            self.next_event_stream(cancel)
         })
     }
 

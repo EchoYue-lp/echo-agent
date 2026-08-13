@@ -1,10 +1,10 @@
 //! QQ Bot HTTP API — Token acquisition + message sending
 //!
 //! Official API docs:
-//! - Token: POST https://bots.qq.com/app/getAppAccessToken
-//! - Gateway: GET https://api.sgroup.qq.com/v2/gateway
-//! - Direct message: POST https://api.sgroup.qq.com/v2/users/{openid}/messages
-//! - Group message: POST https://api.sgroup.qq.com/v2/groups/{guild_id}/messages
+//! - Token: POST <https://bots.qq.com/app/getAppAccessToken>
+//! - Gateway: GET <https://api.sgroup.qq.com/v2/gateway>
+//! - Direct message: POST `https://api.sgroup.qq.com/v2/users/{openid}/messages`
+//! - Group message: POST `https://api.sgroup.qq.com/v2/groups/{guild_id}/messages`
 
 use super::super::super::types::ChatType;
 use echo_core::error::{ChannelError, ReactError, Result};
@@ -162,7 +162,8 @@ impl TokenManager {
                     .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
             })
             .unwrap_or(7200);
-        let refresh_at = (chrono::Utc::now().timestamp() as u64) + expires_in - 300;
+        let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
+        let refresh_at = now.saturating_add(expires_in.saturating_sub(300));
         self.expires_at.store(refresh_at, Ordering::Relaxed);
 
         let mut tok = self.token.lock().await;

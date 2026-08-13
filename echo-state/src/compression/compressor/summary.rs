@@ -5,8 +5,7 @@ use crate::compression::{
 };
 use echo_core::error::Result;
 use echo_core::llm::LlmClient;
-use echo_core::llm::types::{Message, ResponseFormat, Role};
-use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
+use echo_core::llm::types::{ContentPart, Message, MessageContent, ResponseFormat, Role};
 use futures::future::BoxFuture;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -59,11 +58,7 @@ pub fn default_summary_prompt(messages: &[Message]) -> String {
 pub fn default_summary_prompt_with_focus(messages: &[Message], focus: Option<&str>) -> String {
     let history = messages
         .iter()
-        .filter_map(|m| {
-            m.content
-                .as_text()
-                .map(|c| format!("[{}]: {}", m.role.as_str(), c))
-        })
+        .map(message_for_summary)
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -112,11 +107,7 @@ const STRUCTURED_SUMMARY_PROMPT: &str = r#"你的任务是创建对话历史的*
 pub fn structured_summary_prompt(messages: &[Message], focus: Option<&str>) -> String {
     let history = messages
         .iter()
-        .filter_map(|m| {
-            m.content
-                .as_text()
-                .map(|c| format!("[{}]: {}", m.role.as_str(), c))
-        })
+        .map(message_for_summary)
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -128,6 +119,41 @@ pub fn structured_summary_prompt(messages: &[Message], focus: Option<&str>) -> S
         "{}\n{}\n\n对话历史：\n{}\n\n请返回 JSON：",
         STRUCTURED_SUMMARY_PROMPT, focus_instruction, history
     )
+}
+
+fn message_for_summary(message: &Message) -> String {
+    let content = match &message.content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Empty => "[empty message]".to_string(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => text.clone(),
+                ContentPart::ImageUrl { image_url } => {
+                    let hash = echo_core::utils::hash::fnv1a_64(image_url.url.as_bytes());
+                    if image_url.url.starts_with("data:") {
+                        format!(
+                            "[attachment:image content_hash={hash:016x} chars={}]",
+                            image_url.url.chars().count()
+                        )
+                    } else {
+                        format!(
+                            "[attachment:image url={} content_hash={hash:016x}]",
+                            image_url.url
+                        )
+                    }
+                }
+                ContentPart::File { name, content } => format!(
+                    "[attachment:file name={} content_hash={:016x} chars={}]",
+                    name,
+                    echo_core::utils::hash::fnv1a_64(content.as_bytes()),
+                    content.chars().count()
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    format!("[{}]: {content}", message.role.as_str())
 }
 
 /// LLM 摘要压缩策略。
@@ -219,6 +245,7 @@ impl SummaryCompressor {
         &self,
         messages: &[Message],
         focus: Option<&str>,
+        cancel_token: Option<echo_core::compression::CancellationToken>,
     ) -> (Option<String>, Option<StructuredSummary>) {
         // Check if provider supports structured output
         let supports_structured = self.llm.capabilities().structured_output;
@@ -236,7 +263,7 @@ impl SummaryCompressor {
                     tool_choice: None,
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
-                    cancel_token: None,
+                    cancel_token: cancel_token.clone(),
                     user_id: None,
                     cache_hints: None,
                 })
@@ -244,12 +271,14 @@ impl SummaryCompressor {
             {
                 Ok(response) => {
                     let text = response.content().unwrap_or_default().to_string();
-                    if let Some(parsed) = StructuredSummary::from_llm_response(&text) {
+                    if text.trim().is_empty() {
+                        warn!("Structured summary returned empty content");
+                    } else if let Some(parsed) = StructuredSummary::from_llm_response(&text) {
                         return (Some(text), Some(parsed));
+                    } else {
+                        warn!("Structured summary JSON parse failed, using raw text");
+                        return (Some(text), None);
                     }
-                    // JSON parse failed but LLM succeeded — use raw text
-                    warn!("Structured summary JSON parse failed, using raw text");
-                    return (Some(text), None);
                 }
                 Err(e) => {
                     warn!(error = %e, "Structured summary LLM call failed, falling back to natural language");
@@ -266,9 +295,28 @@ impl SummaryCompressor {
             base_prompt
         };
 
-        match self.llm.chat_simple(vec![Message::user(prompt)]).await {
-            Ok(text) => (Some(text), None),
-            Err(_e) => (None, None),
+        match self
+            .llm
+            .chat(echo_core::llm::ChatRequest {
+                messages: vec![Message::user(prompt)],
+                temperature: None,
+                max_tokens: None,
+                tools: None,
+                tool_choice: None,
+                response_format: None,
+                thinking: None,
+                cancel_token,
+                user_id: None,
+                cache_hints: None,
+            })
+            .await
+        {
+            Ok(response) => response
+                .content()
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| (Some(text.to_string()), None))
+                .unwrap_or((None, None)),
+            Err(_) => (None, None),
         }
     }
 }
@@ -281,7 +329,11 @@ impl ContextCompressor for SummaryCompressor {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
             let start = Instant::now();
-            let tokenizer = HeuristicTokenizer;
+            let tokenizer = input.tokenizer();
+            let focus = input
+                .focus_instructions
+                .clone()
+                .or(input.current_query.clone());
             let tokens_before: usize = input
                 .messages
                 .iter()
@@ -289,11 +341,18 @@ impl ContextCompressor for SummaryCompressor {
                 .map(|c| tokenizer.count_tokens(&c))
                 .sum();
 
-            let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) = input
+            let system_msgs: Vec<Message> = input
                 .messages
                 .iter()
+                .filter(|message| message.role == Role::System && !is_generated_summary(message))
                 .cloned()
-                .partition(|m| m.role == Role::System);
+                .collect();
+            let conv_msgs: Vec<Message> = input
+                .messages
+                .iter()
+                .filter(|message| message.role != Role::System || is_generated_summary(message))
+                .cloned()
+                .collect();
             let system_count = system_msgs.len();
 
             if conv_msgs.len() <= self.keep_recent {
@@ -308,7 +367,7 @@ impl ContextCompressor for SummaryCompressor {
                     .with_counts(messages.len(), 0)
                     .with_tokens(tokens_before, tokens_after)
                     .with_duration_ms(start.elapsed().as_millis() as u64)
-                    .with_focus(input.focus_instructions.clone());
+                    .with_focus(focus.clone());
                 return Ok(CompressionOutput {
                     messages,
                     evicted: vec![],
@@ -320,10 +379,10 @@ impl ContextCompressor for SummaryCompressor {
             let to_summarize = &conv_msgs[..split_at];
             let to_keep = conv_msgs[split_at..].to_vec();
 
-            let focus = input.focus_instructions.as_deref();
-
             // Try structured output first; fall back to natural language
-            let (summary_text, structured) = self.try_structured_summary(to_summarize, focus).await;
+            let (summary_text, structured) = self
+                .try_structured_summary(to_summarize, focus.as_deref(), input.cancel_token.clone())
+                .await;
 
             let (final_summary, summary_for_checkpoint) = match (summary_text, structured) {
                 (Some(_text), Some(ref s)) => {
@@ -359,7 +418,7 @@ impl ContextCompressor for SummaryCompressor {
                 .with_counts(messages.len(), to_summarize.len())
                 .with_tokens(tokens_before, tokens_after)
                 .with_duration_ms(start.elapsed().as_millis() as u64)
-                .with_focus(input.focus_instructions.clone());
+                .with_focus(focus);
 
             Ok(CompressionOutput {
                 messages,
@@ -368,6 +427,13 @@ impl ContextCompressor for SummaryCompressor {
             })
         })
     }
+}
+
+fn is_generated_summary(message: &Message) -> bool {
+    message
+        .content
+        .as_text_ref()
+        .is_some_and(|text| text.starts_with("[对话历史摘要]"))
 }
 
 // ── Incremental Summary ───────────────────────────────────────────────────────
@@ -450,6 +516,7 @@ impl IncrementalSummaryCompressor {
         &self,
         messages: &[Message],
         focus: Option<&str>,
+        cancel_token: Option<echo_core::compression::CancellationToken>,
     ) -> (Option<String>, Option<StructuredSummary>) {
         let supports_structured = self.llm.capabilities().structured_output;
 
@@ -465,7 +532,7 @@ impl IncrementalSummaryCompressor {
                     tool_choice: None,
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
-                    cancel_token: None,
+                    cancel_token: cancel_token.clone(),
                     user_id: None,
                     cache_hints: None,
                 })
@@ -499,6 +566,7 @@ impl IncrementalSummaryCompressor {
         new_messages: &[Message],
         previous: &StructuredSummary,
         focus: Option<&str>,
+        cancel_token: Option<echo_core::compression::CancellationToken>,
     ) -> (Option<String>, Option<StructuredSummary>) {
         let supports_structured = self.llm.capabilities().structured_output;
 
@@ -534,7 +602,7 @@ impl IncrementalSummaryCompressor {
                     tool_choice: None,
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
-                    cancel_token: None,
+                    cancel_token,
                     user_id: None,
                     cache_hints: None,
                 })
@@ -593,7 +661,11 @@ impl ContextCompressor for IncrementalSummaryCompressor {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
             let start = Instant::now();
-            let tokenizer = HeuristicTokenizer;
+            let tokenizer = input.tokenizer();
+            let focus = input
+                .focus_instructions
+                .clone()
+                .or(input.current_query.clone());
             let tokens_before: usize = input
                 .messages
                 .iter()
@@ -620,7 +692,7 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                     .with_counts(messages.len(), 0)
                     .with_tokens(tokens_before, tokens_after)
                     .with_duration_ms(start.elapsed().as_millis() as u64)
-                    .with_focus(input.focus_instructions.clone());
+                    .with_focus(focus.clone());
                 return Ok(CompressionOutput {
                     messages,
                     evicted: vec![],
@@ -632,17 +704,26 @@ impl ContextCompressor for IncrementalSummaryCompressor {
             let to_summarize = &conv_msgs[..split_at];
             let to_keep = conv_msgs[split_at..].to_vec();
 
-            let focus = input.focus_instructions.as_deref();
             let prev_structured = self.current_structured_summary();
 
             // Decide: first compression or incremental?
             let (summary_text, structured) = if let Some(ref prev) = prev_structured {
                 // Incremental path: summarize new messages, then merge field-by-field
-                self.incremental_structured_summary(to_summarize, prev, focus)
-                    .await
+                self.incremental_structured_summary(
+                    to_summarize,
+                    prev,
+                    focus.as_deref(),
+                    input.cancel_token.clone(),
+                )
+                .await
             } else {
                 // First compression: full structured summary (with natural language fallback)
-                self.try_first_structured_summary(to_summarize, focus).await
+                self.try_first_structured_summary(
+                    to_summarize,
+                    focus.as_deref(),
+                    input.cancel_token.clone(),
+                )
+                .await
             };
 
             let (final_text, _final_structured, summary_for_checkpoint) =
@@ -697,7 +778,7 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                 .with_counts(messages.len(), to_summarize.len())
                 .with_tokens(tokens_before, tokens_after)
                 .with_duration_ms(start.elapsed().as_millis() as u64)
-                .with_focus(input.focus_instructions.clone());
+                .with_focus(focus);
 
             Ok(CompressionOutput {
                 messages,

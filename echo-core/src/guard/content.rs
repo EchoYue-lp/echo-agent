@@ -219,17 +219,10 @@ impl crate::guard::Guard for ContentGuard {
                 ContentGuardResult::Rejected { pii_types } => crate::guard::GuardResult::Block {
                     reason: format!("内容包含敏感信息: {}", pii_types.join(", ")),
                 },
-                ContentGuardResult::Redacted(_redacted) => {
-                    // GuardManager 不支持内联内容修改，记录警告。
-                    // 调用方可通过 ContentGuard::redact() 单独获取脱敏后的文本。
-                    tracing::warn!(
-                        pii_found = true,
-                        "内容已脱敏，但在 GuardManager 中回传脱敏文本需调用方另外获取"
-                    );
-                    crate::guard::GuardResult::Warn {
-                        reasons: vec!["内容包含敏感信息，已脱敏处理".to_string()],
-                    }
-                }
+                ContentGuardResult::Redacted(redacted) => crate::guard::GuardResult::Transform {
+                    content: redacted,
+                    reasons: vec!["内容包含敏感信息，已脱敏处理".to_string()],
+                },
             })
         })
     }

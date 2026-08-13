@@ -13,8 +13,8 @@
 //!     .name("my-agent")
 //!     .with_system_prompt("You are a helpful assistant");
 //!
-//! let factory = DefaultAgentFactory;
-//! let agent = factory.create_agent(config)?;
+//! struct ProductFactory;
+//! // Implement `AgentFactory` in the product/facade that owns an Agent builder.
 //! ```
 
 use crate::error::Result;
@@ -145,25 +145,6 @@ impl Default for AgentFactoryConfig {
 pub trait AgentFactory: Send + Sync {
     /// Create an agent from the given configuration.
     fn create_agent(&self, config: AgentFactoryConfig) -> Result<Box<dyn crate::agent::Agent>>;
-}
-
-// ── Default Agent Factory ───────────────────────────────────────────────────
-
-/// Default implementation of [`AgentFactory`].
-///
-/// The facade crate (echo-agent) provides a concrete implementation
-/// that uses `ReactAgentBuilder`.
-pub struct DefaultAgentFactory;
-
-impl AgentFactory for DefaultAgentFactory {
-    fn create_agent(&self, _config: AgentFactoryConfig) -> Result<Box<dyn crate::agent::Agent>> {
-        Err(crate::error::ReactError::Other(
-            "DefaultAgentFactory::create_agent must be called from the facade crate \
-             (echo_agent), which provides the concrete ReactAgentBuilder-based implementation. \
-             Use echo_agent::agent::default_factory::DefaultAgentFactory instead."
-                .into(),
-        ))
-    }
 }
 
 #[cfg(test)]

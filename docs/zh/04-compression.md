@@ -47,11 +47,10 @@ SlidingWindowCompressor::new(20) // 保留最新 20 条消息
 
 ```rust
 use echo_agent::prelude::*;
-use echo_agent::llm::DefaultLlmClient;
-use reqwest::Client;
+use echo_agent::llm::OpenAiClient;
 use std::sync::Arc;
 
-let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "qwen3-max"));
+let llm = Arc::new(OpenAiClient::from_env("qwen3-max")?);
 
 // 使用内置摘要提示词
 SummaryCompressor::new(llm.clone(), 6)
@@ -144,7 +143,7 @@ let compressor = HybridCompressor::builder()
 ### 配置
 
 ```rust
-use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+use echo_agent::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
 
 let config = AdaptiveCompressionConfig {
     l1_snip_threshold_tokens: 80_000,
@@ -182,8 +181,8 @@ Token 数:     0 ──── 80k ──── 100k ──── 120k ───�
 `AdaptiveCompressor` 实现了 `ContextCompressor`，可通过 `ContextManager::builder()` 直接集成（v0.2.2 新增）：
 
 ```rust
-use echo_state::compression::ContextManager;
-use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+use echo_agent::compression::ContextManager;
+use echo_agent::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
 
 let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default())
     .with_llm(llm); // 可选：启用 L4
@@ -340,7 +339,7 @@ ctx.reset_compression_metrics();
 `CalibratedTokenizer` 包装任意基础 Tokenizer，通过从实际 API 响应数据学习，逐步提升估算精度：
 
 ```rust
-use echo_core::tokenizer::{CalibratedTokenizer, HeuristicTokenizer, Tokenizer};
+use echo_agent::tokenizer::{CalibratedTokenizer, HeuristicTokenizer, Tokenizer};
 use std::sync::Arc;
 
 let base = Arc::new(HeuristicTokenizer);
@@ -436,8 +435,8 @@ let compressor = SummaryCompressor::with_prompt(
 
 ```rust
 use echo_agent::compression::{ContextCompressor, CompressionInput, CompressionOutput};
-use echo_core::error::Result;
-use echo_core::llm::types::Message;
+use echo_agent::error::Result;
+use echo_agent::llm::types::Message;
 use futures::future::BoxFuture;
 
 /// 只保留用户消息的压缩器（示例）
@@ -480,7 +479,7 @@ let prompt = default_summary_prompt(&messages);
 
 ```rust
 use echo_agent::compression::{CompressionInput, CompressionOutput};
-use echo_core::error::Result;
+use echo_agent::error::Result;
 use echo_agent_macros::compressor;
 
 #[compressor]

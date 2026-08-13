@@ -1,7 +1,7 @@
 //! LLM usage statistics accumulator for subagent dispatches.
 //!
 //! Tracks cumulative token usage across all LLM calls within a single
-//! subagent dispatch, aligned with [`AgentEvent::LlmUsage`] fields.
+//! subagent dispatch, aligned with `AgentEvent::LlmUsage` fields.
 
 use serde::{Deserialize, Serialize};
 

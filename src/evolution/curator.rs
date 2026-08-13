@@ -118,28 +118,11 @@ impl CuratorState {
     ///   save (which would destroy potentially-recoverable data). The caller
     ///   (a curator method) will proceed and rewrite, but at least the loss is
     ///   observable in logs.
-    pub fn load(path: &PathBuf) -> Self {
+    pub fn try_load(path: &PathBuf) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(data) => match serde_json::from_str(&data) {
-                Ok(state) => state,
-                Err(e) => {
-                    tracing::warn!(
-                        path = ?path,
-                        error = %e,
-                        "curator state file is present but unparseable; falling back to default (existing file will be overwritten on next save)"
-                    );
-                    Self::default()
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(e) => {
-                tracing::warn!(
-                    path = ?path,
-                    error = %e,
-                    "curator state file could not be read; falling back to default"
-                );
-                Self::default()
-            }
+            Ok(data) => serde_json::from_str(&data).map_err(Into::into),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -161,7 +144,7 @@ impl CuratorState {
             file.write_all(data.as_bytes())?;
             // fsync the data before rename so a crash after rename cannot
             // expose an empty file.
-            let _ = file.sync_all();
+            file.sync_all()?;
         }
         std::fs::rename(&tmp_path, path)?;
         Ok(())
@@ -222,7 +205,7 @@ impl Curator {
     ///
     /// Holds an exclusive `flock` on the sidecar lock file for the duration of
     /// the read only. For read-modify-write that must be atomic, use
-    /// [`with_locked_state`] instead — that holds the lock across load, mutate,
+    /// `with_locked_state` instead — that holds the lock across load, mutate,
     /// and save in a single critical section.
     ///
     /// The lock is an OS advisory lock (`fs2::FileExt::try_lock_exclusive`) on a
@@ -231,21 +214,15 @@ impl Curator {
     /// This is the critical difference from the previous `create_new` sidecar
     /// design, whose lock file survived a crash and deadlocked every future
     /// locker forever (P0 — Curator TOCTOU).
-    pub fn load_state(&self) -> CuratorState {
-        let _guard = match self.acquire_lock() {
-            Ok(guard) => Some(guard),
-            Err(error) => {
-                tracing::warn!(%error, "curator: state read proceeding without lock");
-                None
-            }
-        };
-        CuratorState::load(&self.state_path)
+    pub fn load_state(&self) -> Result<CuratorState> {
+        let _guard = self.acquire_lock()?;
+        CuratorState::try_load(&self.state_path)
     }
 
     /// Save the state under an advisory file lock.
     ///
     /// Holds an exclusive lock for the duration of the write only. Callers that
-    /// need load-mutate-save atomicity must use [`with_locked_state`].
+    /// need load-mutate-save atomicity must use `with_locked_state`.
     pub fn save_state(&self, state: &CuratorState) -> Result<()> {
         let _guard = self.acquire_lock()?;
         state.save(&self.state_path)
@@ -267,7 +244,7 @@ impl Curator {
         F: FnOnce(&mut CuratorState) -> Result<(T, bool)>,
     {
         let _guard = self.acquire_lock()?;
-        let mut state = CuratorState::load(&self.state_path);
+        let mut state = CuratorState::try_load(&self.state_path)?;
         let (result, dirty) = f(&mut state)?;
         if dirty {
             state.save(&self.state_path)?;
@@ -400,6 +377,56 @@ impl Curator {
         })
     }
 
+    pub(crate) fn remove_candidate(&self, name: &str) -> Result<bool> {
+        self.with_locked_state(|state| {
+            let removable = state
+                .skills
+                .get(name)
+                .is_some_and(|meta| meta.lifecycle == SkillLifecycle::Candidate);
+            if removable {
+                state.skills.remove(name);
+            }
+            Ok((removable, removable))
+        })
+    }
+
+    pub(crate) fn revert_draft_to_candidate(&self, name: &str) -> Result<bool> {
+        self.with_locked_state(|state| {
+            let Some(meta) = state.skills.get_mut(name) else {
+                return Ok((false, false));
+            };
+            if meta.lifecycle != SkillLifecycle::Draft {
+                return Ok((false, false));
+            }
+            meta.lifecycle = SkillLifecycle::Candidate;
+            meta.path = None;
+            meta.last_modified_at = chrono::Utc::now();
+            Ok((true, true))
+        })
+    }
+
+    pub(crate) fn skill(&self, name: &str) -> Result<Option<SkillMeta>> {
+        let _guard = self.acquire_lock()?;
+        Ok(CuratorState::try_load(&self.state_path)?
+            .skills
+            .get(name)
+            .cloned())
+    }
+
+    pub(crate) fn restore_skill(&self, name: &str, previous: Option<SkillMeta>) -> Result<()> {
+        self.with_locked_state(|state| {
+            match previous {
+                Some(meta) => {
+                    state.skills.insert(name.to_string(), meta);
+                }
+                None => {
+                    state.skills.remove(name);
+                }
+            }
+            Ok(((), true))
+        })
+    }
+
     /// Promote a Candidate skill to Draft.
     pub fn promote_to_draft(&self, name: &str) -> Result<bool> {
         self.promote_to_draft_at(name, None)
@@ -449,12 +476,13 @@ impl Curator {
     }
 
     /// Return lifecycle metadata for one concrete `SKILL.md` path.
-    pub fn skill_for_path(&self, path: &std::path::Path) -> Option<SkillMeta> {
+    pub fn skill_for_path(&self, path: &std::path::Path) -> Result<Option<SkillMeta>> {
         let normalized = normalize_skill_path(path);
-        self.load_state()
+        Ok(self
+            .load_state()?
             .skills
             .into_values()
-            .find(|meta| meta.path.as_ref() == Some(&normalized))
+            .find(|meta| meta.path.as_ref() == Some(&normalized)))
     }
 
     /// Deprecate a skill, optionally specifying which skill supersedes it.
@@ -556,8 +584,8 @@ impl Curator {
     }
 
     /// Get a summary of the curator state.
-    pub fn status(&self) -> CuratorStatus {
-        let state = self.load_state();
+    pub fn status(&self) -> Result<CuratorStatus> {
+        let state = self.load_state()?;
         let mut candidate = 0;
         let mut draft = 0;
         let mut active = 0;
@@ -580,7 +608,7 @@ impl Curator {
             }
         }
 
-        CuratorStatus {
+        Ok(CuratorStatus {
             total: state.skills.len(),
             candidate,
             draft,
@@ -590,7 +618,7 @@ impl Curator {
             archived,
             pinned,
             last_run_at: state.last_run_at,
-        }
+        })
     }
 }
 
@@ -649,15 +677,16 @@ mod tests {
     }
 
     #[test]
-    fn test_touch_and_status() {
+    fn test_touch_and_status() -> Result<()> {
         let curator = temp_curator();
-        curator.touch_skill("test-skill", true).unwrap();
+        curator.touch_skill("test-skill", true)?;
 
-        let status = curator.status();
+        let status = curator.status()?;
         assert_eq!(status.total, 1);
         assert_eq!(status.active, 1);
         assert_eq!(status.stale, 0);
         assert_eq!(status.archived, 0);
+        Ok(())
     }
 
     #[test]
@@ -668,7 +697,7 @@ mod tests {
             .join("SKILL.md");
         curator.touch_skill_at("path-skill", Some(&skill_path), true)?;
 
-        let Some(meta) = curator.skill_for_path(&skill_path) else {
+        let Some(meta) = curator.skill_for_path(&skill_path)? else {
             return Err(crate::error::ReactError::Other(
                 "skill path was not tracked".to_string(),
             ));
@@ -679,212 +708,251 @@ mod tests {
     }
 
     #[test]
-    fn test_pin_unpin() {
+    fn test_pin_unpin() -> Result<()> {
         let curator = temp_curator();
-        curator.touch_skill("test-skill", true).unwrap();
-        curator.pin_skill("test-skill").unwrap();
+        curator.touch_skill("test-skill", true)?;
+        curator.pin_skill("test-skill")?;
 
-        let state = curator.load_state();
-        assert!(state.skills["test-skill"].pinned);
+        let state = curator.load_state()?;
+        assert!(
+            state
+                .skills
+                .get("test-skill")
+                .is_some_and(|meta| meta.pinned)
+        );
 
-        curator.unpin_skill("test-skill").unwrap();
-        let state = curator.load_state();
-        assert!(!state.skills["test-skill"].pinned);
+        curator.unpin_skill("test-skill")?;
+        let state = curator.load_state()?;
+        assert!(
+            state
+                .skills
+                .get("test-skill")
+                .is_some_and(|meta| !meta.pinned)
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_no_transition_when_fresh() {
+    fn test_no_transition_when_fresh() -> Result<()> {
         let curator = temp_curator();
-        curator.touch_skill("fresh-skill", true).unwrap();
+        curator.touch_skill("fresh-skill", true)?;
 
-        let transitions = curator.apply_transitions().unwrap();
+        let transitions = curator.apply_transitions()?;
         assert!(transitions.is_empty());
 
-        let status = curator.status();
+        let status = curator.status()?;
         assert_eq!(status.active, 1);
+        Ok(())
     }
 
     #[test]
-    fn test_skip_non_agent_created() {
+    fn test_skip_non_agent_created() -> Result<()> {
         let curator = temp_curator();
-        curator.touch_skill("bundled-skill", false).unwrap();
+        curator.touch_skill("bundled-skill", false)?;
 
         // Manually set last_used_at to old date
-        let mut state = curator.load_state();
-        state.skills.get_mut("bundled-skill").unwrap().last_used_at =
-            chrono::Utc::now() - chrono::Duration::days(100);
-        curator.save_state(&state).unwrap();
+        let mut state = curator.load_state()?;
+        state
+            .skills
+            .get_mut("bundled-skill")
+            .ok_or_else(|| crate::error::ReactError::Other("missing bundled-skill".into()))?
+            .last_used_at = chrono::Utc::now() - chrono::Duration::days(100);
+        curator.save_state(&state)?;
 
-        let transitions = curator.apply_transitions().unwrap();
+        let transitions = curator.apply_transitions()?;
         // Should not transition non-agent-created skills
         assert!(transitions.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn test_stale_transition() {
+    fn test_stale_transition() -> Result<()> {
         let curator = temp_curator();
-        curator.touch_skill("old-skill", true).unwrap();
+        curator.touch_skill("old-skill", true)?;
 
         // Manually set last_used_at to 31 days ago
-        let mut state = curator.load_state();
-        state.skills.get_mut("old-skill").unwrap().last_used_at =
-            chrono::Utc::now() - chrono::Duration::days(31);
-        curator.save_state(&state).unwrap();
+        let mut state = curator.load_state()?;
+        state
+            .skills
+            .get_mut("old-skill")
+            .ok_or_else(|| crate::error::ReactError::Other("missing old-skill".into()))?
+            .last_used_at = chrono::Utc::now() - chrono::Duration::days(31);
+        curator.save_state(&state)?;
 
-        let transitions = curator.apply_transitions().unwrap();
+        let transitions = curator.apply_transitions()?;
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].1, SkillLifecycle::Active);
         assert_eq!(transitions[0].2, SkillLifecycle::Stale);
 
-        let status = curator.status();
+        let status = curator.status()?;
         assert_eq!(status.stale, 1);
+        Ok(())
     }
 
     #[test]
-    fn test_pinned_skips_transition() {
+    fn test_pinned_skips_transition() -> Result<()> {
         let curator = temp_curator();
-        curator.touch_skill("pinned-skill", true).unwrap();
-        curator.pin_skill("pinned-skill").unwrap();
+        curator.touch_skill("pinned-skill", true)?;
+        curator.pin_skill("pinned-skill")?;
 
         // Manually set last_used_at to 100 days ago
-        let mut state = curator.load_state();
-        state.skills.get_mut("pinned-skill").unwrap().last_used_at =
-            chrono::Utc::now() - chrono::Duration::days(100);
-        curator.save_state(&state).unwrap();
+        let mut state = curator.load_state()?;
+        state
+            .skills
+            .get_mut("pinned-skill")
+            .ok_or_else(|| crate::error::ReactError::Other("missing pinned-skill".into()))?
+            .last_used_at = chrono::Utc::now() - chrono::Duration::days(100);
+        curator.save_state(&state)?;
 
-        let transitions = curator.apply_transitions().unwrap();
+        let transitions = curator.apply_transitions()?;
         assert!(transitions.is_empty());
 
-        let status = curator.status();
+        let status = curator.status()?;
         assert_eq!(status.active, 1);
         assert_eq!(status.pinned, 1);
+        Ok(())
     }
 
     #[test]
-    fn test_candidate_to_draft_to_active() {
+    fn test_candidate_to_draft_to_active() -> Result<()> {
         let curator = temp_curator();
 
         // Register as candidate
-        curator.register_candidate("my-skill").unwrap();
-        let state = curator.load_state();
+        curator.register_candidate("my-skill")?;
+        let state = curator.load_state()?;
         assert_eq!(
-            state.skills["my-skill"].lifecycle,
-            SkillLifecycle::Candidate
+            state.skills.get("my-skill").map(|meta| meta.lifecycle),
+            Some(SkillLifecycle::Candidate)
         );
 
         // Promote to draft
-        let promoted = curator.promote_to_draft("my-skill").unwrap();
+        let promoted = curator.promote_to_draft("my-skill")?;
         assert!(promoted);
-        let state = curator.load_state();
-        assert_eq!(state.skills["my-skill"].lifecycle, SkillLifecycle::Draft);
+        let state = curator.load_state()?;
+        assert_eq!(
+            state.skills.get("my-skill").map(|meta| meta.lifecycle),
+            Some(SkillLifecycle::Draft)
+        );
 
         // Promote to active
-        let promoted = curator.promote_to_active("my-skill").unwrap();
+        let promoted = curator.promote_to_active("my-skill")?;
         assert!(promoted);
-        let state = curator.load_state();
-        assert_eq!(state.skills["my-skill"].lifecycle, SkillLifecycle::Active);
+        let state = curator.load_state()?;
+        assert_eq!(
+            state.skills.get("my-skill").map(|meta| meta.lifecycle),
+            Some(SkillLifecycle::Active)
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_deprecate_skill() {
+    fn test_deprecate_skill() -> Result<()> {
         let curator = temp_curator();
-        curator.touch_skill("old-skill", true).unwrap();
+        curator.touch_skill("old-skill", true)?;
 
-        let deprecated = curator
-            .deprecate_skill("old-skill", Some("new-skill"))
-            .unwrap();
+        let deprecated = curator.deprecate_skill("old-skill", Some("new-skill"))?;
         assert!(deprecated);
 
-        let state = curator.load_state();
+        let state = curator.load_state()?;
         assert_eq!(
-            state.skills["old-skill"].lifecycle,
-            SkillLifecycle::Deprecated
+            state.skills.get("old-skill").map(|meta| meta.lifecycle),
+            Some(SkillLifecycle::Deprecated)
         );
         assert_eq!(
-            state.skills["old-skill"].superseded_by.as_deref(),
+            state
+                .skills
+                .get("old-skill")
+                .and_then(|meta| meta.superseded_by.as_deref()),
             Some("new-skill")
         );
+        Ok(())
     }
 
     #[test]
-    fn test_full_lifecycle() {
+    fn test_full_lifecycle() -> Result<()> {
         let curator = temp_curator();
 
         // Candidate -> Draft -> Active
-        curator.register_candidate("lifecycle-skill").unwrap();
-        curator.promote_to_draft("lifecycle-skill").unwrap();
-        curator.promote_to_active("lifecycle-skill").unwrap();
+        curator.register_candidate("lifecycle-skill")?;
+        curator.promote_to_draft("lifecycle-skill")?;
+        curator.promote_to_active("lifecycle-skill")?;
 
         // Set last_used_at to make it stale
-        let mut state = curator.load_state();
+        let mut state = curator.load_state()?;
         state
             .skills
             .get_mut("lifecycle-skill")
-            .unwrap()
+            .ok_or_else(|| crate::error::ReactError::Other("missing lifecycle-skill".into()))?
             .last_used_at = chrono::Utc::now() - chrono::Duration::days(35);
-        curator.save_state(&state).unwrap();
+        curator.save_state(&state)?;
 
-        let transitions = curator.apply_transitions().unwrap();
+        let transitions = curator.apply_transitions()?;
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].2, SkillLifecycle::Stale);
 
         // Set last_used_at to make it deprecated
-        let mut state = curator.load_state();
+        let mut state = curator.load_state()?;
         state
             .skills
             .get_mut("lifecycle-skill")
-            .unwrap()
+            .ok_or_else(|| crate::error::ReactError::Other("missing lifecycle-skill".into()))?
             .last_used_at = chrono::Utc::now() - chrono::Duration::days(65);
-        curator.save_state(&state).unwrap();
+        curator.save_state(&state)?;
 
-        let transitions = curator.apply_transitions().unwrap();
+        let transitions = curator.apply_transitions()?;
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].2, SkillLifecycle::Deprecated);
 
         // Set last_used_at to make it archived
-        let mut state = curator.load_state();
+        let mut state = curator.load_state()?;
         state
             .skills
             .get_mut("lifecycle-skill")
-            .unwrap()
+            .ok_or_else(|| crate::error::ReactError::Other("missing lifecycle-skill".into()))?
             .last_used_at = chrono::Utc::now() - chrono::Duration::days(95);
-        curator.save_state(&state).unwrap();
+        curator.save_state(&state)?;
 
-        let transitions = curator.apply_transitions().unwrap();
+        let transitions = curator.apply_transitions()?;
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].2, SkillLifecycle::Archived);
+        Ok(())
     }
 
     #[test]
-    fn test_candidate_no_auto_transition() {
+    fn test_candidate_no_auto_transition() -> Result<()> {
         let curator = temp_curator();
-        curator.register_candidate("cand-skill").unwrap();
+        curator.register_candidate("cand-skill")?;
 
         // Set last_used_at to very old
-        let mut state = curator.load_state();
-        state.skills.get_mut("cand-skill").unwrap().last_used_at =
-            chrono::Utc::now() - chrono::Duration::days(200);
-        curator.save_state(&state).unwrap();
+        let mut state = curator.load_state()?;
+        state
+            .skills
+            .get_mut("cand-skill")
+            .ok_or_else(|| crate::error::ReactError::Other("missing cand-skill".into()))?
+            .last_used_at = chrono::Utc::now() - chrono::Duration::days(200);
+        curator.save_state(&state)?;
 
         // Candidates should NOT auto-transition
-        let transitions = curator.apply_transitions().unwrap();
+        let transitions = curator.apply_transitions()?;
         assert!(transitions.is_empty());
 
-        let state = curator.load_state();
+        let state = curator.load_state()?;
         assert_eq!(
-            state.skills["cand-skill"].lifecycle,
-            SkillLifecycle::Candidate
+            state.skills.get("cand-skill").map(|meta| meta.lifecycle),
+            Some(SkillLifecycle::Candidate)
         );
+        Ok(())
     }
 
     #[test]
-    fn test_register_candidate_idempotent() {
+    fn test_register_candidate_idempotent() -> Result<()> {
         let curator = temp_curator();
-        curator.register_candidate("my-skill").unwrap();
-        curator.register_candidate("my-skill").unwrap(); // Should not fail
+        curator.register_candidate("my-skill")?;
+        curator.register_candidate("my-skill")?;
 
-        let state = curator.load_state();
+        let state = curator.load_state()?;
         assert_eq!(state.skills.len(), 1);
+        Ok(())
     }
 
     /// Regression for P0-1 (Curator TOCTOU): two `Curator` instances over the
@@ -892,7 +960,7 @@ mod tests {
     /// Under the pre-fix design (separate load/save locks), the second writer
     /// clobbered the first and one skill silently disappeared.
     #[test]
-    fn test_concurrent_curators_do_not_lose_updates() {
+    fn test_concurrent_curators_do_not_lose_updates() -> Result<()> {
         // Shared state path (simulates two modules calling default_path()).
         let dir = std::env::temp_dir().join(format!("echo_curator_conc_{}", uuid::Uuid::new_v4()));
         let path = dir.join("curator_state.json");
@@ -901,10 +969,10 @@ mod tests {
         let b = Curator::new(CuratorConfig::default(), path.clone());
 
         // Interleave the two instances as a race would.
-        a.register_candidate("skill-a").unwrap();
-        b.register_candidate("skill-b").unwrap();
+        a.register_candidate("skill-a")?;
+        b.register_candidate("skill-b")?;
 
-        let state = a.load_state();
+        let state = a.load_state()?;
         assert!(
             state.skills.contains_key("skill-a"),
             "skill-a lost (TOCTOU regression)"
@@ -913,6 +981,7 @@ mod tests {
             state.skills.contains_key("skill-b"),
             "skill-b lost (TOCTOU regression)"
         );
+        Ok(())
     }
 
     /// Regression for the kill-9 deadlock (R1): acquiring the lock, dropping
@@ -921,30 +990,29 @@ mod tests {
     /// locker. This holds because flock auto-releases on fd close; the stale
     /// sidecar file is not an obstacle since we never require `create_new`.
     #[test]
-    fn test_lock_survives_abandoned_sidecar() {
+    fn test_lock_survives_abandoned_sidecar() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("echo_curator_stale_{}", uuid::Uuid::new_v4()));
         let path = dir.join("curator_state.json");
 
         // Pre-create a stale sidecar lock file (as if a prior process crashed).
         let lock_path = path.with_extension("json.lock");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&lock_path, b"").unwrap();
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&lock_path, b"")?;
         assert!(lock_path.exists(), "precondition: stale sidecar exists");
 
         // A new curator must still succeed — the stale file is not a barrier.
         let curator = Curator::new(CuratorConfig::default(), path.clone());
-        curator
-            .register_candidate("after-stale")
-            .expect("curator must not deadlock on a stale sidecar file");
-        assert!(curator.load_state().skills.contains_key("after-stale"));
+        curator.register_candidate("after-stale")?;
+        assert!(curator.load_state()?.skills.contains_key("after-stale"));
+        Ok(())
     }
 
     /// `with_locked_state` must not persist when the closure errors — the
     /// on-disk file stays at its pre-call state.
     #[test]
-    fn test_with_locked_state_rollback_on_error() {
+    fn test_with_locked_state_rollback_on_error() -> Result<()> {
         let curator = temp_curator();
-        curator.register_candidate("keep-me").unwrap();
+        curator.register_candidate("keep-me")?;
 
         use crate::error::ReactError;
         let result: Result<()> = curator.with_locked_state(|state| {
@@ -967,11 +1035,28 @@ mod tests {
         });
         assert!(result.is_err());
 
-        let state = curator.load_state();
+        let state = curator.load_state()?;
         assert!(state.skills.contains_key("keep-me"));
         assert!(
             !state.skills.contains_key("should-not-persist"),
             "failed mutation must not be persisted"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_state_is_reported_and_not_rewritten() -> Result<()> {
+        let curator = temp_curator();
+        let original = b"{not-json";
+        if let Some(parent) = curator.state_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&curator.state_path, original)?;
+
+        assert!(curator.load_state().is_err());
+        assert!(curator.status().is_err());
+        assert!(curator.register_candidate("must-not-overwrite").is_err());
+        assert_eq!(std::fs::read(&curator.state_path)?, original);
+        Ok(())
     }
 }

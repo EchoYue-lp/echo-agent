@@ -67,7 +67,7 @@ Most AI agent frameworks live in Python. **echo-agent** brings full-featured Age
 | **Memory safety** | Compile-time | GC | GC | GC |
 | **ReAct loop** | Built-in | Built-in | Built-in | Built-in |
 | **Tool system** | `#[tool]` macro + JSON Schema | Decorator | Decorator | Function calling |
-| **Multi-agent** | SubAgent + Handoff | Graph | Crew | Conversation |
+| **Multi-agent** | Subagent dispatch + teams | Graph | Crew | Conversation |
 | **Streaming** | Native async streams | Callback | Limited | Callback |
 | **MCP protocol** | Native (stdio/SSE/HTTP) | Via LangChain | No | No |
 | **IM channels** | QQ + Feishu built-in | No | No | No |
@@ -124,7 +124,6 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 | `sqlite` | yes | SQLite-backed persistent memory |
 | `telemetry` | yes | OpenTelemetry tracing + metrics |
 | `a2a` | yes | Agent-to-Agent protocol (server + client) |
-| `handoff` | yes | Agent handoff/collaboration |
 | `topology` | yes | Multi-agent topology tracking |
 | `tasks` | yes | DAG task scheduling |
 | `data` | yes | Polars-powered data tools |
@@ -178,7 +177,7 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 
 ## Feature Matrix
 
-echo-agent ships with **67 registered tools** across 8 crates, all accessible through a single `use echo_agent::prelude::*`.
+echo-agent ships with **67 registered tools** across 8 crates. The prelude exposes common traits and builders; concrete tools use canonical paths such as `echo_agent::tools::files::*`, and feature-enabled tool sets can be installed with `echo_agent::tools::register_all_tools`.
 
 ### Core
 
@@ -204,8 +203,7 @@ echo-agent ships with **67 registered tools** across 8 crates, all accessible th
 | Feature | Description | API Preview |
 |---------|-------------|-------------|
 | **SubAgent** | Sync / Fork / Teammate execution modes | `agent.register_agent(sub)` |
-| **Agent Handoff** | Context-aware transfer between agents | `HandoffManager::new()` |
-| **Task Planning** | Plan → Execute → Summarize (built into ReactAgent) | `agent.execute_with_planning(task)` |
+| **Task Graph** | Revisioned task CRUD on one dependency graph | `.enable_tasks()` |
 | **Self-Review** | LLM-based quality critique as a tool | `ReviewTool::new(critic)` |
 | **Graph Workflow** | Linear, conditional, loop, parallel fan-out/fan-in | `GraphBuilder::new("pipeline")` |
 | **DAG Tasks** | Dependency-aware task scheduling with hooks | `TaskManager::default()` |
@@ -257,7 +255,6 @@ echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "
 | `plan-execute` | Plan-and-Execute agent | — |
 | `self-reflection` | Self-critique agent | — |
 | `subagent` | Multi-agent orchestration | — |
-| `handoff` | Agent handoff | — |
 | `a2a` | Agent-to-Agent protocol | — |
 | `topology` | Agent topology visualization | — |
 | `telemetry` | OpenTelemetry tracing | `opentelemetry` |
@@ -388,7 +385,7 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 - **67 registered tools** — ReAct loop, data analysis, research papers, web, media, RAG, database, and more
 - **66 runnable examples** — every feature has a demo you can `cargo run` immediately
 - **Comprehensive unit tests** — full coverage across all modules
-- **8 crates, 1 import** — modular workspace, but `use echo_agent::prelude::*` is all you need
+- **8 crates, 1 facade** — use `echo_agent::prelude::*` for common types and `echo_agent::tools::<domain>` for concrete tools
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
 - **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box
 - **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required
@@ -636,12 +633,12 @@ async fn main() {
 
 ### 9. Multi-Agent Orchestration — Orchestrator + SubAgent teams
 
-Coordinate multiple specialized agents with context isolation and handoff protocols.
+Coordinate multiple specialized agents through the shared Subagent lifecycle.
 
 Three execution modes:
 - **Sync** — parent blocks until subagent returns
 - **Fork** — subagent runs in background, parent continues
-- **Teammate** — collaborative mode with shared Mailbox
+- **Teammate** — independent background Subagent with a join/cancel handle
 
 ```rust,ignore
 // Requires feature: subagent
@@ -726,11 +723,12 @@ async fn main() -> echo_agent::error::Result<()> {
         .model("qwen3.7-max")
         .system_prompt("You are a research assistant.")
         .enable_tools()
-        .enable_planning()  // Enable plan, create_task, update_task tools
+        .enable_tasks()  // Enable revisioned task CRUD tools
         .build()?;
 
-    // Agent will plan the task, execute steps, and summarize results
-    let result = agent.execute_with_planning("Research quantum computing trends").await?;
+    // The model can create, update, and inspect the revisioned task graph.
+    // Product-specific execution policy belongs in the application adapter.
+    let result = agent.execute("Create a research task graph for quantum computing trends").await?;
     println!("{result}");
     Ok(())
 }
@@ -1082,7 +1080,6 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 18 | [`demo18_semantic_memory`](examples/demo18_semantic_memory.rs) | Semantic memory |
 | 19 | [`demo19_guard`](examples/demo19_guard.rs) | Guard system |
 | 20 | [`demo20_audit`](examples/demo20_audit.rs) | Audit logging |
-| 21 | [`demo21_handoff`](examples/demo21_handoff.rs) | Agent handoff |
 | 22 | [`demo22_plan_execute`](examples/demo22_plan_execute.rs) | Plan-and-Execute |
 | 23 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A protocol |
 | 24 | [`demo24_topology`](examples/demo24_topology.rs) | Topology visualization |
@@ -1107,7 +1104,6 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 43 | [`demo43_data_tools`](examples/demo43_data_tools.rs) | Excel / CSV / Word / Text processing |
 | 50 | [`demo50_eval`](examples/demo50_eval.rs) | Eval system: cases, criteria, constraints, replay, HTML reports |
 | 51 | [`demo51_self_improvement`](examples/demo51_self_improvement.rs) | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver |
-| 52 | [`demo52_loop_detection`](examples/demo52_loop_detection.rs) | Loop detection: exact/same-tool/no-progress loops |
 | 53 | [`demo53_adaptive_compression`](examples/demo53_adaptive_compression.rs) | 5-level adaptive compression (Snip→Micro→Collapse→Compact→Reactive) |
 | 54 | [`demo54_headless`](examples/demo54_headless.rs) | Headless mode: single-prompt CI/CD execution |
 | 55 | [`demo55_lsp_tools`](examples/demo55_lsp_tools.rs) | LSP tools: go-to-definition, find-references, diagnostics |

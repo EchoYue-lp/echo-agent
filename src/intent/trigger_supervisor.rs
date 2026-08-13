@@ -55,7 +55,11 @@ impl TriggerSupervisor {
         if let Some((skill_name, _reason)) = hook {
             return Intent::SkillRequired {
                 skill_name,
-                confidence: 0.6,
+                // A hook activation is an explicit runtime decision, not a
+                // probabilistic classification. Keep it above the router's
+                // configurable classifier threshold so it is not discarded
+                // by a second confidence gate.
+                confidence: 1.0,
             };
         }
         Intent::Fallback
@@ -69,6 +73,13 @@ impl IntentClassifier for TriggerSupervisor {
         context: &'a [crate::llm::types::Message],
     ) -> BoxFuture<'a, Intent> {
         Box::pin(async move {
+            // Consume the turn-scoped slot on every path so a high-confidence
+            // decision cannot leak a prior hook request into the next turn.
+            let hook = self
+                .hook_activation_slot
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.take());
             // First: keyword classifier (0 tokens, fast)
             let kw = self.keyword_classifier.classify(user_input, context).await;
 
@@ -84,12 +95,6 @@ impl IntentClassifier for TriggerSupervisor {
             };
 
             // Third: hook activation from this turn's UserPromptSubmit
-            let hook = self
-                .hook_activation_slot
-                .lock()
-                .ok()
-                .and_then(|mut guard| guard.take());
-
             Self::fuse(kw, llm, hook)
         })
     }
@@ -132,7 +137,7 @@ mod tests {
         let hook = Some(("docx".into(), "detected .docx".into()));
         let result = TriggerSupervisor::fuse(Intent::Fallback, Intent::Fallback, hook);
         assert_eq!(result.skill_name().unwrap(), "docx");
-        assert!(result.confidence().unwrap() >= 0.5);
+        assert_eq!(result.confidence(), Some(1.0));
     }
 
     #[test]

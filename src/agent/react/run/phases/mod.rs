@@ -92,11 +92,14 @@ pub(crate) enum PrepareOutcome {
 }
 
 /// What `run_compact` produced for this iteration.
+#[derive(Debug)]
 pub(crate) enum CompactOutcome {
     /// Prepared LLM messages ready for the think phase.
     Continue(Vec<Message>),
     /// Channel closed; loop driver returns `Ok(())`.
     Abandoned,
+    /// Context preparation failed after emitting an error terminal.
+    Failed,
 }
 
 /// What `run_think` produced for this iteration.
@@ -109,19 +112,18 @@ pub(crate) enum ThinkOutcome {
     Cancelled,
     /// Intervention callback issued block.
     Blocked,
+    /// Model setup or streaming failed after emitting an error terminal.
+    Failed,
 }
 
 /// Output of the think phase, fed into the tools or verify branches.
 pub(crate) struct ThinkOutput {
-    /// The messages sent to the LLM. Kept around in case a downstream phase
-    /// wants to reference what was actually fed into the model (currently
-    /// unused but useful for diagnostics).
-    #[allow(dead_code)]
-    pub messages: Vec<Message>,
     /// Plain assistant text accumulated from streaming chunks.
     pub content_buffer: String,
     /// DeepSeek/Qwen reasoning accumulated for assistant-message replay.
     pub reasoning_buffer: String,
+    /// Signed/redacted reasoning blocks required for provider-valid replay.
+    pub reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
     /// Tool calls accumulated by index → (tool_call_id, function_name, args).
     pub tool_call_map: HashMap<u32, (String, String, String)>,
     /// Prompt tokens reported by the LLM.
@@ -144,6 +146,7 @@ pub(crate) enum IterOutcome {
     FinalText {
         answer: String,
         reasoning_content: String,
+        reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
     },
     /// LLM produced neither tool calls nor content. Terminal failure.
     NoResponse,
@@ -152,9 +155,16 @@ pub(crate) enum IterOutcome {
     Abandoned,
 }
 
-pub(crate) fn with_reasoning_content(mut message: Message, reasoning_content: String) -> Message {
+pub(crate) fn with_reasoning_content(
+    mut message: Message,
+    reasoning_content: String,
+    reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
+) -> Message {
     if !reasoning_content.is_empty() {
         message.reasoning_content = Some(reasoning_content);
+    }
+    if !reasoning_blocks.is_empty() {
+        message.reasoning_blocks = Some(reasoning_blocks);
     }
     message
 }

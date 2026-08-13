@@ -1,7 +1,7 @@
 # AI Agent 核心模式
 
-> ⚠️ **重要说明**：本文档介绍的 Plan-and-Execute 和 Self-Reflection 模式在 echo-agent 中现在通过**工具**实现，而不是独立的 Agent 类型：
-> - **任务规划**：使用 `execute_with_planning()` 方法
+> **重要说明**：Plan 是投影到单一 TaskRun graph 的版本化 artifact，不是独立运行时或 Agent 类型：
+> - **任务规划**：通过 `.enable_tasks()` 启用 `task_create`、`task_update`、`task_list`
 > - **自我审查**：使用 `ReviewTool` 工具
 > 
 > 这与业界最佳实践（Hermes、Claude Code、LangGraph）保持一致，其中反思和规划是可组合的工具能力，而不是单独的 Agent 类型。

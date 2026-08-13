@@ -124,7 +124,13 @@ impl Tool for ClinicalTrialsSearchTool {
 
             let status = response.status();
             if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
+                let body = crate::http_body::read_bounded_text(
+                    response,
+                    crate::http_body::MAX_API_RESPONSE_BYTES,
+                    TOOL_NAME,
+                    None,
+                )
+                .await?;
                 return Err(ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
                     message: format!("ClinicalTrials.gov API error ({}): {}", status, body),
@@ -132,13 +138,13 @@ impl Tool for ClinicalTrialsSearchTool {
                 .into());
             }
 
-            let json: Value = response
-                .json()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to parse ClinicalTrials.gov response: {}", e),
-                })?;
+            let json: Value = crate::http_body::read_bounded_json(
+                response,
+                crate::http_body::MAX_API_RESPONSE_BYTES,
+                TOOL_NAME,
+                None,
+            )
+            .await?;
 
             let total_count = json.get("totalCount").and_then(|v| v.as_u64()).unwrap_or(0);
 

@@ -104,7 +104,13 @@ impl SearchProvider for BraveSearchProvider {
             .into());
         }
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::http_body::read_bounded_text(
+                response,
+                crate::http_body::MAX_API_RESPONSE_BYTES,
+                "web_search",
+                None,
+            )
+            .await?;
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
                 message: format!(
@@ -116,14 +122,13 @@ impl SearchProvider for BraveSearchProvider {
             .into());
         }
 
-        let brave_resp: BraveResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "web_search".into(),
-                    message: format!("Brave Search response parsing failed: {}", e),
-                })?;
+        let brave_resp: BraveResponse = crate::http_body::read_bounded_json(
+            response,
+            crate::http_body::MAX_API_RESPONSE_BYTES,
+            "web_search",
+            None,
+        )
+        .await?;
 
         let results = brave_resp.web.and_then(|w| w.results).unwrap_or_default();
 

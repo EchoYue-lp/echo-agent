@@ -2,7 +2,6 @@
 //! `FinalAnswer` emission with `Stop`-hook continuation handling, the
 //! `NoResponse` failure, and the `MaxIterationsExceeded` failure.
 
-use super::super::stream_macros::yield_final_event;
 use super::{LoopState, with_reasoning_content};
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
@@ -22,13 +21,13 @@ use tracing::info;
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finalize_completed_run(
     snap: &AgentRunSnapshot,
-    context: Arc<Mutex<crate::compression::ContextManager>>,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
     label: &str,
     output: &str,
     _iteration: usize,
     state: &LoopState,
-    tx: mpsc::Sender<Result<AgentEvent>>,
-) -> Result<()> {
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+) -> Result<ControlFlow<(), ()>> {
     let agent = &snap.config.agent_name;
     for cb in snap.config.callbacks.iter() {
         cb.on_final_answer(agent, output).await;
@@ -54,12 +53,32 @@ pub(crate) async fn finalize_completed_run(
         }
         if let Some(injected) = result.injected_context {
             super::super::context::push_runtime_context_note(
-                &context,
+                context,
                 "Intervention:FinalAnswer",
                 &injected,
             )
             .await;
         }
+    }
+
+    let hc = crate::skills::hooks::HookContext::for_stop(
+        None,
+        snap.config.session_id.as_deref().unwrap_or(""),
+        &snap.config.agent_name,
+        state.stop_hook_continued,
+    );
+    let reg = snap.tools.hook_registry.read().await.clone();
+    let sr = reg.run_lifecycle_hooks(&hc).await;
+    if let Some(reason) = &sr.continue_reason
+        && !state.stop_hook_continued
+    {
+        super::super::context::push_runtime_context_note(
+            context,
+            "Hook:Stop",
+            &format!("Continue: {}", reason),
+        )
+        .await;
+        return Ok(ControlFlow::Continue(()));
     }
 
     info!(agent = %agent, "Streaming execution completed{label}");
@@ -76,39 +95,29 @@ pub(crate) async fn finalize_completed_run(
         }
     }
     // Rich runtime checkpoint
-    snap.save_runtime_checkpoint(&context, None).await;
+    snap.save_runtime_checkpoint(context, None).await?;
     // Persist transcript projection so product layers see the final state.
-    snap.save_transcript_projection(&context).await;
+    snap.save_transcript_projection(context).await;
     // Update TaskNode to Success
     if let Some(ref node_id) = state.task_node_id {
         snap.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
             .await;
     }
-    yield_final_event!(tx, AgentEvent::FinalAnswer(output.to_string()));
-    let hc = crate::skills::hooks::HookContext::for_stop(
-        None,
-        snap.config.session_id.as_deref().unwrap_or(""),
-        &snap.config.agent_name,
-        state.stop_hook_continued,
-    );
-    let reg = snap.tools.hook_registry.read().await.clone();
-    let sr = reg.run_lifecycle_hooks(&hc).await;
-    if let Some(reason) = &sr.continue_reason
-        && !state.stop_hook_continued
-    {
-        super::super::context::push_runtime_context_note(
-            &context,
-            "Hook:Stop",
-            &format!("Continue: {}", reason),
-        )
+    snap.finalize_run(crate::trace::RunStatus::Completed, Some(output), None)
         .await;
+    if tx
+        .send(Ok(AgentEvent::FinalAnswer(output.to_string())))
+        .await
+        .is_err()
+    {
+        return Ok(ControlFlow::Break(()));
     }
     snap.fire_hook(
         crate::skills::hooks::HookEvent::SessionEnd,
         Some("complete"),
     )
     .await;
-    Ok(())
+    Ok(ControlFlow::Break(()))
 }
 
 /// Text-branch terminal: the LLM produced content that passed verification.
@@ -135,50 +144,19 @@ pub(crate) async fn emit_final_text(
     ct: usize,
     answer: String,
     reasoning_content: String,
+    reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
 ) -> Result<ControlFlow<(), ()>> {
     let agent = &snap.config.agent_name;
 
     let ts = vec![crate::agent::react::StepType::Thought(answer.clone())];
     for cb in snap.config.callbacks.iter() {
         cb.on_think_end(agent, &ts, pt, ct).await;
-        cb.on_final_answer(agent, &answer).await;
     }
     context.lock().await.push(with_reasoning_content(
         Message::assistant(answer.clone()),
         reasoning_content,
+        reasoning_blocks,
     ));
-    snap.auto_snapshot(context, iteration).await;
-    if let Some(al) = &snap.guard.audit_logger {
-        let ev = crate::audit::AuditEvent::now(
-            snap.config.session_id.clone(),
-            snap.config.agent_name.clone(),
-            crate::audit::AuditEventType::FinalAnswer {
-                content: answer.clone(),
-            },
-        );
-        if let Err(e) = al.log(ev).await {
-            tracing::error!(error = %e, "audit log write failed — event dropped");
-        }
-    }
-    // Rich runtime checkpoint (messages + plan + skills + blocked reason)
-    snap.save_runtime_checkpoint(context, None).await;
-    // Persist user-visible transcript projection — single source of truth
-    // for GUI/TUI history. Product layers should rely on this instead of
-    // re-implementing save_messages on every chat turn.
-    snap.save_transcript_projection(context).await;
-    // Update TaskNode to Success
-    if let Some(ref node_id) = state.task_node_id {
-        snap.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
-            .await;
-    }
-    // Finalize trace before moving the answer into the event
-    snap.finalize_run(crate::trace::RunStatus::Completed, Some(&answer), None)
-        .await;
-    // Sending FinalAnswer is mandatory; on a closed receiver the macro
-    // returns Ok(()) from this fn — but we model that as ControlFlow::Break.
-    if tx.send(Ok(AgentEvent::FinalAnswer(answer))).await.is_err() {
-        return Ok(ControlFlow::Break(()));
-    }
     let hc = crate::skills::hooks::HookContext::for_stop(
         None,
         snap.config.session_id.as_deref().unwrap_or(""),
@@ -198,6 +176,41 @@ pub(crate) async fn emit_final_text(
         .await;
         state.stop_hook_continued = true;
         return Ok(ControlFlow::Continue(()));
+    }
+    for cb in snap.config.callbacks.iter() {
+        cb.on_final_answer(agent, &answer).await;
+    }
+    snap.auto_snapshot(context, iteration).await;
+    if let Some(al) = &snap.guard.audit_logger {
+        let ev = crate::audit::AuditEvent::now(
+            snap.config.session_id.clone(),
+            snap.config.agent_name.clone(),
+            crate::audit::AuditEventType::FinalAnswer {
+                content: answer.clone(),
+            },
+        );
+        if let Err(e) = al.log(ev).await {
+            tracing::error!(error = %e, "audit log write failed — event dropped");
+        }
+    }
+    // Rich runtime checkpoint (messages + plan + skills + blocked reason)
+    snap.save_runtime_checkpoint(context, None).await?;
+    // Persist user-visible transcript projection — single source of truth
+    // for GUI/TUI history. Product layers should rely on this instead of
+    // re-implementing save_messages on every chat turn.
+    snap.save_transcript_projection(context).await;
+    // Update TaskNode to Success
+    if let Some(ref node_id) = state.task_node_id {
+        snap.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
+            .await;
+    }
+    // Finalize trace before moving the answer into the event
+    snap.finalize_run(crate::trace::RunStatus::Completed, Some(&answer), None)
+        .await;
+    // Sending FinalAnswer is mandatory; on a closed receiver the macro
+    // returns Ok(()) from this fn — but we model that as ControlFlow::Break.
+    if tx.send(Ok(AgentEvent::FinalAnswer(answer))).await.is_err() {
+        return Ok(ControlFlow::Break(()));
     }
     snap.fire_hook(
         crate::skills::hooks::HookEvent::SessionEnd,
@@ -223,10 +236,11 @@ pub(crate) async fn finalize_no_response(
         snap.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
             .await;
     }
-    let _ = tx.try_send(Err(ReactError::Agent(Box::new(AgentError::NoResponse {
+    let error = ReactError::Agent(Box::new(AgentError::NoResponse {
         model: snap.config.model_name.clone(),
         agent: snap.config.agent_name.clone(),
-    }))));
+    }));
+    let _ = tx.send(Ok(AgentEvent::from_error("llm", &error))).await;
     Ok(())
 }
 
@@ -249,7 +263,7 @@ pub(crate) async fn finalize_max_iterations(
     .await;
     // Save runtime checkpoint with blocked reason before failing
     snap.save_runtime_checkpoint(context, Some("Max iterations exceeded".to_string()))
-        .await;
+        .await?;
     // Even on failure we save the transcript so the user sees what was
     // attempted in the GUI/TUI history pane.
     snap.save_transcript_projection(context).await;
@@ -264,9 +278,12 @@ pub(crate) async fn finalize_max_iterations(
         Some("Max iterations exceeded"),
     )
     .await;
-    let _ = tx.try_send(Err(ReactError::Agent(Box::new(
-        AgentError::MaxIterationsExceeded(snap.config.max_iterations),
-    ))));
+    let error = ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(
+        snap.config.max_iterations,
+    )));
+    let _ = tx
+        .send(Ok(AgentEvent::from_error("react_loop", &error)))
+        .await;
     Ok(())
 }
 
@@ -307,8 +324,14 @@ mod tests {
             .expect("finalize_no_response must succeed");
 
         let item = rx.recv().await.expect("error must be forwarded to tx");
-        let err = item.expect_err("finalize_no_response must forward an Err");
-        let msg = err.to_string();
+        let event = item.expect("terminal error event must use the typed event stream");
+        let (source, msg) = match event {
+            AgentEvent::Error {
+                source, message, ..
+            } => (source, message),
+            other => panic!("expected AgentEvent::Error, got: {other:?}"),
+        };
+        assert_eq!(source, "llm");
         assert!(
             msg.contains("No response from LLM"),
             "expected NoResponse error, got: {msg}",
@@ -343,8 +366,14 @@ mod tests {
             .expect("finalize_max_iterations must succeed");
 
         let item = rx.recv().await.expect("error must be forwarded to tx");
-        let err = item.expect_err("finalize_max_iterations must forward an Err");
-        let msg = err.to_string();
+        let event = item.expect("terminal error event must use the typed event stream");
+        let (source, msg) = match event {
+            AgentEvent::Error {
+                source, message, ..
+            } => (source, message),
+            other => panic!("expected AgentEvent::Error, got: {other:?}"),
+        };
+        assert_eq!(source, "react_loop");
         assert!(
             msg.contains("Max iterations exceeded"),
             "expected MaxIterationsExceeded error, got: {msg}",

@@ -11,7 +11,6 @@
 //! | Workflow | `DAG + Conditional + Parallel` 流程编排 |
 //! | Topology Tracking | `TopologyCallback` 调用关系追踪 |
 //! | Stream Workflow | `run_stream()` 实时进度 |
-//! | A2A Handoff | `HandoffManager` Agent 间切换 |
 //!
 //! ## 运行方式
 //!
@@ -216,9 +215,6 @@ async fn main() -> Result<()> {
 
     // ── Part 5: 拓扑追踪 ───────────────────────────────────────────────────────
     demo_topology_tracking().await?;
-
-    // ── Part 6: Agent Handoff ────────────────────────────────────────────────────
-    demo_agent_handoff().await?;
 
     println!("\n═══════════════════════════════════════════════════════");
     println!("              综合示例演示完成！");
@@ -535,72 +531,6 @@ async fn demo_topology_tracking() -> Result<()> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Part 6: Agent Handoff
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-async fn demo_agent_handoff() -> Result<()> {
-    println!("═══════════════════════════════════════════════════════");
-    println!("Part 6: Agent Handoff");
-    println!("═══════════════════════════════════════════════════════\n");
-
-    // 创建专业 Agent
-    let developer = ReactAgentBuilder::new()
-        .model("qwen3-max")
-        .name("developer")
-        .system_prompt("你是开发专家，擅长代码编写和技术分析。")
-        .build()?;
-
-    let analyst = ReactAgentBuilder::new()
-        .model("qwen3-max")
-        .name("analyst")
-        .system_prompt("你是业务分析师，擅长需求分析和数据处理。")
-        .build()?;
-
-    // 创建 Handoff 管理器
-    let mut manager = HandoffManager::new();
-    manager.register("developer", developer);
-    manager.register("analyst", analyst);
-
-    println!("  已注册 Agent: {:?}\n", manager.registered_agents());
-    if manager.registered_agents().len() != 2 {
-        return Err(echo_agent::error::ReactError::Other(
-            "综合验收失败：HandoffManager 注册的 Agent 数量不正确".to_string(),
-        ));
-    }
-
-    // 场景：技术问题转给开发者，业务问题转给分析师
-    let scenarios = vec![
-        ("分析用户增长数据趋势", "analyst", "正在分析用户增长数据..."),
-        ("修复这段代码的 bug", "developer", "正在分析代码问题..."),
-    ];
-
-    for (task, expected_agent, _expected_prefix) in scenarios {
-        println!("  场景: \"{}\"", task);
-
-        let target = HandoffTarget::new(expected_agent).with_message(task);
-        let context = HandoffContext::new().with_source("user");
-
-        let result = manager.handoff(target, context).await?;
-        if result.target_agent != expected_agent {
-            return Err(echo_agent::error::ReactError::Other(format!(
-                "综合验收失败：handoff 目标错误，预期 `{expected_agent}`，实际 `{}`",
-                result.target_agent
-            )));
-        }
-        if result.output.trim().is_empty() {
-            return Err(echo_agent::error::ReactError::Other(format!(
-                "综合验收失败：handoff 到 `{expected_agent}` 返回空结果"
-            )));
-        }
-        println!("    → 转发给: {}", result.target_agent);
-        println!("    → 结果: {}", result.output);
-        println!();
-    }
-
-    Ok(())
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 辅助函数
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -610,6 +540,6 @@ fn print_banner() {
     println!("║                                                                ║");
     println!("║  展示核心能力：                                                 ║");
     println!("║  • 外部技能 • Plan-Execute • 动态工具 • Workflow 流式           ║");
-    println!("║  • 拓扑追踪 • Agent Handoff • SQLite 记忆 • 语义检索           ║");
+    println!("║  • 拓扑追踪 • Subagent 团队 • SQLite 记忆 • 语义检索          ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 }

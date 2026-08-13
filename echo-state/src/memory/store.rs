@@ -6,11 +6,12 @@
 use crate::util::expand_tilde;
 use echo_core::error::{MemoryError, Result};
 pub use echo_core::memory::store::{Store, StoreItem};
+use echo_core::utils::time::now_secs;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
@@ -41,7 +42,7 @@ impl InMemoryStore {
     /// `updated_at` — the caller controls the full item state. Intended for
     /// test code that needs to simulate old entries.
     pub async fn put_raw(&self, item: StoreItem) {
-        let ns_key = item.namespace.join("/");
+        let ns_key = namespace_key_owned(&item.namespace);
         let mut data = self.data.write().await;
         let bucket = data.entry(ns_key).or_default();
         bucket.insert(item.key.clone(), item);
@@ -56,7 +57,7 @@ impl Store for InMemoryStore {
         value: Value,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let mut data = self.data.write().await;
             let bucket = data.entry(ns_key).or_default();
             bucket
@@ -82,7 +83,7 @@ impl Store for InMemoryStore {
         key: &'a str,
     ) -> BoxFuture<'a, Result<Option<StoreItem>>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let data = self.data.read().await;
             Ok(data.get(&ns_key).and_then(|b| b.get(key)).cloned())
         })
@@ -95,7 +96,7 @@ impl Store for InMemoryStore {
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let data = self.data.read().await;
             let Some(bucket) = data.get(&ns_key) else {
                 return Ok(vec![]);
@@ -126,7 +127,7 @@ impl Store for InMemoryStore {
 
     fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let mut data = self.data.write().await;
             Ok(data
                 .get_mut(&ns_key)
@@ -141,23 +142,27 @@ impl Store for InMemoryStore {
     ) -> BoxFuture<'a, Result<Vec<Vec<String>>>> {
         Box::pin(async move {
             let data = self.data.read().await;
-            let prefix_str = prefix.map(|p| p.join("/"));
+            let prefix = prefix.map(|values| {
+                values
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect::<Vec<_>>()
+            });
             Ok(data
                 .keys()
-                .filter(|k| {
-                    prefix_str
-                        .as_deref()
-                        .map(|p| k.starts_with(p))
-                        .unwrap_or(true)
+                .filter_map(|key| parse_namespace_key(key).ok())
+                .filter(|namespace| {
+                    prefix
+                        .as_ref()
+                        .is_none_or(|prefix| namespace.starts_with(prefix))
                 })
-                .map(|k| k.split('/').map(String::from).collect())
                 .collect())
         })
     }
 
     fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let data = self.data.read().await;
             Ok(data
                 .get(&ns_key)
@@ -167,7 +172,7 @@ impl Store for InMemoryStore {
     }
 
     fn prune_expired<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
-        let ns_key = namespace.join("/");
+        let ns_key = namespace_key(namespace);
         Box::pin(async move {
             let mut data = self.data.write().await;
             let Some(bucket) = data.get_mut(&ns_key) else {
@@ -181,7 +186,7 @@ impl Store for InMemoryStore {
     }
 
     fn dedup_by_content<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
-        let ns_key = namespace.join("/");
+        let ns_key = namespace_key(namespace);
         Box::pin(async move {
             let mut data = self.data.write().await;
             let Some(bucket) = data.get_mut(&ns_key) else {
@@ -219,7 +224,14 @@ impl Store for InMemoryStore {
 /// JSON file-based persistent Store
 pub struct FileStore {
     path: PathBuf,
-    data: RwLock<HashMap<String, HashMap<String, StoreItem>>>,
+    data: Arc<RwLock<HashMap<String, HashMap<String, StoreItem>>>>,
+}
+
+type FileStoreData = RwLock<HashMap<String, HashMap<String, StoreItem>>>;
+
+fn file_store_registry() -> &'static Mutex<HashMap<PathBuf, Weak<FileStoreData>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<FileStoreData>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl FileStore {
@@ -229,13 +241,23 @@ impl FileStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| MemoryError::IoError(e.to_string()))?;
         }
+        let path = path
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+            .unwrap_or(path);
+        let mut registry = file_store_registry().lock().map_err(|error| {
+            MemoryError::IoError(format!("FileStore registry poisoned: {error}"))
+        })?;
+        if let Some(data) = registry.get(&path).and_then(Weak::upgrade) {
+            return Ok(Self { path, data });
+        }
         let data = if path.exists() {
             let raw =
                 std::fs::read_to_string(&path).map_err(|e| MemoryError::IoError(e.to_string()))?;
-            serde_json::from_str(&raw).unwrap_or_else(|e| {
-                tracing::warn!("Store file parse failed, starting from empty state: {e}");
-                HashMap::new()
-            })
+            serde_json::from_str(&raw).map_err(|e| {
+                MemoryError::SerializationError(format!("parse {}: {e}", path.display()))
+            })?
         } else {
             HashMap::new()
         };
@@ -245,34 +267,17 @@ impl FileStore {
             .map(|b: &HashMap<String, StoreItem>| b.len())
             .sum();
         info!(path = %path.display(), namespaces = ns_count, items = item_count, "FileStore initialized");
-        Ok(Self {
-            path,
-            data: RwLock::new(data),
-        })
+        let data = Arc::new(RwLock::new(data));
+        registry.insert(path.clone(), Arc::downgrade(&data));
+        Ok(Self { path, data })
     }
 
     async fn flush(&self) -> Result<()> {
         let data = self.data.read().await;
         let json = serde_json::to_string_pretty(&*data)
             .map_err(|e| MemoryError::SerializationError(e.to_string()))?;
-        let tmp = format!("{}.tmp", self.path.display());
-        // Atomic write: tmp + fsync + rename
-        {
-            let mut file = tokio::fs::File::create(&tmp)
-                .await
-                .map_err(|e| MemoryError::IoError(e.to_string()))?;
-            use tokio::io::AsyncWriteExt;
-            file.write_all(json.as_bytes())
-                .await
-                .map_err(|e| MemoryError::IoError(e.to_string()))?;
-            file.sync_all()
-                .await
-                .map_err(|e| MemoryError::IoError(e.to_string()))?;
-        }
-        if let Err(e) = tokio::fs::rename(&tmp, &self.path).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(MemoryError::IoError(e.to_string()).into());
-        }
+        echo_core::utils::fs::atomic_write(&self.path, json.as_bytes())
+            .map_err(|e| MemoryError::IoError(e.to_string()))?;
         debug!(path = %self.path.display(), "Store persisted");
         Ok(())
     }
@@ -285,7 +290,7 @@ impl FileStore {
         {
             let mut data = self.data.write().await;
             for (namespace, key, value) in entries {
-                let ns_key = namespace.join("/");
+                let ns_key = namespace_key(&namespace);
                 let ns_vec: Vec<String> = namespace.iter().map(|s| s.to_string()).collect();
                 let bucket = data.entry(ns_key).or_default();
                 bucket
@@ -314,7 +319,7 @@ impl Store for FileStore {
         value: Value,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let ns_vec: Vec<String> = namespace.iter().map(|s| s.to_string()).collect();
             {
                 let mut data = self.data.write().await;
@@ -337,7 +342,7 @@ impl Store for FileStore {
         key: &'a str,
     ) -> BoxFuture<'a, Result<Option<StoreItem>>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let data = self.data.read().await;
             Ok(data.get(&ns_key).and_then(|b| b.get(key)).cloned())
         })
@@ -350,7 +355,7 @@ impl Store for FileStore {
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let data = self.data.read().await;
             let Some(bucket) = data.get(&ns_key) else {
                 return Ok(vec![]);
@@ -382,7 +387,7 @@ impl Store for FileStore {
 
     fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let found = {
                 let mut data = self.data.write().await;
                 data.get_mut(&ns_key)
@@ -402,23 +407,27 @@ impl Store for FileStore {
     ) -> BoxFuture<'a, Result<Vec<Vec<String>>>> {
         Box::pin(async move {
             let data = self.data.read().await;
-            let prefix_str = prefix.map(|p| p.join("/"));
+            let prefix = prefix.map(|values| {
+                values
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect::<Vec<_>>()
+            });
             Ok(data
                 .keys()
-                .filter(|k| {
-                    prefix_str
-                        .as_deref()
-                        .map(|p| k.starts_with(p))
-                        .unwrap_or(true)
+                .filter_map(|key| parse_namespace_key(key).ok())
+                .filter(|namespace| {
+                    prefix
+                        .as_ref()
+                        .is_none_or(|prefix| namespace.starts_with(prefix))
                 })
-                .map(|k| k.split('/').map(String::from).collect())
                 .collect())
         })
     }
 
     fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
+            let ns_key = namespace_key(namespace);
             let data = self.data.read().await;
             Ok(data
                 .get(&ns_key)
@@ -428,54 +437,59 @@ impl Store for FileStore {
     }
 
     fn prune_expired<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
-        let ns_key = namespace.join("/");
+        let ns_key = namespace_key(namespace);
         Box::pin(async move {
-            let mut data = self.data.write().await;
-            let Some(bucket) = data.get_mut(&ns_key) else {
-                return Ok(0);
+            let removed = {
+                let mut data = self.data.write().await;
+                let Some(bucket) = data.get_mut(&ns_key) else {
+                    return Ok(0);
+                };
+                let before = bucket.len();
+                let now = now_secs();
+                bucket.retain(|_k, item| is_item_valid(item, now));
+                (before - bucket.len()) as u64
             };
-            let before = bucket.len();
-            let now = now_secs();
-            bucket.retain(|_k, item| is_item_valid(item, now));
-            let removed = (before - bucket.len()) as u64;
             if removed > 0 {
-                let _ = self.flush().await;
+                self.flush().await?;
             }
             Ok(removed)
         })
     }
 
     fn dedup_by_content<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
-        let ns_key = namespace.join("/");
+        let ns_key = namespace_key(namespace);
         Box::pin(async move {
-            let mut data = self.data.write().await;
-            let Some(bucket) = data.get_mut(&ns_key) else {
-                return Ok(0);
-            };
-            let before = bucket.len();
-            let mut seen: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
-            let mut to_remove: Vec<String> = Vec::new();
-            for (key, item) in bucket.iter() {
-                let hash = content_hash(&item.value);
-                if let Some(existing_key) = seen.get(&hash) {
-                    let existing_updated =
-                        bucket.get(existing_key).map(|i| i.updated_at).unwrap_or(0);
-                    if item.updated_at > existing_updated {
-                        to_remove.push(existing_key.clone());
-                        seen.insert(hash, key.clone());
+            let removed = {
+                let mut data = self.data.write().await;
+                let Some(bucket) = data.get_mut(&ns_key) else {
+                    return Ok(0);
+                };
+                let before = bucket.len();
+                let mut seen: std::collections::HashMap<u64, String> =
+                    std::collections::HashMap::new();
+                let mut to_remove: Vec<String> = Vec::new();
+                for (key, item) in bucket.iter() {
+                    let hash = content_hash(&item.value);
+                    if let Some(existing_key) = seen.get(&hash) {
+                        let existing_updated =
+                            bucket.get(existing_key).map(|i| i.updated_at).unwrap_or(0);
+                        if item.updated_at > existing_updated {
+                            to_remove.push(existing_key.clone());
+                            seen.insert(hash, key.clone());
+                        } else {
+                            to_remove.push(key.clone());
+                        }
                     } else {
-                        to_remove.push(key.clone());
+                        seen.insert(hash, key.clone());
                     }
-                } else {
-                    seen.insert(hash, key.clone());
                 }
-            }
-            for key in &to_remove {
-                bucket.remove(key);
-            }
-            let removed = (before - bucket.len()) as u64;
+                for key in &to_remove {
+                    bucket.remove(key);
+                }
+                (before - bucket.len()) as u64
+            };
             if removed > 0 {
-                let _ = self.flush().await;
+                self.flush().await?;
             }
             Ok(removed)
         })
@@ -487,6 +501,20 @@ impl Store for FileStore {
 /// Compute a simple content hash for deduplication.
 fn content_hash(value: &serde_json::Value) -> u64 {
     echo_core::utils::hash::fnv1a_64(value.to_string().as_bytes())
+}
+
+pub(crate) fn namespace_key(namespace: &[&str]) -> String {
+    serde_json::to_string(namespace).unwrap_or_else(|_| "[]".to_string())
+}
+
+pub(crate) fn namespace_key_owned(namespace: &[String]) -> String {
+    serde_json::to_string(namespace).unwrap_or_else(|_| "[]".to_string())
+}
+
+pub(crate) fn parse_namespace_key(key: &str) -> Result<Vec<String>> {
+    serde_json::from_str(key).map_err(|error| {
+        MemoryError::SerializationError(format!("parse namespace key: {error}")).into()
+    })
 }
 
 /// Check if a StoreItem is still valid (not expired).
@@ -507,17 +535,10 @@ fn is_item_valid(item: &StoreItem, now: u64) -> bool {
     true
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 fn tokenize(text: &str) -> Vec<String> {
     use std::collections::HashSet;
     text.split(|c: char| c.is_whitespace() || "，。！？、；：,.!?;: ".contains(c))
-        .filter(|s| !s.is_empty() && s.len() > 1)
+        .filter(|s| s.chars().count() > 1)
         .map(|s| s.to_lowercase())
         .collect::<HashSet<_>>()
         .into_iter()
@@ -732,5 +753,58 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err}").contains("semantic search"));
+    }
+
+    #[test]
+    fn tokenizer_filters_by_character_count() {
+        assert!(tokenize("中").is_empty());
+        assert_eq!(tokenize("中文"), vec!["中文".to_string()]);
+    }
+
+    #[test]
+    fn file_store_rejects_corrupt_json() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("echo-store-corrupt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).map_err(MemoryError::from)?;
+        let path = root.join("store.json");
+        std::fs::write(&path, b"{broken").map_err(MemoryError::from)?;
+        assert!(FileStore::new(&path).is_err());
+        assert_eq!(std::fs::read(&path).map_err(MemoryError::from)?, b"{broken");
+        std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_store_handles_share_one_authority() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("echo-store-shared-{}", uuid::Uuid::new_v4()));
+        let path = root.join("store.json");
+        let first = FileStore::new(&path)?;
+        let second = FileStore::new(&path)?;
+        first.put(&["one"], "a", json!(1)).await?;
+        second.put(&["two"], "b", json!(2)).await?;
+        assert!(first.get(&["two"], "b").await?.is_some());
+        drop(first);
+        drop(second);
+        let reopened = FileStore::new(&path)?;
+        assert!(reopened.get(&["one"], "a").await?.is_some());
+        assert!(reopened.get(&["two"], "b").await?.is_some());
+        std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn namespace_segments_do_not_alias_slash_content() -> Result<()> {
+        let store = InMemoryStore::new();
+        store.put(&["a/b"], "key", json!(1)).await?;
+        store.put(&["a", "b"], "key", json!(2)).await?;
+        assert_eq!(
+            store.get(&["a/b"], "key").await?.map(|item| item.value),
+            Some(json!(1))
+        );
+        assert_eq!(
+            store.get(&["a", "b"], "key").await?.map(|item| item.value),
+            Some(json!(2))
+        );
+        Ok(())
     }
 }

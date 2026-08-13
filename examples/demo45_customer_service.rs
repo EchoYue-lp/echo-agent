@@ -322,7 +322,7 @@ async fn main() -> Result<()> {
         .name("customer-service-agent")
         .system_prompt(CUSTOMER_SERVICE_PROMPT)
         .enable_tools()
-        .enable_planning()
+        .enable_tasks()
         .enable_human_in_loop()
         .max_iterations(20)
         .snapshot_policy(SnapshotPolicy::EveryIteration)

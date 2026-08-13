@@ -6,7 +6,7 @@
 //! 当前实现约定：
 //! - [`ResourceLimits::cpu_time_secs`] 表示 wall-clock timeout，而不是 CPU request / quota
 //! - [`SandboxCommand::stdin`] 会透传到 Local / Docker / K8s 三个执行器
-//! - K8s 执行器会显式删除临时 Pod；`network=false` 目前只会记录能力告警，不能像 Docker 一样逐 Pod 强制断网
+//! - K8s 执行器会显式删除临时 Pod；无法逐 Pod 强制断网时，`network=false` 会明确拒绝执行
 //!
 //! ## 架构
 //!

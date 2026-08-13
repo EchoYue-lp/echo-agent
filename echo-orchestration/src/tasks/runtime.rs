@@ -147,7 +147,8 @@ impl TaskStatus {
             ),
             Self::Retrying { .. } => matches!(
                 target,
-                Self::Completed
+                Self::Pending
+                    | Self::Completed
                     | Self::Cancelled
                     | Self::Failed(_)
                     | Self::TimedOut { .. }
@@ -210,16 +211,31 @@ impl TaskSpec {
 /// Durable lease for one concrete task dispatch attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskClaim {
+    /// Unique identity for this physical lease, including reclaim of the same
+    /// logical revision and retry attempt after a crashed executor.
+    pub claim_id: String,
     pub revision: u64,
     pub attempt: u32,
     pub spec_hash: String,
 }
 
 impl TaskClaim {
+    pub fn new(revision: u64, attempt: u32, spec_hash: String) -> Self {
+        Self {
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            revision,
+            attempt,
+            spec_hash,
+        }
+    }
+
     /// Globally unique execution identity. The run namespace prevents the same
     /// plan task/revision/attempt in separate TaskRuns from sharing lifecycle.
     pub fn execution_id(&self, run_id: &str, task_id: &str) -> String {
-        format!("{run_id}:{task_id}:{}:{}", self.revision, self.attempt)
+        format!(
+            "{run_id}:{task_id}:{}:{}:{}",
+            self.revision, self.attempt, self.claim_id
+        )
     }
 }
 
@@ -345,6 +361,7 @@ pub struct DagExecutionState {
     pub failed: HashSet<TaskId>,
     pub skipped: HashSet<TaskId>,
     pub cancelled: HashSet<TaskId>,
+    pub paused: HashSet<TaskId>,
 }
 
 impl DagExecutionState {
@@ -381,6 +398,11 @@ impl DagExecutionState {
             .filter(|task| task.execution.status == TaskStatus::Cancelled)
             .map(|task| task.spec.id.clone())
             .collect();
+        let paused = tasks
+            .iter()
+            .filter(|task| matches!(task.execution.status, TaskStatus::Paused(_)))
+            .map(|task| task.spec.id.clone())
+            .collect();
 
         Self {
             completed,
@@ -388,6 +410,7 @@ impl DagExecutionState {
             failed,
             skipped,
             cancelled,
+            paused,
         }
     }
 
@@ -459,19 +482,34 @@ impl DagExecutionState {
 
     /// Downstream task ids blocked by failed dependencies.
     pub fn blocked_by_failures(&self, tasks: &[Task]) -> Vec<TaskId> {
+        let mut failed_or_blocked = self.failed.clone();
+        loop {
+            let mut changed = false;
+            for task in tasks {
+                if self.completed.contains(&task.spec.id)
+                    || self.skipped.contains(&task.spec.id)
+                    || self.cancelled.contains(&task.spec.id)
+                    || failed_or_blocked.contains(&task.spec.id)
+                {
+                    continue;
+                }
+                if task
+                    .spec
+                    .depends_on
+                    .iter()
+                    .any(|dependency| failed_or_blocked.contains(dependency))
+                {
+                    changed |= failed_or_blocked.insert(task.spec.id.clone());
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         tasks
             .iter()
             .filter(|task| {
-                !self.completed.contains(&task.spec.id)
-                    && !self.failed.contains(&task.spec.id)
-                    && !self.skipped.contains(&task.spec.id)
-                    && !self.cancelled.contains(&task.spec.id)
-            })
-            .filter(|task| {
-                task.spec
-                    .depends_on
-                    .iter()
-                    .any(|dep| self.failed.contains(dep))
+                failed_or_blocked.contains(&task.spec.id) && !self.failed.contains(&task.spec.id)
             })
             .map(|task| task.spec.id.clone())
             .collect()
@@ -485,17 +523,14 @@ impl DagExecutionState {
     /// Whether every unfinished task is either failed or blocked by a failed
     /// dependency.
     pub fn all_unfinished_failed_or_blocked(&self, tasks: &[Task]) -> bool {
+        let blocked: HashSet<TaskId> = self.blocked_by_failures(tasks).into_iter().collect();
         tasks.iter().all(|task| {
             self.completed.contains(&task.spec.id)
                 || self.skipped.contains(&task.spec.id)
                 || self.cancelled.contains(&task.spec.id)
                 || self.failed.contains(&task.spec.id)
+                || blocked.contains(&task.spec.id)
                 || matches!(task.execution.status, TaskStatus::Blocked(_))
-                || task
-                    .spec
-                    .depends_on
-                    .iter()
-                    .any(|dep| self.failed.contains(dep))
         })
     }
 }
@@ -660,6 +695,23 @@ mod tests {
         let state = DagExecutionState::from_tasks(&tasks);
 
         assert_eq!(state.blocked_by_failures(&tasks), vec!["b".to_string()]);
+        assert!(state.all_unfinished_failed_or_blocked(&tasks));
+    }
+
+    #[test]
+    fn dag_failure_blocking_is_transitive() {
+        let tasks = vec![
+            runtime_task("a", TaskStatus::Failed("boom".to_string()), &[]),
+            runtime_task("b", TaskStatus::Pending, &["a"]),
+            runtime_task("c", TaskStatus::Pending, &["b"]),
+            runtime_task("d", TaskStatus::Pending, &["c"]),
+        ];
+        let state = DagExecutionState::from_tasks(&tasks);
+
+        assert_eq!(
+            state.blocked_by_failures(&tasks),
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
         assert!(state.all_unfinished_failed_or_blocked(&tasks));
     }
 }

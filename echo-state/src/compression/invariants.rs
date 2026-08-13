@@ -119,6 +119,8 @@ mod tests {
             token_limit: 500,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
 
@@ -174,6 +176,8 @@ mod tests {
             token_limit: 300,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
 
@@ -203,6 +207,8 @@ mod tests {
             token_limit: 50,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
 
@@ -268,6 +274,8 @@ mod tests {
             token_limit: 200,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
 
@@ -292,6 +300,8 @@ mod tests {
             token_limit: 300,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
 
@@ -317,6 +327,8 @@ mod tests {
             token_limit: target,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
         let tokens_after = token_count(&output.messages);
@@ -346,6 +358,8 @@ mod tests {
             token_limit: 200,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output1 = compressor.compress(input).await.unwrap();
         let count1 = output1.messages.len();
@@ -356,6 +370,8 @@ mod tests {
             token_limit: 200,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output2 = compressor.compress(input2).await.unwrap();
         let count2 = output2.messages.len();
@@ -406,6 +422,8 @@ mod tests {
             token_limit: 100,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
 
@@ -452,6 +470,8 @@ mod tests {
             token_limit: 1000,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
 
@@ -499,6 +519,8 @@ mod tests {
             token_limit: 200,
             current_query: None,
             focus_instructions: Some(focus.to_string()),
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
 
@@ -546,6 +568,8 @@ mod tests {
             token_limit: 200,
             current_query: None,
             focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
         let output = compressor.compress(input).await.unwrap();
         let cp = output.checkpoint.unwrap();

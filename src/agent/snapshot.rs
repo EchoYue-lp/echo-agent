@@ -81,6 +81,8 @@ pub struct RuntimeConfig {
     pub provider: Option<String>,
     pub max_iterations: usize,
     pub token_limit: usize,
+    /// Construction-time validation failure for the configured token budget.
+    pub token_budget_error: Option<String>,
     pub run_budget: echo_core::agent::RunBudgetPolicy,
     pub supports_tool_choice_none: bool,
     pub session_id: Option<String>,
@@ -126,6 +128,12 @@ impl RuntimeConfig {
                 .map(|profile| profile.provider.clone()),
             max_iterations: config.max_iterations,
             token_limit: config.token_limit,
+            token_budget_error: config
+                .token_budget_config
+                .enabled
+                .then(|| config.token_budget_config.build(config.token_limit).err())
+                .flatten()
+                .map(|error| error.to_string()),
             run_budget: config.run_budget.clone(),
             supports_tool_choice_none: config
                 .model_profile
@@ -321,7 +329,7 @@ impl GuardRuntime {
 
 // ── AgentRunSnapshot ─────────────────────────────────────────────────
 
-/// Captures everything the streaming loop needs from a [`ReactAgent`] without
+/// Captures everything the streaming loop needs from a [`super::ReactAgent`] without
 /// holding a reference to the agent itself.
 ///
 /// Uses composition via `Arc` for all subsystems — cloning is O(1).
@@ -329,6 +337,8 @@ impl GuardRuntime {
 pub struct AgentRunSnapshot {
     /// Immutable runtime configuration.
     pub config: Arc<RuntimeConfig>,
+    /// Authoritative conversation context shared with the running agent.
+    pub context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
     /// Tool execution state (tools, hooks).
     pub tools: Arc<ToolRuntime>,
     /// Guard / safety state.
@@ -367,6 +377,8 @@ pub struct AgentRunSnapshot {
     pub current_turn_id: Option<String>,
     /// Message that triggered the current invocation.
     pub current_message_id: Option<String>,
+    /// Typed active user message, including any attachments.
+    pub current_message: Option<crate::llm::types::Message>,
     /// Current concrete subagent/tool execution ID.
     pub current_execution_id: Option<String>,
     /// 外部 run 级上下文（跨 spawn 安全，从 ReactAgent.external_* 抓取）。
@@ -377,6 +389,10 @@ pub struct AgentRunSnapshot {
     /// Permission service (human-in-the-loop).
     #[cfg(feature = "human-loop")]
     pub permission_service: Option<Arc<crate::human_loop::PermissionService>>,
+    /// Approval rules registered through the synchronous agent setup API.
+    #[cfg(feature = "human-loop")]
+    pub pending_permission_rules:
+        Arc<tokio::sync::Mutex<Vec<echo_core::tools::permission::PermissionRule>>>,
     /// Token usage tracker shared with the parent ReactAgent.
     pub token_tracker: Arc<echo_core::tokenizer::TokenUsageTracker>,
     /// Self-calibrating tokenizer shared with the parent ReactAgent. The think
@@ -406,7 +422,7 @@ pub struct AgentRunSnapshot {
 }
 
 impl AgentRunSnapshot {
-    /// Create a snapshot from a [`ReactAgent`].
+    /// Create a snapshot from a [`super::ReactAgent`].
     pub fn from_agent(agent: &super::ReactAgent) -> Self {
         Self::from_agent_source(agent, None)
     }
@@ -436,6 +452,7 @@ impl AgentRunSnapshot {
         }
         Self {
             config: Arc::new(config),
+            context: agent.memory.context.clone(),
             tools: Arc::new(ToolRuntime::from_agent(
                 agent,
                 invocation.and_then(|context| context.disabled_tools.as_ref()),
@@ -486,6 +503,7 @@ impl AgentRunSnapshot {
                     .unwrap_or_else(|error| error.into_inner())
                     .clone()
             },
+            current_message: None,
             current_execution_id: runtime.and_then(|context| context.execution_id.clone()),
             external_cancel: if let Some(context) = invocation {
                 runtime
@@ -517,6 +535,15 @@ impl AgentRunSnapshot {
             },
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
+            #[cfg(feature = "human-loop")]
+            pending_permission_rules: Arc::new(tokio::sync::Mutex::new(
+                agent
+                    .approval
+                    .pending_permission_rules
+                    .lock()
+                    .map(|mut rules| std::mem::take(&mut *rules))
+                    .unwrap_or_default(),
+            )),
             token_tracker: Arc::clone(&agent.token_tracker),
             calibrated_tokenizer: Arc::clone(&agent.calibrated_tokenizer),
             state_store: agent.memory.state_store.clone(),
@@ -558,11 +585,29 @@ impl AgentRunSnapshot {
         }
     }
 
+    /// Fire the aggregate lifecycle hook from the canonical tool-batch owner.
+    pub(crate) async fn fire_post_tool_batch(
+        &self,
+        tool_names: &[String],
+        success_count: usize,
+        failure_count: usize,
+    ) {
+        let context = crate::skills::hooks::HookContext::for_post_tool_batch(
+            tool_names,
+            success_count,
+            failure_count,
+            self.config.session_id.as_deref().unwrap_or(""),
+            &self.config.agent_name,
+        );
+        let registry = self.tools.hook_registry.read().await.clone();
+        let _ = registry.run_lifecycle_hooks(&context).await;
+    }
+
     // ── Runtime state checkpoint ─────────────────────────────────────
 
     /// Save a rich checkpoint to the [`RuntimeStateStore`](crate::state::RuntimeStateStore).
     ///
-    /// Persists the full [`AgentCheckpoint`] (messages, active skills, current
+    /// Persists the full [`crate::state::AgentCheckpoint`] (messages, active skills, current
     /// plan, and blocked reason) so an in-flight conversation can resume
     /// across process restarts.
     ///
@@ -571,12 +616,12 @@ impl AgentRunSnapshot {
         &self,
         context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
         blocked_reason: Option<String>,
-    ) {
+    ) -> crate::error::Result<()> {
         let Some(ref store) = self.state_store else {
-            return;
+            return Ok(());
         };
         let Some(ref conv_id) = self.config.conversation_id else {
-            return;
+            return Ok(());
         };
 
         let messages = {
@@ -591,7 +636,9 @@ impl AgentRunSnapshot {
                     error = %e,
                     "Failed to serialize messages for runtime checkpoint"
                 );
-                return;
+                return Err(crate::error::ReactError::Other(format!(
+                    "Failed to serialize runtime checkpoint: {e}"
+                )));
             }
         };
 
@@ -607,27 +654,21 @@ impl AgentRunSnapshot {
             timestamp: chrono::Utc::now(),
         };
 
-        if let Err(e) = store.save_checkpoint(&checkpoint).await {
-            tracing::warn!(
-                error = %e,
-                conversation_id = conv_id.as_str(),
-                "Failed to save runtime checkpoint to state store"
-            );
-        } else {
-            self.record_event(crate::trace::RunEvent::Checkpoint {
-                id: format!(
-                    "checkpoint:{}:{}",
-                    conv_id,
-                    checkpoint.timestamp.timestamp_millis()
-                ),
-            })
-            .await;
-            tracing::debug!(
-                conversation_id = conv_id.as_str(),
-                message_count = messages.len(),
-                "Runtime checkpoint saved"
-            );
-        }
+        store.save_checkpoint(&checkpoint).await?;
+        self.record_event(crate::trace::RunEvent::Checkpoint {
+            id: format!(
+                "checkpoint:{}:{}",
+                conv_id,
+                checkpoint.timestamp.timestamp_millis()
+            ),
+        })
+        .await;
+        tracing::debug!(
+            conversation_id = conv_id.as_str(),
+            message_count = messages.len(),
+            "Runtime checkpoint saved"
+        );
+        Ok(())
     }
 
     /// Save the user-visible transcript projection to the [`ConversationStore`](crate::memory::ConversationStore).
@@ -797,22 +838,93 @@ impl AgentRunSnapshot {
     #[cfg(feature = "human-loop")]
     pub async fn check_tool_approval(
         &self,
+        request_id: &str,
         tool_name: &str,
         input: &serde_json::Value,
         permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
     ) -> std::result::Result<Option<serde_json::Value>, echo_core::error::ReactError> {
         if let Some(ref service) = self.permission_service {
+            let pending = {
+                let mut rules = self.pending_permission_rules.lock().await;
+                std::mem::take(&mut *rules)
+            };
+            if !pending.is_empty() {
+                service.add_rules(pending).await;
+            }
             let permissions = self
                 .tools
                 .tool_manager
                 .get_tool(tool_name)
                 .map(|tool| tool.permissions())
                 .unwrap_or_default();
-            let check = service.check_with_permissions_in_mode(
+            let classifier_context = {
+                let messages = self.context.lock().await.messages().to_vec();
+                let recent_files = self
+                    .recently_read_files
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .keys()
+                    .cloned()
+                    .collect();
+                let mut context = echo_orchestration::human_loop::ClassifierContext::new()
+                    .with_messages(messages)
+                    .with_recent_files(recent_files)
+                    .with_risk_context(echo_orchestration::human_loop::RiskContext {
+                        has_sensitive_files: false,
+                        is_destructive: permissions.iter().any(|permission| {
+                            matches!(
+                                permission,
+                                echo_core::tools::permission::ToolPermission::Write
+                                    | echo_core::tools::permission::ToolPermission::Execute
+                                    | echo_core::tools::permission::ToolPermission::Sensitive
+                            )
+                        }),
+                        directory_depth: self
+                            .config
+                            .working_dir
+                            .as_ref()
+                            .map_or(0, |path| path.components().count()),
+                        repetition_count: 0,
+                    });
+                if let Some(working_dir) = self.config.working_dir.as_ref() {
+                    context = context.with_workspace_path(working_dir.display().to_string());
+                }
+                context
+            };
+            let permission_scope_id = self
+                .config
+                .conversation_id
+                .as_deref()
+                .or(self.config.session_id.as_deref())
+                .map(|session| format!("{}:{}", self.config.agent_name, session));
+            let permission_context = echo_orchestration::human_loop::PermissionInvocationContext {
+                scope_id: permission_scope_id,
+                request_id: Some(request_id.to_string()),
+                session_id: self
+                    .config
+                    .conversation_id
+                    .clone()
+                    .or_else(|| self.config.session_id.clone()),
+                agent_name: Some(self.config.agent_name.clone()),
+                timeout: None,
+                permission: echo_orchestration::human_loop::PermissionContext {
+                    working_directory: self
+                        .config
+                        .working_dir
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                    affected_files: classifier_context.recent_files.clone(),
+                    estimated_impact: None,
+                    metadata: serde_json::Map::new(),
+                },
+                classifier: classifier_context,
+            };
+            let check = service.check_with_permissions_result_in_mode_and_context(
                 tool_name,
                 input,
                 &permissions,
                 permission_mode_override,
+                Some(&permission_context),
             );
             tokio::pin!(check);
             let decision = if let Some(cancel) = self.cancel_token.as_ref() {
@@ -830,8 +942,10 @@ impl AgentRunSnapshot {
             } else {
                 check.await?
             };
-            match decision {
-                echo_core::tools::permission::PermissionDecision::Allow => Ok(None),
+            match decision.decision {
+                echo_core::tools::permission::PermissionDecision::Allow => {
+                    Ok(decision.updated_input)
+                }
                 echo_core::tools::permission::PermissionDecision::Deny { reason } => {
                     Err(echo_core::error::ReactError::Other(format!(
                         "Permission denied for tool '{}': {}",
@@ -860,6 +974,7 @@ impl AgentRunSnapshot {
     #[cfg(not(feature = "human-loop"))]
     pub async fn check_tool_approval(
         &self,
+        _request_id: &str,
         _tool_name: &str,
         _input: &serde_json::Value,
         _permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
@@ -881,40 +996,48 @@ impl AgentRunSnapshot {
 
     /// Check tool output guard and return filtered output if modified.
     pub async fn check_tool_output_guard(&self, output: &str) -> Option<String> {
-        // Secret scan: redact secrets from tool output before guard check
-        if crate::security::contains_secrets(output) {
-            let redacted = crate::security::redact_secrets(output);
+        let mut effective_output = output.to_string();
+        if crate::security::contains_secrets(&effective_output) {
+            effective_output = crate::security::redact_secrets(&effective_output);
             tracing::warn!(agent = %self.config.agent_name, "Secret detected in tool output; redacted");
-            return Some(redacted);
         }
-        let gm = self.guard.guard_manager.as_ref()?;
+        let Some(gm) = self.guard.guard_manager.as_ref() else {
+            return (effective_output != output).then_some(effective_output);
+        };
         use crate::guard::GuardDirection;
-        let result = match gm.check_all(output, GuardDirection::Output).await {
+        let result = match gm
+            .check_all(&effective_output, GuardDirection::Output)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(agent = %self.config.agent_name, error = %e, "Guard check failed, blocking output (fail-closed)");
                 return Some(format!("Output content blocked: guard check error ({e})"));
             }
         };
-        if let crate::guard::GuardResult::Block { reason } = &result {
-            tracing::info!(agent = %self.config.agent_name, reason = %reason, "🛡️ Tool output blocked by guard");
-            if let Some(al) = &self.guard.audit_logger {
-                let event = crate::audit::AuditEvent::now(
-                    self.config.session_id.clone(),
-                    self.config.agent_name.clone(),
-                    crate::audit::AuditEventType::GuardBlock {
-                        guard: "guard_manager".to_string(),
-                        direction: GuardDirection::Output,
-                        reason: reason.clone(),
-                    },
-                );
-                if let Err(e) = al.log(event).await {
-                    tracing::error!(error = %e, "audit log write failed — event dropped");
+        match result {
+            crate::guard::GuardResult::Block { reason } => {
+                tracing::info!(agent = %self.config.agent_name, reason = %reason, "🛡️ Tool output blocked by guard");
+                if let Some(al) = &self.guard.audit_logger {
+                    let event = crate::audit::AuditEvent::now(
+                        self.config.session_id.clone(),
+                        self.config.agent_name.clone(),
+                        crate::audit::AuditEventType::GuardBlock {
+                            guard: "guard_manager".to_string(),
+                            direction: GuardDirection::Output,
+                            reason: reason.clone(),
+                        },
+                    );
+                    if let Err(e) = al.log(event).await {
+                        tracing::error!(error = %e, "audit log write failed — event dropped");
+                    }
                 }
+                Some(format!("Output content filtered by safety guard: {reason}"))
             }
-            Some(format!("Output content filtered by safety guard: {reason}"))
-        } else {
-            None
+            crate::guard::GuardResult::Transform { content, .. } => Some(content),
+            crate::guard::GuardResult::Pass | crate::guard::GuardResult::Warn { .. } => {
+                (effective_output != output).then_some(effective_output)
+            }
         }
     }
 
@@ -1219,6 +1342,7 @@ impl AgentRunSnapshot {
                 output: None,
                 blocked: false,
                 block_reason: None,
+                block_failure: None,
                 duration_ms: 0,
                 plan_mode: self.config.plan_mode,
                 permission_decision: None,
@@ -1226,14 +1350,41 @@ impl AgentRunSnapshot {
                 stream_tx,
             };
 
-            match pipeline.run(&mut ctx, self).await {
+            let pipeline_result = pipeline.run(&mut ctx, self).await;
+            if !ctx.hook_messages.pre.is_empty() || !ctx.hook_messages.post.is_empty() {
+                let mut context = self.context.lock().await;
+                for message in &ctx.hook_messages.pre {
+                    context.push(crate::agent::react::run::context::runtime_context_note(
+                        "Hook:PreToolUse",
+                        message,
+                    ));
+                }
+                for message in &ctx.hook_messages.post {
+                    context.push(crate::agent::react::run::context::runtime_context_note(
+                        "Hook:PostToolUse",
+                        message,
+                    ));
+                }
+            }
+
+            match pipeline_result {
                 Ok(()) => {
                     // Check if execution was blocked
                     if ctx.blocked {
                         let reason = ctx
                             .block_reason
                             .unwrap_or_else(|| format!("Tool {} blocked", tool_name));
-                        return Ok(reason);
+                        let failure = ctx.block_failure.unwrap_or_else(|| {
+                            ToolFailure::new(crate::tools::ToolFailureCategory::Permanent)
+                        });
+                        return Err(ToolCallFailure {
+                            error: crate::error::ToolError::ExecutionFailed {
+                                tool: tool_name.to_string(),
+                                message: reason,
+                            }
+                            .into(),
+                            failure,
+                        });
                     }
 
                     // Return the final output (after guard + truncation)
@@ -1372,7 +1523,7 @@ mod transcript_filter_tests {
         };
         let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
         let input = serde_json::json!({});
-        let approval = snapshot.check_tool_approval("approval_tool", &input, None);
+        let approval = snapshot.check_tool_approval("call-1", "approval_tool", &input, None);
         tokio::pin!(approval);
 
         tokio::task::yield_now().await;

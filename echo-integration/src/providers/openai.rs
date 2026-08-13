@@ -17,6 +17,19 @@ use super::client::{post, stream_post};
 use super::config::{Config, LlmConfig, ModelConfig};
 use super::thinking_translate::translate_thinking_openai_compat;
 
+fn token_limits(model: &str, limit: Option<u32>) -> (Option<u32>, Option<u32>) {
+    let lower = model.to_ascii_lowercase();
+    if lower.starts_with("gpt-5")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+    {
+        (None, limit)
+    } else {
+        (limit, None)
+    }
+}
+
 // ── Convenience Functions ─────────────────────────────────────────────────────
 
 /// Normalize message content for the OpenAI Chat Completions API.
@@ -34,6 +47,10 @@ fn normalize_messages(messages: Vec<Message>) -> Vec<Message> {
     messages
         .into_iter()
         .map(|mut msg| {
+            // Signed/redacted reasoning blocks are Anthropic protocol state.
+            // Preserve them in provider-neutral history, but do not leak these
+            // extension fields to OpenAI-compatible endpoints.
+            msg.reasoning_blocks = None;
             if let MessageContent::Parts(parts) = &mut msg.content {
                 let mut rewritten: Vec<ContentPart> = Vec::with_capacity(parts.len());
                 for part in parts.drain(..) {
@@ -149,11 +166,13 @@ pub async fn chat(
     user_id: Option<String>,
 ) -> Result<ChatCompletionResponse> {
     let model = Config::get_model(model_name)?;
+    let (max_tokens, max_completion_tokens) = token_limits(&model.model, max_tokens);
     let request_body = ChatCompletionRequest {
         model: model.model.clone(),
         messages: normalize_messages(messages.to_vec()),
         temperature,
         max_tokens,
+        max_completion_tokens,
         stream,
         tools,
         tool_choice,
@@ -185,11 +204,13 @@ pub async fn stream_chat(
     user_id: Option<String>,
 ) -> Result<impl Stream<Item = Result<ChatCompletionChunk>> + use<>> {
     let model = Config::get_model(model_name)?;
+    let (max_tokens, max_completion_tokens) = token_limits(&model.model, max_tokens);
     let request_body = ChatCompletionRequest {
         model: model.model.clone(),
         messages: normalize_messages(messages),
         temperature,
         max_tokens,
+        max_completion_tokens,
         stream: Some(true),
         stream_options: Some(serde_json::json!({"include_usage": true})),
         tools,
@@ -277,6 +298,8 @@ impl LlmClient for OpenAiClient {
                     &request.thinking,
                     ProviderCapabilities::openai_compatible(),
                 );
+                let (max_tokens, max_completion_tokens) =
+                    token_limits(&self.config.model, request.max_tokens);
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: normalize_messages(request.messages),
@@ -286,7 +309,8 @@ impl LlmClient for OpenAiClient {
                     } else {
                         request.temperature
                     },
-                    max_tokens: request.max_tokens,
+                    max_tokens,
+                    max_completion_tokens,
                     stream: None,
                     stream_options: None,
                     tools: request.tools,
@@ -312,6 +336,7 @@ impl LlmClient for OpenAiClient {
                 Ok(ChatResponse {
                     message: choice.message.clone(),
                     finish_reason: choice.finish_reason.clone(),
+                    usage: raw.usage.clone(),
                     raw,
                 })
             }
@@ -333,6 +358,8 @@ impl LlmClient for OpenAiClient {
                     &request.thinking,
                     ProviderCapabilities::openai_compatible(),
                 );
+                let (max_tokens, max_completion_tokens) =
+                    token_limits(&self.config.model, request.max_tokens);
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: normalize_messages(request.messages),
@@ -341,7 +368,8 @@ impl LlmClient for OpenAiClient {
                     } else {
                         request.temperature
                     },
-                    max_tokens: request.max_tokens,
+                    max_tokens,
+                    max_completion_tokens,
                     stream: Some(true),
                     stream_options: Some(serde_json::json!({"include_usage": true})),
                     tools: request.tools,
@@ -380,136 +408,6 @@ impl LlmClient for OpenAiClient {
 
     fn model_name(&self) -> &str {
         &self.config.model
-    }
-}
-
-/// Default [`LlmClient`] implementation based on the [`chat`] function
-pub struct DefaultLlmClient {
-    client: Arc<Client>,
-    model_name: String,
-}
-
-impl DefaultLlmClient {
-    pub fn new(client: Arc<Client>, model_name: impl Into<String>) -> Self {
-        Self {
-            client,
-            model_name: model_name.into(),
-        }
-    }
-}
-
-impl LlmClient for DefaultLlmClient {
-    fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
-        Box::pin(async move {
-            if request.thinking.is_some() {
-                tracing::warn!(
-                    model = %self.model_name,
-                    "DefaultLlmClient does not translate thinking config; use a configured OpenAiClient/AnthropicClient to apply it"
-                );
-            }
-            let raw = chat(
-                self.client.clone(),
-                &self.model_name,
-                &request.messages,
-                request.temperature,
-                request.max_tokens,
-                None,
-                request.tools,
-                request.tool_choice,
-                request.response_format,
-                request.user_id,
-            )
-            .await?;
-
-            let choice = raw.choices.first().ok_or(LlmError::EmptyResponse)?;
-
-            Ok(ChatResponse {
-                message: choice.message.clone(),
-                finish_reason: choice.finish_reason.clone(),
-                raw,
-            })
-        })
-    }
-
-    fn chat_stream(
-        &self,
-        request: ChatRequest,
-    ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
-        Box::pin(async move {
-            if request.thinking.is_some() {
-                tracing::warn!(
-                    model = %self.model_name,
-                    "DefaultLlmClient does not translate thinking config; use a configured OpenAiClient/AnthropicClient to apply it"
-                );
-            }
-            let stream = stream_chat(
-                self.client.clone(),
-                &self.model_name,
-                request.messages,
-                request.temperature,
-                request.max_tokens,
-                request.tools,
-                request.tool_choice,
-                request.response_format,
-                request.cancel_token,
-                request.user_id,
-            )
-            .await?;
-
-            Ok(Box::pin(futures::StreamExt::map(stream, |result| {
-                result.map(|chunk| {
-                    let choice = chunk.choices.first();
-                    ChatChunk {
-                        delta: choice.map(|c| c.delta.clone()).unwrap_or_default(),
-                        finish_reason: choice.and_then(|c| c.finish_reason.clone()),
-                        usage: chunk.usage.clone(),
-                    }
-                })
-            })) as BoxStream<'_, Result<ChatChunk>>)
-        })
-    }
-
-    fn chat_simple(&self, messages: Vec<Message>) -> BoxFuture<'_, Result<String>> {
-        self.chat_simple_with_options(
-            messages,
-            echo_core::llm::SimpleChatOptions {
-                temperature: Some(0.3),
-                max_tokens: Some(2048),
-            },
-        )
-    }
-
-    fn chat_simple_with_options(
-        &self,
-        messages: Vec<Message>,
-        options: echo_core::llm::SimpleChatOptions,
-    ) -> BoxFuture<'_, Result<String>> {
-        Box::pin(async move {
-            let response = chat(
-                self.client.clone(),
-                &self.model_name,
-                &messages,
-                options.temperature,
-                options.max_tokens,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
-            )
-            .await?;
-
-            response
-                .choices
-                .into_iter()
-                .next()
-                .and_then(|c| c.message.content.as_text())
-                .ok_or_else(|| ReactError::Other("LLM returned empty content".to_string()))
-        })
-    }
-
-    fn model_name(&self) -> &str {
-        &self.model_name
     }
 }
 
@@ -598,5 +496,22 @@ mod tests {
         let msg = Message::user("hello".to_string());
         let out = normalize_messages(vec![msg]);
         assert_eq!(out[0].content.as_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn anthropic_reasoning_blocks_are_not_forwarded() {
+        use echo_core::llm::types::ReasoningBlock;
+
+        let mut msg = Message::assistant("answer".to_string());
+        msg.reasoning_blocks = Some(vec![ReasoningBlock::Signed {
+            thinking: "private reasoning".to_string(),
+            signature: "signature".to_string(),
+        }]);
+
+        let out = normalize_messages(vec![msg]);
+        assert!(
+            out.first()
+                .is_some_and(|message| message.reasoning_blocks.is_none())
+        );
     }
 }

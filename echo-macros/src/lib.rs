@@ -209,6 +209,13 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
     let struct_name = format_ident!("{}Tool", to_pascal_case(&fn_name_str));
     let params_name = format_ident!("{}Params", to_pascal_case(&fn_name_str));
 
+    if !func.sig.generics.params.is_empty() || func.sig.generics.where_clause.is_some() {
+        return Err(syn::Error::new_spanned(
+            &func.sig.generics,
+            "#[tool] does not support generic functions; use a concrete wrapper function",
+        ));
+    }
+
     if let ReturnType::Default = &func.sig.output {
         return Err(syn::Error::new_spanned(
             &func.sig,
@@ -233,7 +240,7 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
     };
 
     let expanded = quote! {
-        #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
+        #[derive(#echo_agent::__macro_support::serde::Deserialize, #echo_agent::__macro_support::schemars::JsonSchema)]
         pub struct #params_name {
             #(#param_fields),*
         }
@@ -244,21 +251,21 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
             fn name(&self) -> &str { #tool_name }
             fn description(&self) -> &str { #tool_desc }
 
-            fn parameters(&self) -> ::serde_json::Value {
-                let schema = ::schemars::schema_for!(#params_name);
-                ::serde_json::to_value(schema).unwrap_or_default()
+            fn parameters(&self) -> #echo_agent::__macro_support::serde_json::Value {
+                let schema = #echo_agent::__macro_support::schemars::schema_for!(#params_name);
+                #echo_agent::__macro_support::serde_json::to_value(schema).unwrap_or_default()
             }
 
             #permissions_override
 
-            fn validate_parameters<'a>(&'a self, params: &'a #echo_agent::tools::ToolParameters) -> ::futures::future::BoxFuture<'a, #echo_agent::error::Result<()>> {
+            fn validate_parameters<'a>(&'a self, params: &'a #echo_agent::tools::ToolParameters) -> #echo_agent::__macro_support::futures::future::BoxFuture<'a, #echo_agent::error::Result<()>> {
                 Box::pin(async move {
                     #struct_name::deserialize_params(params)?;
                     Ok(())
                 })
             }
 
-            fn execute<'a>(&'a self, parameters: #echo_agent::tools::ToolParameters) -> ::futures::future::BoxFuture<'a, #echo_agent::error::Result<#echo_agent::tools::ToolResult>> {
+            fn execute<'a>(&'a self, parameters: #echo_agent::tools::ToolParameters) -> #echo_agent::__macro_support::futures::future::BoxFuture<'a, #echo_agent::error::Result<#echo_agent::tools::ToolResult>> {
                 Box::pin(async move {
                     let params = #struct_name::deserialize_params(&parameters)?;
                     let #params_name { #(#param_names),* } = params;
@@ -271,8 +278,8 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
             /// Deserialize and validate tool parameters, returning a typed struct
             /// or a [`ToolError::InvalidParameter`] with extracted field name.
             fn deserialize_params(params: &#echo_agent::tools::ToolParameters) -> #echo_agent::error::Result<#params_name> {
-                let value = ::serde_json::Value::Object(params.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
-                ::serde_json::from_value(value).map_err(|e| {
+                let value = #echo_agent::__macro_support::serde_json::Value::Object(params.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+                #echo_agent::__macro_support::serde_json::from_value(value).map_err(|e| {
                     let msg = e.to_string();
                     // Extract field name from common serde error patterns:
                     // "missing field `name`" -> "name"
@@ -329,8 +336,9 @@ pub fn callback(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn callback_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
     let echo_agent = echo_agent_crate_path()?;
+    reject_generic_impl(&input, "#[callback]")?;
     let self_ty = &input.self_ty;
-    let method_impls = impl_block_to_boxfuture_methods(&input, "()")?;
+    let method_impls = impl_block_to_boxfuture_methods(&echo_agent, &input)?;
 
     Ok(quote! {
         impl #echo_agent::agent::AgentCallback for #self_ty {
@@ -397,7 +405,10 @@ pub fn guard(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn guard_impl(attrs: NameAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let echo_agent = echo_agent_crate_path()?;
     let guard_name = &attrs.name;
-    let struct_name = format_ident!("{}Guard", to_pascal_case(&guard_name.replace('-', "_")));
+    let struct_name = generated_ident(
+        &format!("{}Guard", to_pascal_case(&guard_name.replace('-', "_"))),
+        "guard name",
+    )?;
     require_return_type(&func)?;
     let body = &func.block;
 
@@ -411,7 +422,7 @@ fn guard_impl(attrs: NameAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
                 &'a self,
                 content: &'a str,
                 direction: #echo_agent::guard::GuardDirection,
-            ) -> ::futures::future::BoxFuture<'a, #echo_agent::error::Result<#echo_agent::guard::GuardResult>> {
+            ) -> #echo_agent::__macro_support::futures::future::BoxFuture<'a, #echo_agent::error::Result<#echo_agent::guard::GuardResult>> {
                 Box::pin(async move #body)
             }
         }
@@ -456,8 +467,9 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn handler_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
     let echo_agent = echo_agent_crate_path()?;
+    reject_generic_impl(&input, "#[handler]")?;
     let self_ty = &input.self_ty;
-    let method_impls = extract_boxfuture_methods_with_return(&input)?;
+    let method_impls = extract_boxfuture_methods_with_return(&echo_agent, &input)?;
 
     Ok(quote! {
         impl #echo_agent::human_loop::HumanLoopHandler for #self_ty {
@@ -507,7 +519,7 @@ fn compressor_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
             fn compress(
                 &self,
                 input: #echo_agent::compression::CompressionInput,
-            ) -> ::futures::future::BoxFuture<'_, #echo_agent::error::Result<#echo_agent::compression::CompressionOutput>> {
+            ) -> #echo_agent::__macro_support::futures::future::BoxFuture<'_, #echo_agent::error::Result<#echo_agent::compression::CompressionOutput>> {
                 Box::pin(async move #body)
             }
         }
@@ -553,7 +565,7 @@ fn permission_policy_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream>
                 &'a self,
                 tool_name: &'a str,
                 permissions: &'a [#echo_agent::tools::permission::ToolPermission],
-            ) -> ::futures::future::BoxFuture<'a, #echo_agent::tools::permission::PermissionDecision> {
+            ) -> #echo_agent::__macro_support::futures::future::BoxFuture<'a, #echo_agent::tools::permission::PermissionDecision> {
                 Box::pin(async move #body)
             }
         }
@@ -598,8 +610,9 @@ pub fn audit_logger(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn audit_logger_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
     let echo_agent = echo_agent_crate_path()?;
+    reject_generic_impl(&input, "#[audit_logger]")?;
     let self_ty = &input.self_ty;
-    let method_impls = extract_boxfuture_methods_with_return(&input)?;
+    let method_impls = extract_boxfuture_methods_with_return(&echo_agent, &input)?;
 
     Ok(quote! {
         impl #echo_agent::audit::AuditLogger for #self_ty {
@@ -649,8 +662,8 @@ fn extract_fn_params(
 
 /// For callback-style traits: returns `BoxFuture<'a, ()>`.
 fn impl_block_to_boxfuture_methods(
+    echo_agent: &syn::Path,
     input: &ItemImpl,
-    _default_return: &str,
 ) -> syn::Result<Vec<proc_macro2::TokenStream>> {
     let mut methods = Vec::new();
 
@@ -661,7 +674,7 @@ fn impl_block_to_boxfuture_methods(
             let lifetime_params = lifetimed_params(&method.sig.inputs);
 
             methods.push(quote! {
-                fn #name_ident<'a>(#(#lifetime_params),*) -> ::futures::future::BoxFuture<'a, ()> {
+                fn #name_ident<'a>(#(#lifetime_params),*) -> #echo_agent::__macro_support::futures::future::BoxFuture<'a, ()> {
                     Box::pin(async move #body)
                 }
             });
@@ -673,6 +686,7 @@ fn impl_block_to_boxfuture_methods(
 
 /// For traits where user methods have explicit return types (HumanLoopHandler, AuditLogger).
 fn extract_boxfuture_methods_with_return(
+    echo_agent: &syn::Path,
     input: &ItemImpl,
 ) -> syn::Result<Vec<proc_macro2::TokenStream>> {
     let mut methods = Vec::new();
@@ -689,7 +703,7 @@ fn extract_boxfuture_methods_with_return(
             };
 
             methods.push(quote! {
-                fn #name_ident<'a>(#(#lifetime_params),*) -> ::futures::future::BoxFuture<'a, #ret_ty> {
+                fn #name_ident<'a>(#(#lifetime_params),*) -> #echo_agent::__macro_support::futures::future::BoxFuture<'a, #ret_ty> {
                     Box::pin(async move #body)
                 }
             });
@@ -748,6 +762,28 @@ fn require_return_type(func: &ItemFn) -> syn::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn reject_generic_impl(input: &ItemImpl, macro_name: &str) -> syn::Result<()> {
+    if input.generics.params.is_empty() && input.generics.where_clause.is_none() {
+        Ok(())
+    } else {
+        Err(syn::Error::new_spanned(
+            &input.generics,
+            format!(
+                "{macro_name} does not support generic impl blocks; use a concrete wrapper type"
+            ),
+        ))
+    }
+}
+
+fn generated_ident(value: &str, source: &str) -> syn::Result<syn::Ident> {
+    syn::parse_str::<syn::Ident>(value).map_err(|_| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("{source} does not produce a valid Rust identifier: `{value}`"),
+        )
+    })
 }
 
 pub(crate) fn extract_doc_comments(attrs: &[syn::Attribute]) -> Option<String> {

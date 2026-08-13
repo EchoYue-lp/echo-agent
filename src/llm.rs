@@ -7,7 +7,7 @@
 //!
 //! | Client | Backend | Feature |
 //! |--------|---------|---------|
-//! | [`OpenAiClient`] / [`DefaultLlmClient`] | OpenAI & compatible APIs | default |
+//! | [`OpenAiClient`] | OpenAI & compatible APIs | default |
 //! | [`AnthropicClient`] | Native Claude API | `a2a` |
 //! | [`ProviderFactory`] | Dynamic provider selection from config | default |
 //!
@@ -78,7 +78,7 @@ pub mod config {
 pub mod providers {
     //! Compatibility re-export of provider implementations from `echo_integration`.
     pub use echo_integration::providers::anthropic::AnthropicClient;
-    pub use echo_integration::providers::openai::{DefaultLlmClient, OpenAiClient};
+    pub use echo_integration::providers::openai::OpenAiClient;
 }
 
 use futures::Stream;
@@ -98,7 +98,7 @@ pub use echo_core::llm::{
 
 // Provider implementations from echo_integration::providers
 pub use echo_integration::providers::anthropic::AnthropicClient;
-pub use echo_integration::providers::openai::{DefaultLlmClient, OpenAiClient};
+pub use echo_integration::providers::openai::OpenAiClient;
 
 // Config & Factory
 pub use config::{LlmConfig, LlmProvider};

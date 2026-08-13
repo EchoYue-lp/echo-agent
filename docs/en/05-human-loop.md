@@ -105,7 +105,7 @@ let cache = SessionApprovalCache::new();
 Three cache scopes:
 - `Once` — no caching
 - `Session` — cache by tool_name + args_hash
-- `SessionAllTools` — cache by tool_name (all args match)
+- `SessionTool` — cache by tool_name (all args match)
 
 ---
 

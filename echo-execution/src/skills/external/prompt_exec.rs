@@ -118,11 +118,11 @@ pub async fn process_skill_content(content: &str, ctx: &PromptContext) -> String
     let mut safe = String::with_capacity(content.len());
     let mut pos = 0;
     for (i, region) in regions.iter().enumerate() {
-        safe.push_str(&content[pos..region.start]);
+        safe.push_str(content.get(pos..region.start).unwrap_or_default());
         safe.push_str(&format!("\x01CMD_OUT_{}\x01", i)); // SOH-delimited placeholder
         pos = region.end;
     }
-    safe.push_str(&content[pos..]);
+    safe.push_str(content.get(pos..).unwrap_or_default());
 
     // Step 3: Substitute variables only in the safe (non-command) content
     let substituted = substitute_variables(&safe, ctx);
@@ -149,12 +149,15 @@ pub async fn process_skill_content(content: &str, ctx: &PromptContext) -> String
     for i in (0..regions.len()).rev() {
         let placeholder = format!("\x01CMD_OUT_{}\x01", i);
         if let Some(output) = cmd_outputs.remove(&i) {
-            if regions[i].is_block {
+            let Some(region) = regions.get(i) else {
+                continue;
+            };
+            if region.is_block {
                 // Block commands: output replaces the entire ```! ... ``` block
                 result = result.replace(&placeholder, &output);
             } else {
                 // Inline commands: preserve leading whitespace from the original match
-                let matched = &content[regions[i].start..regions[i].end];
+                let matched = content.get(region.start..region.end).unwrap_or_default();
                 let leading_ws: String =
                     matched.chars().take_while(|c| c.is_whitespace()).collect();
                 result = result.replace(&placeholder, &format!("{}{}", leading_ws, output.trim()));

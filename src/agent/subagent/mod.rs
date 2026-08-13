@@ -3,15 +3,13 @@
 //! Provides three execution modes:
 //! - **Sync**: parent blocks until subagent returns (current `AgentDispatchTool` behavior)
 //! - **Fork**: runs independently; context is fresh unless filtered history is explicitly requested
-//! - **Teammate**: parallel independent agent with mailbox communication
+//! - **Teammate**: parallel independent agent controlled through a join/cancel handle
 
 pub mod builder;
 pub mod context;
-pub mod context_builder;
 pub mod events;
 pub mod executor;
 pub mod hooks;
-pub mod isolated;
 pub mod prompt;
 pub mod registry;
 pub mod team;
@@ -22,8 +20,7 @@ pub mod worktree;
 
 // Re-export the most commonly used types
 pub use builder::SubagentBuilder;
-pub use context::{ContextInheritance, MemoryScope, OutputSchema, SubagentContext};
-pub use context_builder::{ContextBuilder, SubagentOutput};
+pub use context::{ContextInheritance, SubagentContext};
 pub use events::{SubagentEvent, SubagentEventBus};
 pub use executor::{
     BackgroundSubagentHandle, DispatchRequest, SubagentExecutor, SubagentExecutorConfig,

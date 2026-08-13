@@ -116,6 +116,16 @@ impl InboundMessage {
         self.attachments = attachments;
         self
     }
+
+    /// Stable conversation identity used for session/cache isolation.
+    pub fn conversation_id(&self) -> &str {
+        &self.chat_id
+    }
+
+    /// Transport target for replies to this conversation.
+    pub fn reply_target(&self) -> &str {
+        &self.chat_id
+    }
 }
 
 // ── Outbound Message ─────────────────────────────────────────────────────────
@@ -261,7 +271,7 @@ mod tests {
         async fn handle(&self, msg: InboundMessage) -> Result<OutboundMessage> {
             Ok(OutboundMessage::new(
                 &msg.channel_id,
-                &msg.sender_id,
+                msg.reply_target(),
                 msg.chat_type,
                 &self.reply_text,
             ))
@@ -287,7 +297,7 @@ mod tests {
             .expect("item is ok");
         assert_eq!(first.text, "hello");
         assert_eq!(first.channel_id, "qq");
-        assert_eq!(first.to, "u1");
+        assert_eq!(first.to, "c1");
 
         // 之后不再有(恰好 1 条)
         assert!(stream.next().await.is_none(), "default yields exactly one");

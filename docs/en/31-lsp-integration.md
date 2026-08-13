@@ -273,7 +273,7 @@ If no server is running for the file's language, the tool returns an error sugge
 ### Loading Configuration in Code
 
 ```rust
-use echo_integration::lsp::{LspConfig, LspManager};
+use echo_agent::lsp::{LspConfig, LspManager};
 use std::path::Path;
 
 let mut manager = LspManager::new();
@@ -358,7 +358,7 @@ languages:
 
 ```rust
 use echo_agent::prelude::*;
-use echo_integration::lsp::{LspConfig, LspManager};
+use echo_agent::lsp::{LspConfig, LspManager};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

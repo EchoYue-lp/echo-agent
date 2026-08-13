@@ -170,7 +170,7 @@ impl PageRequest {
 }
 
 impl PageInfo {
-    /// Attach the common page contract to a tool result without exposing content.
+    /// Attach the common page contract and expose continuation facts to the model.
     pub fn apply_to(&self, result: &mut ToolResult) {
         result.truncated = result.truncated || self.truncated;
         result
@@ -191,6 +191,15 @@ impl PageInfo {
             result
                 .metadata
                 .insert("page.next_cursor".to_string(), cursor.clone());
+            let continuation = serde_json::json!({
+                "next_cursor": cursor,
+                "returned": self.returned,
+                "total": self.total,
+                "total_known": self.total_known,
+                "truncated": true,
+            });
+            result.output.push_str("\n[page]");
+            result.output.push_str(&continuation.to_string());
         }
     }
 }
@@ -370,5 +379,21 @@ mod tests {
             result.metadata.get("page.truncated").map(String::as_str),
             Some("false")
         );
+    }
+
+    #[test]
+    fn continuation_cursor_is_visible_in_result_output() {
+        let mut result = ToolResult::success("first page");
+        PageInfo {
+            next_cursor: Some("opaque-cursor".to_string()),
+            truncated: true,
+            total_known: true,
+            total: Some(3),
+            returned: 1,
+        }
+        .apply_to(&mut result);
+
+        assert!(result.output.contains("[page]{"));
+        assert!(result.output.contains("\"next_cursor\":\"opaque-cursor\""));
     }
 }

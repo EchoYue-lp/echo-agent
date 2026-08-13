@@ -284,7 +284,7 @@ async fn demo_curator() -> Result<(), Box<dyn std::error::Error>> {
     pass!("固定了 code-review 技能");
 
     // 查看状态
-    let status = curator.status();
+    let status = curator.status()?;
     println!("  技能状态:");
     println!("    总数: {}", status.total);
     println!("    活跃: {}", status.active);
@@ -298,7 +298,7 @@ async fn demo_curator() -> Result<(), Box<dyn std::error::Error>> {
 
     // 模拟时间流逝：手动设置 last_used_at 为 31 天前
     {
-        let mut state = curator.load_state();
+        let mut state = curator.load_state()?;
         if let Some(meta) = state.skills.get_mut("web-search") {
             meta.last_used_at = Utc::now() - chrono::Duration::days(31);
         }
@@ -318,7 +318,7 @@ async fn demo_curator() -> Result<(), Box<dyn std::error::Error>> {
     pass!("web-search 从 Active 转为 Stale");
 
     // 验证固定技能未被转换
-    let state = curator.load_state();
+    let state = curator.load_state()?;
     assert!(
         state
             .skills

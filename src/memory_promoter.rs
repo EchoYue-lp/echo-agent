@@ -1,7 +1,7 @@
 //! Store-backed memory promoter — L3 memory promotion from evicted messages.
 //!
 //! Implements [`MemoryPromoter`] to extract key facts from messages evicted
-//! during compression and write them to a [`Store`] for later recall.
+//! during compression and write them to a [`crate::memory::Store`] for later recall.
 //!
 //! # Fact extraction heuristic
 //!
@@ -17,10 +17,8 @@
 //! extracted multiple times will overwrite (upsert) rather than create duplicates.
 //!
 use echo_core::llm::types::{Message, Role};
-use echo_core::memory::Store;
 use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
-use echo_state::compression::MemoryPromoter;
-use echo_state::memory::typed_store::TypedMemoryStore;
+use echo_state::compression::{MemoryPromoter, MemoryPromotionReceipt};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
@@ -33,13 +31,14 @@ use std::sync::Arc;
 /// 割裂点1: promoter-written facts now flow through the same typed path as
 /// agent-written memories and are recallable by composite-score recall.)
 pub struct StoreMemoryPromoter {
-    store: Arc<dyn Store>,
+    layer_manager: Arc<crate::evolution::MemoryLayerManager>,
 }
 
 impl StoreMemoryPromoter {
-    /// Create a new promoter (content-based dedup is always on).
-    pub fn new(store: Arc<dyn Store>) -> Self {
-        Self { store }
+    /// Create a promoter that writes through the canonical layered-memory
+    /// authority (content-based dedup is always on).
+    pub fn new(layer_manager: Arc<crate::evolution::MemoryLayerManager>) -> Self {
+        Self { layer_manager }
     }
 
     /// Compute a deterministic content-based key for deduplication.
@@ -58,17 +57,17 @@ pub(crate) fn durable_memory_content_key(content: &str) -> String {
 }
 
 impl MemoryPromoter for StoreMemoryPromoter {
-    fn promote(&self, evicted: &[Message]) -> BoxFuture<'_, ()> {
+    fn promote(
+        &self,
+        evicted: &[Message],
+    ) -> BoxFuture<'_, echo_core::error::Result<MemoryPromotionReceipt>> {
         let facts = extract_key_facts(evicted);
-        let store = self.store.clone();
+        let submitted = facts.len();
+        let layer_manager = self.layer_manager.clone();
 
         Box::pin(async move {
-            // (stage4 A2) Write promoted facts as TYPED memories (MemoryMeta) to
-            // the unified namespace — not raw JSON to ["l3_promoted"]. This
-            // closes 割裂点1: promoter-written facts are now recallable by the
-            // same composite-score recall path as agent-written memories.
-            let typed = TypedMemoryStore::new(store);
-            let ns = crate::evolution::layer::WARM_NAMESPACE;
+            let mut promoted = 0usize;
+            let mut deduplicated = 0usize;
             for (fact, fact_type) in facts.into_iter() {
                 let key = Self::content_key(&fact);
                 let memory_type = fact_type_to_memory_type(fact_type);
@@ -79,19 +78,22 @@ impl MemoryPromoter for StoreMemoryPromoter {
                 };
                 let meta = MemoryMeta::new(memory_type, MemorySource::L3Promotion, "l3_promotion")
                     .with_recall_weight(recall_weight);
-                if typed
-                    .get_typed(ns, &key)
+                if layer_manager
+                    .locate(&key)
                     .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|existing| existing.content.trim() == fact.trim())
+                    .is_some_and(|(_, existing)| existing.content.trim() == fact.trim())
                 {
+                    deduplicated = deduplicated.saturating_add(1);
                     continue;
                 }
-                if let Err(e) = typed.put_typed(ns, &key, &fact, meta).await {
-                    tracing::debug!(error = %e, "Failed to write promoted memory item");
-                }
+                layer_manager.write_memory(&key, &fact, meta).await?;
+                promoted = promoted.saturating_add(1);
             }
+            Ok(MemoryPromotionReceipt {
+                submitted,
+                promoted,
+                deduplicated,
+            })
         })
     }
 }
@@ -369,11 +371,20 @@ mod tests {
     /// Builds a conversation with important facts → extracts key facts →
     /// writes to an in-memory Store → verifies the facts are recallable.
     #[tokio::test]
-    async fn test_e2e_fact_extraction_and_recall() {
+    async fn test_e2e_fact_extraction_and_recall() -> echo_core::error::Result<()> {
+        use crate::evolution::MemoryLayerManager;
+        use crate::evolution::audit::NullChangeLog;
+        use echo_core::memory::Store;
         use echo_state::memory::InMemoryStore;
 
         let store = Arc::new(InMemoryStore::new());
-        let promoter = StoreMemoryPromoter::new(store.clone());
+        let memory_dir = tempfile::tempdir()?;
+        let layer_manager = Arc::new(MemoryLayerManager::new(
+            memory_dir.path().to_path_buf(),
+            store.clone(),
+            Box::new(NullChangeLog),
+        ));
+        let promoter = StoreMemoryPromoter::new(layer_manager);
 
         // Build a conversation with important facts that should be preserved
         let messages = vec![
@@ -432,7 +443,7 @@ mod tests {
         );
 
         // Step 2: Promote to Store (writes via the promoter)
-        promoter.promote(&messages).await;
+        promoter.promote(&messages).await?;
 
         // Step 3: Verify facts are recallable via Store search
         let results = store.search(&["agent", "memories"], "PostgreSQL", 5).await;
@@ -459,5 +470,6 @@ mod tests {
             "Recalled content should be meaningful (≥50 chars), got {} chars",
             content.len()
         );
+        Ok(())
     }
 }

@@ -48,7 +48,7 @@ pub fn verify_compression(
     checks.push(check_token_target(checkpoint));
 
     // P0: Summary not empty (if an LLM compressor was used)
-    if checkpoint.summary.is_some() && !checkpoint.summary.as_deref().unwrap_or("").is_empty() {
+    if checkpoint.summary.is_some() {
         checks.push(check_summary_not_empty(checkpoint));
     }
 

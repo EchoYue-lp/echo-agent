@@ -54,7 +54,7 @@ exclude = [
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "handoff", "topology", "tasks", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
+features = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "tasks", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
 rustdoc-args = ["--cfg", "docsrs"]
 # NOTE: `data` feature (polars) is excluded because polars-ops 0.46–0.53 has a build.rs that
 # unconditionally enables `feature="nightly"` on nightly compilers, then uses
@@ -64,48 +64,41 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-full = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "handoff", "topology", "tasks", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics"]
+full = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "tasks", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics", "testing"]
 a2a = ["dep:axum", "dep:jsonwebtoken"]
 mcp = ["echo_integration/mcp"]
 lsp = ["echo_core/lsp", "echo_integration/lsp"]
 sqlite = ["echo_state/sqlite", "dep:rusqlite"]
 telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 human-loop = ["echo_orchestration/websocket"]
-handoff = []
 topology = []
 tasks = []
 # `subagent` builds `src/agent/subagent/`, which imports `crate::tasks`
 # (Evidence type). Without `tasks` the `subagent` feature fails to compile on
 # its own — declare the dependency so `--features subagent` works standalone.
 subagent = ["tasks"]
-web = ["dep:scraper", "dep:html2text", "dep:url", "echo_tools/web"]
-media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "echo_tools/media"]
-data = ["dep:polars", "echo_tools/data"]
-statistics = ["dep:polars", "echo_tools/statistics"]
+web = ["echo_tools/web"]
+media = ["echo_tools/media"]
+data = ["echo_tools/data"]
+statistics = ["echo_tools/statistics"]
 channels = ["echo_integration/channels"]
 git = ["echo_tools/git"]
-database = ["dep:sqlx", "echo_tools/database"]
+database = ["echo_tools/database"]
 rag = ["echo_tools/rag"]
 chart = ["echo_tools/chart"]
 content-guard = ["echo_core/guard"]
 project-rules = []
-shell = ["echo_tools/shell"]
-files = ["echo_tools/files"]
+shell = ["echo_execution/shell", "echo_tools/shell"]
+files = ["echo_execution/files", "echo_tools/files"]
 research = ["echo_tools/research"]
 eval = []
 improve = []
 testing = []
-sandbox = []
-semantic-memory = []
-macros = []
-provider-factory = []
-workflow = []
-multimodal = []
 
 [dependencies]
 echo_core = { version = "0.2.0", path = "echo-core", features = ["reqwest", "permission"] }
 echo_macros = { version = "0.2.0", path = "echo-macros" }
-echo_execution = { version = "0.2.0", path = "echo-execution" }
+echo_execution = { version = "0.2.0", path = "echo-execution", default-features = false }
 echo_integration = { version = "0.2.0", path = "echo-integration" }
 echo_tools = { version = "0.2.0", path = "echo-tools" }
 echo_state = { version = "0.2.0", path = "echo-state" }
@@ -148,17 +141,7 @@ axum = { version = "0.7", optional = true }
 # migrate to v10+ or an alternative (josekit, biscuit).
 # See: RUSTSEC-2022-0080 / CVE-2022-23529
 jsonwebtoken = { version = "9", optional = true }
-scraper = { version = "0.22", optional = true }
-html2text = { version = "0.14", optional = true }
-url = { version = "2", optional = true }
-pdf-extract = { version = "0.7", optional = true }
-lopdf = { version = "0.34", optional = true }
-calamine = { version = "0.26", optional = true }
-docx-rs = { version = "0.4", optional = true }
-encoding_rs = { version = "0.8", optional = true }
-polars = { version = "0.53", features = ["lazy", "csv", "json", "parquet", "dtype-full", "strings", "is_in", "regex"], optional = true }
 rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "mysql", "postgres", "any"], optional = true }
 
 [[example]]
 name = "demo27_sqlite_memory"
@@ -178,7 +161,6 @@ required-features = ["sqlite"]
 
 [[example]]
 name = "demo44_code_laboratory"
-required-features = ["sandbox"]
 
 [[example]]
 name = "demo06_mcp"
@@ -189,7 +171,6 @@ name = "demo15_structured_output"
 
 [[example]]
 name = "demo18_semantic_memory"
-required-features = ["semantic-memory"]
 
 [[example]]
 name = "demo23_a2a"
@@ -197,11 +178,9 @@ required-features = ["a2a"]
 
 [[example]]
 name = "demo25_macros"
-required-features = ["macros"]
 
 [[example]]
 name = "demo26_provider_factory"
-required-features = ["provider-factory"]
 
 [[example]]
 name = "smoke_usage_passthrough"
@@ -209,11 +188,9 @@ required-features = ["sqlite", "tasks", "subagent"]
 
 [[example]]
 name = "demo28_workflow"
-required-features = ["workflow"]
 
 [[example]]
 name = "demo29_sandbox"
-required-features = ["sandbox"]
 
 [[example]]
 name = "demo30_mcp_server"
@@ -225,15 +202,12 @@ required-features = ["sqlite"]
 
 [[example]]
 name = "demo34_workflow_stream"
-required-features = ["workflow"]
 
 [[example]]
 name = "demo36_multimodal"
-required-features = ["multimodal"]
 
 [[example]]
 name = "demo37_declarative_workflow"
-required-features = ["workflow"]
 
 [[example]]
 name = "demo38_im_channels"
@@ -277,10 +251,6 @@ name = "demo20_audit"
 required-features = ["human-loop"]
 
 [[example]]
-name = "demo21_handoff"
-required-features = ["handoff"]
-
-[[example]]
 name = "demo24_topology"
 required-features = ["topology"]
 
@@ -298,7 +268,6 @@ required-features = ["sqlite"]
 
 [[example]]
 name = "demo35_dynamic_tools"
-required-features = ["macros"]
 
 [[example]]
 name = "demo50_eval"
@@ -307,9 +276,6 @@ required-features = ["eval"]
 [[example]]
 name = "demo51_self_improvement"
 required-features = ["eval", "improve"]
-
-[[example]]
-name = "demo52_loop_detection"
 
 [[example]]
 name = "demo53_adaptive_compression"

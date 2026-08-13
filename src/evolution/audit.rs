@@ -281,10 +281,10 @@ impl JsonlChangeLog {
             std::thread::sleep(BACKOFF);
         }
         if !got_lock {
-            tracing::error!(
-                attempts = MAX_ATTEMPTS,
-                "audit log lock unavailable; appending WITHOUT cross-process lock (risk of line interleaving)"
-            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("audit log lock unavailable after {MAX_ATTEMPTS} attempts"),
+            ));
         }
 
         use std::io::Write;
@@ -297,11 +297,15 @@ impl JsonlChangeLog {
             // Durability: flush + fsync so a crash after record() returns
             // cannot lose this audit line.
             file.flush()?;
-            let _ = file.sync_all();
+            file.sync_all()?;
             Ok(())
         })();
 
-        let _ = lock_file.unlock();
+        if let Err(unlock_error) = lock_file.unlock()
+            && result.is_ok()
+        {
+            return Err(unlock_error);
+        }
         result
     }
 }

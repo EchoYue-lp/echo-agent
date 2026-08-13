@@ -55,7 +55,7 @@ Output protection:
 echo_tools = { version = "0.2", features = ["files"] }
 ```
 
-Registration (handled automatically by `echo_tools::registry`):
+Registration is handled automatically by `echo_agent::tools::register_all_tools`:
 
 ```rust
 #[cfg(feature = "files")]
@@ -125,7 +125,7 @@ This prevents large search results from exhausting the LLM's context window.
 
 ```rust
 use echo_agent::prelude::*;
-use echo_tools::files::code_search::CodeSearchTool;
+use echo_agent::tools::files::code_search::CodeSearchTool;
 
 let mut agent = ReactAgentBuilder::new()
     .model("qwen3-max")
@@ -143,7 +143,7 @@ let answer = agent
 ### Restrict Search Directory
 
 ```rust
-use echo_tools::files::code_search::CodeSearchTool;
+use echo_agent::tools::files::code_search::CodeSearchTool;
 
 // Constrain all searches to a specific directory
 agent.add_tool(Box::new(CodeSearchTool::with_base_dir("/workspace/my-project")));
@@ -237,7 +237,7 @@ When `rg` is unavailable, the built-in symbol search recognizes definitions in t
 
 ```rust
 use echo_agent::prelude::*;
-use echo_tools::files::code_search::CodeSearchTool;
+use echo_agent::tools::files::code_search::CodeSearchTool;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

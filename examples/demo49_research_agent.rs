@@ -445,7 +445,7 @@ async fn demo_multi_agent_research() -> Result<()> {
         )
         .role(echo_agent::agent::AgentRole::Orchestrator)
         .enable_subagent()
-        .enable_planning()
+        .enable_tasks()
         .max_iterations(30)
         .build()?;
 

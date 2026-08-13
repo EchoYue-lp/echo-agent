@@ -41,8 +41,10 @@ pub fn create_worktree(
     let git_root = find_git_root(repo_path)?;
 
     // Generate worktree path
+    let worktrees_root = git_root.join(".worktrees");
     let worktree_dir = if let Some(ref suffix) = config.path_suffix {
-        git_root.join(".worktrees").join(suffix)
+        echo_core::utils::fs::join_path_segment(&worktrees_root, suffix)
+            .map_err(|error| format!("Invalid worktree path suffix: {error}"))?
     } else {
         let branch_safe = config
             .branch
@@ -114,33 +116,45 @@ pub fn create_worktree(
 /// Remove a managed worktree and clean up.
 pub fn remove_worktree(repo_path: &Path, worktree: &ManagedWorktree) -> Result<(), String> {
     let git_root = find_git_root(repo_path)?;
+    let worktrees_root = git_root.join(".worktrees");
+    let canonical_root = std::fs::canonicalize(&worktrees_root)
+        .map_err(|e| format!("Failed to resolve worktrees root: {e}"))?;
+    let canonical_worktree = std::fs::canonicalize(&worktree.path)
+        .map_err(|e| format!("Failed to resolve worktree path: {e}"))?;
+    if !canonical_worktree.starts_with(&canonical_root) {
+        return Err(format!(
+            "Refusing to remove worktree outside {}: {}",
+            canonical_root.display(),
+            canonical_worktree.display()
+        ));
+    }
 
-    // Remove worktree
+    let status = Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .current_dir(&canonical_worktree)
+        .output()
+        .map_err(|e| format!("Failed to inspect worktree status: {e}"))?;
+    if !status.status.success() {
+        return Err(format!(
+            "Failed to inspect worktree status: {}",
+            String::from_utf8_lossy(&status.stderr)
+        ));
+    }
+    if !status.stdout.is_empty() {
+        return Err("Refusing to remove a worktree with uncommitted changes".to_string());
+    }
+
     let output = Command::new("git")
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            &worktree.path.to_string_lossy(),
-        ])
+        .args(["worktree", "remove", &canonical_worktree.to_string_lossy()])
         .current_dir(&git_root)
         .output()
         .map_err(|e| format!("Failed to remove worktree: {e}"))?;
 
     if !output.status.success() {
-        // Fallback: prune stale worktrees
-        let _ = Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(&git_root)
-            .output();
-    }
-
-    // Delete the branch if it was managed
-    if worktree.managed {
-        let _ = Command::new("git")
-            .args(["branch", "-D", "--", &worktree.branch])
-            .current_dir(&git_root)
-            .output();
+        return Err(format!(
+            "git worktree remove failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
     Ok(())

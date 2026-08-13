@@ -57,7 +57,6 @@ pub mod handle;
 pub mod react;
 pub mod snapshot;
 mod steer;
-pub mod turn;
 
 #[cfg(feature = "subagent")]
 pub mod subagent;
@@ -73,8 +72,8 @@ pub use config::{AgentConfig, AgentRole};
 
 /// Agent factory types — re-exported from echo-core with facade-level overrides.
 ///
-/// This module provides [`AgentFactory`], [`AgentFactoryConfig`],
-/// and [`DefaultAgentFactory`] (the concrete facade implementation that uses
+/// This module provides [`factory::AgentFactory`], [`factory::AgentFactoryConfig`],
+/// and [`factory::DefaultAgentFactory`] (the concrete facade implementation that uses
 /// `ReactAgentBuilder`).
 pub mod factory {
     pub use crate::agent::default_factory::DefaultAgentFactory;

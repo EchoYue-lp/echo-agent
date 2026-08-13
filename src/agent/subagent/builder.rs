@@ -103,7 +103,7 @@ impl SubagentBuilder {
         self
     }
 
-    /// Set execution mode to Teammate (parallel, mailbox-based).
+    /// Set execution mode to Teammate (parallel, handle-based).
     pub fn teammate_mode(mut self) -> Self {
         self.definition.execution_mode = ExecutionMode::Teammate;
         self

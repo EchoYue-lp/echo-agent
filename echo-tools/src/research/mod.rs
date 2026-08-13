@@ -7,7 +7,6 @@ pub mod arxiv;
 pub mod bibtex;
 pub mod clients;
 pub mod clinical_trials;
-pub mod memory;
 pub mod pdf_fetch;
 pub mod pubmed;
 pub mod semantic_scholar;
@@ -20,7 +19,6 @@ pub use clients::{
     ZoteroLibraryKind, ZoteroTag, scholarly_work_from_zotero, scholarly_work_to_zotero,
 };
 pub use clinical_trials::ClinicalTrialsSearchTool;
-pub use memory::{ResearchRecallTool, ResearchRememberTool};
 pub use pdf_fetch::PdfFetchTool;
 pub use pubmed::PubMedSearchTool;
 pub use semantic_scholar::SemanticScholarSearchTool;

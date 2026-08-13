@@ -12,7 +12,9 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{HumanLoopKind, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse, RiskLevel};
+use super::{
+    ApprovalScope, HumanLoopKind, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse, RiskLevel,
+};
 use echo_core::error::Result;
 
 // ── 批量审批请求 ─────────────────────────────────────────────────────────────
@@ -90,7 +92,10 @@ impl BatchApprovalRequest {
 #[derive(Debug, Clone)]
 pub enum BatchItemDecision {
     /// 批准
-    Approved,
+    Approved {
+        final_args: Value,
+        scope: ApprovalScope,
+    },
     /// 拒绝
     Rejected { reason: Option<String> },
     /// 跳过（推迟）
@@ -101,7 +106,7 @@ pub enum BatchItemDecision {
 #[derive(Debug, Clone)]
 pub enum BatchApprovalResponse {
     /// 全部批准
-    AllApproved,
+    AllApproved(Vec<BatchItemDecision>),
     /// 全部拒绝
     AllRejected { reason: Option<String> },
     /// 逐项决策（索引与请求 items 对应）
@@ -129,11 +134,16 @@ pub trait BatchApprovalProvider: HumanLoopProvider {
 
             for item in &batch.items {
                 let req = HumanLoopRequest {
+                    request_id: None,
+                    session_id: None,
+                    agent_name: None,
                     kind: HumanLoopKind::Approval,
                     prompt: item.prompt.clone(),
                     tool_name: Some(item.tool_name.clone()),
                     args: Some(item.args.clone()),
                     risk_level: Some(item.risk_level),
+                    approval_context: None,
+                    suggestions: Vec::new(),
                     timeout: batch.timeout,
                     task_id: None,
                     options: None,
@@ -143,14 +153,22 @@ pub trait BatchApprovalProvider: HumanLoopProvider {
 
                 match self.request(req).await? {
                     HumanLoopResponse::Approved => {
-                        decisions.push(BatchItemDecision::Approved);
+                        decisions.push(BatchItemDecision::Approved {
+                            final_args: item.args.clone(),
+                            scope: ApprovalScope::Once,
+                        });
                     }
-                    HumanLoopResponse::ApprovedWithScope { scope: _ } => {
-                        decisions.push(BatchItemDecision::Approved);
+                    HumanLoopResponse::ApprovedWithScope { scope } => {
+                        decisions.push(BatchItemDecision::Approved {
+                            final_args: item.args.clone(),
+                            scope,
+                        });
                     }
-                    HumanLoopResponse::ModifiedArgs { args: _, scope: _ } => {
-                        // 批量审批中暂不支持修改参数，按批准处理
-                        decisions.push(BatchItemDecision::Approved);
+                    HumanLoopResponse::ModifiedArgs { args, scope } => {
+                        decisions.push(BatchItemDecision::Approved {
+                            final_args: args,
+                            scope,
+                        });
                     }
                     HumanLoopResponse::Rejected { reason } => {
                         decisions.push(BatchItemDecision::Rejected { reason });
@@ -173,13 +191,13 @@ pub trait BatchApprovalProvider: HumanLoopProvider {
             // 检查是否全部一致
             let all_approved = decisions
                 .iter()
-                .all(|d| matches!(d, BatchItemDecision::Approved));
+                .all(|d| matches!(d, BatchItemDecision::Approved { .. }));
             let all_rejected = decisions
                 .iter()
                 .all(|d| matches!(d, BatchItemDecision::Rejected { .. }));
 
             if all_approved {
-                Ok(BatchApprovalResponse::AllApproved)
+                Ok(BatchApprovalResponse::AllApproved(decisions))
             } else if all_rejected {
                 Ok(BatchApprovalResponse::AllRejected { reason: None })
             } else {
@@ -198,6 +216,7 @@ impl<T: HumanLoopProvider> BatchApprovalProvider for T {}
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn test_batch_approval_item_new() {
@@ -221,8 +240,14 @@ mod tests {
 
     #[test]
     fn test_batch_approval_response_variants() {
-        let all_approved = BatchApprovalResponse::AllApproved;
-        assert!(matches!(all_approved, BatchApprovalResponse::AllApproved));
+        let all_approved = BatchApprovalResponse::AllApproved(vec![BatchItemDecision::Approved {
+            final_args: json!({"cmd": "ls"}),
+            scope: ApprovalScope::Once,
+        }]);
+        assert!(matches!(
+            all_approved,
+            BatchApprovalResponse::AllApproved(_)
+        ));
 
         let all_rejected = BatchApprovalResponse::AllRejected { reason: None };
         assert!(matches!(
@@ -231,7 +256,10 @@ mod tests {
         ));
 
         let individual = BatchApprovalResponse::Individual(vec![
-            BatchItemDecision::Approved,
+            BatchItemDecision::Approved {
+                final_args: json!({"cmd": "ls"}),
+                scope: ApprovalScope::Once,
+            },
             BatchItemDecision::Rejected {
                 reason: Some("test".to_string()),
             },
@@ -241,5 +269,42 @@ mod tests {
 
         let timeout = BatchApprovalResponse::Timeout;
         assert!(matches!(timeout, BatchApprovalResponse::Timeout));
+    }
+
+    struct ModifyProvider;
+
+    impl HumanLoopProvider for ModifyProvider {
+        fn request(&self, _req: HumanLoopRequest) -> BoxFuture<'_, Result<HumanLoopResponse>> {
+            Box::pin(async {
+                Ok(HumanLoopResponse::ModifiedArgs {
+                    args: json!({"cmd": "safe"}),
+                    scope: ApprovalScope::Session,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_preserves_modified_args_and_scope() -> Result<()> {
+        let provider = Arc::new(ModifyProvider);
+        let response = provider
+            .batch_request(BatchApprovalRequest::new(vec![BatchApprovalItem::new(
+                "Bash",
+                json!({"cmd": "unsafe"}),
+                RiskLevel::High,
+            )]))
+            .await?;
+
+        let BatchApprovalResponse::AllApproved(decisions) = response else {
+            return Err(echo_core::error::ReactError::Other(
+                "expected all-approved batch".to_string(),
+            ));
+        };
+        assert!(matches!(
+            decisions.first(),
+            Some(BatchItemDecision::Approved { final_args, scope })
+                if final_args == &json!({"cmd": "safe"}) && *scope == ApprovalScope::Session
+        ));
+        Ok(())
     }
 }

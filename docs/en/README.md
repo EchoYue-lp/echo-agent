@@ -208,7 +208,6 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo18_semantic_memory.rs` | Store semantic search (EmbeddingStore / vector retrieval) |
 | `examples/demo19_guard.rs` | Guard system (rule / LLM content filtering) |
 | `examples/demo20_audit.rs` | Audit logging |
-| `examples/demo21_handoff.rs` | Agent handoff |
 | `examples/demo22_plan_execute.rs` | Plan-and-Execute |
 | `examples/demo23_a2a.rs` | A2A protocol |
 | `examples/demo24_topology.rs` | Multi-agent topology visualization |

@@ -9,6 +9,7 @@
 //! | `memory` | `MemorySubsystem` | Context management, long-term memory, snapshots, Checkpoint, conversation persistence |
 //! | `approval` | `ApprovalSubsystem` | Human-in-the-loop approval |
 
+#[cfg(feature = "human-loop")]
 pub(crate) mod approval;
 pub(crate) mod guard;
 pub(crate) mod memory;

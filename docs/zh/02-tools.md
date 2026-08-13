@@ -276,7 +276,7 @@ impl Tool for DeleteFileTool {
 从 LLM 传来的原始 JSON 参数可以通过 `ToolCallParams` 做类型安全的提取和校验：
 
 ```rust
-use echo_core::tools::{ToolCallParams, ParamValue};
+use echo_agent::tools::{ToolCallParams, ParamValue};
 
 let params = ToolCallParams::from_value(&raw_json);
 
@@ -299,7 +299,7 @@ params.validate_required("path", "string")?;
 use echo_agent::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 use echo_agent::tools::permission::ToolPermission;
 use echo_agent::error::Result;
-use echo_core::tools::ToolCallParams;
+use echo_agent::tools::ToolCallParams;
 use serde_json::{Value, json};
 use futures::future::BoxFuture;
 
@@ -477,7 +477,7 @@ agent.add_tools(vec![
 | `Function { name }` | 强制调用指定工具 | `{"type":"function","function":{"name":"..."}}` |
 
 ```rust
-use echo_core::llm::ToolChoice;
+use echo_agent::llm::ToolChoice;
 
 // 让模型自行决定
 let choice = ToolChoice::Auto;

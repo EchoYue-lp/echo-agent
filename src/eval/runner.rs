@@ -1,12 +1,14 @@
 //! Eval runner — executes eval cases against an agent.
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentEvent, AgentInvocationContext};
 use crate::eval::{EvalCase, EvalConstraints, EvalReport, EvalResult, SuccessCriteria};
 use crate::eval::{LlmGrader, TrajectoryReplay};
 use crate::trace::Run;
+use futures::StreamExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 /// Runs eval cases against agents.
 pub struct EvalRunner {
@@ -51,7 +53,16 @@ impl EvalRunner {
     /// Run a single eval case against the given agent.
     pub async fn run(&self, case: &EvalCase, agent: &dyn Agent) -> EvalResult {
         let started = Instant::now();
-        let work_dir = self.setup_fixture(case).await;
+        let work_dir = match self.setup_fixture(case).await {
+            Ok(work_dir) => work_dir,
+            Err(error) => {
+                let mut result = EvalResult::new(&case.id, false);
+                result
+                    .violations
+                    .push(format!("Fixture setup failed: {error}"));
+                return result;
+            }
+        };
         let mut result = EvalResult::new(&case.id, true);
         let mut final_output = None;
 
@@ -60,9 +71,15 @@ impl EvalRunner {
             .clone()
             .unwrap_or_else(|| self.workspace_root.clone());
 
+        let cancel = CancellationToken::new();
+        let invocation = AgentInvocationContext {
+            working_dir: Some(cwd.clone()),
+            cancel: Some(cancel.clone()),
+            ..AgentInvocationContext::default()
+        };
         let agent_result = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
-            agent.execute(&case.task),
+            execute_for_final_answer(agent, &case.task, cancel.clone(), invocation),
         )
         .await;
 
@@ -71,16 +88,20 @@ impl EvalRunner {
 
         match agent_result {
             Ok(Ok(output)) => {
-                result.duration_ms = started.elapsed().as_millis() as u64;
+                result.duration_ms =
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 final_output = Some(output);
             }
             Ok(Err(e)) => {
-                result.duration_ms = started.elapsed().as_millis() as u64;
+                result.duration_ms =
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 result.success = false;
                 result.violations.push(format!("Agent error: {e}"));
             }
             Err(_) => {
-                result.duration_ms = started.elapsed().as_millis() as u64;
+                cancel.cancel();
+                result.duration_ms =
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 result.success = false;
                 result.violations.push("Timeout".to_string());
             }
@@ -174,21 +195,24 @@ impl EvalRunner {
 
     // ── Private helpers ────────────────────────────────────────────
 
-    async fn setup_fixture(&self, case: &EvalCase) -> Option<PathBuf> {
-        let fixture = case.project_fixture.as_ref()?;
+    async fn setup_fixture(&self, case: &EvalCase) -> std::result::Result<Option<PathBuf>, String> {
+        let Some(fixture) = case.project_fixture.as_ref() else {
+            return Ok(None);
+        };
         if !fixture.exists() {
-            return None;
+            return Err(format!("fixture does not exist: {}", fixture.display()));
         }
-        let dest = self.workspace_root.join(&case.id);
+        let dest = echo_core::utils::fs::join_path_segment(&self.workspace_root, &case.id)
+            .map_err(|error| format!("unsafe eval case id {:?}: {error}", case.id))?;
         if dest.exists() {
-            let _ = std::fs::remove_dir_all(&dest);
+            std::fs::remove_dir_all(&dest)
+                .map_err(|error| format!("failed to reset {}: {error}", dest.display()))?;
         }
         // Simple recursive copy
         if let Err(e) = copy_dir(fixture, &dest) {
-            tracing::warn!("Failed to copy fixture {}: {e}", fixture.display());
-            return None;
+            return Err(format!("failed to copy fixture {}: {e}", fixture.display()));
         }
-        Some(dest)
+        Ok(Some(dest))
     }
 
     async fn check_criteria(
@@ -725,14 +749,51 @@ fn extract_number_near_key(text: &str, key: &str) -> Option<f64> {
     let lower_text = text.to_lowercase();
     let lower_key = key.to_lowercase();
     if let Some(pos) = lower_text.find(&lower_key) {
-        let after = &text[pos..text.len().min(pos + key.len() + 50)];
+        let prefix_chars = lower_text.get(..pos)?.chars().count();
+        let after: String = text
+            .chars()
+            .skip(prefix_chars)
+            .take(key.chars().count().saturating_add(50))
+            .collect();
         if let Ok(re) = regex::Regex::new(r"(-?\d+\.?\d*(?:e[+-]?\d+)?)")
-            && let Some(m) = re.find(after)
+            && let Some(m) = re.find(&after)
         {
             return m.as_str().parse::<f64>().ok();
         }
     }
     None
+}
+
+async fn execute_for_final_answer(
+    agent: &dyn Agent,
+    task: &str,
+    cancel: CancellationToken,
+    invocation: AgentInvocationContext,
+) -> crate::error::Result<String> {
+    let mut stream = agent
+        .execute_stream_with_invocation_context(task, cancel, invocation)
+        .await?;
+    while let Some(event) = stream.next().await {
+        match event? {
+            AgentEvent::FinalAnswer(answer) => return Ok(answer),
+            AgentEvent::Cancelled => {
+                return Err(crate::error::ReactError::Agent(Box::new(
+                    crate::error::AgentError::Cancelled("eval invocation".to_string()),
+                )));
+            }
+            AgentEvent::Error {
+                source, message, ..
+            } => {
+                return Err(crate::error::ReactError::Other(format!(
+                    "{source}: {message}"
+                )));
+            }
+            _ => {}
+        }
+    }
+    Err(crate::error::ReactError::Other(
+        "agent event stream closed without a terminal event".to_string(),
+    ))
 }
 
 /// Simple recursive directory copy.

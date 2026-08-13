@@ -15,9 +15,9 @@
 
 use crate::evolution::layer::MemoryLayerManager;
 use echo_core::memory::types::MemoryStatus;
+use echo_core::utils::time::now_secs;
 use echo_state::memory::typed_store::MemoryFilter;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // ── Config ─────────────────────────────────────────────────────────────
 
@@ -214,13 +214,6 @@ impl Dreaming {
         );
         Ok(report)
     }
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 fn age_days(created_at: u64, now: u64) -> f64 {

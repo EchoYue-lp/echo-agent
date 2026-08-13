@@ -3,14 +3,12 @@
 //! Provides [`WebFetchTool`], fetches URL content and converts it to readable text.
 //! Supports HTML → plain text conversion, suitable for LLM consumption.
 
-use crate::security::ssrf_safe_redirect_policy;
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::artifact::{ToolOutputArtifactIdentity, persist_tool_output};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::StreamExt;
 use futures::future::BoxFuture;
-use reqwest::Client;
 use serde_json::Value;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -27,34 +25,10 @@ const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 static HTML_TAG_RE: OnceLock<Option<regex::Regex>> = OnceLock::new();
 static WHITESPACE_RE: OnceLock<Option<regex::Regex>> = OnceLock::new();
 
-static CLIENT: OnceLock<Client> = OnceLock::new();
-
-fn build_client() -> &'static Client {
-    CLIENT.get_or_init(|| {
-        Client::builder()
-            .user_agent(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
-                 AppleWebKit/537.36 (KHTML, like Gecko) \
-                 Chrome/131.0.0.0 Safari/537.36",
-            )
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .redirect(ssrf_safe_redirect_policy())
-            .build()
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to build HTTP client: {}, using default", e);
-                Client::new()
-            })
-    })
-}
-
 /// Web page fetching tool
 ///
 /// Fetches content from the specified URL, converting HTML to readable text.
 pub struct WebFetchTool {
-    /// Retained for potential direct-client use by future call sites; the SSRF-safe
-    /// path goes through `security::ssrf_safe_get`, which builds its own pinned client.
-    #[allow(dead_code)]
-    client: Client,
     max_content_length: usize,
     text_width: usize,
 }
@@ -63,7 +37,6 @@ impl WebFetchTool {
     /// Create a new WebFetchTool
     pub fn new() -> Self {
         Self {
-            client: build_client().clone(),
             max_content_length: DEFAULT_MAX_LENGTH,
             text_width: DEFAULT_TEXT_WIDTH,
         }
@@ -198,7 +171,7 @@ impl Tool for WebFetchTool {
             // SSRF protection: resolve + validate + connect on pinned IPs, closing
             // the DNS-rebinding TOCTOU window that validate_url+client.get leaves.
             let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECS);
-            let response = match crate::security::ssrf_safe_get(url, timeout, 5).await {
+            let response = match crate::security::local_http_get(url, timeout, 5).await {
                 Ok(r) => r,
                 Err(e) => {
                     return Ok(ToolResult::error(format!("Request failed: {}", e)));

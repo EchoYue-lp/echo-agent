@@ -24,7 +24,7 @@ echo-agent 采用**单一 Agent 引擎**架构：所有执行路径（前台对�
 │                                                              │
 │  可组合能力:                                                 │
 │  ├── ReAct 循环 (think → act → observe)                     │
-│  ├── 任务规划 (execute_with_planning)                       │
+│  ├── 版本化任务图工具                                      │
 │  ├── 子 Agent 调度 (SubagentExecutor)                       │
 │  ├── 自我审查 (ReviewTool)                                  │
 │  └── 后台任务 (TaskSpawner / DAG 引擎)                      │
@@ -39,7 +39,7 @@ echo-agent 采用**单一 Agent 引擎**架构：所有执行路径（前台对�
 |---------|---------|------|
 | `execute()` / `chat()` | `run_react_loop()` 入口 | 非流式执行 |
 | `execute_stream()` / `chat_stream()` | `run_stream_channel()` 中 `lock_owned()` | 流式执行，锁移入 spawned task |
-| `execute_with_planning()` | 方法入口 | 三阶段规划 |
+| `task_create/task_update/task_list` | 工具调用 | 版本化任务图 CRUD |
 | `chat_multimodal()` | 方法入口 | 多模态对话 |
 
 这意味着：前台 chat 和后台任务**自动互斥**，调用方无需手动管理任何锁。
@@ -70,7 +70,7 @@ handle.write(|a| { a.add_callback(callback); }).await;
 
 | 子系统 | 模块 | 说明 |
 |--------|------|------|
-| DAG 任务引擎 | `echo_orchestration::tasks` | 有向无环图任务编排，支持依赖、并行、重试 |
+| DAG 任务引擎 | `echo_agent::tasks` | 有向无环图任务编排，支持依赖、并行、重试 |
 | 后台任务句柄 | `tasks::background_task` | `BackgroundTask<T>` + `TaskSpawner`，非阻塞任务管理 |
 | 进度追踪 | `tasks::progress` + `callbacks::ProgressBridge` | `PhasePlan` + `ProgressReporter` + Agent 回调桥接 |
 | 人在回路选择 | `human_loop::Selection` | `HumanLoopProvider` 的 `Selection` kind，暂停任务等待人类选择 |
@@ -84,7 +84,7 @@ handle.write(|a| { a.add_callback(callback); }).await;
 `BackgroundTask<T>` 提供对异步任务的非阻塞控制：
 
 ```rust,ignore
-use echo_orchestration::tasks::{TaskSpawner, TaskSpawnerConfig};
+use echo_agent::tasks::{TaskSpawner, TaskSpawnerConfig};
 
 let spawner = TaskSpawner::new(TaskSpawnerConfig::default());
 

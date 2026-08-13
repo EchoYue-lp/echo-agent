@@ -40,8 +40,8 @@
 //! | [`builtin`] | `ThinkTool`, `FinalAnswerTool`, memory tools, data tools, git, RAG, chart | various |
 //! | [`web`] | `WebSearchTool`, `WebFetchTool` | `web` |
 //! | [`media`] | `ImageFetchTool`, PDF/Excel/Word tools | `media` |
-//! | [`files`] | File read/write/list/delete tools | default |
-//! | [`shell`] | Shell command execution (sandboxed) | default |
+//! | [`files`] | File read/write/list/delete tools | `files` |
+//! | [`shell`] | Shell command execution (sandboxed) | `shell` |
 //!
 //! # Key Types
 //!
@@ -55,6 +55,7 @@
 /// Built-in tools (security, think, etc.)
 pub mod builtin;
 /// File manipulation tools (re-export from echo_tools)
+#[cfg(feature = "files")]
 pub mod files {
     pub use echo_tools::files::*;
 }
@@ -66,6 +67,10 @@ pub mod security {
     pub use echo_tools::security::*;
 }
 pub mod permission;
+/// Tool-call risk classification (re-export from echo_execution).
+pub mod risk {
+    pub use echo_execution::risk::*;
+}
 /// Complete oversized tool-output artifacts (re-export from echo_core).
 pub mod artifact {
     pub use echo_core::tools::artifact::*;
@@ -74,7 +79,17 @@ pub mod artifact {
 pub mod pagination {
     pub use echo_core::tools::pagination::*;
 }
+/// Git checkpoint primitives (re-export from echo_tools).
+pub mod git_checkpoint {
+    pub use echo_tools::git_checkpoint::*;
+}
+/// Isolated Git worktree primitives (re-export from echo_tools).
+#[cfg(feature = "git")]
+pub mod git_worktree {
+    pub use echo_tools::git_worktree::*;
+}
 /// Shell tool (re-export from echo_tools)
+#[cfg(feature = "shell")]
 pub mod shell {
     pub use echo_tools::shell::*;
 }
@@ -106,11 +121,14 @@ pub mod execution {
     pub use echo_execution::tools::*;
 }
 
+pub use echo_core::tools::{ParamValue, ToolCallParams};
 pub use echo_execution::tools::{
-    Tool, ToolBudgetMetricsSnapshot, ToolExecutionConfig, ToolFailure, ToolFailureCategory,
-    ToolManager, ToolOutputChannel, ToolParameters, ToolRecoveryAction, ToolResult, ToolRiskLevel,
-    ToolSchemaStats, ToolSearchTool, ToolSideEffect, ToolStreamEvent,
+    Tool, ToolBudgetMetricsSnapshot, ToolContext, ToolExecutionConfig, ToolFailure,
+    ToolFailureCategory, ToolManager, ToolOutputChannel, ToolParameters, ToolRecoveryAction,
+    ToolResult, ToolRiskLevel, ToolRunner, ToolSchemaStats, ToolSearchTool, ToolSideEffect,
+    ToolStreamEvent,
 };
+pub use echo_tools::{register_all_tools, register_readonly_tools};
 
 // ── Common file tool classification ──────────────────────────────────────────
 

@@ -284,6 +284,9 @@ mod tests {
             ]).collect(),
             token_limit: 50,
             current_query: None,
+            focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
 
         let output = compressor.compress(input).await.unwrap();
@@ -304,6 +307,9 @@ mod tests {
             ],
             token_limit: 10,
             current_query: None,
+            focus_instructions: None,
+            cancel_token: None,
+            tokenizer: None,
         };
 
         assert!(compressor.compress(input).await.is_err());

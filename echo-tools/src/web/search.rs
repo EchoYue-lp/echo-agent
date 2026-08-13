@@ -5,7 +5,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```text
 
 use super::providers::SearchProvider;
 use super::providers::brave::BraveSearchProvider;

@@ -98,7 +98,7 @@ fn parse_guard_response(response: &str) -> Result<GuardResult> {
     // 尝试提取 JSON 部分
     let json_str = if let Some(start) = trimmed.find('{') {
         if let Some(end) = trimmed.rfind('}') {
-            &trimmed[start..=end]
+            trimmed.get(start..=end).unwrap_or(trimmed)
         } else {
             trimmed
         }

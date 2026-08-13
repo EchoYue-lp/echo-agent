@@ -329,6 +329,19 @@ impl PluginIntegrator {
                 };
                 let mut expected_servers = config.mcp_servers.keys().cloned().collect::<Vec<_>>();
                 expected_servers.sort();
+                let collisions = expected_servers
+                    .iter()
+                    .filter(|name| agent.list_mcp_servers().contains(&name.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !collisions.is_empty() {
+                    failed_plugins.insert(plugin_id.clone());
+                    result.errors.push(format!(
+                        "Plugin '{plugin_id}' MCP server name collision(s): {}",
+                        collisions.join(", ")
+                    ));
+                    continue;
+                }
                 match agent.load_mcp_config(config).await {
                     Ok(clients) => {
                         let connected_servers = clients
@@ -391,88 +404,44 @@ impl PluginIntegrator {
             })
             .collect();
 
+        if !result.errors.is_empty() {
+            Self::unwire(agent, &result.components_by_plugin).await;
+            result.plugins_loaded.clear();
+            result.skills_loaded.clear();
+            result.hooks_registered.clear();
+            result.mcp_connected.clear();
+            result.components_by_plugin.clear();
+        }
+
         result
     }
 
-    /// Wire only skills from resolved components into the agent.
-    pub async fn wire_skills(
-        &self,
+    /// Remove exactly the framework components recorded by a successful
+    /// generation receipt.
+    pub async fn unwire(
         agent: &mut crate::agent::react::ReactAgent,
-        skill_dirs: &[PathBuf],
-    ) -> Vec<String> {
-        let mut loaded = Vec::new();
-        for dir in skill_dirs {
-            if let Ok(names) = agent.load_skills_from_dir(dir).await {
-                loaded.extend(names);
-            }
-        }
-        loaded
-    }
-
-    /// Wire only hooks from resolved components into the agent.
-    pub async fn wire_hooks(
-        &self,
-        agent: &crate::agent::react::ReactAgent,
-        hooks: &[(
-            String,
-            String,
-            echo_execution::skills::hooks::HooksDefinition,
-        )],
+        components: &HashMap<String, WiredPluginComponents>,
     ) {
-        let mut registry = agent.hook_registry().write().await;
-        for (plugin_name, source_dir, def) in hooks {
-            let _ = registry.register_plugin_hooks(plugin_name, source_dir, def.clone());
-        }
-    }
-
-    /// Wire only MCP servers from resolved components into the agent.
-    #[cfg(feature = "mcp")]
-    pub async fn wire_mcp(
-        &self,
-        agent: &mut crate::agent::react::ReactAgent,
-        mcp_files: &[PathBuf],
-    ) -> Vec<String> {
-        let mut connected = Vec::new();
-        for file in mcp_files {
-            if let Ok(clients) = agent.load_mcp_from_file(file).await {
-                for client in clients {
-                    connected.push(client.server_name().to_string());
-                }
+        for (plugin_id, owned) in components {
+            let source = format!("plugin:{plugin_id}");
+            let _ = agent.unregister_skills_by_source(&source).await;
+            if owned.hooks_registered {
+                agent
+                    .hook_registry()
+                    .write()
+                    .await
+                    .unregister(&crate::skills::hooks::HookSource::Plugin(plugin_id.clone()));
+            }
+            #[cfg(feature = "mcp")]
+            for server in &owned.mcp_servers {
+                let _ = agent.disconnect_mcp(server).await;
             }
         }
-        connected
     }
 }
 
 impl Default for PluginIntegrator {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// ── Backward-compatible legacy trait ───────────────────────────────────
-
-/// Legacy native plugin trait — for code-level extensions.
-///
-/// Prefer file-based plugins (with `manifest.yaml`) for most use cases.
-/// This trait is retained for backward compatibility with code-level plugins
-/// that need to inject custom Rust logic.
-pub trait NativePlugin: Send + Sync {
-    /// Unique plugin identifier.
-    fn id(&self) -> &str;
-    /// Human-readable name.
-    fn name(&self) -> &str;
-    /// What this plugin provides.
-    fn capabilities(&self) -> Vec<PluginCapability>;
-    /// Plugin version.
-    fn version(&self) -> &str;
-
-    /// Initialize the plugin. Called once at startup.
-    fn init(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-    /// Shutdown the plugin. Called at agent shutdown.
-    fn shutdown(&mut self) -> Result<(), String> {
-        Ok(())
     }
 }

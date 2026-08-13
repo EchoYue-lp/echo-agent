@@ -65,6 +65,8 @@ pub enum StreamChunk {
     },
     /// Mid-stream error (provider disconnect, malformed event, timeout).
     Err(ReactError),
+    /// A cancellation-aware wait before the next scripted chunk.
+    Delay(Duration),
 }
 
 /// A scriptable Mock LLM client.
@@ -301,6 +303,7 @@ impl MockLlmClient {
     ///         role: Some("assistant".to_string()),
     ///         content: Some("Hello".to_string()),
     ///         reasoning_content: None,
+    ///         reasoning_blocks: None,
     ///         tool_calls: None,
     ///     }),
     ///     StreamChunk::Terminal {
@@ -410,7 +413,7 @@ impl LlmClient for MockLlmClient {
             // Optional delay with cancel-awareness (Phase 3: lets tests verify
             // mid-flight cancellation).
             if let Some(d) = self.delay {
-                let token = request.cancel_token.unwrap_or_default();
+                let token = request.cancel_token.clone().unwrap_or_default();
                 tokio::select! {
                     _ = token.cancelled() => {
                         return Err(ReactError::Other("mock LLM call cancelled".into()));
@@ -423,6 +426,7 @@ impl LlmClient for MockLlmClient {
                 PopResult::Content(text, usage) => Ok(ChatResponse {
                     message: Message::assistant(text),
                     finish_reason: Some("stop".to_string()),
+                    usage: usage.clone(),
                     raw: crate::llm::types::ChatCompletionResponse {
                         usage,
                         ..crate::llm::types::ChatCompletionResponse::default()
@@ -431,6 +435,7 @@ impl LlmClient for MockLlmClient {
                 PopResult::ToolCalls(message, usage) => Ok(ChatResponse {
                     message,
                     finish_reason: Some("tool_calls".to_string()),
+                    usage: usage.clone(),
                     raw: crate::llm::types::ChatCompletionResponse {
                         usage,
                         ..crate::llm::types::ChatCompletionResponse::default()
@@ -441,6 +446,8 @@ impl LlmClient for MockLlmClient {
                 // the last terminal's finish reason / usage.
                 PopResult::Stream(chunks) => {
                     let mut text = String::new();
+                    let mut reasoning = String::new();
+                    let mut reasoning_blocks = Vec::new();
                     let mut finish_reason = None;
                     let mut usage = None;
                     for chunk in chunks {
@@ -449,6 +456,10 @@ impl LlmClient for MockLlmClient {
                                 if let Some(t) = delta.content {
                                     text.push_str(&t);
                                 }
+                                if let Some(value) = delta.reasoning_content {
+                                    reasoning.push_str(&value);
+                                }
+                                reasoning_blocks.extend(delta.reasoning_blocks.unwrap_or_default());
                             }
                             StreamChunk::Terminal {
                                 finish_reason: fr,
@@ -458,11 +469,29 @@ impl LlmClient for MockLlmClient {
                                 usage = u;
                             }
                             StreamChunk::Err(e) => return Err(e),
+                            StreamChunk::Delay(delay) => {
+                                let token = request.cancel_token.clone().unwrap_or_default();
+                                tokio::select! {
+                                    _ = token.cancelled() => {
+                                        return Err(ReactError::Agent(Box::new(
+                                            crate::error::AgentError::Cancelled(
+                                                "mock LLM call cancelled".to_string(),
+                                            ),
+                                        )));
+                                    }
+                                    _ = tokio::time::sleep(delay) => {}
+                                }
+                            }
                         }
                     }
+                    let mut message = Message::assistant(text);
+                    message.reasoning_content = (!reasoning.is_empty()).then_some(reasoning);
+                    message.reasoning_blocks =
+                        (!reasoning_blocks.is_empty()).then_some(reasoning_blocks);
                     Ok(ChatResponse {
-                        message: Message::assistant(text),
+                        message,
                         finish_reason,
+                        usage: usage.clone(),
                         raw: crate::llm::types::ChatCompletionResponse {
                             usage,
                             ..crate::llm::types::ChatCompletionResponse::default()
@@ -494,7 +523,7 @@ impl LlmClient for MockLlmClient {
 
             // Optional delay with cancel-awareness (Phase 3).
             if let Some(d) = self.delay {
-                let token = request.cancel_token.unwrap_or_default();
+                let token = request.cancel_token.clone().unwrap_or_default();
                 tokio::select! {
                     _ = token.cancelled() => {
                         return Err(ReactError::Other("mock LLM stream cancelled".into()));
@@ -514,6 +543,7 @@ impl LlmClient for MockLlmClient {
                                 role: Some("assistant".to_string()),
                                 content: Some(text),
                                 reasoning_content: None,
+                                reasoning_blocks: None,
                                 tool_calls: None,
                             },
                             finish_reason: None,
@@ -524,6 +554,7 @@ impl LlmClient for MockLlmClient {
                                 role: None,
                                 content: None,
                                 reasoning_content: None,
+                                reasoning_blocks: None,
                                 tool_calls: None,
                             },
                             finish_reason: Some("stop".to_string()),
@@ -557,6 +588,7 @@ impl LlmClient for MockLlmClient {
                                 role: Some("assistant".to_string()),
                                 content,
                                 reasoning_content,
+                                reasoning_blocks: message.reasoning_blocks,
                                 tool_calls: Some(delta_calls),
                             },
                             finish_reason: None,
@@ -567,6 +599,7 @@ impl LlmClient for MockLlmClient {
                                 role: None,
                                 content: None,
                                 reasoning_content: None,
+                                reasoning_blocks: None,
                                 tool_calls: None,
                             },
                             finish_reason: Some("tool_calls".to_string()),
@@ -576,9 +609,11 @@ impl LlmClient for MockLlmClient {
                     Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
                 }
                 PopResult::Stream(chunks) => {
-                    let stream =
-                        futures::stream::iter(chunks.into_iter().map(|chunk| match chunk {
-                            StreamChunk::Delta(delta) => Ok(ChatChunk {
+                    let cancel = request.cancel_token.unwrap_or_default();
+                    let stream = async_stream::stream! {
+                        for chunk in chunks {
+                            match chunk {
+                            StreamChunk::Delta(delta) => yield Ok(ChatChunk {
                                 delta,
                                 finish_reason: None,
                                 usage: None,
@@ -586,18 +621,37 @@ impl LlmClient for MockLlmClient {
                             StreamChunk::Terminal {
                                 finish_reason,
                                 usage,
-                            } => Ok(ChatChunk {
+                            } => yield Ok(ChatChunk {
                                 delta: DeltaMessage {
                                     role: None,
                                     content: None,
                                     reasoning_content: None,
+                                    reasoning_blocks: None,
                                     tool_calls: None,
                                 },
                                 finish_reason,
                                 usage,
                             }),
-                            StreamChunk::Err(e) => Err(e),
-                        }));
+                            StreamChunk::Err(error) => {
+                                yield Err(error);
+                                return;
+                            }
+                            StreamChunk::Delay(delay) => {
+                                tokio::select! {
+                                    _ = cancel.cancelled() => {
+                                        yield Err(ReactError::Agent(Box::new(
+                                            crate::error::AgentError::Cancelled(
+                                                "mock LLM stream cancelled".to_string(),
+                                            ),
+                                        )));
+                                        return;
+                                    }
+                                    _ = tokio::time::sleep(delay) => {}
+                                }
+                            }
+                            }
+                        }
+                    };
                     Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
                 }
             }

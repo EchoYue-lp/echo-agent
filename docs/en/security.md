@@ -19,7 +19,7 @@ Each tool declares its required permissions:
 | `Sensitive` | Sensitive operations (secrets, env vars) |
 
 ```rust
-use echo_core::tools::permission::ToolPermission;
+use echo_agent::tools::permission::ToolPermission;
 
 impl Tool for FileReadTool {
     fn permissions(&self) -> Vec<ToolPermission> {
@@ -39,7 +39,7 @@ impl Tool for FileReadTool {
 `ToolRiskClassifier` auto-classifies by tool name:
 
 ```rust
-use echo_execution::risk::ToolRiskClassifier;
+use echo_agent::tools::risk::ToolRiskClassifier;
 
 let category = ToolRiskClassifier::classify("shell");  // ShellExec, level 3
 let category = ToolRiskClassifier::classify("read_file");  // ReadOnly, level 0
@@ -116,7 +116,7 @@ RuleMatcher::All                                        // match all
 ### RuleRegistry — deny-first evaluation
 
 ```rust
-use echo_core::tools::permission::*;
+use echo_agent::tools::permission::*;
 
 let mut registry = RuleRegistry::new();
 

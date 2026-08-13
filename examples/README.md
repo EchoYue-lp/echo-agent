@@ -68,7 +68,6 @@ These examples stay focused on API understanding, interaction style, or walkthro
 - `demo17_chat.rs`
 - `demo19_guard.rs`
 - `demo20_audit.rs`
-- `demo21_handoff.rs`
 - `demo22_plan_execute.rs`
 - `demo23_a2a.rs`
 - `demo24_topology.rs`
@@ -82,7 +81,6 @@ These examples stay focused on API understanding, interaction style, or walkthro
 - `demo40_snapshot.rs`
 - `demo50_eval.rs`
 - `demo51_self_improvement.rs`
-- `demo52_loop_detection.rs`
 - `demo53_adaptive_compression.rs`
 - `demo54_headless.rs`
 - `demo55_lsp_tools.rs`

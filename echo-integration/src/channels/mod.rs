@@ -36,21 +36,21 @@
 //!     app_id: "your-app-id".into(),
 //!     client_secret: "your-secret".into(),
 //! };
-//! manager.register(Box::new(QqChannel::new(qq_config)?));
+//! manager.register(Box::new(QqChannel::new(qq_config)?))?;
 //!
 //! // Register Feishu (long-poll mode, no public IP required)
 //! let feishu_config = FeishuConfig::new_long_poll(
 //!     "your-feishu-app-id".into(),
 //!     "your-feishu-secret".into(),
 //! );
-//! manager.register(Box::new(FeishuChannel::new(feishu_config)?));
+//! manager.register(Box::new(FeishuChannel::new(feishu_config)?))?;
 //!
 //! // Start all channels
 //! let handler_factory = |_channel_id: &str| -> Arc<dyn MessageHandler> {
 //!     Arc::new(DummyHandler)
 //! };
 //! for result in manager.start_all(handler_factory).await {
-//!     result?;
+//!     result.result?;
 //! }
 //! # Ok(())
 //! # }

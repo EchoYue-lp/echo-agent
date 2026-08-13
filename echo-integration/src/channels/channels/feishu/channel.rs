@@ -12,6 +12,7 @@
 //! 5. Bot 添加 "DONE" 表情反应
 
 use super::super::super::types::*;
+use super::super::{DeliveryRequest, DeliverySender};
 use super::api::{
     FEISHU_API_BASE, FEISHU_WS_BASE, LARK_API_BASE, LARK_WS_BASE, TokenManager, add_reaction,
     http_client, patch_card_message, reply_message, send_card_message,
@@ -130,7 +131,8 @@ pub struct FeishuChannel {
     config: FeishuConfig,
     token_manager: Option<Arc<TokenManager>>,
     http: reqwest::Client,
-    send_tx: Option<mpsc::Sender<OutboundMessage>>,
+    send_tx: Option<DeliverySender>,
+    send_handle: Option<JoinHandle<()>>,
     task_handle: Option<JoinHandle<()>>,
     /// 消息 ID -> (卡片消息 ID, 创建时间)（用于更新运行中的卡片，带 TTL 防泄漏）
     running_cards: Arc<dashmap::DashMap<String, (String, std::time::Instant)>>,
@@ -149,6 +151,7 @@ impl FeishuChannel {
             token_manager: None,
             http: http_client(),
             send_tx: None,
+            send_handle: None,
             task_handle: None,
             running_cards: Arc::new(dashmap::DashMap::new()),
         })
@@ -192,6 +195,11 @@ impl ChannelPlugin for FeishuChannel {
     }
 
     async fn start(&mut self, handler: Arc<dyn MessageHandler>) -> Result<()> {
+        if self.task_handle.is_some() || self.send_handle.is_some() {
+            return Err(ReactError::Channel(Box::new(ChannelError::Other(
+                "Feishu channel is already started".to_string(),
+            ))));
+        }
         info!("Starting Feishu channel...");
 
         // 1. 初始化 Token 管理器
@@ -206,7 +214,7 @@ impl ChannelPlugin for FeishuChannel {
         token_manager.get_token().await?;
 
         // 2. 启动消息发送任务
-        let (send_tx, mut send_rx) = mpsc::channel::<OutboundMessage>(256);
+        let (send_tx, mut send_rx) = mpsc::channel::<DeliveryRequest>(256);
         self.send_tx = Some(send_tx.clone());
 
         let http = self.http.clone();
@@ -214,29 +222,23 @@ impl ChannelPlugin for FeishuChannel {
         let token_mgr = token_manager.clone();
         let running_cards = self.running_cards.clone();
 
-        tokio::spawn(async move {
-            while let Some(msg) = send_rx.recv().await {
-                let token = match token_mgr.get_token().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        warn!("Feishu: failed to get token: {:?}", e);
-                        continue;
-                    }
-                };
-
-                if let Err(e) = send_feishu_message_internal(
-                    &http,
-                    &api_domain,
-                    &token,
-                    msg,
-                    running_cards.clone(),
-                )
-                .await
-                {
-                    warn!("Feishu: failed to send message: {:?}", e);
+        self.send_handle = Some(tokio::spawn(async move {
+            while let Some(request) = send_rx.recv().await {
+                let result = async {
+                    let token = token_mgr.get_token().await?;
+                    send_feishu_message_internal(
+                        &http,
+                        &api_domain,
+                        &token,
+                        request.message,
+                        running_cards.clone(),
+                    )
+                    .await
                 }
+                .await;
+                let _ = request.receipt.send(result);
             }
-        });
+        }));
 
         // 3. 创建 wrapper handler
         let wrapper_handler = Arc::new(FeishuMessageHandler {
@@ -304,26 +306,34 @@ impl ChannelPlugin for FeishuChannel {
 
         if let Some(handle) = self.task_handle.take() {
             handle.abort();
+            let _ = handle.await;
         }
 
         self.send_tx = None;
+        if let Some(handle) = self.send_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        self.token_manager = None;
         info!("Feishu channel stopped");
         Ok(())
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
-        if let Some(tx) = &self.send_tx {
-            tx.send(msg).await.map_err(|e| {
-                ReactError::Channel(Box::new(ChannelError::SendError(format!(
-                    "Failed to queue message: {}",
-                    e
-                ))))
-            })
-        } else {
-            Err(ReactError::Channel(Box::new(ChannelError::SendError(
+        let token_manager = self.token_manager.as_ref().ok_or_else(|| {
+            ReactError::Channel(Box::new(ChannelError::SendError(
                 "Feishu channel not started".to_string(),
-            ))))
-        }
+            )))
+        })?;
+        let token = token_manager.get_token().await?;
+        send_feishu_message_internal(
+            &self.http,
+            &self.config.api_domain,
+            &token,
+            msg,
+            self.running_cards.clone(),
+        )
+        .await
     }
 
     async fn health_check(&self) -> Result<()> {
@@ -399,7 +409,7 @@ async fn send_feishu_message_internal(
 /// Wrapper Handler：处理消息并自动发送回复
 struct FeishuMessageHandler {
     inner: Arc<dyn MessageHandler>,
-    send_tx: mpsc::Sender<OutboundMessage>,
+    send_tx: DeliverySender,
     http: reqwest::Client,
     api_domain: String,
     token_manager: Arc<TokenManager>,

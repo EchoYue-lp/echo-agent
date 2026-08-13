@@ -6,7 +6,7 @@ use super::super::stream_macros::{try_send_or, yield_event_or};
 use super::{LoopState, ThinkOutcome, ThinkOutput};
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
-use crate::error::{ReactError, Result};
+use crate::error::Result;
 use crate::llm::types::{Message, Role, ToolDefinition};
 use echo_core::tokenizer::Tokenizer;
 use futures::StreamExt;
@@ -44,9 +44,13 @@ pub(crate) async fn run_think(
                 snap.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
                     .await;
             }
-            let _ = tx.try_send(Err(ReactError::Other(
-                "Agent execution cancelled by intervention at think".into(),
-            )));
+            snap.finalize_run(
+                crate::trace::RunStatus::Cancelled,
+                None,
+                Some("Agent execution cancelled by intervention at think"),
+            )
+            .await;
+            let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
             return Ok(ThinkOutcome::Cancelled);
         }
         if result.block {
@@ -62,10 +66,12 @@ pub(crate) async fn run_think(
                 )
                 .await;
             }
-            let _ = tx.try_send(Err(ReactError::Other(format!(
-                "Think blocked by intervention: {}",
-                reason
-            ))));
+            let _ = tx
+                .send(Ok(AgentEvent::error_message(
+                    "intervention",
+                    format!("Think blocked by intervention: {reason}"),
+                )))
+                .await;
             return Ok(ThinkOutcome::Blocked);
         }
         if let Some(injected) = result.injected_context {
@@ -78,15 +84,25 @@ pub(crate) async fn run_think(
         }
     }
 
-    let estimated_context_tokens: usize = messages
-        .iter()
-        .filter_map(|message| message.text_content())
-        .fold(0usize, |total, text| {
-            total.saturating_add(snap.calibrated_tokenizer.count_tokens(&text))
-        });
+    let estimated_context_tokens = messages.iter().fold(0usize, |total, message| {
+        total.saturating_add(
+            message
+                .content
+                .estimated_tokens(snap.calibrated_tokenizer.as_ref()),
+        )
+    });
     let context_breakdown =
         crate::trace::LlmContextBreakdown::estimate(&messages, snap.calibrated_tokenizer.as_ref());
     let request_tools = tools_for_request(snap, final_only);
+    try_send_or!(
+        tx,
+        validate_request_budget(
+            snap,
+            estimated_context_tokens,
+            request_tools.as_deref().unwrap_or_default(),
+        ),
+        ThinkOutcome::Failed
+    );
     let cache_fingerprint = cache_fingerprint(&messages, request_tools.as_deref());
     let (protected_message_count, protected_context_tokens) = {
         let context = context.lock().await;
@@ -99,18 +115,55 @@ pub(crate) async fn run_think(
     let mut llm_stream = Box::pin(try_send_or!(
         tx,
         create_llm_stream(snap, messages.clone(), final_only).await,
-        ThinkOutcome::Abandoned
+        ThinkOutcome::Failed
     ));
     let mut content_buffer = String::new();
     let mut reasoning_buffer = String::new();
+    let mut reasoning_blocks = Vec::new();
     let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
     let mut last_usage = None;
+    let mut finish_reason = None::<String>;
     let mut in_reasoning = false;
 
-    while let Some(cr) = llm_stream.next().await {
-        let chunk = try_send_or!(tx, cr, ThinkOutcome::Abandoned);
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = async {
+                match snap.cancel_token.as_ref() {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                snap.finalize_run(
+                    crate::trace::RunStatus::Cancelled,
+                    None,
+                    Some("Agent execution cancelled during model response"),
+                ).await;
+                let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
+                return Ok(ThinkOutcome::Cancelled);
+            }
+            next = llm_stream.next() => next,
+        };
+        let Some(cr) = next else {
+            break;
+        };
+        let chunk = try_send_or!(tx, cr, ThinkOutcome::Failed);
+        for reason in chunk
+            .choices
+            .iter()
+            .filter_map(|choice| choice.finish_reason.as_ref())
+        {
+            finish_reason = Some(reason.clone());
+        }
         if chunk.usage.is_some() {
             last_usage = chunk.usage.clone();
+        }
+        for blocks in chunk
+            .choices
+            .iter()
+            .filter_map(|choice| choice.delta.reasoning_blocks.as_ref())
+        {
+            reasoning_blocks.extend(blocks.iter().cloned());
         }
         for event in process_stream_chunk(
             &chunk,
@@ -121,6 +174,39 @@ pub(crate) async fn run_think(
             false,
         ) {
             yield_event_or!(tx, event, ThinkOutcome::Abandoned);
+        }
+    }
+
+    match finish_reason.as_deref() {
+        Some("stop" | "tool_calls" | "function_call") => {}
+        Some(reason) => {
+            let error =
+                crate::error::ReactError::Llm(Box::new(crate::error::LlmError::InvalidResponse(
+                    format!("model stream ended with non-success finish reason '{reason}'"),
+                )));
+            snap.finalize_run(
+                crate::trace::RunStatus::Failed,
+                None,
+                Some(&error.to_string()),
+            )
+            .await;
+            let _ = tx.send(Err(error)).await;
+            return Ok(ThinkOutcome::Failed);
+        }
+        None => {
+            let error =
+                crate::error::ReactError::Llm(Box::new(crate::error::LlmError::InvalidResponse(
+                    "model stream ended without a finish reason; response may be truncated"
+                        .to_string(),
+                )));
+            snap.finalize_run(
+                crate::trace::RunStatus::Failed,
+                None,
+                Some(&error.to_string()),
+            )
+            .await;
+            let _ = tx.send(Err(error)).await;
+            return Ok(ThinkOutcome::Failed);
         }
     }
 
@@ -182,6 +268,33 @@ pub(crate) async fn run_think(
     // Record usage in the token tracker for cumulative tracking
     if let Some(ref u) = last_usage {
         snap.token_tracker.record_usage(u);
+    }
+    #[cfg(feature = "telemetry")]
+    {
+        let provider = snap.config.provider.as_deref().unwrap_or("unknown");
+        let status = if content_buffer.is_empty() && tool_call_map.is_empty() {
+            "empty"
+        } else {
+            "success"
+        };
+        crate::telemetry::Metrics::record_llm_call(provider, &snap.config.model_name, status);
+        crate::telemetry::Metrics::record_llm_latency(
+            provider,
+            &snap.config.model_name,
+            llm_started.elapsed().as_secs_f64() * 1000.0,
+        );
+        crate::telemetry::Metrics::record_llm_tokens(
+            provider,
+            &snap.config.model_name,
+            "input",
+            u64::try_from(pt).unwrap_or(u64::MAX),
+        );
+        crate::telemetry::Metrics::record_llm_tokens(
+            provider,
+            &snap.config.model_name,
+            "output",
+            u64::try_from(ct).unwrap_or(u64::MAX),
+        );
     }
     tracing::debug!(
         target: "echo_agent::llm_usage",
@@ -247,9 +360,9 @@ pub(crate) async fn run_think(
     }
 
     Ok(ThinkOutcome::Continue(ThinkOutput {
-        messages,
         content_buffer,
         reasoning_buffer,
+        reasoning_blocks,
         tool_call_map,
         pt,
         ct,
@@ -291,6 +404,7 @@ pub(crate) async fn create_llm_stream(
             snap.config.llm_max_retries,
             snap.config.llm_retry_delay_ms,
             &snap.guard.circuit_breaker,
+            snap.cancel_token.as_ref(),
             || {
                 let llm_client = llm_client.clone();
                 let ms = messages.clone();
@@ -328,9 +442,8 @@ pub(crate) async fn create_llm_stream(
                     };
                     let inner = llm_client.chat_stream(request).await?;
                     // Adapt the trait's flattened ChatChunk back into the
-                    // ChatCompletionChunk shape consumed downstream (think
-                    // phase, direct_answer_stream). Both originate from the
-                    // same OpenAI stream, so no information is lost.
+                    // ChatCompletionChunk shape consumed by the think phase.
+                    // Both originate from the same stream, so no information is lost.
                     let mapped = inner.map(|chunk_result| {
                         chunk_result.map(|c| crate::llm::types::ChatCompletionChunk {
                             id: String::new(),
@@ -356,6 +469,7 @@ pub(crate) async fn create_llm_stream(
         snap.config.llm_max_retries,
         snap.config.llm_retry_delay_ms,
         &snap.guard.circuit_breaker,
+        snap.cancel_token.as_ref(),
         || {
             let c = snap.client.clone();
             let m = snap.config.model_name.clone();
@@ -411,6 +525,41 @@ fn tools_for_request(snap: &AgentRunSnapshot, final_only: bool) -> Option<Vec<To
         );
     }
     Some(tools)
+}
+
+fn validate_request_budget(
+    snap: &AgentRunSnapshot,
+    message_tokens: usize,
+    tools: &[ToolDefinition],
+) -> Result<()> {
+    if let Some(error) = &snap.config.token_budget_error {
+        return Err(crate::error::ReactError::Other(error.clone()));
+    }
+    let window = snap.config.token_limit;
+    if window == usize::MAX {
+        return Ok(());
+    }
+    let tool_tokens = serde_json::to_string(tools)
+        .map_err(|error| crate::error::ReactError::Other(error.to_string()))
+        .map(|schema| snap.calibrated_tokenizer.count_tokens(&schema))?;
+    let default_output = window / 10;
+    let output_tokens = snap
+        .config
+        .max_tokens
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(default_output);
+    let safety_tokens = window / 20;
+    let required = message_tokens
+        .saturating_add(tool_tokens)
+        .saturating_add(output_tokens)
+        .saturating_add(safety_tokens);
+    if required > window {
+        return Err(crate::error::AgentError::ContextLimitExceeded(format!(
+            "request requires approximately {required} tokens (messages {message_tokens}, tools {tool_tokens}, output {output_tokens}, safety {safety_tokens}) but the model window is {window}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 pub(crate) fn cache_fingerprint(

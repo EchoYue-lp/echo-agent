@@ -279,7 +279,8 @@ impl TokenManager {
             .to_string();
 
         let expires_in = json["expire"].as_u64().unwrap_or(7200);
-        let refresh_at = (chrono::Utc::now().timestamp() as u64) + expires_in - 300;
+        let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
+        let refresh_at = now.saturating_add(expires_in.saturating_sub(300));
         self.expires_at.store(refresh_at, Ordering::Relaxed);
 
         let mut tok = self.token.lock().await;

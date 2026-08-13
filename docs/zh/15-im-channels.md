@@ -178,7 +178,7 @@ impl MessageHandler for MyHandler {
         let reply = agent.chat(&msg.text).await?;
 
         Ok(OutboundMessage::new(
-            &msg.channel_id, &msg.sender_id,
+            &msg.channel_id, msg.reply_target(),
             msg.chat_type, &reply,
         ))
     }

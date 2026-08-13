@@ -36,10 +36,10 @@ echo_tools = { version = "0.2", features = ["git"] }
 
 ### Rust API
 
-底层 API 位于 `echo_tools::git_worktree`：
+底层 API 位于 `echo_agent::tools::git_worktree`：
 
 ```rust
-use echo_tools::git_worktree::{
+use echo_agent::tools::git_worktree::{
     create_worktree, remove_worktree, list_worktrees,
     merge_worktree, WorktreeConfig, ManagedWorktree,
 };
@@ -181,7 +181,7 @@ Git Checkpoint 在文件变更前创建轻量级 git 标签，捕获该时刻仓
 ### 核心 API
 
 ```rust
-use echo_tools::git_checkpoint::{
+use echo_agent::tools::git_checkpoint::{
     create_checkpoint,
     rollback_to_checkpoint,
     cleanup_old_checkpoints,
@@ -359,8 +359,8 @@ echo-checkpoint/1748864500
 
 ```rust
 // 编排示例
-use echo_tools::git_worktree::{create_worktree, remove_worktree, merge_worktree, WorktreeConfig};
-use echo_tools::git_checkpoint::{create_checkpoint, rollback_to_checkpoint, cleanup_old_checkpoints};
+use echo_agent::tools::git_worktree::{create_worktree, remove_worktree, merge_worktree, WorktreeConfig};
+use echo_agent::tools::git_checkpoint::{create_checkpoint, rollback_to_checkpoint, cleanup_old_checkpoints};
 
 // 1. 创建隔离工作空间
 let worktree = create_worktree(&repo_path, &WorktreeConfig {

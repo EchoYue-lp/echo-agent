@@ -29,8 +29,10 @@ pub fn percent_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = &input[i + 1..i + 3];
-            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+            let high = decode_hex(bytes[i + 1]);
+            let low = decode_hex(bytes[i + 2]);
+            if let (Some(high), Some(low)) = (high, low) {
+                let byte = high.saturating_mul(16).saturating_add(low);
                 result.push(byte);
                 i += 3;
                 continue;
@@ -44,6 +46,15 @@ pub fn percent_decode(input: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&result).to_string()
+}
+
+fn decode_hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -74,5 +85,7 @@ mod tests {
             "https://example.com"
         );
         assert_eq!(percent_decode("hello+world"), "hello world");
+        assert_eq!(percent_decode("%中文"), "%中文");
+        assert_eq!(percent_decode("%E4%B8%AD%E6%96%87"), "中文");
     }
 }

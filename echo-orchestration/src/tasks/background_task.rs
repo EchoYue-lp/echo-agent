@@ -15,7 +15,7 @@
 //!   in a single collection (e.g., a status dashboard).
 //!
 //! - [`TaskSpawner`] — System-level spawner that manages concurrency (via Semaphore),
-//!   tracks all spawned tasks, and supports cross-restart resumption via [`TaskStore`].
+//!   tracks all spawned tasks, and supports cross-restart resumption via [`crate::tasks::TaskStore`].
 //!
 //! # Example
 //!
@@ -45,6 +45,7 @@ use dashmap::DashMap;
 use echo_core::error::{ReactError, Result};
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
@@ -273,6 +274,8 @@ pub trait AnyBackgroundTask: Send + Sync {
     fn cancel(&self);
     /// Whether the task has reached a terminal state (synchronous check).
     fn is_terminal_sync(&self) -> bool;
+    /// Monotonic registration order used for bounded history retention.
+    fn sequence(&self) -> u64;
 }
 
 /// A simple wrapper that stores a status snapshot for sync access.
@@ -284,6 +287,7 @@ struct TypeErasedTask {
     cancel: CancellationToken,
     /// Cached terminal status for sync checks (updated by the spawn wrapper).
     terminal_flag: Arc<std::sync::atomic::AtomicBool>,
+    sequence: u64,
 }
 
 impl AnyBackgroundTask for TypeErasedTask {
@@ -337,6 +341,9 @@ impl AnyBackgroundTask for TypeErasedTask {
         self.terminal_flag
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+    fn sequence(&self) -> u64 {
+        self.sequence
+    }
 }
 
 // ── TaskSummary ───────────────────────────────────────────────────
@@ -358,6 +365,9 @@ pub struct TaskSpawnerConfig {
     pub max_concurrent: usize,
     /// Default timeout for spawned tasks (0 = no timeout).
     pub default_timeout_secs: u64,
+    /// Maximum terminal task summaries retained for status/list queries.
+    /// Running and pending tasks are never removed by retention.
+    pub max_terminal_history: usize,
 }
 
 impl Default for TaskSpawnerConfig {
@@ -365,6 +375,7 @@ impl Default for TaskSpawnerConfig {
         Self {
             max_concurrent: 16,
             default_timeout_secs: 300, // 5 minutes
+            max_terminal_history: 256,
         }
     }
 }
@@ -374,7 +385,7 @@ impl Default for TaskSpawnerConfig {
 /// System-level spawner that manages background tasks with concurrency control.
 ///
 /// All spawned tasks are tracked in a concurrent map and can be listed,
-/// cancelled, or inspected. Optionally backed by a [`TaskStore`] for
+/// cancelled, or inspected. Optionally backed by a [`crate::tasks::TaskStore`] for
 /// cross-restart resumption.
 pub struct TaskSpawner {
     /// All tracked tasks (type-erased).
@@ -385,6 +396,8 @@ pub struct TaskSpawner {
     semaphore: Arc<tokio::sync::Semaphore>,
     /// Configuration.
     config: TaskSpawnerConfig,
+    /// Monotonic registration sequence used for deterministic terminal retention.
+    next_sequence: AtomicU64,
 }
 
 impl TaskSpawner {
@@ -396,6 +409,7 @@ impl TaskSpawner {
             store: None,
             semaphore,
             config,
+            next_sequence: AtomicU64::new(0),
         }
     }
 
@@ -418,6 +432,7 @@ impl TaskSpawner {
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
     {
+        self.prune_terminal_history();
         let id = uuid::Uuid::new_v4().to_string();
         let name = name.to_string();
         let cancel = CancellationToken::new();
@@ -556,6 +571,7 @@ impl TaskSpawner {
             status: status.clone(),
             cancel: cancel.clone(),
             terminal_flag,
+            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
         });
         self.tasks.insert(id.clone(), erased);
 
@@ -607,6 +623,30 @@ impl TaskSpawner {
         let before = self.tasks.len();
         self.tasks.retain(|_, v| !v.is_terminal_sync());
         before - self.tasks.len()
+    }
+
+    /// Retain at most the configured number of terminal task summaries.
+    ///
+    /// This runs before registration so a newly spawned task is always tracked.
+    /// Pending/running tasks are never selected, even if the map is above the
+    /// terminal-history limit.
+    fn prune_terminal_history(&self) -> usize {
+        let max_terminal_history = self.config.max_terminal_history;
+        let mut terminal = self
+            .tasks
+            .iter()
+            .filter(|entry| entry.value().is_terminal_sync())
+            .map(|entry| (entry.value().sequence(), entry.key().clone()))
+            .collect::<Vec<_>>();
+        let remove_count = terminal.len().saturating_sub(max_terminal_history);
+        if remove_count == 0 {
+            return 0;
+        }
+        terminal.sort_by_key(|(sequence, _)| *sequence);
+        for (_, id) in terminal.into_iter().take(remove_count) {
+            self.tasks.remove(&id);
+        }
+        remove_count
     }
 
     /// Number of currently tracked tasks.
@@ -747,6 +787,40 @@ mod tests {
 
         let list = spawner.list().await;
         assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn terminal_history_is_bounded_without_removing_running_tasks() -> Result<()> {
+        let spawner = TaskSpawner::new(TaskSpawnerConfig {
+            max_concurrent: 4,
+            default_timeout_secs: 0,
+            max_terminal_history: 2,
+        });
+
+        for index in 0..4 {
+            let handle = spawner.spawn(&format!("completed-{index}"), async { Ok(()) });
+            handle.wait(Some(Duration::from_secs(1))).await?;
+        }
+
+        let running = spawner.spawn("still-running", async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        });
+        let trigger = spawner.spawn("retention-trigger", async { Ok(()) });
+
+        let summaries = spawner.list().await;
+        let completed_history = summaries
+            .iter()
+            .filter(|summary| summary.name.starts_with("completed-"))
+            .count();
+        assert_eq!(completed_history, 2);
+        assert!(summaries.iter().any(|summary| summary.id == running.id));
+        assert!(summaries.iter().any(|summary| summary.id == trigger.id));
+
+        running.cancel();
+        let _ = running.wait(Some(Duration::from_secs(1))).await;
+        trigger.wait(Some(Duration::from_secs(1))).await?;
+        Ok(())
     }
 
     #[tokio::test]

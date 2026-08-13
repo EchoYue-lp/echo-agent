@@ -32,22 +32,22 @@ pub enum SubagentEvent {
         mode: ExecutionMode,
         /// Task description being dispatched.
         task: String,
-        /// Stable execution id from the caller's [`ExternalRunContext`]
+        /// Stable execution id from the caller's `ExternalRunContext`
         /// (format `{task_id}:{attempt}` in EKO). `None` = legacy caller that
         /// has not opted in; bridges fall back to temp id allocation.
         /// Frontends should use this as the canonical `subagent_run_id`.
         execution_id: Option<String>,
-        /// Parent run id from the caller's [`ExternalRunContext`]. `None` =
+        /// Parent run id from the caller's `ExternalRunContext`. `None` =
         /// legacy caller.
         run_id: Option<String>,
-        /// Conversation id from the caller's [`ExternalRunContext`]. This is
+        /// Conversation id from the caller's `ExternalRunContext`. This is
         /// retained even for ad-hoc dispatches that have no formal run id.
         conversation_id: Option<String>,
         /// Message id that triggered the run (chat `message_key`). Lets the
         /// frontend pin the subagent stream to the right chat message block.
         /// `None` = non-chat path (cron, etc).
         message_id: Option<String>,
-        /// True when this dispatch was started via [`dispatch_background`]
+        /// True when this dispatch was started via `dispatch_background`
         /// (non-blocking); UI shows a background card and injects a finished
         /// note into the parent chat on completion.
         background: bool,

@@ -1,6 +1,6 @@
 //! MCP Server —— 将 echo-agent 的 Tool 暴露为 MCP 服务端
 //!
-//! 支持将任意 [`Tool`](echo_core::tools::Tool) 实现暴露给 MCP 客户端（如 Claude Desktop、
+//! 支持将任意 [`Tool`] 实现暴露给 MCP 客户端（如 Claude Desktop、
 //! Cursor、其他 MCP 客户端），实现双向 MCP 互操作。
 //!
 //! # 支持的传输方式
