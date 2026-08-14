@@ -20,6 +20,7 @@ use reqwest::Client;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
@@ -190,20 +191,7 @@ impl LlmClient for ResponsesClient {
                     cancel_token,
                 )
                 .await?;
-                let stream = async_stream::try_stream! {
-                    futures::pin_mut!(raw_stream);
-                    while let Some(event) = raw_stream.next().await {
-                        match event? {
-                            JsonSseEvent::Done => return,
-                            JsonSseEvent::Data(value) => {
-                                if let Some(chunk) = stream_event_to_chunk(value)? {
-                                    yield chunk;
-                                }
-                            }
-                        }
-                    }
-                };
-                Ok(Box::pin(stream) as BoxStream<'static, Result<ChatChunk>>)
+                Ok(adapt_responses_stream(raw_stream))
             }
             .instrument(info_span!("openai_responses_stream", model = %model)),
         )
@@ -212,6 +200,31 @@ impl LlmClient for ResponsesClient {
     fn model_name(&self) -> &str {
         &self.config.model
     }
+}
+
+fn adapt_responses_stream<S>(raw_stream: S) -> BoxStream<'static, Result<ChatChunk>>
+where
+    S: futures::Stream<Item = Result<JsonSseEvent>> + Send + 'static,
+{
+    let stream = async_stream::try_stream! {
+        let mut adapter = ResponsesStreamAdapter::default();
+        futures::pin_mut!(raw_stream);
+        while let Some(event) = raw_stream.next().await {
+            match event? {
+                JsonSseEvent::Done => {
+                    adapter.validate_transport_end("SSE [DONE]")?;
+                    return;
+                }
+                JsonSseEvent::Data(value) => {
+                    if let Some(chunk) = adapter.map_event(value)? {
+                        yield chunk;
+                    }
+                }
+            }
+        }
+        adapter.validate_transport_end("SSE EOF")?;
+    };
+    Box::pin(stream)
 }
 
 fn insert_option<T: serde::Serialize>(
@@ -375,8 +388,7 @@ struct ResponsesResponse {
     created_at: Option<u64>,
     #[serde(default)]
     model: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
+    status: String,
     #[serde(default)]
     output: Vec<ResponsesOutputItem>,
     #[serde(default)]
@@ -408,18 +420,13 @@ enum ResponsesOutputItem {
         content: Vec<ResponsesContent>,
     },
     FunctionCall {
-        #[serde(default)]
         call_id: String,
-        #[serde(default)]
         name: String,
-        #[serde(default)]
         arguments: String,
     },
     Reasoning {
-        #[serde(default)]
         id: String,
-        #[serde(default)]
-        encrypted_content: Option<String>,
+        encrypted_content: String,
         #[serde(default)]
         summary: Vec<ReasoningText>,
         #[serde(default)]
@@ -471,17 +478,49 @@ impl From<ResponsesUsage> for Usage {
     }
 }
 
+fn invalid_response(message: impl Into<String>) -> echo_core::error::ReactError {
+    LlmError::InvalidResponse(message.into()).into()
+}
+
+fn require_non_empty(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(invalid_response(format!(
+            "Responses response omitted required {field}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_completed_response(response: &ResponsesResponse, context: &str) -> Result<()> {
+    require_non_empty(&response.id, "response id")?;
+    if let Some(error) = response.error.as_ref() {
+        let code = error
+            .code
+            .as_deref()
+            .map(|code| format!("{code}: "))
+            .unwrap_or_default();
+        return Err(invalid_response(format!("{code}{}", error.message)));
+    }
+    if response.status != "completed" {
+        let detail = response
+            .incomplete_details
+            .as_ref()
+            .and_then(|details| details.reason.as_deref())
+            .map(|reason| format!(" ({reason})"))
+            .unwrap_or_default();
+        return Err(invalid_response(format!(
+            "{context} ended with non-completed status '{}'{}",
+            response.status, detail
+        )));
+    }
+    Ok(())
+}
+
 fn response_to_chat(raw: Value) -> Result<ChatResponse> {
     let response: ResponsesResponse = serde_json::from_value(raw.clone()).map_err(|error| {
         LlmError::InvalidResponse(format!("invalid Responses response: {error}"))
     })?;
-    if let Some(error) = response.error {
-        let code = error
-            .code
-            .map(|code| format!("{code}: "))
-            .unwrap_or_default();
-        return Err(LlmError::InvalidResponse(format!("{code}{}", error.message)).into());
-    }
+    ensure_completed_response(&response, "Responses response")?;
 
     let mut text = String::new();
     let mut tool_calls = Vec::new();
@@ -502,11 +541,16 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
                 call_id,
                 name,
                 arguments,
-            } => tool_calls.push(ToolCall {
-                id: call_id,
-                call_type: "function".to_string(),
-                function: FunctionCall { name, arguments },
-            }),
+            } => {
+                require_non_empty(&call_id, "function_call.call_id")?;
+                require_non_empty(&name, "function_call.name")?;
+                require_non_empty(&arguments, "function_call.arguments")?;
+                tool_calls.push(ToolCall {
+                    id: call_id,
+                    call_type: "function".to_string(),
+                    function: FunctionCall { name, arguments },
+                });
+            }
             ResponsesOutputItem::Reasoning {
                 id,
                 encrypted_content,
@@ -518,14 +562,14 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
                     .map(|part| part.text)
                     .collect::<Vec<_>>();
                 reasoning_text.extend(content.into_iter().map(|part| part.text));
-                if let Some(data) = encrypted_content {
-                    reasoning_blocks.push(ReasoningBlock::Opaque {
-                        provider: "openai_responses".to_string(),
-                        id,
-                        data,
-                        summary: summaries.clone(),
-                    });
-                }
+                require_non_empty(&id, "reasoning.id")?;
+                require_non_empty(&encrypted_content, "reasoning.encrypted_content")?;
+                reasoning_blocks.push(ReasoningBlock::Opaque {
+                    provider: "openai_responses".to_string(),
+                    id,
+                    data: encrypted_content,
+                    summary: summaries.clone(),
+                });
                 if reasoning_text.is_empty() {
                     reasoning_text.extend(summaries);
                 }
@@ -548,11 +592,7 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
         ..Default::default()
     };
     let usage = response.usage.map(Usage::from);
-    let finish_reason = finish_reason(
-        response.status.as_deref(),
-        has_tool_calls,
-        response.incomplete_details.as_ref(),
-    );
+    let finish_reason = finish_reason(has_tool_calls);
     let compat_raw = ChatCompletionResponse {
         id: response.id,
         choices: vec![Choice {
@@ -573,65 +613,336 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
     })
 }
 
-fn finish_reason(
-    status: Option<&str>,
-    has_tool_calls: bool,
-    incomplete: Option<&IncompleteDetails>,
-) -> Option<String> {
-    if status == Some("incomplete") {
-        let reason = incomplete.and_then(|details| details.reason.as_deref());
-        return Some(match reason {
-            Some("max_output_tokens") | None => "length".to_string(),
-            Some(value) => value.to_string(),
-        });
-    }
+fn finish_reason(has_tool_calls: bool) -> Option<String> {
     Some(if has_tool_calls { "tool_calls" } else { "stop" }.to_string())
 }
 
-fn stream_event_to_chunk(event: Value) -> Result<Option<ChatChunk>> {
-    let event_type = event
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    match event_type {
-        "response.output_text.delta" => Ok(Some(text_chunk(&event, false))),
-        "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
-            Ok(Some(text_chunk(&event, true)))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum StreamTextKind {
+    Output,
+    Refusal,
+    Reasoning,
+    ReasoningSummary,
+}
+
+impl StreamTextKind {
+    fn index_field(self) -> &'static str {
+        match self {
+            Self::ReasoningSummary => "summary_index",
+            Self::Output | Self::Refusal | Self::Reasoning => "content_index",
         }
-        "response.output_item.added" => output_item_added_chunk(&event),
-        "response.output_item.done" => output_item_done_chunk(&event),
-        "response.function_call_arguments.delta" => Ok(Some(ChatChunk {
-            delta: DeltaMessage {
-                tool_calls: Some(vec![DeltaToolCall {
-                    index: event_u32(&event, "output_index"),
-                    id: None,
-                    call_type: None,
-                    function: Some(DeltaFunctionCall {
-                        name: None,
-                        arguments: event_string(&event, "delta"),
-                    }),
-                }]),
-                ..Default::default()
-            },
-            finish_reason: None,
-            usage: None,
-        })),
-        "response.completed" | "response.incomplete" => terminal_chunk(&event),
-        "response.failed" => Err(stream_failure(&event).into()),
-        "error" => Err(LlmError::InvalidResponse(
-            event_string(&event, "message").unwrap_or_else(|| "Responses stream error".to_string()),
-        )
-        .into()),
-        _ => Ok(None),
+    }
+
+    fn is_reasoning(self) -> bool {
+        matches!(self, Self::Reasoning | Self::ReasoningSummary)
     }
 }
 
-fn text_chunk(event: &Value, reasoning: bool) -> ChatChunk {
-    let delta = event_string(event, "delta");
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct StreamTextKey {
+    kind: StreamTextKind,
+    output_index: u32,
+    content_index: u32,
+    item_id: String,
+}
+
+#[derive(Debug)]
+struct StreamFunctionCall {
+    item_id: String,
+    call_id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Default)]
+struct ResponsesStreamAdapter {
+    function_calls: HashMap<u32, StreamFunctionCall>,
+    text: HashMap<StreamTextKey, String>,
+    completed: bool,
+}
+
+impl ResponsesStreamAdapter {
+    fn map_event(&mut self, event: Value) -> Result<Option<ChatChunk>> {
+        let event_type = required_non_empty_string(&event, "type", "Responses stream event")?;
+        if self.completed {
+            return Err(invalid_response(format!(
+                "Responses stream emitted {event_type} after response.completed"
+            )));
+        }
+        match event_type {
+            "response.output_text.delta" => self.text_delta(&event, StreamTextKind::Output),
+            "response.refusal.delta" => self.text_delta(&event, StreamTextKind::Refusal),
+            "response.reasoning_text.delta" => self.text_delta(&event, StreamTextKind::Reasoning),
+            "response.reasoning_summary_text.delta" => {
+                self.text_delta(&event, StreamTextKind::ReasoningSummary)
+            }
+            "response.output_text.done" => self.text_done(&event, StreamTextKind::Output, "text"),
+            "response.refusal.done" => self.text_done(&event, StreamTextKind::Refusal, "refusal"),
+            "response.reasoning_text.done" => {
+                self.text_done(&event, StreamTextKind::Reasoning, "text")
+            }
+            "response.reasoning_summary_text.done" => {
+                self.text_done(&event, StreamTextKind::ReasoningSummary, "text")
+            }
+            "response.output_item.added" => self.output_item_added(&event),
+            "response.output_item.done" => self.output_item_done(&event),
+            "response.function_call_arguments.delta" => self.function_arguments_delta(&event),
+            "response.function_call_arguments.done" => self.function_arguments_done(&event),
+            "response.completed" => {
+                let chunk = terminal_chunk(&event)?;
+                self.completed = true;
+                Ok(chunk)
+            }
+            "response.incomplete" | "response.failed" | "response.cancelled" => {
+                Err(stream_failure(&event).into())
+            }
+            "error" => Err(invalid_response(
+                event_string(&event, "message")
+                    .unwrap_or_else(|| "Responses stream error".to_string()),
+            )),
+            _ => Ok(None),
+        }
+    }
+
+    fn validate_transport_end(&self, boundary: &str) -> Result<()> {
+        if !self.completed {
+            return Err(invalid_response(format!(
+                "Responses stream reached {boundary} before response.completed"
+            )));
+        }
+        Ok(())
+    }
+
+    fn text_delta(&mut self, event: &Value, kind: StreamTextKind) -> Result<Option<ChatChunk>> {
+        let key = stream_text_key(event, kind)?;
+        let delta = required_string(event, "delta", "Responses text delta")?;
+        self.text.entry(key).or_default().push_str(delta);
+        if delta.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(text_chunk(delta.to_string(), kind.is_reasoning())))
+    }
+
+    fn text_done(
+        &mut self,
+        event: &Value,
+        kind: StreamTextKind,
+        value_field: &str,
+    ) -> Result<Option<ChatChunk>> {
+        let key = stream_text_key(event, kind)?;
+        let completed = required_string(event, value_field, "Responses text done event")?;
+        let accumulated = self.text.entry(key).or_default();
+        let suffix = reconcile_terminal_text(accumulated, completed, value_field)?;
+        Ok(suffix.map(|text| text_chunk(text, kind.is_reasoning())))
+    }
+
+    fn output_item_added(&mut self, event: &Value) -> Result<Option<ChatChunk>> {
+        let output_index = required_u32(event, "output_index", "response.output_item.added")?;
+        let item = required_object(event, "item", "response.output_item.added")?;
+        let item_id = required_non_empty_string(item, "id", "Responses output item")?;
+        let item_type = required_non_empty_string(item, "type", "Responses output item")?;
+        if item_type != "function_call" {
+            return Ok(None);
+        }
+        if self.function_calls.contains_key(&output_index) {
+            return Err(invalid_response(format!(
+                "duplicate function_call output_index {output_index}"
+            )));
+        }
+
+        let call_id = required_non_empty_string(item, "call_id", "Responses function_call")?;
+        let name = required_non_empty_string(item, "name", "Responses function_call")?;
+        let arguments = required_string(item, "arguments", "Responses function_call")?;
+        let initial_arguments = (!arguments.is_empty()).then(|| arguments.to_string());
+        self.function_calls.insert(
+            output_index,
+            StreamFunctionCall {
+                item_id: item_id.to_string(),
+                call_id: call_id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        );
+        Ok(Some(tool_chunk(
+            output_index,
+            Some(call_id.to_string()),
+            Some(name.to_string()),
+            initial_arguments,
+        )))
+    }
+
+    fn function_arguments_delta(&mut self, event: &Value) -> Result<Option<ChatChunk>> {
+        let output_index = required_u32(
+            event,
+            "output_index",
+            "response.function_call_arguments.delta",
+        )?;
+        let item_id =
+            required_non_empty_string(event, "item_id", "response.function_call_arguments.delta")?;
+        let delta = required_string(event, "delta", "response.function_call_arguments.delta")?;
+        let state = self.function_calls.get_mut(&output_index).ok_or_else(|| {
+            invalid_response(format!(
+                "function arguments delta preceded function_call item {output_index}"
+            ))
+        })?;
+        validate_item_id(state, item_id, output_index)?;
+        state.arguments.push_str(delta);
+        if delta.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(tool_chunk(
+            output_index,
+            None,
+            None,
+            Some(delta.to_string()),
+        )))
+    }
+
+    fn function_arguments_done(&mut self, event: &Value) -> Result<Option<ChatChunk>> {
+        let output_index = required_u32(
+            event,
+            "output_index",
+            "response.function_call_arguments.done",
+        )?;
+        let item_id =
+            required_non_empty_string(event, "item_id", "response.function_call_arguments.done")?;
+        let arguments =
+            required_non_empty_string(event, "arguments", "response.function_call_arguments.done")?;
+        let state = self.function_calls.get_mut(&output_index).ok_or_else(|| {
+            invalid_response(format!(
+                "function arguments done preceded function_call item {output_index}"
+            ))
+        })?;
+        validate_item_id(state, item_id, output_index)?;
+        let suffix = reconcile_terminal_text(&mut state.arguments, arguments, "arguments")?;
+        Ok(suffix.map(|arguments| tool_chunk(output_index, None, None, Some(arguments))))
+    }
+
+    fn output_item_done(&mut self, event: &Value) -> Result<Option<ChatChunk>> {
+        let output_index = required_u32(event, "output_index", "response.output_item.done")?;
+        let item = required_object(event, "item", "response.output_item.done")?;
+        let item_id = required_non_empty_string(item, "id", "Responses output item")?;
+        let item_type = required_non_empty_string(item, "type", "Responses output item")?;
+        match item_type {
+            "function_call" => self.function_call_item_done(output_index, item_id, item),
+            "message" => self.message_item_done(output_index, item_id, item),
+            "reasoning" => reasoning_item_done(item),
+            _ => Ok(None),
+        }
+    }
+
+    fn message_item_done(
+        &mut self,
+        output_index: u32,
+        item_id: &str,
+        item: &Value,
+    ) -> Result<Option<ChatChunk>> {
+        let content = required_array(item, "content", "Responses message item")?;
+        let mut unseen = String::new();
+        for (index, part) in content.iter().enumerate() {
+            let content_index = u32::try_from(index)
+                .map_err(|_| invalid_response("Responses message content index exceeded u32"))?;
+            let part_type =
+                required_non_empty_string(part, "type", "Responses message content part")?;
+            let (kind, field) = match part_type {
+                "output_text" => (StreamTextKind::Output, "text"),
+                "refusal" => (StreamTextKind::Refusal, "refusal"),
+                _ => continue,
+            };
+            let completed =
+                required_string(part, field, "Responses terminal message content part")?;
+            let key = StreamTextKey {
+                kind,
+                output_index,
+                content_index,
+                item_id: item_id.to_string(),
+            };
+            let accumulated = self.text.entry(key).or_default();
+            if let Some(suffix) = reconcile_terminal_text(accumulated, completed, field)? {
+                unseen.push_str(&suffix);
+            }
+        }
+        Ok((!unseen.is_empty()).then(|| text_chunk(unseen, false)))
+    }
+
+    fn function_call_item_done(
+        &mut self,
+        output_index: u32,
+        item_id: &str,
+        item: &Value,
+    ) -> Result<Option<ChatChunk>> {
+        let call_id = required_non_empty_string(item, "call_id", "Responses function_call")?;
+        let name = required_non_empty_string(item, "name", "Responses function_call")?;
+        let arguments = required_non_empty_string(item, "arguments", "Responses function_call")?;
+        let Some(state) = self.function_calls.get_mut(&output_index) else {
+            self.function_calls.insert(
+                output_index,
+                StreamFunctionCall {
+                    item_id: item_id.to_string(),
+                    call_id: call_id.to_string(),
+                    name: name.to_string(),
+                    arguments: arguments.to_string(),
+                },
+            );
+            return Ok(Some(tool_chunk(
+                output_index,
+                Some(call_id.to_string()),
+                Some(name.to_string()),
+                Some(arguments.to_string()),
+            )));
+        };
+        validate_item_id(state, item_id, output_index)?;
+        if state.call_id != call_id || state.name != name {
+            return Err(invalid_response(format!(
+                "function_call identity changed at output_index {output_index}"
+            )));
+        }
+        let suffix = reconcile_terminal_text(&mut state.arguments, arguments, "arguments")?;
+        Ok(suffix.map(|arguments| tool_chunk(output_index, None, None, Some(arguments))))
+    }
+}
+
+fn stream_text_key(event: &Value, kind: StreamTextKind) -> Result<StreamTextKey> {
+    Ok(StreamTextKey {
+        kind,
+        output_index: required_u32(event, "output_index", "Responses text event")?,
+        content_index: required_u32(event, kind.index_field(), "Responses text event")?,
+        item_id: required_non_empty_string(event, "item_id", "Responses text event")?.to_string(),
+    })
+}
+
+fn reconcile_terminal_text(
+    accumulated: &mut String,
+    completed: &str,
+    field: &str,
+) -> Result<Option<String>> {
+    if accumulated.as_str() == completed {
+        return Ok(None);
+    }
+    let Some(suffix) = completed.strip_prefix(accumulated.as_str()) else {
+        return Err(invalid_response(format!(
+            "Responses {field} done payload disagreed with accumulated deltas"
+        )));
+    };
+    let suffix = suffix.to_string();
+    *accumulated = completed.to_string();
+    Ok((!suffix.is_empty()).then_some(suffix))
+}
+
+fn validate_item_id(state: &StreamFunctionCall, item_id: &str, output_index: u32) -> Result<()> {
+    if state.item_id != item_id {
+        return Err(invalid_response(format!(
+            "function_call item_id changed at output_index {output_index}"
+        )));
+    }
+    Ok(())
+}
+
+fn text_chunk(text: String, reasoning: bool) -> ChatChunk {
     ChatChunk {
         delta: DeltaMessage {
-            content: (!reasoning).then_some(delta.clone()).flatten(),
-            reasoning_content: reasoning.then_some(delta).flatten(),
+            content: (!reasoning).then_some(text.clone()),
+            reasoning_content: reasoning.then_some(text),
             ..Default::default()
         },
         finish_reason: None,
@@ -639,41 +950,30 @@ fn text_chunk(event: &Value, reasoning: bool) -> ChatChunk {
     }
 }
 
-fn output_item_added_chunk(event: &Value) -> Result<Option<ChatChunk>> {
-    let Some(item) = event.get("item") else {
-        return Ok(None);
-    };
-    if item.get("type").and_then(Value::as_str) != Some("function_call") {
-        return Ok(None);
-    }
-    Ok(Some(ChatChunk {
+fn tool_chunk(
+    index: u32,
+    id: Option<String>,
+    name: Option<String>,
+    arguments: Option<String>,
+) -> ChatChunk {
+    ChatChunk {
         delta: DeltaMessage {
             tool_calls: Some(vec![DeltaToolCall {
-                index: event_u32(event, "output_index"),
-                id: event_string(item, "call_id"),
+                index,
+                id,
                 call_type: Some("function".to_string()),
-                function: Some(DeltaFunctionCall {
-                    name: event_string(item, "name"),
-                    arguments: None,
-                }),
+                function: Some(DeltaFunctionCall { name, arguments }),
             }]),
             ..Default::default()
         },
         finish_reason: None,
         usage: None,
-    }))
+    }
 }
 
-fn output_item_done_chunk(event: &Value) -> Result<Option<ChatChunk>> {
-    let Some(item) = event.get("item") else {
-        return Ok(None);
-    };
-    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
-        return Ok(None);
-    }
-    let Some(data) = event_string(item, "encrypted_content") else {
-        return Ok(None);
-    };
+fn reasoning_item_done(item: &Value) -> Result<Option<ChatChunk>> {
+    let id = required_non_empty_string(item, "id", "Responses reasoning item")?;
+    let data = required_non_empty_string(item, "encrypted_content", "Responses reasoning item")?;
     let summary = item
         .get("summary")
         .and_then(Value::as_array)
@@ -685,8 +985,8 @@ fn output_item_done_chunk(event: &Value) -> Result<Option<ChatChunk>> {
         delta: DeltaMessage {
             reasoning_blocks: Some(vec![ReasoningBlock::Opaque {
                 provider: "openai_responses".to_string(),
-                id: event_string(item, "id").unwrap_or_default(),
-                data,
+                id: id.to_string(),
+                data: data.to_string(),
                 summary,
             }]),
             ..Default::default()
@@ -706,29 +1006,38 @@ fn terminal_chunk(event: &Value) -> Result<Option<ChatChunk>> {
     let parsed: ResponsesResponse = serde_json::from_value(response.clone()).map_err(|error| {
         LlmError::InvalidResponse(format!("invalid terminal Responses event: {error}"))
     })?;
+    ensure_completed_response(&parsed, "Responses terminal event")?;
     let has_tool_calls = parsed
         .output
         .iter()
         .any(|item| matches!(item, ResponsesOutputItem::FunctionCall { .. }));
     Ok(Some(ChatChunk {
         delta: DeltaMessage::default(),
-        finish_reason: finish_reason(
-            parsed.status.as_deref(),
-            has_tool_calls,
-            parsed.incomplete_details.as_ref(),
-        ),
+        finish_reason: finish_reason(has_tool_calls),
         usage: parsed.usage.map(Usage::from),
     }))
 }
 
 fn stream_failure(event: &Value) -> LlmError {
-    let message = event
+    let explicit_message = event
         .get("response")
         .and_then(|response| response.get("error"))
         .and_then(|error| error.get("message"))
+        .and_then(Value::as_str);
+    let event_type = event
+        .get("type")
         .and_then(Value::as_str)
-        .unwrap_or("Responses stream failed");
-    LlmError::InvalidResponse(message.to_string())
+        .unwrap_or("unknown terminal event");
+    let status = event
+        .get("response")
+        .and_then(|response| response.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or(event_type);
+    LlmError::InvalidResponse(
+        explicit_message
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("Responses stream ended with {status}")),
+    )
 }
 
 fn event_string(value: &Value, key: &str) -> Option<String> {
@@ -738,12 +1047,44 @@ fn event_string(value: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn event_u32(value: &Value, key: &str) -> u32 {
+fn required_object<'a>(value: &'a Value, key: &str, context: &str) -> Result<&'a Value> {
+    value
+        .get(key)
+        .filter(|field| field.is_object())
+        .ok_or_else(|| invalid_response(format!("{context} omitted required object {key}")))
+}
+
+fn required_array<'a>(value: &'a Value, key: &str, context: &str) -> Result<&'a [Value]> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| invalid_response(format!("{context} omitted required array {key}")))
+}
+
+fn required_string<'a>(value: &'a Value, key: &str, context: &str) -> Result<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_response(format!("{context} omitted required string {key}")))
+}
+
+fn required_non_empty_string<'a>(value: &'a Value, key: &str, context: &str) -> Result<&'a str> {
+    let field = required_string(value, key, context)?;
+    if field.is_empty() {
+        return Err(invalid_response(format!(
+            "{context} supplied empty required string {key}"
+        )));
+    }
+    Ok(field)
+}
+
+fn required_u32(value: &Value, key: &str, context: &str) -> Result<u32> {
     value
         .get(key)
         .and_then(Value::as_u64)
         .and_then(|number| u32::try_from(number).ok())
-        .unwrap_or(0)
+        .ok_or_else(|| invalid_response(format!("{context} omitted required integer {key}")))
 }
 
 #[cfg(test)]
@@ -753,6 +1094,37 @@ mod tests {
 
     fn test_config() -> LlmConfig {
         LlmConfig::openai("test-key", "gpt-test")
+    }
+
+    fn is_invalid_response<T>(result: &Result<T>) -> bool {
+        matches!(
+            result,
+            Err(echo_core::error::ReactError::Llm(error))
+                if matches!(error.as_ref(), LlmError::InvalidResponse(_))
+        )
+    }
+
+    fn required_chunk(result: Result<Option<ChatChunk>>, context: &str) -> Result<ChatChunk> {
+        result?.ok_or_else(|| invalid_response(format!("{context} was dropped")))
+    }
+
+    fn first_tool_delta(chunk: &ChatChunk) -> Result<&DeltaToolCall> {
+        chunk
+            .delta
+            .tool_calls
+            .as_ref()
+            .and_then(|calls| calls.first())
+            .ok_or_else(|| invalid_response("test chunk omitted tool delta"))
+    }
+
+    fn tool_arguments(chunk: &ChatChunk) -> Option<&str> {
+        chunk
+            .delta
+            .tool_calls
+            .as_ref()
+            .and_then(|calls| calls.first())
+            .and_then(|call| call.function.as_ref())
+            .and_then(|function| function.arguments.as_deref())
     }
 
     #[test]
@@ -801,24 +1173,50 @@ mod tests {
             ..Default::default()
         };
         let body = client.request_body(&request, false);
-        assert_eq!(body["store"], false);
-        assert_eq!(body["prompt_cache_key"], "cache-key");
-        assert_eq!(body["tools"][0]["name"], "lookup");
-        assert_eq!(body["text"]["format"]["type"], "json_schema");
-        let input = body["input"]
-            .as_array()
+        assert_eq!(body.get("store").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            body.get("prompt_cache_key").and_then(Value::as_str),
+            Some("cache-key")
+        );
+        assert_eq!(
+            body.get("tools")
+                .and_then(Value::as_array)
+                .and_then(|tools| tools.first())
+                .and_then(|tool| tool.get("name"))
+                .and_then(Value::as_str),
+            Some("lookup")
+        );
+        assert_eq!(
+            body.get("text")
+                .and_then(|text| text.get("format"))
+                .and_then(|format| format.get("type"))
+                .and_then(Value::as_str),
+            Some("json_schema")
+        );
+        let input = body
+            .get("input")
+            .and_then(Value::as_array)
             .ok_or_else(|| LlmError::InvalidResponse("input was not an array".to_string()))?;
-        assert!(input.iter().any(|item| item["type"] == "function_call"));
         assert!(
             input
                 .iter()
-                .any(|item| item["type"] == "function_call_output")
+                .any(|item| { item.get("type").and_then(Value::as_str) == Some("function_call") })
         );
-        assert!(
-            input
-                .iter()
-                .any(|item| item["content"][0]["type"] == "input_image")
-        );
+        let function_output = input
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
+            .ok_or_else(|| {
+                LlmError::InvalidResponse("function call output was not mapped".to_string())
+            })?;
+        assert!(function_output.get("name").is_none());
+        assert!(input.iter().any(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .and_then(|content| content.first())
+                .and_then(|part| part.get("type"))
+                .and_then(Value::as_str)
+                == Some("input_image")
+        }));
         Ok(())
     }
 
@@ -864,34 +1262,433 @@ mod tests {
     }
 
     #[test]
-    fn semantic_stream_events_map_without_done_sentinel() -> Result<()> {
-        let text = stream_event_to_chunk(json!({
-            "type":"response.output_text.delta","delta":"你"
-        }))?
-        .ok_or_else(|| LlmError::InvalidResponse("text event was dropped".to_string()))?;
-        assert_eq!(text.delta.content.as_deref(), Some("你"));
+    fn nonstream_rejects_every_non_completed_or_missing_status() {
+        for status in ["failed", "cancelled", "incomplete", "in_progress"] {
+            let result = response_to_chat(json!({
+                "id": "resp_1",
+                "status": status,
+                "output": []
+            }));
+            assert!(is_invalid_response(&result), "status {status} was accepted");
+        }
+        let missing_status = response_to_chat(json!({"id": "resp_1", "output": []}));
+        assert!(is_invalid_response(&missing_status));
+    }
 
-        let call = stream_event_to_chunk(json!({
-            "type":"response.output_item.added","output_index":2,
-            "item":{"type":"function_call","call_id":"call_7","name":"read","arguments":""}
-        }))?
-        .ok_or_else(|| LlmError::InvalidResponse("tool event was dropped".to_string()))?;
-        let tool_delta = call
-            .delta
-            .tool_calls
-            .as_ref()
-            .and_then(|calls| calls.first())
-            .ok_or_else(|| LlmError::InvalidResponse("tool delta missing".to_string()))?;
-        assert_eq!(tool_delta.index, 2);
-        assert_eq!(tool_delta.id.as_deref(), Some("call_7"));
+    #[test]
+    fn nonstream_rejects_missing_or_empty_function_identity() {
+        let invalid_items = [
+            json!({"type":"function_call","name":"lookup","arguments":"{}"}),
+            json!({"type":"function_call","call_id":"","name":"lookup","arguments":"{}"}),
+            json!({"type":"function_call","call_id":"call_1","arguments":"{}"}),
+            json!({"type":"function_call","call_id":"call_1","name":"","arguments":"{}"}),
+            json!({"type":"function_call","call_id":"call_1","name":"lookup"}),
+            json!({"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}),
+        ];
+        for item in invalid_items {
+            let result = response_to_chat(json!({
+                "id": "resp_1",
+                "status": "completed",
+                "output": [item]
+            }));
+            assert!(is_invalid_response(&result));
+        }
+    }
 
-        let terminal = stream_event_to_chunk(json!({
-            "type":"response.completed",
-            "response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}
-        }))?
-        .ok_or_else(|| LlmError::InvalidResponse("terminal event was dropped".to_string()))?;
+    #[test]
+    fn nonstream_rejects_missing_or_empty_opaque_reasoning_identity() {
+        let invalid_items = [
+            json!({"type":"reasoning","encrypted_content":"encrypted"}),
+            json!({"type":"reasoning","id":"","encrypted_content":"encrypted"}),
+            json!({"type":"reasoning","id":"rs_1"}),
+            json!({"type":"reasoning","id":"rs_1","encrypted_content":""}),
+        ];
+        for item in invalid_items {
+            let result = response_to_chat(json!({
+                "id": "resp_1",
+                "status": "completed",
+                "output": [item]
+            }));
+            assert!(is_invalid_response(&result));
+        }
+    }
+
+    #[test]
+    fn function_argument_terminal_events_emit_only_unseen_suffix() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let added = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.output_item.added",
+                "output_index":2,
+                "item":{"id":"fc_7","type":"function_call","call_id":"call_7","name":"read","arguments":""}
+            })),
+            "function_call added event",
+        )?;
+        let added_delta = first_tool_delta(&added)?;
+        assert_eq!(added_delta.index, 2);
+        assert_eq!(added_delta.id.as_deref(), Some("call_7"));
+        assert_eq!(
+            added_delta
+                .function
+                .as_ref()
+                .and_then(|function| function.name.as_deref()),
+            Some("read")
+        );
+        assert_eq!(tool_arguments(&added), None);
+
+        let delta = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.function_call_arguments.delta",
+                "item_id":"fc_7",
+                "output_index":2,
+                "delta":"{\"q\":"
+            })),
+            "function arguments delta",
+        )?;
+        assert_eq!(tool_arguments(&delta), Some("{\"q\":"));
+
+        let done = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.function_call_arguments.done",
+                "item_id":"fc_7",
+                "output_index":2,
+                "arguments":"{\"q\":\"rust\"}"
+            })),
+            "function arguments done suffix",
+        )?;
+        assert_eq!(tool_arguments(&done), Some("\"rust\"}"));
+
+        let item_done = adapter.map_event(json!({
+            "type":"response.output_item.done",
+            "output_index":2,
+            "item":{"id":"fc_7","type":"function_call","call_id":"call_7","name":"read","arguments":"{\"q\":\"rust\"}"}
+        }))?;
+        assert!(item_done.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn function_argument_terminal_event_rejects_mismatch() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let _added = adapter.map_event(json!({
+            "type":"response.output_item.added",
+            "output_index":1,
+            "item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":""}
+        }))?;
+        let _delta = adapter.map_event(json!({
+            "type":"response.function_call_arguments.delta",
+            "item_id":"fc_1",
+            "output_index":1,
+            "delta":"not-json"
+        }))?;
+        let result = adapter.map_event(json!({
+            "type":"response.function_call_arguments.done",
+            "item_id":"fc_1",
+            "output_index":1,
+            "arguments":"{}"
+        }));
+        assert!(is_invalid_response(&result));
+        Ok(())
+    }
+
+    #[test]
+    fn refusal_and_reasoning_terminal_events_map_without_duplication() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let refusal_delta = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.refusal.delta",
+                "item_id":"msg_1",
+                "output_index":0,
+                "content_index":0,
+                "delta":"can"
+            })),
+            "refusal delta",
+        )?;
+        assert_eq!(refusal_delta.delta.content.as_deref(), Some("can"));
+        let refusal_done = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.refusal.done",
+                "item_id":"msg_1",
+                "output_index":0,
+                "content_index":0,
+                "refusal":"cannot"
+            })),
+            "refusal done suffix",
+        )?;
+        assert_eq!(refusal_done.delta.content.as_deref(), Some("not"));
+        let repeated_refusal_done = adapter.map_event(json!({
+            "type":"response.refusal.done",
+            "item_id":"msg_1",
+            "output_index":0,
+            "content_index":0,
+            "refusal":"cannot"
+        }))?;
+        assert!(repeated_refusal_done.is_none());
+
+        let reasoning_delta = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.reasoning_text.delta",
+                "item_id":"rs_1",
+                "output_index":1,
+                "content_index":0,
+                "delta":"think"
+            })),
+            "reasoning text delta",
+        )?;
+        assert_eq!(
+            reasoning_delta.delta.reasoning_content.as_deref(),
+            Some("think")
+        );
+        let reasoning_done = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.reasoning_text.done",
+                "item_id":"rs_1",
+                "output_index":1,
+                "content_index":0,
+                "text":"thinking"
+            })),
+            "reasoning text done suffix",
+        )?;
+        assert_eq!(
+            reasoning_done.delta.reasoning_content.as_deref(),
+            Some("ing")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn output_item_terminals_map_tool_and_opaque_reasoning() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let tool = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.output_item.done",
+                "output_index":3,
+                "item":{"id":"fc_3","type":"function_call","call_id":"call_3","name":"lookup","arguments":"{}"}
+            })),
+            "terminal function_call item",
+        )?;
+        let tool_delta = first_tool_delta(&tool)?;
+        assert_eq!(tool_delta.id.as_deref(), Some("call_3"));
+        assert_eq!(tool_arguments(&tool), Some("{}"));
+
+        let reasoning = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.output_item.done",
+                "output_index":4,
+                "item":{"id":"rs_4","type":"reasoning","encrypted_content":"encrypted","summary":[{"type":"summary_text","text":"summary"}]}
+            })),
+            "terminal reasoning item",
+        )?;
+        assert!(reasoning.delta.reasoning_blocks.as_ref().is_some_and(|blocks| {
+            matches!(
+                blocks.first(),
+                Some(ReasoningBlock::Opaque { id, data, summary, .. })
+                    if id == "rs_4" && data == "encrypted" && summary.first().is_some_and(|text| text == "summary")
+            )
+        }));
+
+        let _partial = adapter.map_event(json!({
+            "type":"response.output_text.delta",
+            "item_id":"msg_5",
+            "output_index":5,
+            "content_index":0,
+            "delta":"hel"
+        }))?;
+        let message_suffix = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.output_item.done",
+                "output_index":5,
+                "item":{"id":"msg_5","type":"message","content":[{"type":"output_text","text":"hello"}]}
+            })),
+            "terminal message item suffix",
+        )?;
+        assert_eq!(message_suffix.delta.content.as_deref(), Some("lo"));
+        let repeated_message = adapter.map_event(json!({
+            "type":"response.output_item.done",
+            "output_index":5,
+            "item":{"id":"msg_5","type":"message","content":[{"type":"output_text","text":"hello"}]}
+        }))?;
+        assert!(repeated_message.is_none());
+
+        let message_without_delta = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.output_item.done",
+                "output_index":6,
+                "item":{"id":"msg_6","type":"message","content":[{"type":"refusal","refusal":"cannot comply"}]}
+            })),
+            "terminal message item without deltas",
+        )?;
+        assert_eq!(
+            message_without_delta.delta.content.as_deref(),
+            Some("cannot comply")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stream_events_reject_missing_required_identity() {
+        let invalid_events = [
+            json!({
+                "type":"response.output_text.delta",
+                "item_id":"msg_1",
+                "content_index":0,
+                "delta":"text"
+            }),
+            json!({
+                "type":"response.output_item.added",
+                "output_index":0,
+                "item":{"type":"function_call","call_id":"call_1","name":"read","arguments":""}
+            }),
+            json!({
+                "type":"response.output_item.added",
+                "output_index":0,
+                "item":{"id":"fc_1","type":"function_call","call_id":"","name":"read","arguments":""}
+            }),
+            json!({
+                "type":"response.output_item.added",
+                "output_index":0,
+                "item":{"id":"fc_1","type":"function_call","call_id":"call_1","arguments":""}
+            }),
+            json!({
+                "type":"response.output_item.added",
+                "output_index":0,
+                "item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read"}
+            }),
+            json!({
+                "type":"response.output_item.done",
+                "output_index":0,
+                "item":{"id":"rs_1","type":"reasoning"}
+            }),
+        ];
+        for event in invalid_events {
+            let mut adapter = ResponsesStreamAdapter::default();
+            let result = adapter.map_event(event);
+            assert!(is_invalid_response(&result));
+        }
+    }
+
+    #[test]
+    fn terminal_events_require_completed_response_even_without_error() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        for status in ["failed", "cancelled", "incomplete", "in_progress"] {
+            let result = adapter.map_event(json!({
+                "type":"response.completed",
+                "response":{"id":"resp_1","status":status,"output":[]}
+            }));
+            assert!(is_invalid_response(&result), "status {status} was accepted");
+        }
+        for event_type in [
+            "response.failed",
+            "response.cancelled",
+            "response.incomplete",
+        ] {
+            let result = adapter.map_event(json!({
+                "type":event_type,
+                "response":{"id":"resp_1","status":event_type,"output":[]}
+            }));
+            assert!(is_invalid_response(&result));
+        }
+
+        let terminal = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.completed",
+                "response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}
+            })),
+            "completed terminal event",
+        )?;
         assert_eq!(terminal.finish_reason.as_deref(), Some("stop"));
         assert_eq!(terminal.usage.and_then(|usage| usage.total_tokens), Some(5));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delta_then_done_without_completed_fails() -> Result<()> {
+        let raw_stream = futures::stream::iter(vec![
+            Ok(JsonSseEvent::Data(json!({
+                "type":"response.output_text.delta",
+                "item_id":"msg_1",
+                "output_index":0,
+                "content_index":0,
+                "delta":"partial"
+            }))),
+            Ok(JsonSseEvent::Done),
+        ]);
+        let mut stream = adapt_responses_stream(raw_stream);
+        let first = stream.next().await.ok_or_else(|| {
+            invalid_response("adapted stream omitted the text delta before [DONE]")
+        })??;
+        assert_eq!(first.delta.content.as_deref(), Some("partial"));
+        let terminal = stream.next().await.ok_or_else(|| {
+            invalid_response("adapted stream omitted missing-completed error at [DONE]")
+        })?;
+        assert!(is_invalid_response(&terminal));
+        assert!(stream.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delta_then_eof_without_completed_fails() -> Result<()> {
+        let raw_stream = futures::stream::iter(vec![Ok(JsonSseEvent::Data(json!({
+            "type":"response.output_text.delta",
+            "item_id":"msg_1",
+            "output_index":0,
+            "content_index":0,
+            "delta":"partial"
+        })))]);
+        let mut stream = adapt_responses_stream(raw_stream);
+        let first = stream.next().await.ok_or_else(|| {
+            invalid_response("adapted stream omitted the text delta before EOF")
+        })??;
+        assert_eq!(first.delta.content.as_deref(), Some("partial"));
+        let terminal = stream.next().await.ok_or_else(|| {
+            invalid_response("adapted stream omitted missing-completed error at EOF")
+        })?;
+        assert!(is_invalid_response(&terminal));
+        assert!(stream.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_then_done_emits_single_finish() -> Result<()> {
+        let raw_stream = futures::stream::iter(vec![
+            Ok(JsonSseEvent::Data(json!({
+                "type":"response.completed",
+                "response":{"id":"resp_1","status":"completed","output":[]}
+            }))),
+            Ok(JsonSseEvent::Done),
+        ]);
+        let items = adapt_responses_stream(raw_stream).collect::<Vec<_>>().await;
+        assert_eq!(items.len(), 1);
+        let Some(Ok(terminal)) = items.first() else {
+            return Err(invalid_response(
+                "completed stream did not emit one successful terminal chunk",
+            ));
+        };
+        assert_eq!(terminal.finish_reason.as_deref(), Some("stop"));
+        Ok(())
+    }
+
+    #[test]
+    fn completed_rejects_following_semantic_or_duplicate_terminal_event() -> Result<()> {
+        let completed = json!({
+            "type":"response.completed",
+            "response":{"id":"resp_1","status":"completed","output":[]}
+        });
+        let mut semantic_adapter = ResponsesStreamAdapter::default();
+        let _terminal = semantic_adapter.map_event(completed.clone())?;
+        let semantic = semantic_adapter.map_event(json!({
+            "type":"response.output_text.delta",
+            "item_id":"msg_1",
+            "output_index":0,
+            "content_index":0,
+            "delta":"late"
+        }));
+        assert!(is_invalid_response(&semantic));
+
+        let mut duplicate_adapter = ResponsesStreamAdapter::default();
+        let _terminal = duplicate_adapter.map_event(completed.clone())?;
+        let duplicate = duplicate_adapter.map_event(completed);
+        assert!(is_invalid_response(&duplicate));
         Ok(())
     }
 }
