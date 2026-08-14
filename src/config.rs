@@ -38,6 +38,7 @@
 use crate::agent::AgentConfig;
 use crate::skills::hooks::HooksDefinition;
 use echo_core::budget::TokenBudgetConfig;
+use echo_core::llm::LlmApiProtocol;
 use echo_core::llm::capabilities::infer_context_window;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -306,6 +307,9 @@ pub struct ModelConfig {
     pub auth_token: Option<String>,
     /// API base URL (optional; populated by the application layer).
     pub base_url: Option<String>,
+    /// Optional wire protocol override. OpenAI defaults to Responses,
+    /// Anthropic to Messages, and compatible providers to Chat Completions.
+    pub api_protocol: Option<LlmApiProtocol>,
     /// Maximum tokens to generate (None means use model default).
     pub max_tokens: Option<u32>,
     /// Temperature parameter (0.0–2.0, None means use model default).
@@ -331,6 +335,7 @@ impl Default for ModelConfig {
             name: "deepseek-v4-flash".to_string(),
             auth_token: None,
             base_url: None,
+            api_protocol: None,
             max_tokens: None,
             temperature: None,
             context_window: None,
@@ -383,6 +388,8 @@ pub struct ConfiguredModel {
     pub provider: String,
     /// Provider model name.
     pub model: String,
+    /// Optional per-model HTTP wire protocol override.
+    pub api_protocol: Option<LlmApiProtocol>,
     /// Whether this model should be shown in quick switchers.
     pub enabled: bool,
     /// Optional model-specific maximum output tokens.
@@ -408,6 +415,7 @@ impl Default for ConfiguredModel {
             display_name: String::new(),
             provider: String::new(),
             model: String::new(),
+            api_protocol: None,
             enabled: true,
             max_tokens: None,
             temperature: None,

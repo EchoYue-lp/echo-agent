@@ -79,6 +79,7 @@ pub mod providers {
     //! Compatibility re-export of provider implementations from `echo_integration`.
     pub use echo_integration::providers::anthropic::AnthropicClient;
     pub use echo_integration::providers::openai::OpenAiClient;
+    pub use echo_integration::providers::responses::ResponsesClient;
 }
 
 use futures::Stream;
@@ -92,13 +93,14 @@ pub use echo_core::llm::capabilities::{
     ModelProfile, ModelProfileOverride, ModelProfileResolver, ProviderCapabilities,
 };
 pub use echo_core::llm::{
-    ChatChunk, ChatRequest, ChatResponse, LlmClient, SimpleChatOptions, ThinkingConfig,
-    ThinkingLevel, ThinkingProtocol,
+    ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, SimpleChatOptions,
+    ThinkingConfig, ThinkingLevel, ThinkingProtocol,
 };
 
 // Provider implementations from echo_integration::providers
 pub use echo_integration::providers::anthropic::AnthropicClient;
 pub use echo_integration::providers::openai::OpenAiClient;
+pub use echo_integration::providers::responses::ResponsesClient;
 
 // Config & Factory
 pub use config::{LlmConfig, LlmProvider};

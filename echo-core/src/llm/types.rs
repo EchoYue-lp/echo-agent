@@ -38,6 +38,17 @@ pub enum ReasoningBlock {
     Signed { thinking: String, signature: String },
     /// Opaque encrypted reasoning that must be replayed unchanged.
     Redacted { data: String },
+    /// Provider-owned opaque reasoning state that must be replayed unchanged.
+    ///
+    /// Responses requires both the item id and encrypted payload when the
+    /// application manages conversation history locally with `store: false`.
+    Opaque {
+        provider: String,
+        id: String,
+        data: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        summary: Vec<String>,
+    },
 }
 
 /// Image URL or Base64 data
@@ -725,6 +736,9 @@ pub struct Usage {
     /// Some compatible providers report input-token details instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens_details: Option<TokenUsageDetails>,
+    /// Provider-specific output-token details, including reasoning tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_details: Option<TokenUsageDetails>,
     /// Anthropic cache writes for this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u32>,
@@ -837,6 +851,9 @@ pub struct TokenUsageDetails {
     /// Tokens written into provider-side prompt cache.
     #[serde(default)]
     pub cache_write_tokens: Option<u32>,
+    /// Tokens used for internal model reasoning.
+    #[serde(default)]
+    pub reasoning_tokens: Option<u32>,
 }
 
 // ── Streaming Response Types ───────────────────────────────────────────────────

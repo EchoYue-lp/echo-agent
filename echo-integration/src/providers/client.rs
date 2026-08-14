@@ -109,11 +109,35 @@ impl SseDecoder {
     }
 }
 
+#[cfg(test)]
 enum ParsedSseChunk {
     Done,
     Chunk(ChatCompletionChunk),
 }
 
+/// Provider-neutral payload decoded from one SSE event.
+pub(crate) enum JsonSseEvent {
+    /// Compatibility terminator used by Chat Completions streams.
+    Done,
+    /// Semantic JSON event payload.
+    Data(serde_json::Value),
+}
+
+fn parse_json_sse_event(data: &str) -> Result<Option<JsonSseEvent>> {
+    let trimmed = data.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed == "[DONE]" {
+        return Ok(Some(JsonSseEvent::Done));
+    }
+    serde_json::from_str(trimmed)
+        .map(JsonSseEvent::Data)
+        .map(Some)
+        .map_err(|error| LlmError::InvalidResponse(format!("invalid SSE JSON: {error}")).into())
+}
+
+#[cfg(test)]
 fn parse_sse_chunk(data: &str) -> Result<Option<ParsedSseChunk>> {
     let trimmed = data.trim();
     if trimmed.is_empty() {
@@ -146,10 +170,36 @@ pub async fn post(
         "Post completion request"
     );
 
+    let value = post_json(
+        client,
+        serde_json::to_value(request_body)
+            .map_err(|error| LlmError::InvalidResponse(error.to_string()))?,
+        header_map,
+        url,
+    )
+    .await?;
+    let completion_response: ChatCompletionResponse = serde_json::from_value(value)
+        .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+
+    trace!(
+        choice_count = completion_response.choices.len(),
+        "Post completion response received"
+    );
+
+    Ok(completion_response)
+}
+
+/// Send a JSON request and return the complete JSON response body.
+pub(crate) async fn post_json(
+    client: Arc<Client>,
+    request_body: serde_json::Value,
+    header_map: HeaderMap,
+    url: &str,
+) -> Result<serde_json::Value> {
     let response = client
         .post(url)
         .headers(header_map)
-        .json(request_body)
+        .json(&request_body)
         .send()
         .await
         .map_err(|e| LlmError::NetworkError(e.to_string()))?;
@@ -173,15 +223,8 @@ pub async fn post(
 
     tracing::debug!(raw_len = raw_text.len(), raw = %raw_text.chars().take(2000).collect::<String>(), "Raw API response");
 
-    let completion_response: ChatCompletionResponse =
-        serde_json::from_str(&raw_text).map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
-
-    trace!(
-        choice_count = completion_response.choices.len(),
-        "Post completion response received"
-    );
-
-    Ok(completion_response)
+    serde_json::from_str(&raw_text)
+        .map_err(|error| LlmError::InvalidResponse(error.to_string()).into())
 }
 
 /// Send a request with `stream: true`, returning a parsed SSE chunk stream.
@@ -199,18 +242,43 @@ pub async fn stream_post(
     url: String,
     cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<impl Stream<Item = Result<ChatCompletionChunk>>> {
+    let model = request_body.model.clone();
+    let body = serde_json::to_value(request_body)
+        .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+    let raw_stream = stream_json_sse(client, body, header_map, url, model, cancel_token).await?;
+    Ok(async_stream::try_stream! {
+        futures::pin_mut!(raw_stream);
+        while let Some(event) = raw_stream.next().await {
+            match event? {
+                JsonSseEvent::Done => return,
+                JsonSseEvent::Data(value) => {
+                    let chunk = serde_json::from_value::<ChatCompletionChunk>(value)
+                        .map_err(|error| LlmError::InvalidResponse(format!("invalid Chat Completions SSE event: {error}")))?;
+                    yield chunk;
+                }
+            }
+        }
+    })
+}
+
+/// Send a JSON request and decode its SSE response without assuming a provider
+/// event schema. Chat Completions and Responses share this transport while
+/// retaining independent wire adapters.
+pub(crate) async fn stream_json_sse(
+    client: Arc<Client>,
+    request_body: serde_json::Value,
+    header_map: HeaderMap,
+    url: String,
+    model: String,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
+) -> Result<impl Stream<Item = Result<JsonSseEvent>>> {
     info!(
         "Stream completion: model={}, url={}, first_chunk_timeout_ms={:?}, idle_timeout_ms={:?}, overall_timeout_ms={:?}",
-        request_body.model,
+        model,
         url,
         env_duration_ms("ECHO_AGENT_STREAM_FIRST_CHUNK_TIMEOUT_MS", 30_000).map(|d| d.as_millis()),
         env_duration_ms("ECHO_AGENT_STREAM_IDLE_TIMEOUT_MS", 60_000).map(|d| d.as_millis()),
         env_duration_ms("ECHO_AGENT_STREAM_OVERALL_TIMEOUT_MS", 0).map(|d| d.as_millis())
-    );
-    trace!(
-        model = %request_body.model,
-        message_count = request_body.messages.len(),
-        "Stream completion request"
     );
 
     let request_future = async {
@@ -220,17 +288,14 @@ pub async fn stream_post(
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+            .map_err(|error| LlmError::NetworkError(error.to_string()))?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let error_text = response
+            let message = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(LlmError::ApiError {
-                status,
-                message: error_text,
-            });
+            return Err(LlmError::ApiError { status, message });
         }
         Ok(response)
     };
@@ -271,98 +336,71 @@ pub async fn stream_post(
     })?
     .map_err(|error| LlmError::NetworkError(error.to_string()))?;
 
-    let stream = async_stream::try_stream! {
+    Ok(async_stream::try_stream! {
         let mut decoder = SseDecoder::new();
         decoder.push(&first_bytes)?;
-        while let Some(event_str) = decoder.next_event() {
-            if let Some(data) = parse_sse_data(&event_str) {
-                match parse_sse_chunk(&data)? {
-                    Some(ParsedSseChunk::Chunk(chunk)) => yield chunk,
-                    Some(ParsedSseChunk::Done) => return,
-                    None => {}
+        while let Some(event) = decoder.next_event() {
+            let parsed = parse_sse_data(&event)
+                .map(|data| parse_json_sse_event(&data))
+                .transpose()?
+                .flatten();
+            if let Some(parsed) = parsed {
+                let done = matches!(parsed, JsonSseEvent::Done);
+                yield parsed;
+                if done {
+                    return;
                 }
             }
         }
+
         let overall_sleep = overall_timeout.map(tokio::time::sleep);
         tokio::pin!(overall_sleep);
-
         loop {
-            if let Some(ref ct) = cancel_token
-                && ct.is_cancelled() {
-                    tracing::info!("Stream cancelled by caller");
-                    return;
-                }
-
+            if cancel_token
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            {
+                tracing::info!(model = %model, "LLM stream cancelled by caller");
+                return;
+            }
             let next_bytes = byte_stream.next();
             tokio::pin!(next_bytes);
-
             let bytes = tokio::select! {
                 biased;
-                _ = async {
-                    match cancel_token.as_ref() {
-                        Some(token) => token.cancelled().await,
-                        None => std::future::pending().await,
-                    }
-                } => Err(LlmError::NetworkError("LLM stream cancelled".to_string())),
                 _ = async {
                     if let Some(sleep) = overall_sleep.as_mut().as_pin_mut() {
                         sleep.await;
                     } else {
                         std::future::pending::<()>().await;
                     }
-                } => {
-                    if let Some(timeout) = overall_timeout {
-                        tracing::warn!(
-                            model = %request_body.model,
-                            timeout_ms = timeout.as_millis() as u64,
-                            "LLM stream overall timeout"
-                        );
-                        Err(timeout_error("overall", timeout))
-                    } else {
-                        Err(LlmError::NetworkError(
-                            "LLM stream timeout future completed without a configured timeout"
-                                .to_string(),
-                        ))
-                    }
-                }
+                } => match overall_timeout {
+                    Some(timeout) => Err(timeout_error("overall", timeout)),
+                    None => Err(LlmError::NetworkError("LLM stream timeout completed unexpectedly".to_string())),
+                },
                 result = async {
-                    if let Some(duration) = idle_timeout {
-                        match tokio::time::timeout(duration, next_bytes).await {
-                            Ok(result) => Ok(result),
-                            Err(_) => {
-                                tracing::warn!(
-                                    model = %request_body.model,
-                                    kind = "idle",
-                                    timeout_ms = duration.as_millis() as u64,
-                                    "LLM stream timeout"
-                                );
-                                Err(timeout_error("idle", duration))
-                            }
-                        }
-                    } else {
-                        Ok(next_bytes.await)
+                    match idle_timeout {
+                        Some(duration) => tokio::time::timeout(duration, next_bytes)
+                            .await
+                            .map_err(|_| timeout_error("idle", duration)),
+                        None => Ok(next_bytes.await),
                     }
                 } => result,
-            };
-
-            let bytes = bytes?;
+            }?;
             let Some(bytes) = bytes else {
                 break;
             };
-            let bytes = bytes.map_err(|e| LlmError::NetworkError(e.to_string()))?;
-            tracing::debug!(
-                model = %request_body.model,
-                byte_len = bytes.len(),
-                "LLM stream bytes received"
-            );
+            let bytes = bytes.map_err(|error| LlmError::NetworkError(error.to_string()))?;
             decoder.push(&bytes)?;
-
-            while let Some(event_str) = decoder.next_event() {
-                if let Some(data) = parse_sse_data(&event_str) {
-                    match parse_sse_chunk(&data)? {
-                        Some(ParsedSseChunk::Chunk(chunk)) => yield chunk,
-                        Some(ParsedSseChunk::Done) => return,
-                        None => {}
+            while let Some(event) = decoder.next_event() {
+                let parsed = parse_sse_data(&event)
+                    .map(|data| parse_json_sse_event(&data))
+                    .transpose()?
+                    .flatten();
+                if let Some(parsed) = parsed {
+                    let done = matches!(parsed, JsonSseEvent::Done);
+                    yield parsed;
+                    if done {
+                        return;
                     }
                 }
             }
@@ -372,14 +410,11 @@ pub async fn stream_post(
             let data = parse_sse_data(&event).ok_or_else(|| {
                 LlmError::InvalidResponse("truncated SSE event at EOF".to_string())
             })?;
-            match parse_sse_chunk(&data)? {
-                Some(ParsedSseChunk::Chunk(chunk)) => yield chunk,
-                Some(ParsedSseChunk::Done) | None => return,
+            if let Some(parsed) = parse_json_sse_event(&data)? {
+                yield parsed;
             }
         }
-    };
-
-    Ok(stream)
+    })
 }
 
 #[cfg(test)]

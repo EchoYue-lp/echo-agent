@@ -150,10 +150,10 @@ pub mod prelude {
     // LLM
     pub use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
     pub use crate::llm::{
-        AnthropicClient, ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient,
-        LlmConfig, LlmProvider, ModelProfile, ModelProfileOverride, ModelProfileResolver,
-        OpenAiClient, ProviderCapabilities, ProviderFactory, ResponseFormat, SimpleChatOptions,
-        ToolDefinition,
+        AnthropicClient, ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmApiProtocol,
+        LlmClient, LlmConfig, LlmProvider, ModelProfile, ModelProfileOverride,
+        ModelProfileResolver, OpenAiClient, ProviderCapabilities, ProviderFactory, ResponseFormat,
+        ResponsesClient, SimpleChatOptions, ToolDefinition,
     };
 
     // Tools

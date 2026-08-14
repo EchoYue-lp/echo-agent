@@ -9,6 +9,8 @@
 #   - ${VAR_NAME} 会被解析为对应的环境变量值
 #   - provider 字段可替代 base_url，自动填充已知厂商的默认地址
 #   - models.*.model 字段可选，默认使用配置的 key 名称
+#   - api_protocol 可选：responses / chat_completions / anthropic；省略时按
+#     provider 默认值或完整 endpoint URL 推断
 #   - 支持的 provider: openai, anthropic, deepseek, dashscope/qwen/aliyun,
 #                       moonshot/kimi, zhipu/glm, ollama
 #   - `model.name` 应引用 `models` 中已经声明好的一个 key
@@ -44,11 +46,13 @@ models:
   # ── OpenAI ──────────────────────────────────────────────────────────────
   # gpt-5.5:
   #   provider: openai
+  #   api_protocol: responses
   #   api_key: ${OPENAI_API_KEY}
 
   # ── Anthropic ───────────────────────────────────────────────────────────
   # claude-opus-4-8:
   #   provider: anthropic
+  #   api_protocol: anthropic
   #   api_key: ${ANTHROPIC_API_KEY}
 
   # ── Moonshot / Kimi ─────────────────────────────────────────────────────
@@ -69,6 +73,7 @@ models:
   # ── 自定义端点 ──────────────────────────────────────────────────────────
   # my-custom-model:
   #   base_url: https://my-proxy.example.com/v1/chat/completions
+  #   api_protocol: chat_completions
   #   api_key: ${MY_API_KEY}
   #   model: gpt-5.5          # 实际发送给 API 的模型名（默认使用 key）
 
@@ -86,6 +91,7 @@ embedding:
 # ── Runtime 配置（供 echo_agent::config 使用）───────────────────────────────
 model:
   name: qwen3.7-plus
+  api_protocol: chat_completions
   max_tokens: 4096
   temperature: 0.7
 

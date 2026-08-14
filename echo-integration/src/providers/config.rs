@@ -24,6 +24,7 @@
 //! ```
 //!
 use echo_core::error::{ConfigError, Result};
+use echo_core::llm::LlmApiProtocol;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -31,7 +32,8 @@ use std::sync::OnceLock;
 
 /// Well-known provider API base URLs
 pub mod provider_urls {
-    pub const OPENAI: &str = "https://api.openai.com/v1/chat/completions";
+    pub const OPENAI: &str = "https://api.openai.com/v1/responses";
+    pub const OPENAI_CHAT_COMPLETIONS: &str = "https://api.openai.com/v1/chat/completions";
     pub const ANTHROPIC: &str = "https://api.anthropic.com/v1/messages";
     pub const DEEPSEEK: &str = "https://api.deepseek.com/chat/completions";
     pub const DASHSCOPE: &str =
@@ -122,7 +124,9 @@ pub fn provider_metadata(provider: &str) -> Option<ProviderMetadata> {
         .find(|metadata| metadata.id == canonical)
 }
 
-/// LLM 供应商类型
+/// Provider family used for identity and capability defaults.
+///
+/// Wire client selection is controlled independently by [`LlmApiProtocol`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub enum LlmProvider {
     /// OpenAI 兼容 API（默认，适用于 OpenAI、DashScope、DeepSeek、Moonshot、智谱 等）
@@ -169,7 +173,10 @@ pub struct LlmConfig {
     /// 按模型名推断。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_name: Option<String>,
-    /// Chat Completions 接口完整 URL
+    /// Wire protocol spoken by `base_url`.
+    #[serde(default)]
+    pub api_protocol: LlmApiProtocol,
+    /// Complete Chat Completions or Responses endpoint URL.
     pub base_url: String,
     /// API 密钥
     pub api_key: String,
@@ -189,6 +196,7 @@ impl std::fmt::Debug for LlmConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlmConfig")
             .field("provider", &self.provider)
+            .field("api_protocol", &self.api_protocol)
             .field("base_url", &self.base_url)
             .field("api_key", &"[REDACTED]")
             .field("model", &self.model)
@@ -211,6 +219,7 @@ impl LlmConfig {
             // dashscope vs reasoning_effort for deepseek). Falls back to None
             // (model-name-based inference) for generic OpenAI-compatible URLs.
             provider_name: provider_name_from_url(&base_url),
+            api_protocol: LlmApiProtocol::from_endpoint(&base_url),
             base_url,
             api_key: api_key.into(),
             model: model.into(),
@@ -229,6 +238,7 @@ impl LlmConfig {
         Ok(Self {
             provider: config.provider,
             provider_name: config.provider_name,
+            api_protocol: config.api_protocol,
             base_url: config.baseurl,
             api_key: config.apikey,
             model: config.model,
@@ -246,6 +256,7 @@ impl LlmConfig {
         Self {
             provider: LlmProvider::OpenAi,
             provider_name: Some("openai".to_string()),
+            api_protocol: LlmApiProtocol::Responses,
             base_url: provider_urls::OPENAI.to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -258,6 +269,7 @@ impl LlmConfig {
         Self {
             provider: LlmProvider::Anthropic,
             provider_name: Some("anthropic".to_string()),
+            api_protocol: LlmApiProtocol::Anthropic,
             base_url: provider_urls::ANTHROPIC.to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -270,6 +282,7 @@ impl LlmConfig {
         Self {
             provider: LlmProvider::OpenAi,
             provider_name: Some("deepseek".to_string()),
+            api_protocol: LlmApiProtocol::ChatCompletions,
             base_url: provider_urls::DEEPSEEK.to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -282,6 +295,7 @@ impl LlmConfig {
         Self {
             provider: LlmProvider::OpenAi,
             provider_name: Some("dashscope".to_string()),
+            api_protocol: LlmApiProtocol::ChatCompletions,
             base_url: provider_urls::DASHSCOPE.to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -298,14 +312,18 @@ impl LlmConfig {
         Self::new(base_url, api_key, model)
     }
 
-    /// 根据 provider 字段构建对应的 [`LlmClient`](echo_core::llm::LlmClient) 实例
+    /// Build the wire client selected by [`Self::api_protocol`].
     pub fn build_client(&self) -> Result<Box<dyn echo_core::llm::LlmClient>> {
-        match self.provider {
-            LlmProvider::OpenAi => {
+        match self.api_protocol {
+            LlmApiProtocol::Responses => {
+                let client = super::responses::ResponsesClient::new(self.clone())?;
+                Ok(Box::new(client))
+            }
+            LlmApiProtocol::ChatCompletions => {
                 let client = super::openai::OpenAiClient::new(self.clone())?;
                 Ok(Box::new(client))
             }
-            LlmProvider::Anthropic => {
+            LlmApiProtocol::Anthropic => {
                 let client = super::anthropic::AnthropicClient::with_base_url(
                     &self.base_url,
                     &self.api_key,
@@ -324,6 +342,7 @@ impl LlmConfig {
             apikey: self.api_key.clone(),
             provider: self.provider.clone(),
             provider_name: self.provider_name.clone(),
+            api_protocol: self.api_protocol,
             thinking: None,
         }
     }
@@ -418,6 +437,11 @@ impl ProviderFactory {
         let config = LlmConfig {
             provider: llm_provider,
             provider_name: Some(provider.to_string()),
+            api_protocol: match provider.to_ascii_lowercase().as_str() {
+                "openai" => LlmApiProtocol::Responses,
+                "anthropic" => LlmApiProtocol::Anthropic,
+                _ => LlmApiProtocol::ChatCompletions,
+            },
             base_url: base_url.to_string(),
             api_key,
             model: model.to_string(),
@@ -461,9 +485,9 @@ impl ProviderFactory {
 /// 已知 Provider 的默认 base_url 映射
 pub fn provider_base_url(provider: &str) -> Option<&'static str> {
     match provider.to_lowercase().as_str() {
-        "openai" => Some("https://api.openai.com/v1/chat/completions"),
-        "anthropic" => Some("https://api.anthropic.com/v1/messages"),
-        "deepseek" => Some("https://api.deepseek.com/chat/completions"),
+        "openai" => Some(provider_urls::OPENAI),
+        "anthropic" => Some(provider_urls::ANTHROPIC),
+        "deepseek" => Some(provider_urls::DEEPSEEK),
         "dashscope" | "qwen" | "aliyun" => {
             Some("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
         }
@@ -539,6 +563,9 @@ struct ModelEntry {
     /// 内置 Provider 名称（如 "openai"、"deepseek"），自动填充 base_url
     #[serde(default)]
     provider: Option<String>,
+    /// HTTP wire protocol. Inferred from the endpoint when omitted.
+    #[serde(default)]
+    api_protocol: Option<LlmApiProtocol>,
 }
 
 impl std::fmt::Debug for ModelEntry {
@@ -548,6 +575,7 @@ impl std::fmt::Debug for ModelEntry {
             .field("api_key", &"[REDACTED]")
             .field("model", &self.model)
             .field("provider", &self.provider)
+            .field("api_protocol", &self.api_protocol)
             .finish()
     }
 }
@@ -590,16 +618,19 @@ impl std::fmt::Debug for EmbeddingEntry {
 pub struct ModelConfig {
     /// LLM 接口中使用的模型名（如 `qwen3-max`）
     pub model: String,
-    /// Chat Completions 接口完整 URL
+    /// Complete endpoint URL for the selected wire protocol.
     pub baseurl: String,
     /// API 密钥
     pub apikey: String,
-    /// LLM 供应商类型（用于自动选择客户端实现）
+    /// Provider family used for identity and capability defaults.
     #[serde(default)]
     pub provider: LlmProvider,
     /// 原始 provider 标识(见 [`LlmConfig::provider_name`])。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_name: Option<String>,
+    /// Wire protocol spoken by `baseurl`.
+    #[serde(default)]
+    pub api_protocol: LlmApiProtocol,
     /// 思考深度 / reasoning-depth 控制（可选）。
     ///
     /// 配置文件里可写成字符串形式,自动解析:`"auto"`/`""`(默认,不发字段)、
@@ -786,7 +817,14 @@ impl Config {
         let mut invalid_models = HashMap::new();
 
         for (key, entry) in file.models {
-            let parsed: Result<(String, String, String, LlmProvider, Option<String>)> = (|| {
+            let parsed: Result<(
+                String,
+                String,
+                String,
+                LlmProvider,
+                Option<String>,
+                LlmApiProtocol,
+            )> = (|| {
                 // 解析 base_url：显式指定 > provider 快捷方式
                 let base_url = match (entry.base_url.as_deref(), entry.provider.as_deref()) {
                     (Some(url), _) => resolve_env_ref(url),
@@ -835,18 +873,32 @@ impl Config {
                         (detected, provider_name_from_url(&base_url))
                     }
                 };
-                Ok((base_url, api_key, model_name, provider, provider_name))
-            })(
-            );
+                let api_protocol = entry.api_protocol.unwrap_or_else(|| {
+                    match (provider_name.as_deref(), entry.base_url.is_none()) {
+                        (Some("openai"), true) => LlmApiProtocol::Responses,
+                        (Some("anthropic"), true) => LlmApiProtocol::Anthropic,
+                        _ => LlmApiProtocol::from_endpoint(&base_url),
+                    }
+                });
+                Ok((
+                    base_url,
+                    api_key,
+                    model_name,
+                    provider,
+                    provider_name,
+                    api_protocol,
+                ))
+            })();
 
             match parsed {
-                Ok((base_url, api_key, model_name, provider, provider_name)) => {
+                Ok((base_url, api_key, model_name, provider, provider_name, api_protocol)) => {
                     let mc = ModelConfig {
                         model: model_name.clone(),
                         baseurl: base_url,
                         apikey: api_key,
                         provider,
                         provider_name,
+                        api_protocol,
                         thinking: None,
                     };
 
@@ -1072,6 +1124,11 @@ fn builtin_model_config(model: &str) -> Option<ModelConfig> {
         apikey,
         provider: parse_provider(provider),
         provider_name: Some(provider.to_string()),
+        api_protocol: match provider.to_ascii_lowercase().as_str() {
+            "openai" => LlmApiProtocol::Responses,
+            "anthropic" => LlmApiProtocol::Anthropic,
+            _ => LlmApiProtocol::ChatCompletions,
+        },
         thinking: None,
     })
 }
@@ -1341,11 +1398,12 @@ mod tests {
         let config = LlmConfig::anthropic("sk-test", "claude-sonnet-4-6");
         assert!(config.base_url.contains("anthropic.com"));
         assert_eq!(config.model, "claude-sonnet-4-6");
+        assert_eq!(config.api_protocol, LlmApiProtocol::Anthropic);
     }
 
     #[test]
     fn test_provider_base_url() {
-        assert!(provider_base_url("openai").is_some());
+        assert_eq!(provider_base_url("openai"), Some(provider_urls::OPENAI));
         assert!(provider_base_url("anthropic").is_some());
         assert!(provider_base_url("deepseek").is_some());
         assert!(provider_base_url("dashscope").is_some());

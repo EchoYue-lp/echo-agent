@@ -17,6 +17,62 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
+/// HTTP API protocol used by an LLM provider endpoint.
+///
+/// This is deliberately separate from provider identity. A provider selects a
+/// default protocol, while custom and compatible endpoints can explicitly
+/// select any supported wire format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmApiProtocol {
+    /// OpenAI-compatible `/chat/completions` request and stream schema.
+    #[default]
+    ChatCompletions,
+    /// OpenAI Responses request and semantic SSE event schema.
+    Responses,
+    /// Anthropic Messages request and semantic SSE event schema.
+    Anthropic,
+}
+
+impl LlmApiProtocol {
+    /// Infer the protocol from a complete endpoint URL.
+    pub fn from_endpoint(endpoint: &str) -> Self {
+        let path = endpoint
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(endpoint)
+            .trim_end_matches('/');
+        if path.ends_with("/responses") {
+            Self::Responses
+        } else if path.ends_with("/messages") || path.contains("anthropic.com/") {
+            Self::Anthropic
+        } else {
+            Self::ChatCompletions
+        }
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::LlmApiProtocol;
+
+    #[test]
+    fn infers_all_supported_wire_protocols() {
+        assert_eq!(
+            LlmApiProtocol::from_endpoint("https://api.openai.com/v1/responses?trace=true"),
+            LlmApiProtocol::Responses
+        );
+        assert_eq!(
+            LlmApiProtocol::from_endpoint("https://api.anthropic.com/v1/messages"),
+            LlmApiProtocol::Anthropic
+        );
+        assert_eq!(
+            LlmApiProtocol::from_endpoint("https://gateway.example/v1/chat/completions"),
+            LlmApiProtocol::ChatCompletions
+        );
+    }
+}
+
 /// Options for [`LlmClient::chat_simple_with_options`].
 #[derive(Debug, Clone)]
 pub struct SimpleChatOptions {

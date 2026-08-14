@@ -1039,7 +1039,7 @@ fn append_reasoning_blocks(
     reasoning_blocks: Option<&[ReasoningBlock]>,
 ) {
     for block in reasoning_blocks.unwrap_or_default() {
-        target.push(match block {
+        let content = match block {
             ReasoningBlock::Signed {
                 thinking,
                 signature,
@@ -1050,7 +1050,11 @@ fn append_reasoning_blocks(
             ReasoningBlock::Redacted { data } => {
                 ContentBlock::RedactedThinking { data: data.clone() }
             }
-        });
+            // Opaque state is owned by another provider and must not cross the
+            // protocol boundary when a conversation switches models.
+            ReasoningBlock::Opaque { .. } => continue,
+        };
+        target.push(content);
     }
 }
 
