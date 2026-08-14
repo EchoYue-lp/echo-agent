@@ -366,32 +366,40 @@ impl MessageHandler for SessionHandler {
         let key = (msg.channel_id.clone(), msg.conversation_id().to_string());
         let session = self.get_or_create(&key, &msg.sender_id);
         let stream = async_stream::stream! {
-            let mut guard = session.lock().await;
-            if self.config.is_reset(&msg.text) {
-                guard.handler = Arc::from(self.factory.create());
+            let handler = {
+                let mut guard = session.lock().await;
+                if self.config.is_reset(&msg.text) {
+                    guard.handler = Arc::from(self.factory.create());
+                    guard.last_active = Instant::now();
+                    self.notify_session_end(
+                        msg.channel_id.clone(), msg.chat_id.clone(), msg.sender_id.clone(),
+                        SessionEndReason::CommandReset,
+                    );
+                    drop(guard);
+                    yield Ok(OutboundMessage::new(
+                        &msg.channel_id, msg.reply_target(), msg.chat_type, &self.config.reset_reply,
+                    ));
+                    return;
+                }
+                if guard.last_active.elapsed() >= self.config.timeout {
+                    self.notify_session_end(
+                        msg.channel_id.clone(), msg.chat_id.clone(), msg.sender_id.clone(),
+                        SessionEndReason::TimeoutReplaced,
+                    );
+                    guard.handler = Arc::from(self.factory.create());
+                }
                 guard.last_active = Instant::now();
-                self.notify_session_end(
-                    msg.channel_id.clone(), msg.chat_id.clone(), msg.sender_id.clone(),
-                    SessionEndReason::CommandReset,
-                );
-                yield Ok(OutboundMessage::new(
-                    &msg.channel_id, msg.reply_target(), msg.chat_type, &self.config.reset_reply,
-                ));
-                return;
-            }
-            if guard.last_active.elapsed() >= self.config.timeout {
-                self.notify_session_end(
-                    msg.channel_id.clone(), msg.chat_id.clone(), msg.sender_id.clone(),
-                    SessionEndReason::TimeoutReplaced,
-                );
-                guard.handler = Arc::from(self.factory.create());
-            }
-            guard.last_active = Instant::now();
-            guard.sender_id = msg.sender_id.clone();
-            let handler = guard.handler.clone();
+                guard.sender_id = msg.sender_id.clone();
+                guard.handler.clone()
+            };
             let mut inner = match handler.handle_stream(msg).await {
                 Ok(stream) => stream,
                 Err(error) => {
+                    let mut guard = session.lock().await;
+                    if Arc::ptr_eq(&guard.handler, &handler) {
+                        guard.last_active = Instant::now();
+                    }
+                    drop(guard);
                     yield Err(error);
                     return;
                 }
@@ -400,7 +408,10 @@ impl MessageHandler for SessionHandler {
                 yield item;
             }
             drop(inner);
-            guard.last_active = Instant::now();
+            let mut guard = session.lock().await;
+            if Arc::ptr_eq(&guard.handler, &handler) {
+                guard.last_active = Instant::now();
+            }
         };
         Ok(stream.boxed())
     }
@@ -416,9 +427,12 @@ impl MessageHandler for SessionHandler {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use echo_core::error::ReactError;
     use futures::stream::{BoxStream, StreamExt};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+    use tokio::time::timeout;
 
     /// 测试用 inner handler:override handle_stream 产 2 条分段,记录调用次数。
     struct TwoChunkHandler {
@@ -460,6 +474,82 @@ mod tests {
         fn create(&self) -> Box<dyn MessageHandler> {
             Box::new(TwoChunkHandler {
                 call_count: self.counter.clone(),
+            })
+        }
+    }
+
+    struct ConcurrentStreamHandler {
+        parked_started: Arc<Notify>,
+        release_parked: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for ConcurrentStreamHandler {
+        async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                msg.reply_target(),
+                msg.chat_type,
+                &msg.text,
+            ))
+        }
+
+        async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn handle_stream<'a>(
+            &'a self,
+            msg: InboundMessage,
+        ) -> echo_core::error::Result<BoxStream<'a, echo_core::error::Result<OutboundMessage>>>
+        {
+            let channel_id = msg.channel_id;
+            let chat_id = msg.chat_id;
+            let chat_type = msg.chat_type;
+            let text = msg.text;
+            if text == "park" {
+                let parked_started = self.parked_started.clone();
+                let release_parked = self.release_parked.clone();
+                return Ok(async_stream::stream! {
+                    parked_started.notify_one();
+                    release_parked.notified().await;
+                    yield Ok(OutboundMessage::new(
+                        &channel_id,
+                        &chat_id,
+                        chat_type,
+                        "parked-complete",
+                    ));
+                }
+                .boxed());
+            }
+            if text == "fail" {
+                return Err(ReactError::Other("stream setup failed".to_string()));
+            }
+            if text == "empty" {
+                return Ok(futures::stream::empty().boxed());
+            }
+            Ok(futures::stream::once(async move {
+                Ok(OutboundMessage::new(
+                    &channel_id,
+                    &chat_id,
+                    chat_type,
+                    &text,
+                ))
+            })
+            .boxed())
+        }
+    }
+
+    struct ConcurrentStreamFactory {
+        parked_started: Arc<Notify>,
+        release_parked: Arc<Notify>,
+    }
+
+    impl SessionFactory for ConcurrentStreamFactory {
+        fn create(&self) -> Box<dyn MessageHandler> {
+            Box::new(ConcurrentStreamHandler {
+                parked_started: self.parked_started.clone(),
+                release_parked: self.release_parked.clone(),
             })
         }
     }
@@ -509,6 +599,92 @@ mod tests {
             counter.load(Ordering::SeqCst),
             0,
             "inner NOT called on reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_handler_allows_same_session_message_while_stream_is_parked() {
+        let parked_started = Arc::new(Notify::new());
+        let release_parked = Arc::new(Notify::new());
+        let handler = Arc::new(SessionHandler::new(
+            SessionConfig::default(),
+            ConcurrentStreamFactory {
+                parked_started: parked_started.clone(),
+                release_parked: release_parked.clone(),
+            },
+        ));
+
+        let first_handler = handler.clone();
+        let first = tokio::spawn(async move {
+            let msg = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "park", "m1");
+            match first_handler.handle_stream(msg).await {
+                Ok(mut stream) => stream.next().await,
+                Err(error) => Some(Err(error)),
+            }
+        });
+        assert!(
+            timeout(std::time::Duration::from_secs(2), parked_started.notified())
+                .await
+                .is_ok(),
+            "first stream did not reach its parked state"
+        );
+
+        let second = timeout(std::time::Duration::from_secs(2), async {
+            let msg = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "control", "m2");
+            match handler.handle_stream(msg).await {
+                Ok(mut stream) => stream.next().await,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .await;
+        assert!(
+            matches!(second, Ok(Some(Ok(ref output))) if output.text == "control"),
+            "same-session control message was blocked by the parked stream"
+        );
+
+        release_parked.notify_one();
+        let first_result = timeout(std::time::Duration::from_secs(2), first).await;
+        assert!(
+            matches!(first_result, Ok(Ok(Some(Ok(ref output)))) if output.text == "parked-complete"),
+            "parked stream did not close cleanly after release"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_handler_remains_usable_after_stream_error_and_close() {
+        let handler = SessionHandler::new(
+            SessionConfig::default(),
+            ConcurrentStreamFactory {
+                parked_started: Arc::new(Notify::new()),
+                release_parked: Arc::new(Notify::new()),
+            },
+        );
+
+        let fail = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "fail", "m1");
+        let failed = match handler.handle_stream(fail).await {
+            Ok(mut stream) => stream.next().await,
+            Err(error) => Some(Err(error)),
+        };
+        assert!(matches!(failed, Some(Err(ReactError::Other(_)))));
+
+        let empty = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "empty", "m2");
+        let closed = match handler.handle_stream(empty).await {
+            Ok(mut stream) => stream.next().await,
+            Err(error) => Some(Err(error)),
+        };
+        assert!(closed.is_none(), "empty inner stream should close normally");
+
+        let follow_up = timeout(std::time::Duration::from_secs(2), async {
+            let msg = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "follow-up", "m3");
+            match handler.handle_stream(msg).await {
+                Ok(mut stream) => stream.next().await,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .await;
+        assert!(
+            matches!(follow_up, Ok(Some(Ok(ref output))) if output.text == "follow-up"),
+            "session was not reusable after stream error and close"
         );
     }
 }
