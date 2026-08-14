@@ -2266,5 +2266,13 @@ mod tests {
                 .any(|event| matches!(event, AgentEvent::Error { .. })),
             "truncated stream must surface an error terminal"
         );
+        let partial = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Token(token) => Some(token.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(partial, "Partial answer that never finished");
     }
 }

@@ -18,6 +18,7 @@ static SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"glpat-[A-Za-z0-9\-_]{26}",
         r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+",
         r"(?i)(api[_-]?key|apikey|token|secret|password|passwd)[\s:=]+[A-Za-z0-9_\-!@#$%^&*+/=]{8,}",
+        r#"(?i)\"(?:[^\"]*(?:api[_-]?key|apikey|token|secret|password|passwd)[^\"]*)\"\s*:\s*\"[^\"]*\""#,
         r"(?i)(postgres(ql)?|mysql)://[^@\s]+:[^@\s]+@",
         r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
     ]
@@ -57,8 +58,12 @@ impl ContentRetentionPolicy {
                 }
             }
             Value::Object(values) => {
-                for value in values.values_mut() {
-                    self.sanitize_json(value);
+                for (key, value) in values.iter_mut() {
+                    if is_sensitive_key(key) {
+                        *value = Value::String("[REDACTED]".to_string());
+                    } else {
+                        self.sanitize_json(value);
+                    }
                 }
             }
             Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -77,6 +82,25 @@ impl ContentRetentionPolicy {
         bounded.push_str("...[TRUNCATED]");
         bounded
     }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace(['-', '_'], "");
+    [
+        "authorization",
+        "cookie",
+        "setcookie",
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "apikey",
+        "accesstoken",
+        "refreshtoken",
+        "privatekey",
+    ]
+    .iter()
+    .any(|sensitive| normalized == *sensitive || normalized.ends_with(sensitive))
 }
 
 #[cfg(test)]
@@ -102,5 +126,23 @@ mod tests {
                 .is_some_and(|text| text.ends_with("[TRUNCATED]"))
         );
         assert_eq!(value["many"].as_array().map(Vec::len), Some(2));
+        assert_eq!(value["nested"]["secret"], "[REDACTED]");
+    }
+
+    #[test]
+    fn redacts_structured_and_embedded_json_secret_fields() {
+        let policy = ContentRetentionPolicy::default();
+        let mut value = serde_json::json!({
+            "OPENAI_API_KEY": "short-value",
+            "headers": {"Authorization": "custom credential"},
+            "ordinary": "visible"
+        });
+        policy.sanitize_json(&mut value);
+        assert_eq!(value["OPENAI_API_KEY"], "[REDACTED]");
+        assert_eq!(value["headers"]["Authorization"], "[REDACTED]");
+        assert_eq!(value["ordinary"], "visible");
+
+        let text = policy.sanitize_text(r#"{"password":"short","name":"ok"}"#);
+        assert!(!text.contains("short"));
     }
 }

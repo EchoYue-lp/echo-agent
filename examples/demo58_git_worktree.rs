@@ -37,7 +37,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("Part 1：列出现有 worktree");
     println!("───────────────────────────────────────────────────────\n");
 
-    let worktrees_before = list_worktrees(repo_path)?;
+    let worktrees_before = list_worktrees(repo_path).await?;
     println!("  当前 worktree 数量: {}", worktrees_before.len());
     for wt in &worktrees_before {
         let branch = if wt.branch.is_empty() {
@@ -67,7 +67,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("    path_suffix : {:?}", config.path_suffix);
     println!();
 
-    let worktree = match create_worktree(repo_path, &config) {
+    let worktree = match create_worktree(repo_path, &config).await {
         Ok(wt) => {
             println!("  ✓ worktree 创建成功");
             println!("    path   : {}", wt.path.display());
@@ -88,7 +88,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 .current_dir(repo_path)
                 .output();
             // Retry
-            let wt = create_worktree(repo_path, &config)?;
+            let wt = create_worktree(repo_path, &config).await?;
             println!("  ✓ 重试成功: {}", wt.path.display());
             wt
         }
@@ -100,7 +100,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("Part 3：再次列出 worktree（确认新增）");
     println!("───────────────────────────────────────────────────────\n");
 
-    let worktrees_after = list_worktrees(repo_path)?;
+    let worktrees_after = list_worktrees(repo_path).await?;
     println!(
         "  worktree 数量: {} → {}",
         worktrees_before.len(),
@@ -126,7 +126,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("Part 4：移除 worktree 并清理分支");
     println!("───────────────────────────────────────────────────────\n");
 
-    remove_worktree(repo_path, &worktree)?;
+    remove_worktree(repo_path, &worktree).await?;
     println!("  ✓ worktree 已移除: {}", worktree.path.display());
     println!("  ✓ 分支 '{}' 已删除", worktree.branch);
     println!();

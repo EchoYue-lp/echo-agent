@@ -46,7 +46,7 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
         use crate::git::{GitBlameTool, GitDiffTool, GitLogTool, GitStatusTool};
         // Deliberately EXCLUDED: GitBranchTool, GitCommitTool,
         // EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool.
-        tool_manager.register(Box::new(GitStatusTool::default()));
+        tool_manager.register(Box::new(GitStatusTool));
         tool_manager.register(Box::new(GitDiffTool));
         tool_manager.register(Box::new(GitLogTool));
         tool_manager.register(Box::new(GitBlameTool));
@@ -251,7 +251,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
             GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
         };
         use crate::worktree_tool::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
-        tool_manager.register(Box::new(GitStatusTool::default()));
+        tool_manager.register(Box::new(GitStatusTool));
         tool_manager.register(Box::new(GitDiffTool));
         tool_manager.register(Box::new(GitLogTool));
         tool_manager.register(Box::new(GitBlameTool));

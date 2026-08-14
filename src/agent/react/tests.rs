@@ -8,7 +8,9 @@ use crate::agent::subagent::SubagentBuilder;
 #[cfg(feature = "subagent")]
 use crate::agent::subagent::SubagentRegistry;
 use crate::llm::types::{Message, Role};
+#[cfg(feature = "shell")]
 use crate::sandbox::SandboxManager;
+#[cfg(feature = "shell")]
 use crate::skills::builtin::ShellSkill;
 use crate::skills::external::loader::DiscoveryScope;
 use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
@@ -1434,6 +1436,7 @@ async fn execute_tool_injects_pre_and_post_hook_messages_into_context() -> crate
     Ok(())
 }
 
+#[cfg(feature = "shell")]
 #[tokio::test]
 async fn shell_skill_uses_agent_sandbox_manager_when_present() -> crate::error::Result<()> {
     let config = AgentConfig::minimal("model", "agent");

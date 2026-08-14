@@ -11,38 +11,69 @@
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::path::Path;
-use std::process::Command;
+use std::time::Duration;
 
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::permission::ToolPermission;
-use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel, ToolRunner};
+use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult, ToolRiskLevel};
+
+const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_GIT_OUTPUT_BYTES: usize = 1024 * 1024;
 
 // ── Git status ──────────────────────────────────────────────────────────────
 
-#[derive(Default, echo_macros::Tool)]
-#[tool(
-    name = "git_status",
-    description = "View working directory status of the current repo: modified, staged, untracked files",
-    risk_level = "ReadOnly"
-)]
-// The derive macro uses these fields to generate GitStatusToolParams and the
-// JSON schema; the zero-sized Tool value does not read them directly.
-#[allow(dead_code)]
-pub struct GitStatusTool {
-    #[tool_param(description = "Repository path (defaults to current working directory)")]
-    repo_path: Option<String>,
-}
+#[derive(Default)]
+pub struct GitStatusTool;
 
-impl ToolRunner<GitStatusToolParams> for GitStatusTool {
-    async fn run(&self, params: GitStatusToolParams) -> Result<ToolResult> {
-        let repo_path = params.repo_path.as_deref().unwrap_or(".");
-        let output = run_git(repo_path, &["status", "--short"])?;
-        if output.is_empty() {
-            Ok(ToolResult::success("Working directory clean, no changes"))
-        } else {
-            Ok(ToolResult::success(format!("Git status:\n{}", output)))
-        }
+impl Tool for GitStatusTool {
+    fn name(&self) -> &str {
+        "git_status"
+    }
+
+    fn description(&self) -> &str {
+        "View working directory status of the current repo: modified, staged, untracked files"
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "repo_path": {
+                    "type": "string",
+                    "description": "Repository path (defaults to current working directory)"
+                }
+            },
+            "required": []
+        })
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
+    }
+
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let repo_path = parameters
+                .get("repo_path")
+                .and_then(Value::as_str)
+                .unwrap_or(".");
+            let repo_path = effective_repo_path(repo_path, ctx);
+            let output = run_git(&repo_path, &["status", "--short"], ctx).await?;
+            if output.is_empty() {
+                Ok(ToolResult::success("Working directory clean, no changes"))
+            } else {
+                Ok(ToolResult::success(format!("Git status:\n{output}")))
+            }
+        })
     }
 }
 
@@ -142,7 +173,7 @@ impl Tool for GitDiffTool {
                 args.push(fp);
             }
 
-            let output = run_git(&repo_path, &args)?;
+            let output = run_git(&repo_path, &args, ctx).await?;
             let chunks = crate::diff_pagination::split_unified_diff(&output);
             let query = serde_json::json!({
                 "repo_path": repo_path,
@@ -255,7 +286,7 @@ impl Tool for GitLogTool {
             let extra_strs: Vec<&str> = extra_args.iter().map(|s| s.as_str()).collect();
             args.extend(&extra_strs);
 
-            let output = run_git(&repo_path, &args)?;
+            let output = run_git(&repo_path, &args, ctx).await?;
             if output.is_empty() {
                 Ok(ToolResult::success(
                     "Repository has no commit history".to_string(),
@@ -355,7 +386,7 @@ impl Tool for GitBlameTool {
             args.push(file_path.to_string());
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(&repo_path, &str_args)?;
+            let output = run_git(&repo_path, &str_args, ctx).await?;
             let lines = output.lines().map(str::to_string).collect();
             let query = serde_json::json!({
                 "repo_path": repo_path,
@@ -388,10 +419,14 @@ impl Tool for GitBranchTool {
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {
-        vec![ToolPermission::Read]
+        vec![
+            ToolPermission::Read,
+            ToolPermission::Write,
+            ToolPermission::Execute,
+        ]
     }
     fn risk_level(&self) -> ToolRiskLevel {
-        ToolRiskLevel::ReadOnly
+        ToolRiskLevel::Dangerous
     }
 
     fn parameters(&self) -> Value {
@@ -455,7 +490,7 @@ impl Tool for GitBranchTool {
             }
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(&repo_path, &str_args)?;
+            let output = run_git(&repo_path, &str_args, ctx).await?;
             Ok(ToolResult::success(format!("{}:\n{}", action, output)))
         })
     }
@@ -527,13 +562,13 @@ impl Tool for GitCommitTool {
                         // starting with `-` (e.g. `--upload-pack=...`) can't be
                         // interpreted as a git flag (P1-2 argument injection).
                         let add_args = ["add", "--", f];
-                        run_git(&repo_path, &add_args)?;
+                        run_git(&repo_path, &add_args, ctx).await?;
                     }
                 }
             }
 
             let commit_args = ["commit", "-m", message];
-            let output = run_git(&repo_path, &commit_args)?;
+            let output = run_git(&repo_path, &commit_args, ctx).await?;
             Ok(ToolResult::success(format!(
                 "Commit succeeded:\n{}",
                 output
@@ -569,7 +604,7 @@ fn effective_repo_path(user_repo_path: &str, ctx: &echo_core::tools::ToolContext
     user_repo_path.to_string()
 }
 
-fn run_git(repo_path: &str, args: &[&str]) -> Result<String> {
+async fn run_git(repo_path: &str, args: &[&str], context: &ToolContext) -> Result<String> {
     // Validate repo_path: reject path traversal and ensure the path exists
     let path = Path::new(repo_path);
     if path
@@ -596,20 +631,23 @@ fn run_git(repo_path: &str, args: &[&str]) -> Result<String> {
         .into());
     }
 
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(args)
-        .output()
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool: "git".to_string(),
-            message: format!(
-                "Unable to execute git command (please verify git is installed): {}",
-                e
-            ),
-        })?;
+    let output = crate::process::run_bounded_command(
+        "git",
+        "git",
+        args,
+        path,
+        context,
+        GIT_TIMEOUT,
+        MAX_GIT_OUTPUT_BYTES,
+    )
+    .await?;
 
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.truncated {
+            text.push_str("\n[git output truncated at 1 MiB]");
+        }
+        Ok(text)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(ToolError::ExecutionFailed {

@@ -189,6 +189,9 @@ impl ToolFailure {
                 ToolError::Timeout(_) => {
                     possible_side_effect(Self::new(ToolFailureCategory::Timeout).retryable())
                 }
+                ToolError::Cancelled(_) => {
+                    possible_side_effect(Self::new(ToolFailureCategory::Cancelled))
+                }
                 ToolError::NotFound(_) | ToolError::ExecutionFailed { .. } => {
                     possible_side_effect(Self::new(ToolFailureCategory::Permanent))
                 }
@@ -200,7 +203,9 @@ impl ToolFailure {
                 SandboxError::Timeout(_) => {
                     possible_side_effect(Self::new(ToolFailureCategory::Timeout).retryable())
                 }
-                SandboxError::Cancelled(_) => Self::new(ToolFailureCategory::Cancelled),
+                SandboxError::Cancelled(_) => {
+                    possible_side_effect(Self::new(ToolFailureCategory::Cancelled))
+                }
                 SandboxError::ResourceExceeded(_)
                 | SandboxError::PermissionDenied(_)
                 | SandboxError::IoError(_) => {
@@ -1301,6 +1306,17 @@ mod tool_context_tests {
         );
         assert!(state.is_eligible("git_commit"));
         assert!(state.is_visible("git_commit"));
+    }
+
+    #[test]
+    fn cancelled_mutation_reports_possible_side_effect() {
+        let error = ReactError::from(ToolError::Cancelled("git_branch".to_string()));
+        let failure = ToolFailure::from_error(&error, true);
+
+        assert_eq!(failure.category, ToolFailureCategory::Cancelled);
+        assert_eq!(failure.side_effect, ToolSideEffect::Possible);
+        assert_eq!(failure.recovery, ToolRecoveryAction::VerifyThenRetry);
+        assert!(!failure.allows_automatic_retry());
     }
 }
 

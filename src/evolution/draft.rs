@@ -383,6 +383,29 @@ mod tests {
         assert!(outside.is_none_or(|path| !path.exists()));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn draft_generation_rejects_symlink_candidate_directory() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let drafts = root.path().join(DRAFTS_DIR);
+        std::fs::create_dir_all(&drafts)?;
+        symlink(outside.path(), drafts.join("cargo-build"))?;
+        let log = NullChangeLog;
+        let generator = SkillDraftGenerator::new(root.path().to_path_buf(), &log);
+
+        assert!(
+            generator
+                .generate_from_candidate(&sample_candidate())
+                .await
+                .is_err()
+        );
+        assert!(!outside.path().join("SKILL.md").exists());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_draft_yaml_frontmatter_valid() {
         let dir = tempfile::tempdir().expect("tempdir").keep();

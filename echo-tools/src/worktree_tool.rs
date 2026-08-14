@@ -11,10 +11,11 @@ use std::path::Path;
 
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
-use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
+use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult, ToolRiskLevel};
 
 use crate::git_worktree::{
-    WorktreeConfig, create_worktree, list_worktrees, merge_worktree, remove_worktree,
+    WorktreeConfig, create_worktree_with_context, list_worktrees_with_context,
+    merge_worktree_with_context, remove_worktree_with_context,
 };
 
 // ── Enter Worktree ──────────────────────────────────────────────────────────
@@ -74,7 +75,11 @@ impl Tool for EnterWorktreeTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        context: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let branch = parameters
                 .get("branch")
@@ -88,10 +93,11 @@ impl Tool for EnterWorktreeTool {
                 .get("path_suffix")
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let repo_path = parameters
+            let requested_repo_path = parameters
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
+            let repo_path = context.resolve_path(Path::new(requested_repo_path));
 
             let config = WorktreeConfig {
                 branch: branch.to_string(),
@@ -99,12 +105,9 @@ impl Tool for EnterWorktreeTool {
                 path_suffix,
             };
 
-            let worktree = create_worktree(Path::new(repo_path), &config).map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: "enter_worktree".to_string(),
-                    message: e,
-                }
-            })?;
+            let worktree = create_worktree_with_context(&repo_path, &config, context)
+                .await
+                .map_err(|error| worktree_tool_error("enter_worktree", error))?;
 
             let msg = format!(
                 "Created worktree at '{}' on branch '{}'. \
@@ -171,25 +174,28 @@ impl Tool for ExitWorktreeTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        context: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let worktree_path = parameters
                 .get("worktree_path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("worktree_path".to_string()))?;
             let merge_to = parameters.get("merge_to").and_then(|v| v.as_str());
-            let repo_path = parameters
+            let requested_repo_path = parameters
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
+            let repo_path = context.resolve_path(Path::new(requested_repo_path));
 
             // Determine the branch name from the worktree path.
             // We look up the worktree in the list to get its branch.
-            let worktrees =
-                list_worktrees(Path::new(repo_path)).map_err(|e| ToolError::ExecutionFailed {
-                    tool: "exit_worktree".to_string(),
-                    message: e,
-                })?;
+            let worktrees = list_worktrees_with_context(&repo_path, context)
+                .await
+                .map_err(|error| worktree_tool_error("exit_worktree", error))?;
 
             let requested = std::fs::canonicalize(worktree_path).map_err(|error| {
                 ToolError::ExecutionFailed {
@@ -210,22 +216,18 @@ impl Tool for ExitWorktreeTool {
 
             // Optionally merge before removal
             let merge_msg = if let Some(target) = merge_to {
-                let msg = merge_worktree(Path::new(repo_path), &wt, target).map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        tool: "exit_worktree".to_string(),
-                        message: e,
-                    }
-                })?;
+                let msg = merge_worktree_with_context(&repo_path, &wt, target, context)
+                    .await
+                    .map_err(|error| worktree_tool_error("exit_worktree", error))?;
                 Some(msg)
             } else {
                 None
             };
 
             // Remove the worktree
-            remove_worktree(Path::new(repo_path), &wt).map_err(|e| ToolError::ExecutionFailed {
-                tool: "exit_worktree".to_string(),
-                message: e,
-            })?;
+            remove_worktree_with_context(&repo_path, &wt, context)
+                .await
+                .map_err(|error| worktree_tool_error("exit_worktree", error))?;
 
             let msg = match merge_msg {
                 Some(m) => format!("{m}. Worktree at '{}' removed.", worktree_path),
@@ -274,18 +276,21 @@ impl Tool for ListWorktreesTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        context: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
-            let repo_path = parameters
+            let requested_repo_path = parameters
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
+            let repo_path = context.resolve_path(Path::new(requested_repo_path));
 
-            let worktrees =
-                list_worktrees(Path::new(repo_path)).map_err(|e| ToolError::ExecutionFailed {
-                    tool: "list_worktrees".to_string(),
-                    message: e,
-                })?;
+            let worktrees = list_worktrees_with_context(&repo_path, context)
+                .await
+                .map_err(|error| worktree_tool_error("list_worktrees", error))?;
 
             if worktrees.is_empty() {
                 return Ok(ToolResult::success(
@@ -311,5 +316,18 @@ impl Tool for ListWorktreesTool {
                 lines.join("\n")
             )))
         })
+    }
+}
+
+fn worktree_tool_error(tool: &str, error: String) -> ToolError {
+    if error.contains("execution cancelled") {
+        return ToolError::Cancelled(tool.to_string());
+    }
+    if error.contains("timed out") {
+        return ToolError::Timeout(tool.to_string());
+    }
+    ToolError::ExecutionFailed {
+        tool: tool.to_string(),
+        message: error,
     }
 }

@@ -726,7 +726,18 @@ impl JsonlRunStore {
 
         // Populate only the newest bounded set and remove expired run logs.
         let mut paths = std::fs::read_dir(&dir)?
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .map(|entry| {
+                let entry = entry?;
+                if entry.file_type()?.is_symlink() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("run store contains a symlink: {}", entry.path().display()),
+                    ));
+                }
+                Ok(entry.path())
+            })
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
             .collect::<Vec<_>>();
         paths.sort_by_key(|path| {
@@ -941,10 +952,7 @@ impl RunStore for JsonlRunStore {
         bytes.push(b'\n');
         let path = self.run_path(run_id)?;
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-            file.write_all(&bytes)?;
-            file.sync_data()
+            echo_core::utils::fs::append_existing(&path, &bytes)
         })
         .await
         .map_err(|error| {
@@ -1306,6 +1314,56 @@ mod tests {
             assert!(store.save(make_run(id, "s1")).await.is_err());
             assert!(store.load(id).await.is_err());
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jsonl_store_rejects_symlink_run_file() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir();
+        let outside = dir.with_extension("outside.jsonl");
+        let outside_bytes = serde_json::to_vec(&make_run("linked", "s1"))?;
+        std::fs::write(&outside, &outside_bytes)?;
+        symlink(&outside, dir.join("linked.jsonl"))?;
+
+        assert!(JsonlRunStore::new(&dir).is_err());
+        assert_eq!(std::fs::read(&outside)?, outside_bytes);
+
+        std::fs::remove_file(dir.join("linked.jsonl"))?;
+        std::fs::remove_file(outside)?;
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jsonl_store_append_rejects_runtime_symlink_swap() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir();
+        let store = JsonlRunStore::new(&dir)?;
+        store.save(make_run("linked", "s1")).await?;
+        let run_path = dir.join("linked.jsonl");
+        let original = dir.join("linked.original.jsonl");
+        let outside = dir.with_extension("outside-runtime.jsonl");
+        std::fs::rename(&run_path, &original)?;
+        std::fs::write(&outside, b"outside\n")?;
+        symlink(&outside, &run_path)?;
+
+        assert!(
+            store
+                .append_event("linked", RunEvent::Checkpoint { id: "one".into() })
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&outside)?, b"outside\n");
+
+        std::fs::remove_file(run_path)?;
+        std::fs::remove_file(original)?;
+        std::fs::remove_file(outside)?;
+        std::fs::remove_dir_all(dir)?;
         Ok(())
     }
 

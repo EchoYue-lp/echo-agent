@@ -51,29 +51,22 @@ pub fn project_message(conversation_id: &str, message: &Message) -> Result<Store
         None
     };
 
-    // `content` is the searchable text projection. Preserve the structured
-    // multimodal payload and reasoning separately so restore_message can
-    // rebuild the runtime message without making plain-text records verbose.
+    // `content` is the searchable text projection. Every canonical runtime
+    // message carries the marker, including plain text, so application
+    // projections can reliably distinguish an Agent-owned transcript from a
+    // UI-only bootstrap record.
     let structured_content = matches!(
         &message.content,
         MessageContent::Parts(_) | MessageContent::Empty
     )
     .then(|| message.content.clone());
-    let attachments_json = if structured_content.is_some()
-        || message.reasoning_content.is_some()
-        || message.name.is_some()
-        || message.tool_call_id.is_some()
-    {
-        Some(serde_json::to_string(&MessageProjectionMeta {
-            version: MESSAGE_PROJECTION_VERSION,
-            content: structured_content,
-            reasoning_content: message.reasoning_content.clone(),
-            name: message.name.clone(),
-            tool_call_id: message.tool_call_id.clone(),
-        })?)
-    } else {
-        None
-    };
+    let attachments_json = Some(serde_json::to_string(&MessageProjectionMeta {
+        version: MESSAGE_PROJECTION_VERSION,
+        content: structured_content,
+        reasoning_content: message.reasoning_content.clone(),
+        name: message.name.clone(),
+        tool_call_id: message.tool_call_id.clone(),
+    })?);
 
     Ok(StoredMessage {
         id: None,
@@ -215,6 +208,21 @@ mod tests {
         assert!(matches!(restored.content, MessageContent::Empty));
         assert_eq!(restored.name.as_deref(), Some("assistant-name"));
         assert_eq!(restored.tool_call_id.as_deref(), Some("carried-call-id"));
+        Ok(())
+    }
+
+    #[test]
+    fn plain_text_projection_carries_canonical_marker() -> Result<()> {
+        let stored = project_message("conversation", &Message::user("hello".to_string()))?;
+        let projection = stored.attachments_json.as_deref().ok_or_else(|| {
+            MemoryError::SerializationError("missing canonical projection marker".to_string())
+        })?;
+
+        assert!(projection.contains("_echo_message_version"));
+        assert_eq!(
+            restore_message(&stored)?.text_content().as_deref(),
+            Some("hello")
+        );
         Ok(())
     }
 }

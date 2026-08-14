@@ -422,6 +422,13 @@ impl RuleRegistry {
         }
     }
 
+    /// Remove one exact rule without affecting rules owned by other sources.
+    pub fn remove_rule(&mut self, rule: &PermissionRule) -> bool {
+        let before = self.rules.len();
+        self.rules.retain(|candidate| candidate != rule);
+        before != self.rules.len()
+    }
+
     /// Check a tool invocation and return the matching rule behavior
     ///
     /// Evaluation order follows deny-first principle (referenced from Claude Code):
@@ -772,6 +779,27 @@ mod tests {
         // Bash 无匹配规则
         let result = registry.check("Bash", &[]);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn remove_rule_keeps_other_sources_and_matchers() {
+        let mut registry = RuleRegistry::new();
+        let removable = PermissionRule::allow(
+            RuleMatcher::Tool {
+                name: "Read".to_string(),
+            },
+            RuleSource::UserSettings,
+        );
+        registry.add_rule(removable.clone());
+        registry.add_rule(PermissionRule::deny(
+            RuleMatcher::All,
+            "default deny".to_string(),
+            RuleSource::Default,
+        ));
+
+        assert!(registry.remove_rule(&removable));
+        assert!(!registry.remove_rule(&removable));
+        assert_eq!(registry.len(), 1);
     }
 
     #[test]

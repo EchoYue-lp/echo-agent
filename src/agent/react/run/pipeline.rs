@@ -1312,6 +1312,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "files")]
     #[tokio::test]
     async fn truncation_stage_spills_without_token_limit_and_read_artifact_can_recover()
     -> Result<()> {

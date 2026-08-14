@@ -147,7 +147,16 @@ pub(crate) async fn run_think(
         let Some(cr) = next else {
             break;
         };
-        let chunk = try_send_or!(tx, cr, ThinkOutcome::Failed);
+        let chunk = match cr {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                emit_partial_content_before_failure(tx, &content_buffer).await;
+                let _ = tx
+                    .send(Ok(AgentEvent::from_error("react_loop", &error)))
+                    .await;
+                return Ok(ThinkOutcome::Failed);
+            }
+        };
         for reason in chunk
             .choices
             .iter()
@@ -190,6 +199,7 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
+            emit_partial_content_before_failure(tx, &content_buffer).await;
             let _ = tx.send(Err(error)).await;
             return Ok(ThinkOutcome::Failed);
         }
@@ -205,6 +215,7 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
+            emit_partial_content_before_failure(tx, &content_buffer).await;
             let _ = tx.send(Err(error)).await;
             return Ok(ThinkOutcome::Failed);
         }
@@ -368,6 +379,12 @@ pub(crate) async fn run_think(
         ct,
         usage_reported,
     }))
+}
+
+async fn emit_partial_content_before_failure(tx: &mpsc::Sender<Result<AgentEvent>>, content: &str) {
+    if !content.is_empty() {
+        let _ = tx.send(Ok(AgentEvent::Token(content.to_string()))).await;
+    }
 }
 
 /// Create a streaming LLM call wrapped in retry / circuit-breaker policy.

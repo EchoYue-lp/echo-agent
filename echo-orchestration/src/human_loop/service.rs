@@ -302,6 +302,11 @@ impl PermissionService {
         registry.add_rules(rules);
     }
 
+    /// Remove one exact rule while preserving unrelated session and policy rules.
+    pub async fn remove_rule(&self, rule: &PermissionRule) -> bool {
+        self.rules.write().await.remove_rule(rule)
+    }
+
     /// 应用权限更新
     pub async fn apply_update(&self, update: PermissionUpdate) {
         let mut rules = self.rules.write().await;

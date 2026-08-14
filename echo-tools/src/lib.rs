@@ -28,6 +28,8 @@ pub mod files;
 pub mod git_checkpoint;
 #[cfg(any(feature = "web", feature = "media", feature = "research"))]
 mod http_body;
+#[cfg(feature = "git")]
+mod process;
 pub mod security;
 #[cfg(feature = "shell")]
 #[cfg_attr(docsrs, doc(cfg(feature = "shell")))]

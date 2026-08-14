@@ -363,6 +363,9 @@ pub enum ToolError {
     /// Execution timed out
     #[error("Tool '{0}' execution timed out")]
     Timeout(String),
+    /// Execution was cancelled by the owning run.
+    #[error("Tool '{0}' execution cancelled")]
+    Cancelled(String),
     /// Invalid path (path traversal attack detected)
     #[error("Invalid path: {path} ({reason})")]
     InvalidPath {

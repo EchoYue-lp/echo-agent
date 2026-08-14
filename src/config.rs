@@ -684,6 +684,29 @@ pub fn load_config_file(path: &std::path::Path) -> Result<AppConfig, String> {
     serde_yaml_ng::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))
 }
 
+/// Persist an [`AppConfig`] to one explicit configuration file.
+pub fn save_config_file(
+    path: &std::path::Path,
+    config: &AppConfig,
+) -> std::result::Result<(), String> {
+    let yaml =
+        serde_yaml_ng::to_string(config).map_err(|e| format!("serialization failed: {e}"))?;
+    let header = "# Echo Agent Configuration\n# Auto-saved via Web API or CLI\n\n";
+    let content = format!("{header}{yaml}");
+    echo_core::utils::fs::atomic_write(path, content.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))?;
+    // Configuration can contain provider/channel credentials. This protection
+    // is required for a local application because other host accounts should
+    // not inherit those secrets.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("set permissions failed: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Persist an [`AppConfig`] back to the first writable config file.
 ///
 /// Search order: `$ECHO_AGENT_CONFIG` → `./echo-agent.yaml` → `~/.echo-agent/config.yaml`.
@@ -697,28 +720,7 @@ pub fn save_config(config: &AppConfig) -> std::result::Result<(), String> {
         .or_else(|| search.get(1))
         .or_else(|| search.first())
         .ok_or_else(|| "no configuration path is available".to_string())?;
-    let yaml =
-        serde_yaml_ng::to_string(config).map_err(|e| format!("serialization failed: {e}"))?;
-    let header = "# Echo Agent Configuration\n# Auto-saved via Web API or CLI\n\n";
-    let content = format!("{header}{yaml}");
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create directory failed: {e}"))?;
-    }
-    std::fs::write(target, content).map_err(|e| format!("write failed: {e}"))?;
-    // P1-4: the config file holds plaintext secrets (channel app_secret /
-    // client_secret, and is the on-disk source for MCP env/headers tokens).
-    // Restrict it to owner-only (0600) so other users on the host can't read
-    // credentials. (Full at-rest encryption would need an OS keychain to store
-    // the key; file permissions are the standard local-app mitigation and the
-    // scope of this fix.)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!("Failed to set config file permissions to 0600: {e}");
-        }
-    }
-    Ok(())
+    save_config_file(target, config)
 }
 
 /// Load configuration (searches default paths).
