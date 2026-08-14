@@ -875,15 +875,15 @@ impl Config {
                         (detected, provider_name_from_url(&base_url))
                     }
                 };
-                let api_protocol = entry.api_protocol.unwrap_or_else(|| {
-                    if entry.base_url.is_some() {
-                        LlmApiProtocol::from_endpoint(&base_url)
-                    } else {
-                        builtin_provider
-                            .map(|metadata| metadata.default_api_protocol)
-                            .unwrap_or_else(|| LlmApiProtocol::from_endpoint(&base_url))
-                    }
-                });
+                let endpoint_protocol = entry
+                    .base_url
+                    .as_deref()
+                    .and_then(|_| LlmApiProtocol::try_from_endpoint(&base_url));
+                let api_protocol = entry
+                    .api_protocol
+                    .or(endpoint_protocol)
+                    .or_else(|| builtin_provider.map(|metadata| metadata.default_api_protocol))
+                    .unwrap_or(LlmApiProtocol::ChatCompletions);
                 Ok((
                     base_url,
                     api_key,
@@ -1443,6 +1443,18 @@ models:
     provider: custom-gateway
     base_url: https://gateway.example/v1/chat/completions
     api_key: sk-custom
+  openai-root-override:
+    provider: openai
+    base_url: https://gateway.example/v1
+    api_key: sk-root
+  openai-complete-override:
+    provider: openai
+    base_url: https://gateway.example/v1/chat/completions
+    api_key: sk-complete
+  unknown-root-fallback:
+    provider: custom-gateway
+    base_url: https://gateway.example/v1
+    api_key: sk-unknown
   explicit-override:
     provider: deepseek
     base_url: https://gateway.example/v1/chat/completions
@@ -1477,6 +1489,27 @@ models:
             config
                 .models
                 .get("custom-chat")
+                .map(|model| model.api_protocol),
+            Some(LlmApiProtocol::ChatCompletions)
+        );
+        assert_eq!(
+            config
+                .models
+                .get("openai-root-override")
+                .map(|model| model.api_protocol),
+            Some(LlmApiProtocol::Responses)
+        );
+        assert_eq!(
+            config
+                .models
+                .get("openai-complete-override")
+                .map(|model| model.api_protocol),
+            Some(LlmApiProtocol::ChatCompletions)
+        );
+        assert_eq!(
+            config
+                .models
+                .get("unknown-root-fallback")
                 .map(|model| model.api_protocol),
             Some(LlmApiProtocol::ChatCompletions)
         );

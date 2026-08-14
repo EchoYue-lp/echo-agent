@@ -21,11 +21,14 @@ environment-variable aliases, and default wire protocol.
 | `moonshot` (`kimi`) | OpenAI Chat Completions |
 | `zhipu` (`glm`) | OpenAI Chat Completions |
 
-Protocol selection follows one precedence rule: an explicit `api_protocol` wins; a
-provider shorthand uses its metadata default; otherwise a complete custom `base_url`
-is inspected for `/responses`, `/messages`, or Chat Completions. Supplying both
-`provider` and `base_url` makes the URL authoritative for protocol inference unless
-`api_protocol` is also set.
+Protocol selection follows one precedence rule: an explicit `api_protocol` wins;
+otherwise a complete custom `base_url` is inspected for a `/responses`, `/messages`,
+or `/chat/completions` suffix; otherwise a provider shorthand uses its metadata
+default. A provider root such as `https://api.example.com/v1` is intentionally not
+enough to infer a protocol. Supplying both `provider` and a recognized complete
+`base_url` makes the URL authoritative unless `api_protocol` is also set. An
+unrecognized root therefore falls back to the provider metadata default, or Chat
+Completions when the provider is also unknown.
 
 ---
 

@@ -35,16 +35,38 @@ pub enum LlmApiProtocol {
 }
 
 impl LlmApiProtocol {
-    /// Infer the protocol from a complete endpoint URL.
-    pub fn from_endpoint(endpoint: &str) -> Self {
+    /// Identify the protocol spoken by a complete endpoint URL.
+    ///
+    /// Returns `None` for provider roots such as `https://api.example.com/v1`
+    /// because selecting a wire protocol from an incomplete path would turn the
+    /// Chat Completions fallback into a false positive.
+    pub fn try_from_endpoint(endpoint: &str) -> Option<Self> {
         let path = endpoint
             .split(['?', '#'])
             .next()
             .unwrap_or(endpoint)
             .trim_end_matches('/');
         if path.ends_with("/responses") {
-            Self::Responses
-        } else if path.ends_with("/messages") || path.contains("anthropic.com/") {
+            Some(Self::Responses)
+        } else if path.ends_with("/messages") {
+            Some(Self::Anthropic)
+        } else if path.ends_with("/chat/completions") {
+            Some(Self::ChatCompletions)
+        } else {
+            None
+        }
+    }
+
+    /// Infer the protocol from a complete endpoint URL.
+    pub fn from_endpoint(endpoint: &str) -> Self {
+        if let Some(protocol) = Self::try_from_endpoint(endpoint) {
+            protocol
+        } else if endpoint
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(endpoint)
+            .contains("anthropic.com/")
+        {
             Self::Anthropic
         } else {
             Self::ChatCompletions
@@ -68,6 +90,32 @@ mod protocol_tests {
         );
         assert_eq!(
             LlmApiProtocol::from_endpoint("https://gateway.example/v1/chat/completions"),
+            LlmApiProtocol::ChatCompletions
+        );
+    }
+
+    #[test]
+    fn complete_endpoint_detection_does_not_guess_from_provider_roots() {
+        assert_eq!(
+            LlmApiProtocol::try_from_endpoint("https://gateway.example/v1/responses?trace=true"),
+            Some(LlmApiProtocol::Responses)
+        );
+        assert_eq!(
+            LlmApiProtocol::try_from_endpoint("https://gateway.example/v1/messages#debug"),
+            Some(LlmApiProtocol::Anthropic)
+        );
+        assert_eq!(
+            LlmApiProtocol::try_from_endpoint("https://gateway.example/v1/chat/completions/"),
+            Some(LlmApiProtocol::ChatCompletions)
+        );
+        assert_eq!(
+            LlmApiProtocol::try_from_endpoint("https://gateway.example/v1"),
+            None
+        );
+        assert_eq!(
+            LlmApiProtocol::from_endpoint(
+                "https://gateway.example/v1?upstream=https://api.anthropic.com/v1/"
+            ),
             LlmApiProtocol::ChatCompletions
         );
     }

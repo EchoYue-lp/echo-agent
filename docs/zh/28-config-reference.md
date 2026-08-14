@@ -21,10 +21,12 @@ echo-agent 提供两种配置方式：
 | `moonshot`（`kimi`） | OpenAI Chat Completions |
 | `zhipu`（`glm`） | OpenAI Chat Completions |
 
-协议选择遵循同一优先级：显式 `api_protocol` 优先；provider 快捷方式使用 metadata
-中的默认值；否则根据完整自定义 `base_url` 的 `/responses`、`/messages` 或 Chat
-Completions endpoint 推断。同时提供 `provider` 和 `base_url` 时，除非另有显式
-`api_protocol`，否则以 URL 推断结果为准。
+协议选择遵循同一优先级：显式 `api_protocol` 优先；否则先根据完整自定义
+`base_url` 的 `/responses`、`/messages` 或 `/chat/completions` 后缀推断；仍无法
+识别时才使用 provider metadata 默认值。`https://api.example.com/v1` 这类 provider
+根地址不足以推断协议。同时提供 `provider` 和可识别的完整 `base_url` 时，除非另有
+显式 `api_protocol`，否则以完整 URL 推断结果为准。无法识别的根地址会回退到
+provider metadata 默认值；provider 也未知时则回退到 Chat Completions。
 
 ---
 
