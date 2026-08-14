@@ -975,11 +975,18 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    let critic = Arc::new(LlmCritic::new("qwen3.7-max"));
+    let llm_config = LlmConfig::openai(
+        std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+        "gpt-5.5",
+    );
+    let llm_client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
+    let critic = Arc::new(LlmCritic::new(llm_client.clone()));
     let review_tool = ReviewTool::new(critic);
 
     let agent = ReactAgentBuilder::new()
-        .model("qwen3.7-max")
+        .model("gpt-5.5")
+        .llm_config(llm_config)
+        .llm_client(llm_client)
         .system_prompt("You are a technical writer. Use the review tool to self-critique your work.")
         .enable_tools()
         .tool(Box::new(review_tool))

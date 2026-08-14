@@ -8,10 +8,14 @@
 use super::ReactAgent;
 #[cfg(feature = "subagent")]
 use crate::agent::Agent;
+use crate::agent::AgentHandle;
 #[cfg(feature = "subagent")]
 use crate::agent::subagent::{AgentFactory, SubagentDefinition};
-use crate::compression::{CompressionCheckpoint, ContextCompressor, ForceCompressStats};
+use crate::compression::{
+    CompressionCheckpoint, ContextCompressor, ContextManager, ForceCompressStats,
+};
 use crate::error::Result;
+use crate::llm::{LlmClient, LlmConfig, ThinkingConfig};
 #[cfg(feature = "mcp")]
 use crate::mcp::McpServerEntry;
 #[cfg(feature = "mcp")]
@@ -22,11 +26,141 @@ use crate::skills::external::resource_tool::ReadSkillResourceTool;
 use crate::skills::external::run_script_tool::RunSkillScriptTool;
 use crate::skills::{Skill, SkillInfo};
 use crate::tools::Tool;
+use echo_core::agent::Critic;
+use echo_core::budget::TokenBudget;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedMutexGuard, RwLock};
 use tracing::{info, warn};
 
 const SKILL_CATALOG_PROJECTION: &str = "echo-agent:skill-catalog";
+
+/// A validated token-limit update with exclusive ownership of the live context.
+///
+/// Holding this value prevents an agent turn from entering the context between
+/// preparation and commit. Dropping it cancels the update without changing the
+/// agent or its context.
+pub struct PreparedTokenLimit {
+    agent: tokio::sync::OwnedRwLockWriteGuard<ReactAgent>,
+    values: PreparedTokenLimitValues,
+}
+
+struct PreparedTokenLimitValues {
+    token_limit: usize,
+    budget: Option<TokenBudget>,
+    context: OwnedMutexGuard<ContextManager>,
+}
+
+/// Explicit critic publication policy for a prepared model generation.
+pub enum PreparedCriticUpdate {
+    /// Leave the currently installed critic and its ownership unchanged.
+    Preserve,
+    /// Replace the critic only when it is still owned by `owner`.
+    ///
+    /// A later [`ReactAgent::set_critic`] call clears named ownership, so a
+    /// consumer cannot overwrite a user-installed custom critic accidentally.
+    ReplaceOwned {
+        owner: String,
+        critic: Arc<dyn Critic>,
+    },
+}
+
+/// A complete, prevalidated runtime model generation for a [`ReactAgent`].
+///
+/// The LLM client is constructed by the consumer before preparation, so commit
+/// performs no I/O, configuration parsing, or provider lookup.
+pub struct PreparedAgentModelGeneration {
+    agent: tokio::sync::OwnedRwLockWriteGuard<ReactAgent>,
+    llm_config: LlmConfig,
+    llm_client: Arc<dyn LlmClient>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    thinking: Option<ThinkingConfig>,
+    critic: PreparedCriticUpdate,
+    token_limit: PreparedTokenLimitValues,
+}
+
+impl PreparedTokenLimit {
+    /// Publish the token limit to the exact agent locked during preparation.
+    pub fn commit(self) {
+        let Self { mut agent, values } = self;
+        agent.commit_prepared_token_limit(values);
+    }
+}
+
+impl PreparedAgentModelGeneration {
+    /// Publish this generation to the exact agent locked during preparation.
+    /// No target parameter exists, so a receipt prepared on one agent cannot be
+    /// committed to another agent.
+    pub fn commit(self) {
+        let Self {
+            mut agent,
+            llm_config,
+            llm_client,
+            temperature,
+            max_tokens,
+            thinking,
+            critic,
+            token_limit,
+        } = self;
+        agent.commit_prepared_token_limit(token_limit);
+        agent.config.model_name = llm_config.model.clone();
+        agent.config.temperature = temperature;
+        agent.config.max_tokens = max_tokens;
+        agent.llm_config = Some(llm_config);
+        agent.llm_client = Some(llm_client);
+        agent.thinking = thinking;
+        if let PreparedCriticUpdate::ReplaceOwned { owner, critic } = critic
+            && agent.critic_owner.as_deref() == Some(owner.as_str())
+        {
+            agent.critic = Some(critic);
+        }
+    }
+}
+
+impl AgentHandle {
+    /// Prepare a target-bound token-limit publication.
+    pub async fn prepare_token_limit(
+        &self,
+        token_limit: usize,
+    ) -> crate::error::Result<PreparedTokenLimit> {
+        let agent = Arc::clone(self.inner()).write_owned().await;
+        let values = agent.prepare_token_limit_values(token_limit).await?;
+        Ok(PreparedTokenLimit { agent, values })
+    }
+
+    /// Prepare a target-bound complete model generation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_model_generation(
+        &self,
+        llm_config: LlmConfig,
+        llm_client: Arc<dyn LlmClient>,
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+        thinking: Option<ThinkingConfig>,
+        token_limit: usize,
+        critic: PreparedCriticUpdate,
+    ) -> crate::error::Result<PreparedAgentModelGeneration> {
+        if llm_client.model_name() != llm_config.model {
+            return Err(crate::error::ReactError::Other(format!(
+                "prepared LLM client model '{}' does not match config model '{}'",
+                llm_client.model_name(),
+                llm_config.model
+            )));
+        }
+        let agent = Arc::clone(self.inner()).write_owned().await;
+        let token_limit = agent.prepare_token_limit_values(token_limit).await?;
+        Ok(PreparedAgentModelGeneration {
+            agent,
+            llm_config,
+            llm_client,
+            temperature,
+            max_tokens,
+            thinking,
+            critic,
+            token_limit,
+        })
+    }
+}
 
 impl ReactAgent {
     // ── Tool registration ────────────────────────────────────────────────────
@@ -424,9 +558,42 @@ impl ReactAgent {
         self.config.max_tokens = max_tokens;
     }
 
+    /// Prepare a token-limit change without mutating the agent.
+    ///
+    /// This waits for exclusive access to the live context and retains that
+    /// access in the returned receipt. Dropping the receipt rolls the operation
+    /// back; target-bound publication commit is infallible.
+    async fn prepare_token_limit_values(
+        &self,
+        token_limit: usize,
+    ) -> crate::error::Result<PreparedTokenLimitValues> {
+        let budget = if self.config.token_budget_config.enabled {
+            Some(self.config.token_budget_config.build(token_limit)?)
+        } else {
+            None
+        };
+        let context = Arc::clone(&self.memory.context).lock_owned().await;
+        Ok(PreparedTokenLimitValues {
+            token_limit,
+            budget,
+            context,
+        })
+    }
+
+    fn commit_prepared_token_limit(&mut self, prepared: PreparedTokenLimitValues) {
+        let PreparedTokenLimitValues {
+            token_limit,
+            budget,
+            mut context,
+        } = prepared;
+        context.set_token_limit(token_limit, budget);
+        self.config.token_limit = token_limit;
+    }
+
     /// Set the token limit (context window budget) at runtime.
-    /// When set to a finite value, this enables token budget tracking and
-    /// may trigger compression. Set to `usize::MAX` to disable.
+    ///
+    /// This compatibility method remains non-blocking. Consumers that need a
+    /// transactional multi-agent update should use the prepare/commit API.
     pub fn set_token_limit(&mut self, token_limit: usize) -> crate::error::Result<()> {
         let mut context = self.memory.context.try_lock().map_err(|_| {
             crate::error::AgentError::ContextLimitExceeded(

@@ -62,6 +62,7 @@ use crate::agent::react::subsystems::tool_exec::ToolExecutionSubsystem;
 
 pub mod builder;
 mod capabilities;
+pub use capabilities::{PreparedAgentModelGeneration, PreparedCriticUpdate, PreparedTokenLimit};
 mod extract;
 pub mod run;
 pub mod structured;
@@ -217,6 +218,9 @@ pub struct ReactAgent {
 
     /// Optional Critic for final_answer verification.
     pub(crate) critic: Option<Arc<dyn echo_core::agent::Critic>>,
+    /// Named owner allowed to refresh the current critic during a prepared
+    /// model-generation publication. `None` denotes an unowned/custom critic.
+    critic_owner: Option<String>,
 
     /// Layered memory manager used by runtime-triggered memory writes.
     pub(crate) memory_layer_manager: Option<Arc<crate::evolution::MemoryLayerManager>>,
@@ -555,6 +559,7 @@ impl ReactAgent {
             intent_router: None,
             plan_state: Arc::new(tokio::sync::RwLock::new(None)),
             critic: None,
+            critic_owner: None,
             memory_layer_manager: None,
             memory_trigger_state: Arc::new(std::sync::Mutex::new(
                 MemoryTriggerRuntimeState::default(),
@@ -1489,6 +1494,23 @@ impl ReactAgent {
     /// message and the agent continues iterating to self-correct.
     pub fn set_critic(&mut self, critic: Arc<dyn echo_core::agent::Critic>) {
         self.critic = Some(critic);
+        self.critic_owner = None;
+    }
+
+    /// Install a critic that may be refreshed by the same named owner during a
+    /// prepared runtime-model publication.
+    pub fn set_owned_critic(
+        &mut self,
+        owner: impl Into<String>,
+        critic: Arc<dyn echo_core::agent::Critic>,
+    ) {
+        self.critic = Some(critic);
+        self.critic_owner = Some(owner.into());
+    }
+
+    /// Return the named critic owner, if the current critic permits refresh.
+    pub fn critic_owner(&self) -> Option<&str> {
+        self.critic_owner.as_deref()
     }
 
     /// Manually capture a snapshot of the current conversation state, returning the snapshot ID.

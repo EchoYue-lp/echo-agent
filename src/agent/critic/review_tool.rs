@@ -23,7 +23,7 @@ use std::sync::Arc;
 /// ```rust,ignore
 /// use echo_agent::agent::critic::{LlmCritic, ReviewTool};
 ///
-/// let critic = LlmCritic::new("qwen3.7-max").with_pass_threshold(8.0);
+/// let critic = LlmCritic::new(llm_client).with_pass_threshold(8.0);
 /// let review_tool = ReviewTool::new(Arc::new(critic));
 ///
 /// // Agent 在 ReAct 循环中可以调用：
@@ -41,13 +41,13 @@ impl ReviewTool {
     }
 
     /// 便捷方法：使用 LlmCritic 创建 ReviewTool
-    pub fn with_llm(model: &str) -> Self {
-        Self::new(Arc::new(LlmCritic::new(model)))
+    pub fn with_llm(client: Arc<dyn crate::llm::LlmClient>) -> Self {
+        Self::new(Arc::new(LlmCritic::new(client)))
     }
 
     /// 便捷方法：使用 LlmCritic 并指定 pass_threshold
-    pub fn with_llm_threshold(model: &str, threshold: f64) -> Self {
-        let critic = LlmCritic::new(model).with_pass_threshold(threshold);
+    pub fn with_llm_threshold(client: Arc<dyn crate::llm::LlmClient>, threshold: f64) -> Self {
+        let critic = LlmCritic::new(client).with_pass_threshold(threshold);
         Self::new(Arc::new(critic))
     }
 }

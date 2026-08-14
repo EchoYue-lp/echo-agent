@@ -1,5 +1,4 @@
 use super::ReactAgent;
-use crate::agent::Agent;
 #[cfg(feature = "subagent")]
 use crate::agent::ReactAgentBuilder;
 use crate::agent::config::{AgentConfig, DEFAULT_TOKEN_LIMIT};
@@ -7,6 +6,7 @@ use crate::agent::config::{AgentConfig, DEFAULT_TOKEN_LIMIT};
 use crate::agent::subagent::SubagentBuilder;
 #[cfg(feature = "subagent")]
 use crate::agent::subagent::SubagentRegistry;
+use crate::agent::{Agent, AgentHandle};
 use crate::llm::types::{Message, Role};
 #[cfg(feature = "shell")]
 use crate::sandbox::SandboxManager;
@@ -623,6 +623,191 @@ fn react_agent_builder_token_limit() {
         .unwrap();
 
     assert_eq!(agent.config().get_token_limit(), DEFAULT_TOKEN_LIMIT);
+}
+
+#[tokio::test]
+async fn prepared_model_generation_is_inert_until_infallible_commit() -> crate::error::Result<()> {
+    let agent = ReactAgent::new(AgentConfig::new(
+        "original-model",
+        "test_agent",
+        "system prompt",
+    ));
+    let llm_config = crate::llm::LlmConfig::openai("test-key", "replacement-model");
+    let client: Arc<dyn crate::llm::LlmClient> =
+        Arc::new(crate::testing::MockLlmClient::new().with_model_name("replacement-model"));
+
+    let handle = AgentHandle::new(agent);
+    let context = handle.read(|agent| Arc::clone(&agent.memory.context)).await;
+    assert_eq!(
+        handle.read(|agent| agent.model_name().to_string()).await,
+        "original-model"
+    );
+    let prepared = handle
+        .prepare_model_generation(
+            llm_config,
+            Arc::clone(&client),
+            Some(0.25),
+            Some(4096),
+            None,
+            32_768,
+            super::PreparedCriticUpdate::Preserve,
+        )
+        .await?;
+
+    assert!(handle.try_write(|_| ()).is_none());
+    assert!(context.try_lock().is_err());
+
+    prepared.commit();
+
+    let projection = handle
+        .read(|agent| {
+            (
+                agent.model_name().to_string(),
+                agent.config().get_temperature(),
+                agent.config().get_max_tokens(),
+                agent.config().get_token_limit(),
+                agent.llm_config().map(|config| config.model.clone()),
+                agent
+                    .llm_client()
+                    .map(|value| value.model_name().to_string()),
+            )
+        })
+        .await;
+    assert_eq!(projection.0, "replacement-model");
+    assert_eq!(projection.1, Some(0.25));
+    assert_eq!(projection.2, Some(4096));
+    assert_eq!(projection.3, 32_768);
+    assert_eq!(projection.4.as_deref(), Some("replacement-model"),);
+    assert_eq!(projection.5.as_deref(), Some("replacement-model"));
+    assert!(context.try_lock().is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mismatched_prepared_client_leaves_agent_unchanged() {
+    let agent = AgentHandle::new(ReactAgent::new(AgentConfig::new(
+        "original-model",
+        "test_agent",
+        "system prompt",
+    )));
+    let llm_config = crate::llm::LlmConfig::openai("test-key", "replacement-model");
+    let client: Arc<dyn crate::llm::LlmClient> =
+        Arc::new(crate::testing::MockLlmClient::new().with_model_name("wrong-model"));
+
+    let result = agent
+        .prepare_model_generation(
+            llm_config,
+            client,
+            None,
+            None,
+            None,
+            32_768,
+            super::PreparedCriticUpdate::Preserve,
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(
+        agent.read(|agent| agent.model_name().to_string()).await,
+        "original-model"
+    );
+    assert_eq!(
+        agent.read(|agent| agent.config().get_token_limit()).await,
+        DEFAULT_TOKEN_LIMIT
+    );
+    assert!(agent.try_write(|_| ()).is_some());
+}
+
+#[tokio::test]
+async fn owned_critic_refresh_does_not_replace_a_custom_critic() -> crate::error::Result<()> {
+    let mut agent = ReactAgent::new(AgentConfig::new(
+        "original-model",
+        "test_agent",
+        "system prompt",
+    ));
+    let custom = Arc::new(echo_core::agent::StaticCritic::always_pass());
+    agent.set_critic(custom.clone());
+    assert_eq!(agent.critic_owner(), None);
+    let agent = AgentHandle::new(agent);
+
+    let llm_config = crate::llm::LlmConfig::openai("test-key", "replacement-model");
+    let client: Arc<dyn crate::llm::LlmClient> =
+        Arc::new(crate::testing::MockLlmClient::new().with_model_name("replacement-model"));
+    let replacement = Arc::new(echo_core::agent::StaticCritic::always_fail());
+    let prepared = agent
+        .prepare_model_generation(
+            llm_config,
+            client,
+            None,
+            None,
+            None,
+            32_768,
+            super::PreparedCriticUpdate::ReplaceOwned {
+                owner: "eko:model-generation".to_string(),
+                critic: replacement,
+            },
+        )
+        .await?;
+
+    prepared.commit();
+
+    assert_eq!(Arc::strong_count(&custom), 2);
+    assert_eq!(
+        agent
+            .read(|agent| agent.critic_owner().map(str::to_string))
+            .await,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepared_generation_is_type_bound_to_its_origin_agent() -> crate::error::Result<()> {
+    let origin = AgentHandle::new(ReactAgent::new(AgentConfig::new(
+        "origin-model",
+        "origin",
+        "system prompt",
+    )));
+    let other = AgentHandle::new(ReactAgent::new(AgentConfig::new(
+        "other-model",
+        "other",
+        "system prompt",
+    )));
+    let client: Arc<dyn crate::llm::LlmClient> =
+        Arc::new(crate::testing::MockLlmClient::new().with_model_name("replacement-model"));
+    let prepared = origin
+        .prepare_model_generation(
+            crate::llm::LlmConfig::openai("test-key", "replacement-model"),
+            client,
+            None,
+            None,
+            None,
+            32_768,
+            super::PreparedCriticUpdate::Preserve,
+        )
+        .await?;
+
+    assert!(origin.try_write(|_| ()).is_none());
+    assert!(other.try_write(|_| ()).is_some());
+    prepared.commit();
+
+    assert_eq!(
+        origin.read(|agent| agent.model_name().to_string()).await,
+        "replacement-model"
+    );
+    assert_eq!(
+        origin.read(|agent| agent.config().get_token_limit()).await,
+        32_768
+    );
+    assert_eq!(
+        other.read(|agent| agent.model_name().to_string()).await,
+        "other-model"
+    );
+    assert_eq!(
+        other.read(|agent| agent.config().get_token_limit()).await,
+        DEFAULT_TOKEN_LIMIT
+    );
+    Ok(())
 }
 
 #[test]

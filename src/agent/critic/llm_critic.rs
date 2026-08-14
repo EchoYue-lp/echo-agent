@@ -1,13 +1,11 @@
 //! LLM-driven Critic implementation
 
 use crate::error::{ReactError, Result};
-use crate::llm;
-use crate::llm::ResponseFormat;
 use crate::llm::types::Message;
+use crate::llm::{ChatRequest, LlmClient, ResponseFormat};
 use echo_core::agent::Critic;
 use echo_core::agent::{Critique, CritiqueOutput, critique_output_schema};
 use futures::future::BoxFuture;
-use reqwest::Client;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -17,7 +15,7 @@ use tracing::{debug, info, warn};
 /// Reuses the `LlmPlanner` pattern: LLM call + structured JSON output + auto-fix.
 pub struct LlmCritic {
     model: String,
-    client: Arc<Client>,
+    client: Arc<dyn LlmClient>,
     system_prompt: String,
     pass_threshold: f64,
     cache_user_id: Option<String>,
@@ -27,21 +25,15 @@ impl LlmCritic {
     /// Create an LLM evaluator
     ///
     /// # Parameters
-    /// * `model` - LLM model identifier for quality evaluation
+    /// * `client` - The already-prepared client used by the owning Agent
     ///
     /// # Default configuration
     /// * System prompt: multi-dimensional quality evaluation expert (accuracy, completeness, clarity, usefulness)
     /// * Pass threshold: 7.0 (score >= 7.0 considered passing)
-    /// * HTTP client: newly created `reqwest::Client`
-    pub fn new(model: impl Into<String>) -> Self {
+    pub fn new(client: Arc<dyn LlmClient>) -> Self {
         Self {
-            model: model.into(),
-            client: Arc::new(
-                Client::builder()
-                    .timeout(std::time::Duration::from_secs(120))
-                    .build()
-                    .unwrap_or_default(),
-            ),
+            model: client.model_name().to_string(),
+            client,
             system_prompt: Self::default_system_prompt().to_string(),
             pass_threshold: 7.0,
             cache_user_id: None,
@@ -135,27 +127,20 @@ impl LlmCritic {
         messages: &[Message],
         response_format: Option<ResponseFormat>,
     ) -> std::result::Result<String, String> {
-        let response = llm::chat(
-            self.client.clone(),
-            &self.model,
-            messages,
-            Some(0.3),
-            Some(2048u32),
-            Some(false),
-            None,
-            None,
-            response_format,
-            self.cache_user_id.clone(),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        let response = self
+            .client
+            .chat(ChatRequest {
+                messages: messages.to_vec(),
+                temperature: Some(0.3),
+                max_tokens: Some(2048u32),
+                response_format,
+                user_id: self.cache_user_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
 
-        Ok(response
-            .choices
-            .first()
-            .and_then(|c| c.message.content.as_text())
-            .unwrap_or_default()
-            .to_string())
+        Ok(response.content().unwrap_or_default())
     }
 
     /// Whether an error message indicates the provider rejected the
@@ -285,6 +270,13 @@ impl Critic for LlmCritic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::MockLlmClient;
+
+    fn critic_for_model(model: &str) -> LlmCritic {
+        LlmCritic::new(Arc::new(
+            MockLlmClient::new().with_model_name(model.to_string()),
+        ))
+    }
 
     #[test]
     fn test_parse_critique_output_json() {
@@ -354,16 +346,16 @@ mod tests {
 
     #[test]
     fn deepseek_skips_structured_response_format() {
-        let critic = LlmCritic::new("deepseek-v4-flash");
+        let critic = critic_for_model("deepseek-v4-flash");
         assert!(critic.should_skip_structured_response_format());
 
-        let other = LlmCritic::new("gpt-5.1");
+        let other = critic_for_model("gpt-5.1");
         assert!(!other.should_skip_structured_response_format());
     }
 
     #[test]
     fn fallback_messages_request_json_only() -> std::result::Result<(), &'static str> {
-        let critic = LlmCritic::new("deepseek-v4-flash");
+        let critic = critic_for_model("deepseek-v4-flash");
         let messages = critic.fallback_messages("Evaluate this");
         assert_eq!(messages.len(), 2);
         let user_message = messages
@@ -372,6 +364,22 @@ mod tests {
             .ok_or("expected fallback user message text")?;
         assert!(user_message.contains("ONLY a JSON object"));
         assert!(user_message.contains("score (0-10 number)"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn critique_uses_the_prepared_client_transport() -> Result<()> {
+        let client = Arc::new(
+            MockLlmClient::new()
+                .with_model_name("prepared-model")
+                .with_response(r#"{"score":8.0,"passed":true,"feedback":"ok","suggestions":[]}"#),
+        );
+        let critic = LlmCritic::new(client.clone());
+
+        let critique = critic.critique("task", "answer", "").await?;
+
+        assert!(critique.passed);
+        assert_eq!(client.call_count(), 1);
         Ok(())
     }
 }

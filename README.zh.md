@@ -705,11 +705,18 @@ agent.add_tool(Box::new(WebFetchTool::new()));
 使用 ReviewTool 让 Agent 评估和优化自己的输出。这遵循业界最佳实践（Hermes、Claude Code），反思是工具能力而非独立的 Agent 类型。
 
 ```rust,ignore
-let critic = Arc::new(LlmCritic::new("qwen3.7-max"));
+let llm_config = LlmConfig::openai(
+    std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+    "gpt-5.5",
+);
+let llm_client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
+let critic = Arc::new(LlmCritic::new(llm_client.clone()));
 let review_tool = ReviewTool::new(critic);
 
 let agent = ReactAgentBuilder::new()
-    .model("qwen3.7-max")
+    .model("gpt-5.5")
+    .llm_config(llm_config)
+    .llm_client(llm_client)
     .system_prompt("你是技术写手。使用 review 工具自我审查你的作品。")
     .enable_tools()
     .tool(Box::new(review_tool))
