@@ -7,6 +7,26 @@ echo-agent provides two configuration approaches:
 1. **Rust API** — `AgentConfig` + `ReactAgentBuilder` for programmatic configuration
 2. **YAML file** — `echo-agent.yaml` for declarative configuration
 
+## Built-in Provider Wire Protocols
+
+`ProviderMetadata` is the authoritative registry for each built-in provider's endpoint,
+environment-variable aliases, and default wire protocol.
+
+| Provider (aliases) | Default wire protocol |
+|--------------------|-----------------------|
+| `openai` | OpenAI Responses |
+| `anthropic` | Anthropic Messages |
+| `deepseek` | OpenAI Chat Completions |
+| `dashscope` (`qwen`, `aliyun`) | OpenAI Chat Completions |
+| `moonshot` (`kimi`) | OpenAI Chat Completions |
+| `zhipu` (`glm`) | OpenAI Chat Completions |
+
+Protocol selection follows one precedence rule: an explicit `api_protocol` wins; a
+provider shorthand uses its metadata default; otherwise a complete custom `base_url`
+is inspected for `/responses`, `/messages`, or Chat Completions. Supplying both
+`provider` and `base_url` makes the URL authoritative for protocol inference unless
+`api_protocol` is also set.
+
 ---
 
 ## AgentConfig — Runtime Configuration

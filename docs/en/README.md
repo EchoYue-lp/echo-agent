@@ -154,12 +154,16 @@ async fn main() -> Result<()> {
 │  │    "writer_agent": ... }                          │   │
 │  └──────────────────────────────────────────────────┘   │
 └────────────────────────┬────────────────────────────────┘
-                         │ HTTP (OpenAI-compatible API)
+                         │ HTTP (metadata-selected wire protocol)
 ┌────────────────────────▼────────────────────────────────┐
 │                  LLM Provider                            │
-│        (OpenAI / DeepSeek / Qwen / Ollama / ...)         │
+│   (Responses / Anthropic Messages / Chat Completions)    │
 └─────────────────────────────────────────────────────────┘
 ```
+
+Built-in provider identity, endpoint, aliases, and default wire protocol come from the
+canonical `ProviderMetadata` registry. Complete custom endpoints remain protocol-driven
+by their URL, with an explicit `api_protocol` override when required.
 
 ---
 

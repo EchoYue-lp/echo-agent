@@ -7,6 +7,25 @@ echo-agent 提供两种配置方式：
 1. **Rust API** — `AgentConfig` + `ReactAgentBuilder`，编程式配置
 2. **YAML 文件** — `echo-agent.yaml`，声明式配置
 
+## 内置 Provider 的 Wire Protocol
+
+`ProviderMetadata` 是内置 Provider endpoint、环境变量别名和默认 wire protocol
+的唯一权威注册表。
+
+| Provider（别名） | 默认 wire protocol |
+|------------------|--------------------|
+| `openai` | OpenAI Responses |
+| `anthropic` | Anthropic Messages |
+| `deepseek` | OpenAI Chat Completions |
+| `dashscope`（`qwen`、`aliyun`） | OpenAI Chat Completions |
+| `moonshot`（`kimi`） | OpenAI Chat Completions |
+| `zhipu`（`glm`） | OpenAI Chat Completions |
+
+协议选择遵循同一优先级：显式 `api_protocol` 优先；provider 快捷方式使用 metadata
+中的默认值；否则根据完整自定义 `base_url` 的 `/responses`、`/messages` 或 Chat
+Completions endpoint 推断。同时提供 `provider` 和 `base_url` 时，除非另有显式
+`api_protocol`，否则以 URL 推断结果为准。
+
 ---
 
 ## AgentConfig — 运行时配置

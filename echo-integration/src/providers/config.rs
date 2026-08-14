@@ -50,60 +50,80 @@ pub struct ProviderMetadata {
     pub id: &'static str,
     pub name: &'static str,
     pub base_url: &'static str,
+    /// Wire protocol used when the built-in provider supplies the endpoint.
+    pub default_api_protocol: LlmApiProtocol,
     pub env_vars: &'static [&'static str],
     pub default_models: &'static [&'static str],
     pub requires_api_key: bool,
 }
 
+const DEEPSEEK_METADATA: ProviderMetadata = ProviderMetadata {
+    id: "deepseek",
+    name: "DeepSeek",
+    base_url: provider_urls::DEEPSEEK,
+    default_api_protocol: LlmApiProtocol::ChatCompletions,
+    env_vars: &["DEEPSEEK_API_KEY"],
+    default_models: &["deepseek-v4-flash", "deepseek-v4-pro"],
+    requires_api_key: true,
+};
+
+const DASHSCOPE_METADATA: ProviderMetadata = ProviderMetadata {
+    id: "dashscope",
+    name: "通义千问",
+    base_url: provider_urls::DASHSCOPE,
+    default_api_protocol: LlmApiProtocol::ChatCompletions,
+    env_vars: &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
+    default_models: &["qwen3.7-max", "qwen3.6-plus"],
+    requires_api_key: true,
+};
+
+const OPENAI_METADATA: ProviderMetadata = ProviderMetadata {
+    id: "openai",
+    name: "OpenAI",
+    base_url: provider_urls::OPENAI,
+    default_api_protocol: LlmApiProtocol::Responses,
+    env_vars: &["OPENAI_API_KEY"],
+    default_models: &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+    requires_api_key: true,
+};
+
+const ANTHROPIC_METADATA: ProviderMetadata = ProviderMetadata {
+    id: "anthropic",
+    name: "Anthropic",
+    base_url: provider_urls::ANTHROPIC,
+    default_api_protocol: LlmApiProtocol::Anthropic,
+    env_vars: &["ANTHROPIC_API_KEY"],
+    default_models: &["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5"],
+    requires_api_key: true,
+};
+
+const MOONSHOT_METADATA: ProviderMetadata = ProviderMetadata {
+    id: "moonshot",
+    name: "Moonshot",
+    base_url: provider_urls::MOONSHOT,
+    default_api_protocol: LlmApiProtocol::ChatCompletions,
+    env_vars: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+    default_models: &["kimi-k2.7-code", "kimi-k2.6"],
+    requires_api_key: true,
+};
+
+const ZHIPU_METADATA: ProviderMetadata = ProviderMetadata {
+    id: "zhipu",
+    name: "智谱",
+    base_url: provider_urls::ZHIPU,
+    default_api_protocol: LlmApiProtocol::ChatCompletions,
+    env_vars: &["ZHIPU_API_KEY", "GLM_API_KEY"],
+    default_models: &["glm-5.2", "glm-5.1"],
+    requires_api_key: true,
+};
+
 pub const BUILTIN_PROVIDER_METADATA: &[ProviderMetadata] = &[
-    ProviderMetadata {
-        id: "deepseek",
-        name: "DeepSeek",
-        base_url: provider_urls::DEEPSEEK,
-        env_vars: &["DEEPSEEK_API_KEY"],
-        default_models: &["deepseek-v4-flash", "deepseek-v4-pro"],
-        requires_api_key: true,
-    },
-    ProviderMetadata {
-        id: "dashscope",
-        name: "通义千问",
-        base_url: provider_urls::DASHSCOPE,
-        env_vars: &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
-        default_models: &["qwen3.7-max", "qwen3.6-plus"],
-        requires_api_key: true,
-    },
-    ProviderMetadata {
-        id: "openai",
-        name: "OpenAI",
-        base_url: provider_urls::OPENAI,
-        env_vars: &["OPENAI_API_KEY"],
-        default_models: &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-        requires_api_key: true,
-    },
-    ProviderMetadata {
-        id: "anthropic",
-        name: "Anthropic",
-        base_url: provider_urls::ANTHROPIC,
-        env_vars: &["ANTHROPIC_API_KEY"],
-        default_models: &["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5"],
-        requires_api_key: true,
-    },
-    ProviderMetadata {
-        id: "moonshot",
-        name: "Moonshot",
-        base_url: provider_urls::MOONSHOT,
-        env_vars: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
-        default_models: &["kimi-k2.7-code", "kimi-k2.6"],
-        requires_api_key: true,
-    },
-    ProviderMetadata {
-        id: "zhipu",
-        name: "智谱",
-        base_url: provider_urls::ZHIPU,
-        env_vars: &["ZHIPU_API_KEY", "GLM_API_KEY"],
-        default_models: &["glm-5.2", "glm-5.1"],
-        requires_api_key: true,
-    },
+    DEEPSEEK_METADATA,
+    DASHSCOPE_METADATA,
+    OPENAI_METADATA,
+    ANTHROPIC_METADATA,
+    MOONSHOT_METADATA,
+    ZHIPU_METADATA,
 ];
 
 pub fn all_provider_metadata() -> &'static [ProviderMetadata] {
@@ -255,9 +275,9 @@ impl LlmConfig {
     pub fn openai(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
-            provider_name: Some("openai".to_string()),
-            api_protocol: LlmApiProtocol::Responses,
-            base_url: provider_urls::OPENAI.to_string(),
+            provider_name: Some(OPENAI_METADATA.id.to_string()),
+            api_protocol: OPENAI_METADATA.default_api_protocol,
+            base_url: OPENAI_METADATA.base_url.to_string(),
             api_key: api_key.into(),
             model: model.into(),
             thinking: None,
@@ -268,9 +288,9 @@ impl LlmConfig {
     pub fn anthropic(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::Anthropic,
-            provider_name: Some("anthropic".to_string()),
-            api_protocol: LlmApiProtocol::Anthropic,
-            base_url: provider_urls::ANTHROPIC.to_string(),
+            provider_name: Some(ANTHROPIC_METADATA.id.to_string()),
+            api_protocol: ANTHROPIC_METADATA.default_api_protocol,
+            base_url: ANTHROPIC_METADATA.base_url.to_string(),
             api_key: api_key.into(),
             model: model.into(),
             thinking: None,
@@ -281,9 +301,9 @@ impl LlmConfig {
     pub fn deepseek(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
-            provider_name: Some("deepseek".to_string()),
-            api_protocol: LlmApiProtocol::ChatCompletions,
-            base_url: provider_urls::DEEPSEEK.to_string(),
+            provider_name: Some(DEEPSEEK_METADATA.id.to_string()),
+            api_protocol: DEEPSEEK_METADATA.default_api_protocol,
+            base_url: DEEPSEEK_METADATA.base_url.to_string(),
             api_key: api_key.into(),
             model: model.into(),
             thinking: None,
@@ -294,9 +314,9 @@ impl LlmConfig {
     pub fn dashscope(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
-            provider_name: Some("dashscope".to_string()),
-            api_protocol: LlmApiProtocol::ChatCompletions,
-            base_url: provider_urls::DASHSCOPE.to_string(),
+            provider_name: Some(DASHSCOPE_METADATA.id.to_string()),
+            api_protocol: DASHSCOPE_METADATA.default_api_protocol,
+            base_url: DASHSCOPE_METADATA.base_url.to_string(),
             api_key: api_key.into(),
             model: model.into(),
             thinking: None,
@@ -414,7 +434,7 @@ impl ProviderFactory {
         provider: &str,
         model: &str,
     ) -> Result<Box<dyn echo_core::llm::LlmClient>> {
-        let base_url = provider_base_url(provider).ok_or_else(|| {
+        let metadata = provider_metadata(provider).ok_or_else(|| {
             ConfigError::ConfigFileError(format!(
                 "未知的 provider: '{provider}'，\
                  支持: openai, anthropic, deepseek, dashscope, moonshot, zhipu"
@@ -437,12 +457,8 @@ impl ProviderFactory {
         let config = LlmConfig {
             provider: llm_provider,
             provider_name: Some(provider.to_string()),
-            api_protocol: match provider.to_ascii_lowercase().as_str() {
-                "openai" => LlmApiProtocol::Responses,
-                "anthropic" => LlmApiProtocol::Anthropic,
-                _ => LlmApiProtocol::ChatCompletions,
-            },
-            base_url: base_url.to_string(),
+            api_protocol: metadata.default_api_protocol,
+            base_url: metadata.base_url.to_string(),
             api_key,
             model: model.to_string(),
             thinking: None,
@@ -452,16 +468,9 @@ impl ProviderFactory {
 
     /// 根据 provider 名称获取对应的环境变量 API key
     fn env_api_key(provider: &str) -> String {
-        let env_vars: &[&str] = match provider.to_lowercase().as_str() {
-            "anthropic" => &["ANTHROPIC_API_KEY"],
-            "openai" => &["OPENAI_API_KEY"],
-            "deepseek" => &["DEEPSEEK_API_KEY"],
-            "dashscope" | "qwen" | "aliyun" => &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
-            "moonshot" | "kimi" => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
-            "zhipu" | "glm" => &["ZHIPU_API_KEY", "GLM_API_KEY"],
-            _ => return String::new(),
-        };
-        first_present_env(env_vars).unwrap_or_default()
+        provider_metadata(provider)
+            .and_then(|metadata| first_present_env(metadata.env_vars))
+            .unwrap_or_default()
     }
 
     /// 列出所有支持的 provider 名称
@@ -484,17 +493,7 @@ impl ProviderFactory {
 
 /// 已知 Provider 的默认 base_url 映射
 pub fn provider_base_url(provider: &str) -> Option<&'static str> {
-    match provider.to_lowercase().as_str() {
-        "openai" => Some(provider_urls::OPENAI),
-        "anthropic" => Some(provider_urls::ANTHROPIC),
-        "deepseek" => Some(provider_urls::DEEPSEEK),
-        "dashscope" | "qwen" | "aliyun" => {
-            Some("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
-        }
-        "moonshot" | "kimi" => Some("https://api.moonshot.cn/v1/chat/completions"),
-        "zhipu" | "glm" => Some("https://open.bigmodel.cn/api/paas/v4/chat/completions"),
-        _ => None,
-    }
+    provider_metadata(provider).map(|metadata| metadata.base_url)
 }
 
 /// 从 provider 字符串解析 [`LlmProvider`] 枚举
@@ -563,7 +562,7 @@ struct ModelEntry {
     /// 内置 Provider 名称（如 "openai"、"deepseek"），自动填充 base_url
     #[serde(default)]
     provider: Option<String>,
-    /// HTTP wire protocol. Inferred from the endpoint when omitted.
+    /// HTTP wire protocol. Uses provider metadata or endpoint inference when omitted.
     #[serde(default)]
     api_protocol: Option<LlmApiProtocol>,
 }
@@ -825,21 +824,25 @@ impl Config {
                 Option<String>,
                 LlmApiProtocol,
             )> = (|| {
+                let resolved_provider = entry.provider.as_deref().map(resolve_env_ref);
+                let builtin_provider = resolved_provider.as_deref().and_then(provider_metadata);
+                if let (None, Some(provider), None) = (
+                    entry.base_url.as_deref(),
+                    resolved_provider.as_deref(),
+                    builtin_provider,
+                ) {
+                    return Err(ConfigError::ConfigFileError(format!(
+                        "模型 '{}' 指定了未知的 provider: '{}'，\
+                         支持的 provider: openai, anthropic, deepseek, dashscope, moonshot, zhipu",
+                        key, provider
+                    ))
+                    .into());
+                }
+
                 // 解析 base_url：显式指定 > provider 快捷方式
-                let base_url = match (entry.base_url.as_deref(), entry.provider.as_deref()) {
+                let base_url = match (entry.base_url.as_deref(), builtin_provider) {
                     (Some(url), _) => resolve_env_ref(url),
-                    (None, Some(provider)) => {
-                        let resolved_provider = resolve_env_ref(provider);
-                        provider_base_url(&resolved_provider)
-                            .ok_or_else(|| {
-                                ConfigError::ConfigFileError(format!(
-                                    "模型 '{}' 指定了未知的 provider: '{}'，\
-                                     支持的 provider: openai, anthropic, deepseek, dashscope, moonshot, zhipu",
-                                    key, resolved_provider
-                                ))
-                            })?
-                            .to_string()
-                    }
+                    (None, Some(metadata)) => metadata.base_url.to_string(),
                     (None, None) => {
                         return Err(ConfigError::MissingConfig(
                             key.clone(),
@@ -862,9 +865,8 @@ impl Config {
                     .unwrap_or_else(|| key.clone());
 
                 // 确定 provider：显式指定 > 从 base_url 推断
-                let (provider, provider_name) = match entry.provider.as_deref() {
-                    Some(p) => {
-                        let raw = resolve_env_ref(p);
+                let (provider, provider_name) = match resolved_provider {
+                    Some(raw) => {
                         let parsed = parse_provider(&raw);
                         (parsed, Some(raw))
                     }
@@ -874,10 +876,12 @@ impl Config {
                     }
                 };
                 let api_protocol = entry.api_protocol.unwrap_or_else(|| {
-                    match (provider_name.as_deref(), entry.base_url.is_none()) {
-                        (Some("openai"), true) => LlmApiProtocol::Responses,
-                        (Some("anthropic"), true) => LlmApiProtocol::Anthropic,
-                        _ => LlmApiProtocol::from_endpoint(&base_url),
+                    if entry.base_url.is_some() {
+                        LlmApiProtocol::from_endpoint(&base_url)
+                    } else {
+                        builtin_provider
+                            .map(|metadata| metadata.default_api_protocol)
+                            .unwrap_or_else(|| LlmApiProtocol::from_endpoint(&base_url))
                     }
                 });
                 Ok((
@@ -992,15 +996,7 @@ impl Config {
         // If so, give a specific error about the missing env var rather than
         // falling through to "未找到模型配置文件".
         if let Some((provider, _)) = infer_builtin_provider(model) {
-            let env_vars = match provider {
-                "openai" => "OPENAI_API_KEY",
-                "anthropic" => "ANTHROPIC_API_KEY",
-                "deepseek" => "DEEPSEEK_API_KEY",
-                "qwen" | "dashscope" | "aliyun" => "DASHSCOPE_API_KEY",
-                "moonshot" | "kimi" => "MOONSHOT_API_KEY",
-                "zhipu" | "glm" => "ZHIPU_API_KEY",
-                _ => "",
-            };
+            let env_vars = provider_env_var_names(provider).join(" / ");
             if !env_vars.is_empty() {
                 // The model is recognized but the env var is missing/empty.
                 // Still try YAML as fallback, but if that also fails, give
@@ -1111,7 +1107,7 @@ impl Config {
 
 fn builtin_model_config(model: &str) -> Option<ModelConfig> {
     let (provider, model_name) = infer_builtin_provider(model)?;
-    let baseurl = provider_base_url(provider)?.to_string();
+    let metadata = provider_metadata(provider)?;
     let apikey = ProviderFactory::env_api_key(provider);
 
     if apikey.trim().is_empty() {
@@ -1120,15 +1116,11 @@ fn builtin_model_config(model: &str) -> Option<ModelConfig> {
 
     Some(ModelConfig {
         model: model_name,
-        baseurl,
+        baseurl: metadata.base_url.to_string(),
         apikey,
         provider: parse_provider(provider),
         provider_name: Some(provider.to_string()),
-        api_protocol: match provider.to_ascii_lowercase().as_str() {
-            "openai" => LlmApiProtocol::Responses,
-            "anthropic" => LlmApiProtocol::Anthropic,
-            _ => LlmApiProtocol::ChatCompletions,
-        },
+        api_protocol: metadata.default_api_protocol,
         thinking: None,
     })
 }
@@ -1252,15 +1244,9 @@ fn fallback_env_alias(var_name: &str) -> Option<&'static str> {
 }
 
 pub fn provider_env_var_names(provider: &str) -> &'static [&'static str] {
-    match provider.to_lowercase().as_str() {
-        "anthropic" => &["ANTHROPIC_API_KEY"],
-        "openai" => &["OPENAI_API_KEY"],
-        "deepseek" => &["DEEPSEEK_API_KEY"],
-        "dashscope" | "qwen" | "aliyun" => &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
-        "moonshot" | "kimi" => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
-        "zhipu" | "glm" => &["ZHIPU_API_KEY", "GLM_API_KEY"],
-        _ => &[],
-    }
+    provider_metadata(provider)
+        .map(|metadata| metadata.env_vars)
+        .unwrap_or(&[])
 }
 
 fn ensure_resolved_api_key(
@@ -1377,6 +1363,7 @@ mod tests {
         let config = LlmConfig::openai("sk-test", "gpt-5.5");
         assert!(config.base_url.contains("openai.com"));
         assert_eq!(config.model, "gpt-5.5");
+        assert_eq!(config.api_protocol, LlmApiProtocol::Responses);
     }
 
     #[test]
@@ -1384,6 +1371,7 @@ mod tests {
         let config = LlmConfig::deepseek("sk-test", "deepseek-v4-flash");
         assert!(config.base_url.contains("deepseek.com"));
         assert_eq!(config.model, "deepseek-v4-flash");
+        assert_eq!(config.api_protocol, LlmApiProtocol::ChatCompletions);
     }
 
     #[test]
@@ -1391,6 +1379,7 @@ mod tests {
         let config = LlmConfig::dashscope("sk-test", "qwen3-max");
         assert!(config.base_url.contains("dashscope.aliyuncs.com"));
         assert_eq!(config.model, "qwen3-max");
+        assert_eq!(config.api_protocol, LlmApiProtocol::ChatCompletions);
     }
 
     #[test]
@@ -1409,6 +1398,97 @@ mod tests {
         assert!(provider_base_url("dashscope").is_some());
         assert!(provider_base_url("qwen").is_some());
         assert!(provider_base_url("unknown_provider").is_none());
+    }
+
+    #[test]
+    fn test_provider_metadata_aliases_preserve_canonical_default_protocol() {
+        let expectations = [
+            ("openai", LlmApiProtocol::Responses),
+            ("anthropic", LlmApiProtocol::Anthropic),
+            ("deepseek", LlmApiProtocol::ChatCompletions),
+            ("dashscope", LlmApiProtocol::ChatCompletions),
+            ("qwen", LlmApiProtocol::ChatCompletions),
+            ("aliyun", LlmApiProtocol::ChatCompletions),
+            ("moonshot", LlmApiProtocol::ChatCompletions),
+            ("kimi", LlmApiProtocol::ChatCompletions),
+            ("zhipu", LlmApiProtocol::ChatCompletions),
+            ("glm", LlmApiProtocol::ChatCompletions),
+        ];
+
+        for (provider, expected) in expectations {
+            assert_eq!(
+                provider_metadata(provider).map(|metadata| metadata.default_api_protocol),
+                Some(expected),
+                "unexpected default protocol for {provider}"
+            );
+        }
+        assert!(provider_metadata("unknown_provider").is_none());
+    }
+
+    #[test]
+    fn test_yaml_provider_defaults_and_custom_endpoint_protocols() -> std::result::Result<(), String>
+    {
+        let yaml = r#"
+models:
+  openai-default:
+    provider: openai
+    api_key: sk-openai
+  anthropic-default:
+    provider: anthropic
+    api_key: sk-anthropic
+  aliyun-alias:
+    provider: aliyun
+    api_key: sk-dashscope
+  custom-chat:
+    provider: custom-gateway
+    base_url: https://gateway.example/v1/chat/completions
+    api_key: sk-custom
+  explicit-override:
+    provider: deepseek
+    base_url: https://gateway.example/v1/chat/completions
+    api_protocol: responses
+    api_key: sk-override
+"#;
+        let file: ConfigFile = serde_yaml_ng::from_str(yaml).map_err(|error| error.to_string())?;
+        let config = Config::from_config_file_data(file).map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            config
+                .models
+                .get("openai-default")
+                .map(|model| model.api_protocol),
+            Some(LlmApiProtocol::Responses)
+        );
+        assert_eq!(
+            config
+                .models
+                .get("anthropic-default")
+                .map(|model| model.api_protocol),
+            Some(LlmApiProtocol::Anthropic)
+        );
+        assert_eq!(
+            config
+                .models
+                .get("aliyun-alias")
+                .map(|model| model.api_protocol),
+            Some(LlmApiProtocol::ChatCompletions)
+        );
+        assert_eq!(
+            config
+                .models
+                .get("custom-chat")
+                .map(|model| model.api_protocol),
+            Some(LlmApiProtocol::ChatCompletions)
+        );
+        assert_eq!(
+            config
+                .models
+                .get("explicit-override")
+                .map(|model| model.api_protocol),
+            Some(LlmApiProtocol::Responses)
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -1472,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_model_config_uses_qwen_alias() {
+    fn test_builtin_model_config_uses_qwen_alias() -> std::result::Result<(), String> {
         let _lock = env_test_lock();
         unsafe {
             std::env::remove_var("DASHSCOPE_API_KEY");
@@ -1480,14 +1560,16 @@ mod tests {
             std::env::remove_var("ECHO_AGENT_CONFIG");
         }
         let _guard = EnvGuard::set("QWEN_API_KEY", "qwen-builtin-key");
-        let config = Config::get_model("qwen3.6-plus").unwrap();
+        let config = Config::get_model("qwen3.6-plus").map_err(|error| error.to_string())?;
         assert_eq!(config.model, "qwen3.6-plus");
         assert_eq!(config.apikey, "qwen-builtin-key");
         assert!(config.baseurl.contains("dashscope.aliyuncs.com"));
+        assert_eq!(config.api_protocol, LlmApiProtocol::ChatCompletions);
+        Ok(())
     }
 
     #[test]
-    fn test_provider_prefixed_builtin_model_config() {
+    fn test_provider_prefixed_builtin_model_config() -> std::result::Result<(), String> {
         let _lock = env_test_lock();
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");
@@ -1495,10 +1577,12 @@ mod tests {
             std::env::remove_var("ECHO_AGENT_CONFIG");
         }
         let _guard = EnvGuard::set("OPENAI_API_KEY", "openai-builtin-key");
-        let config = Config::get_model("openai:gpt-5.5").unwrap();
+        let config = Config::get_model("openai:gpt-5.5").map_err(|error| error.to_string())?;
         assert_eq!(config.model, "gpt-5.5");
         assert_eq!(config.apikey, "openai-builtin-key");
         assert!(config.baseurl.contains("api.openai.com"));
+        assert_eq!(config.api_protocol, LlmApiProtocol::Responses);
+        Ok(())
     }
 
     #[test]
