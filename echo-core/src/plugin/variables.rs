@@ -10,6 +10,10 @@
 //! | `${ECHO_PROJECT_DIR}` | Project root directory |
 //!
 //! Environment variables from the OS (`${ENV_VAR}`) are also substituted.
+//!
+//! Agent Plugins 1.0 MCP uses a narrower portable contract: `PLUGIN_ROOT` and
+//! `PLUGIN_DATA` are provided by the strict `mcp.json` adapter and expanded
+//! only in the standard-defined stdio fields.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

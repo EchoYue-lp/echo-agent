@@ -130,7 +130,7 @@ impl SkillLoader {
                     );
                     continue;
                 }
-                let found = self.scan_directory(&dir, 0).await?;
+                let found = self.scan_directory(&dir, 0, true).await?;
                 for (desc, legacy_instr) in found {
                     if self
                         .policy
@@ -171,6 +171,53 @@ impl SkillLoader {
         Ok(results)
     }
 
+    /// Discover Agent Plugin Skills from immediate child directories only.
+    ///
+    /// Agent Plugins 1.0 fixes the component at `skills/<name>/SKILL.md` and
+    /// does not recursively search category directories.
+    pub async fn discover_agent_plugin_skills(
+        &mut self,
+        dir: impl Into<PathBuf>,
+    ) -> Result<Vec<SkillDescriptor>> {
+        let dir = dir.into();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let found = self.scan_directory(&dir, 0, false).await?;
+        let mut results = Vec::new();
+        for (desc, legacy_instr) in found {
+            if self
+                .policy
+                .as_ref()
+                .is_some_and(|policy| !policy.allows(&desc))
+            {
+                info!(
+                    skill = %desc.name,
+                    path = %desc.location.display(),
+                    "Skill excluded by load policy"
+                );
+                continue;
+            }
+            if let Some(existing) = self.descriptors.get(&desc.name) {
+                warn!(
+                    "Skill '{}' at '{}' shadowed by existing at '{}'",
+                    desc.name,
+                    desc.location.display(),
+                    existing.location.display()
+                );
+                continue;
+            }
+            if !legacy_instr.is_empty() {
+                self.legacy_instructions
+                    .insert(desc.name.clone(), legacy_instr);
+            }
+            self.descriptors.insert(desc.name.clone(), desc.clone());
+            results.push(desc);
+        }
+        validate_and_sort_dependencies(&results);
+        Ok(results)
+    }
+
     /// Convenience: discover from a single directory path (backward-compatible).
     pub async fn discover_from_dir(
         &mut self,
@@ -184,6 +231,7 @@ impl SkillLoader {
         &self,
         dir: &Path,
         depth: usize,
+        recursive: bool,
     ) -> Result<Vec<(SkillDescriptor, String)>> {
         if depth > MAX_SCAN_DEPTH {
             return Ok(vec![]);
@@ -275,13 +323,13 @@ impl SkillLoader {
                         );
                     }
                 }
-            } else {
+            } else if recursive {
                 // No SKILL.md in this direct subdir: recurse into it to support
                 // nested category layouts (skills/<category>/<name>/SKILL.md).
                 // Without this, only flat skills/<name>/SKILL.md would be found.
                 // MAX_SCAN_DEPTH caps recursion to avoid infinite loops / huge trees.
                 // Box::pin because async fn cannot recurse directly (Rust constraint).
-                let nested = Box::pin(self.scan_directory(&path, depth + 1)).await?;
+                let nested = Box::pin(self.scan_directory(&path, depth + 1, true)).await?;
                 found.extend(nested);
             }
         }
@@ -584,7 +632,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_frontmatter_standard() {
+    fn test_parse_frontmatter_standard() -> std::result::Result<(), String> {
         let content = r#"---
 name: pdf-processing
 description: Extract PDF text, fill forms, merge files. Use when handling PDFs.
@@ -598,14 +646,15 @@ metadata:
 
 Instructions here.
 "#;
-        let raw = parse_frontmatter(content).unwrap();
+        let raw = parse_frontmatter(content).map_err(|error| error.to_string())?;
         assert_eq!(raw.name, "pdf-processing");
         assert_eq!(raw.license, Some("Apache-2.0".into()));
         assert!(!raw.is_legacy_format());
+        Ok(())
     }
 
     #[test]
-    fn test_parse_frontmatter_legacy() {
+    fn test_parse_frontmatter_legacy() -> std::result::Result<(), String> {
         let content = r#"---
 name: code_review
 version: "1.0.0"
@@ -620,17 +669,19 @@ resources:
     description: "Review checklist"
 ---
 "#;
-        let raw = parse_frontmatter(content).unwrap();
+        let raw = parse_frontmatter(content).map_err(|error| error.to_string())?;
         assert_eq!(raw.name, "code_review");
         assert!(raw.is_legacy_format());
         assert!(raw.instructions.is_some());
+        Ok(())
     }
 
     #[test]
-    fn test_parse_frontmatter_missing_description() {
+    fn test_parse_frontmatter_missing_description() -> std::result::Result<(), String> {
         let content = "---\nname: test\ndescription: \"\"\n---\n";
-        let raw = parse_frontmatter(content).unwrap();
+        let raw = parse_frontmatter(content).map_err(|error| error.to_string())?;
         assert!(raw.description.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -663,7 +714,8 @@ resources:
     /// 验证 scan_directory 递归:嵌套布局 skills/<category>/<name>/SKILL.md
     /// 必须能被发现(B2 修复前只能找到扁平 skills/<name>/SKILL.md)。
     #[tokio::test]
-    async fn scan_directory_finds_nested_category_skills() {
+    async fn scan_directory_finds_nested_category_skills()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         // 用 std 临时目录避免为单个测试增加 dev-dependency。用进程 id + 原子计数
         // 保证唯一,测试结束清理。
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -689,32 +741,29 @@ resources:
 
         // 扁平技能(直接 root/<name>/SKILL.md)
         let flat = root.join("coding");
-        std::fs::create_dir_all(&flat).unwrap();
+        std::fs::create_dir_all(&flat)?;
         std::fs::write(
             flat.join("SKILL.md"),
             "---\nname: coding\ndescription: flat skill\n---\nbody",
-        )
-        .unwrap();
+        )?;
 
         // 嵌套技能(root/<category>/<name>/SKILL.md)——B2 修复前扫不到
         let nested = root.join("methodology").join("brainstorming");
-        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&nested)?;
         std::fs::write(
             nested.join("SKILL.md"),
             "---\nname: brainstorming\ndescription: nested skill\n---\nbody",
-        )
-        .unwrap();
+        )?;
         // 第二个嵌套,确保多个都能扫到
         let nested2 = root.join("methodology").join("writing-plans");
-        std::fs::create_dir_all(&nested2).unwrap();
+        std::fs::create_dir_all(&nested2)?;
         std::fs::write(
             nested2.join("SKILL.md"),
             "---\nname: writing-plans\ndescription: nested skill 2\n---\nbody",
-        )
-        .unwrap();
+        )?;
 
         let mut loader = SkillLoader::new();
-        let descs = loader.discover_from_dir(root.clone()).await.unwrap();
+        let descs = loader.discover_from_dir(root.clone()).await?;
 
         let names: Vec<String> = descs.iter().map(|d| d.name.clone()).collect();
         assert!(
@@ -733,6 +782,7 @@ resources:
             names
         );
         assert_eq!(descs.len(), 3, "expected 3 skills (1 flat + 2 nested)");
+        Ok(())
     }
 
     #[tokio::test]
@@ -768,6 +818,43 @@ resources:
         assert_eq!(
             descriptors.first().map(|value| value.name.as_str()),
             Some("allowed")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_plugin_discovery_uses_only_immediate_children()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("echo_agent_plugin_skills_{}", uuid::Uuid::new_v4()));
+        struct Guard(std::path::PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = Guard(root.clone());
+        let direct = root.join("direct");
+        let nested = root.join("category/nested");
+        std::fs::create_dir_all(&direct)?;
+        std::fs::create_dir_all(&nested)?;
+        std::fs::write(
+            direct.join("SKILL.md"),
+            "---\nname: direct\ndescription: direct skill\n---\nbody",
+        )?;
+        std::fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: nested\ndescription: nested skill\n---\nbody",
+        )?;
+
+        let mut loader = SkillLoader::new();
+        let descriptors = loader.discover_agent_plugin_skills(&root).await?;
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            descriptors
+                .first()
+                .map(|descriptor| descriptor.name.as_str()),
+            Some("direct")
         );
         Ok(())
     }
@@ -831,8 +918,11 @@ resources:
     fn test_scope_to_dirs_project() {
         let dirs = scope_to_dirs(&DiscoveryScope::Project(PathBuf::from("/my/project")));
         assert_eq!(dirs.len(), 2);
-        assert_eq!(dirs[0], PathBuf::from("/my/project/skills"));
-        assert_eq!(dirs[1], PathBuf::from("/my/project/.agents/skills"));
+        assert_eq!(dirs.first(), Some(&PathBuf::from("/my/project/skills")));
+        assert_eq!(
+            dirs.get(1),
+            Some(&PathBuf::from("/my/project/.agents/skills"))
+        );
     }
 
     #[test]
@@ -842,10 +932,11 @@ resources:
     }
 
     #[test]
-    fn test_allowed_tools_string() {
+    fn test_allowed_tools_string() -> std::result::Result<(), String> {
         let content = "---\nname: test\ndescription: Test\nallowed-tools: Bash(git:*) Read\n---\n";
-        let raw = parse_frontmatter(content).unwrap();
+        let raw = parse_frontmatter(content).map_err(|error| error.to_string())?;
         let desc = raw.into_descriptor(PathBuf::from("/test/SKILL.md"));
         assert_eq!(desc.allowed_tools, vec!["Bash(git:*)", "Read"]);
+        Ok(())
     }
 }

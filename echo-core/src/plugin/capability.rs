@@ -29,9 +29,9 @@ pub enum PluginCapability {
     Skill,
     /// Hook definitions (hooks.yaml) — registered with `HookRegistry`.
     Hook,
-    /// MCP server configurations (.mcp.json) — connected via `McpManager`.
+    /// MCP server configurations (`mcp.json`) — connected via `McpManager`.
     McpServer,
-    /// LSP server configurations (.lsp.yaml) — started via `LspManager`.
+    /// LSP server configurations — started via `LspManager`.
     LspServer,
     /// Agent definition files (agents/*.md) — registered with `SubagentRegistry`.
     Agent,

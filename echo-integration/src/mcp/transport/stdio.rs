@@ -34,18 +34,22 @@ impl StdioTransport {
     ///
     /// # 安全模型
     ///
-    /// MCP 服务端是任意外部进程，`command`/`args`/`env` 来自 `mcp.json`（项目本地
-    /// 配置文件）。本函数做基础校验（拒绝空命令、以 `-` 开头的参数注入、危险元字符），
-    /// 但**不**做可执行文件白名单——因为合法服务端可能是 `npx`、`uvx`、`python -m …` 等任意解释器。
-    ///
-    /// 调用方（应用层）应：从可信目录加载 `mcp.json`，并在首次连接每个服务端时
-    /// 要求人工确认（`PermissionService`）。
-    pub async fn new(command: &str, args: &[String], env: &[(String, String)]) -> Result<Self> {
-        validate_mcp_command(command, args)?;
+    /// MCP servers are user-selected local extensions. This transport checks
+    /// only framework invariants; product policy remains application-owned.
+    pub async fn new(
+        command: &str,
+        args: &[String],
+        env: &[(String, String)],
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        validate_mcp_command(command)?;
         let mut cmd = Command::new(command);
         cmd.args(args);
         for (k, v) in env {
             cmd.env(k, v);
+        }
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
         }
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
@@ -283,61 +287,14 @@ impl Drop for StdioTransport {
 
 /// Validate the command used to spawn an MCP server.
 ///
-/// Defense-in-depth against a malicious `mcp.json`: rejects empty commands,
-/// argument injection (args starting with `-`, which could become flags to
-/// the spawned binary), and obvious shell-meta abuse. This does **not**
-/// whitelist executables — MCP servers are legitimately arbitrary
-/// interpreters (`npx`, `uvx`, `python -m …`); the real trust boundary is
-/// "where did this mcp.json come from", enforced by the caller.
-fn validate_mcp_command(command: &str, args: &[String]) -> Result<()> {
+/// Commands are executed directly without a shell, so only an empty command
+/// is a framework error. Users remain responsible for extensions they load.
+fn validate_mcp_command(command: &str) -> Result<()> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
             "MCP server command is empty".to_string(),
         ))));
-    }
-
-    // Reject a bare shell as the command — that turns every arg into a shell
-    // script and bypasses any argv-level control. Legitimate servers invoke a
-    // real interpreter binary directly.
-    let basename = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
-    if matches!(
-        basename,
-        "sh" | "bash" | "zsh" | "fish" | "dash" | "cmd" | "powershell" | "pwsh"
-    ) {
-        tracing::warn!(
-            command = %command,
-            "MCP server uses a bare shell as its command; this allows arbitrary shell \
-             execution from mcp.json and is strongly discouraged"
-        );
-    }
-
-    // Argument-injection guard: block options that are known to enable
-    // arbitrary-code execution or credential exfiltration when passed to
-    // certain binaries (e.g. `--upload-pack=` to git-over-ssh, ssh `-o`
-    // proxy commands). Normal interpreter flags (`-y`, `-m`) are allowed
-    // because they are the standard way to launch MCP servers.
-    const DANGEROUS_ARG_PREFIXES: &[&str] = &["--upload-pack", "--config"];
-    for arg in args {
-        let lower = arg.to_lowercase();
-        if lower.starts_with("--upload-pack") || lower.starts_with("-o") {
-            return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
-                format!(
-                    "MCP server argument '{arg}' may enable arbitrary command execution \
-                     (git/ssh option injection) and is rejected",
-                ),
-            ))));
-        }
-        for prefix in DANGEROUS_ARG_PREFIXES {
-            if lower.starts_with(prefix) {
-                return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
-                    format!(
-                        "MCP server argument '{arg}' matches a dangerous option prefix \
-                         ('{prefix}') and is rejected",
-                    ),
-                ))));
-            }
-        }
     }
 
     Ok(())
@@ -349,31 +306,13 @@ mod tests {
 
     #[test]
     fn rejects_empty_command() {
-        assert!(validate_mcp_command("   ", &[]).is_err());
+        assert!(validate_mcp_command("   ").is_err());
     }
 
     #[test]
-    fn rejects_dangerous_option_injection() {
-        // git-over-ssh upload-pack injection
-        assert!(validate_mcp_command("git", &["--upload-pack=evil".into()]).is_err());
-        // ssh -o ProxyCommand injection
-        assert!(validate_mcp_command("ssh", &["-o".into(), "ProxyCommand=evil".into()]).is_err());
-    }
-
-    #[test]
-    fn accepts_legitimate_interpreter_flags() {
-        // These are the standard ways real MCP servers are launched.
-        assert!(
-            validate_mcp_command("npx", &["-y".into(), "@modelcontextprotocol/server".into()])
-                .is_ok()
-        );
-        assert!(validate_mcp_command("python", &["-m".into(), "mcp_server".into()]).is_ok());
-        assert!(validate_mcp_command("node", &["server.js".into()]).is_ok());
-    }
-
-    #[test]
-    fn accepts_plain_command_and_paths() {
-        assert!(validate_mcp_command("/usr/local/bin/my-mcp-server", &[]).is_ok());
-        assert!(validate_mcp_command("uvx", &["mcp-server".into()]).is_ok());
+    fn accepts_user_selected_commands() {
+        assert!(validate_mcp_command("npx").is_ok());
+        assert!(validate_mcp_command("/usr/local/bin/my-mcp-server").is_ok());
+        assert!(validate_mcp_command("sh").is_ok());
     }
 }

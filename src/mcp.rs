@@ -9,8 +9,8 @@ pub mod integration {
 }
 
 pub use echo_integration::mcp::{
-    McpClient, McpConfigFile, McpManager, McpServer, McpServerConfig, McpServerEntry,
-    McpToolAdapter, TransportConfig,
+    AGENT_PLUGIN_MCP_SCHEMA_V1, AgentPluginMcpLoad, McpClient, McpConfigFile, McpManager,
+    McpServer, McpServerConfig, McpServerEntry, McpToolAdapter, TransportConfig,
 };
 pub use echo_integration::mcp::{
     McpContent, McpPrompt, McpPromptGetResult, McpResource, McpResourceReadResult, McpTool,

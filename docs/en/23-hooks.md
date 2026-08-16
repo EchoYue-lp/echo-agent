@@ -63,7 +63,7 @@ are runtime events rather than reserved enum values.
 | `permission` | Return a permission decision directly (allow/deny/ask) |
 | `http` | POST event data to a URL, parse response |
 | `mcp_tool` | Call an MCP server tool |
-| `agent` | Dispatch a named subagent for the hook action |
+| `subagent` | Dispatch a named subagent through the agent's registered Subagent runtime |
 | `activate_skill` | Activate a discovered skill directly, without an LLM round trip |
 
 ### YAML Configuration
@@ -99,6 +99,12 @@ hooks:
       hooks:
         - type: permission
           decision: "allow"
+  StopFailure:
+    - hooks:
+        - type: subagent
+          name: incident-reviewer
+          task: "Summarize the failure and propose recovery steps"
+          timeout: 900
 ```
 
 ### Matcher Patterns
@@ -135,6 +141,23 @@ The command's stdout is parsed as a `HookResult`:
 }
 ```
 
+Plugin command hooks also receive `PLUGIN_ROOT` and `PLUGIN_DATA`. For
+compatibility with existing plugin packages, the same values are available as
+`CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA` and
+`ECHO_PLUGIN_ROOT` / `ECHO_PLUGIN_DATA`. Paths are passed through the process
+environment rather than interpolated into shell source, so spaces and shell
+characters in an installation path remain valid.
+
+Exit code `2` blocks the operation and uses stderr as the user-facing reason.
+Other non-zero exits remain non-blocking but are surfaced in HookResult messages
+instead of disappearing into logs.
+
+For portable plugin reuse, EKO also accepts Codex-style `systemMessage` and
+`hookSpecificOutput` fields: `additionalContext`, `permissionDecision`,
+`permissionDecisionReason`, `updatedInput`, and the PermissionRequest
+`decision.behavior` object. Model-visible text is UTF-8-safely bounded before
+it is merged into context.
+
 These are the canonical wire names; `modified_input`, `message`, and
 `permission_mode` are not aliases. `permission_mode_override` may be returned
 by `PreToolUse` or `PermissionRequest`. It applies only to that tool call and is
@@ -160,9 +183,9 @@ source/action list without executing side effects.
 
 | Limit | Value | Purpose |
 |-------|-------|---------|
-| Default timeout | 10 seconds | Prevents hanging hooks |
-| Max timeout | 300 seconds | Hard upper bound |
-| Max command length | 32 KB | Prevents abuse via malformed YAML |
+| Default timeout | 600 seconds | Supports real command, MCP, HTTP, and Subagent work |
+| Max timeout | 3600 seconds | Bounds accidentally unending hooks |
+| Max command length | 32K characters | Rejects obviously malformed YAML |
 | Sandbox execution | Optional | Hooks can run inside sandbox |
 
 EKO is a local, user-controlled application. Hook HTTP actions therefore allow

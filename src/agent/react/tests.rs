@@ -19,6 +19,48 @@ use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "subagent")]
+#[tokio::test]
+async fn react_agent_initializes_subagent_hook_executor() {
+    let agent = ReactAgent::new(AgentConfig::new("test-model", "main", "sys"));
+    let mut definition = HooksDefinition::default();
+    definition.add_rules(
+        HookEvent::SessionStart,
+        vec![HookRule {
+            matcher: "startup".to_string(),
+            hooks: vec![HookAction::Subagent {
+                name: "missing-reviewer".to_string(),
+                task: Some("Review the change".to_string()),
+                timeout: 5,
+            }],
+        }],
+    );
+    {
+        let mut registry = agent.hook_registry().write().await;
+        registry.register_user_hooks(definition);
+    }
+    let registry = agent.hook_registry().read().await.clone();
+
+    let result = registry
+        .run_lifecycle_hooks(&crate::skills::hooks::HookContext::for_session_start(
+            "startup", "session", "main",
+        ))
+        .await;
+
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.contains("missing-reviewer"))
+    );
+    assert!(
+        result
+            .messages
+            .iter()
+            .all(|message| !message.contains("no subagent executor"))
+    );
+}
+
 // ── ReactAgent::reset() ───────────────────────────────────────────────────────
 
 /// reset() should clear all messages, keeping only the system prompt (1 message)

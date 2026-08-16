@@ -45,9 +45,12 @@ impl McpClient {
     /// 连接到 MCP 服务端，完成握手和能力发现后返回 `Arc<McpClient>`
     pub async fn new(config: McpServerConfig) -> Result<Arc<Self>> {
         let transport: Arc<dyn McpTransport> = match config.transport {
-            TransportConfig::Stdio { command, args, env } => {
-                Arc::new(StdioTransport::new(&command, &args, &env).await?)
-            }
+            TransportConfig::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => Arc::new(StdioTransport::new(&command, &args, &env, cwd.as_deref()).await?),
             TransportConfig::Http { base_url, headers } => {
                 Arc::new(HttpTransport::new(base_url, headers))
             }

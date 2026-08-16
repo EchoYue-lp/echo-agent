@@ -105,7 +105,7 @@ Task/Subagent 的取消与超时由对应终态事件的结构化 status 表达�
 | `permission` | 直接返回权限决策（allow/deny/ask） |
 | `http` | 向 URL 发送事件数据并解析响应 |
 | `mcp_tool` | 调用用户配置的 MCP 服务器工具 |
-| `agent` | 派发一个 subagent 处理该 hook 动作 |
+| `subagent` | 通过 Agent 已注册的 Subagent 运行时派发具名 Subagent |
 | `activate_skill` | 直接激活一个技能（不经 LLM），reason 作为系统说明呈现给模型 |
 
 ### Hook 来源（source identity）
@@ -153,6 +153,12 @@ hooks:
       hooks:
         - type: permission
           decision: "allow"
+  StopFailure:
+    - hooks:
+        - type: subagent
+          name: incident-reviewer
+          task: "总结失败原因并提出恢复步骤"
+          timeout: 900
 ```
 
 ### 匹配模式
@@ -193,6 +199,19 @@ Command Hook 通过 stdin 接收完整的 `HookContext` JSON（含 `hook_event_n
 
 退出码语义（对齐 Claude Code 约定）：`0`/`1` 不阻塞，`2` 显式阻塞，其它非零仅告警不阻塞。
 
+插件 Command Hook 还会收到 `PLUGIN_ROOT` 与 `PLUGIN_DATA`。为兼容已有插件包，
+相同值也通过 `CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA` 和
+`ECHO_PLUGIN_ROOT` / `ECHO_PLUGIN_DATA` 提供。路径通过进程环境传递，不再拼接进
+shell 源码，因此安装路径包含空格或 shell 特殊字符时仍可正常运行。
+
+退出码 `2` 会阻止操作，并把 stderr 作为面向用户的原因；其它非零退出仍不阻止，
+但会进入 HookResult 消息，不再只留在日志里。
+
+为复用可移植插件，EKO 也接受 Codex 风格的 `systemMessage` 与
+`hookSpecificOutput` 字段：`additionalContext`、`permissionDecision`、
+`permissionDecisionReason`、`updatedInput`，以及 PermissionRequest 的
+`decision.behavior` 对象。所有进入模型上下文的文本都会先进行 UTF-8 安全的长度限制。
+
 以上是规范 wire 字段名，`modified_input`、`message` 和 `permission_mode` 不是别名。
 `PreToolUse` 或 `PermissionRequest` 可以返回 `permission_mode_override`。该值只作用于
 当前工具调用，由主执行 Pipeline 传入权限服务，不会修改会话级权限模式，也不会污染
@@ -214,9 +233,9 @@ EKO 会合并 `echo-agent.yaml` 内嵌 Hooks、全局 `~/.eko/hooks.yaml` 和项
 
 | 限制 | 值 | 目的 |
 |------|-----|------|
-| 默认超时 | 10 秒 | 防止 Hook 挂起 |
-| 最大超时 | 300 秒 | 硬上限 |
-| 最大命令长度 | 32 KB | 防止畸形 YAML 滥用 |
+| 默认超时 | 600 秒 | 支持真实 Command、MCP、HTTP 与 Subagent 工作 |
+| 最大超时 | 3600 秒 | 限制意外不结束的 Hook |
+| 最大命令长度 | 32K 字符 | 拒绝明显畸形的 YAML |
 | 沙箱执行 | 可选 | Hook 可在沙箱内运行 |
 
 EKO 是用户本机上的可信个人助理。HTTP Hook 允许 loopback、私网和 link-local IP

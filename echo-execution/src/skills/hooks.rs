@@ -128,16 +128,16 @@ use crate::skills::minimal_hook_env_with_context;
 
 // ── Hook Action ────────────────────────────────────────────────────────
 
-/// Default timeout for hook commands (seconds).
+/// Default timeout for hook actions (seconds).
 const fn default_hook_timeout() -> u64 {
-    10
+    600
 }
 
 /// Maximum allowed hook timeout (seconds). Prevents accidental runaway hooks.
-const MAX_HOOK_TIMEOUT: u64 = 300;
+const MAX_HOOK_TIMEOUT: u64 = 3600;
 
-/// Maximum command string length (bytes). Rejects obviously malformed YAML early.
-const MAX_COMMAND_LENGTH: usize = 32 * 1024; // 32 KB
+/// Maximum command string length (Unicode scalar values).
+const MAX_COMMAND_CHARS: usize = 32 * 1024;
 
 /// A single hook action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,15 +185,12 @@ pub enum HookAction {
         timeout: u64,
     },
     /// Spawn a subagent to handle the hook action.
-    Agent {
-        /// Name of the agent to invoke.
+    Subagent {
+        /// Name of the subagent to invoke.
         name: String,
-        /// Task description to pass to the agent.
+        /// Task description to pass to the subagent.
         #[serde(default)]
         task: Option<String>,
-        /// Maximum number of iterations for the agent.
-        #[serde(default)]
-        max_iterations: Option<u32>,
         /// Timeout in seconds.
         #[serde(default = "default_hook_timeout")]
         timeout: u64,
@@ -222,11 +219,11 @@ impl HookAction {
                 if command.is_empty() {
                     return Err("Command hook has empty command string".into());
                 }
-                if command.len() > MAX_COMMAND_LENGTH {
+                let command_chars = command.chars().count();
+                if command_chars > MAX_COMMAND_CHARS {
                     return Err(format!(
-                        "Command hook exceeds max length ({} > {} bytes)",
-                        command.len(),
-                        MAX_COMMAND_LENGTH
+                        "Command hook exceeds max length ({} > {} characters)",
+                        command_chars, MAX_COMMAND_CHARS
                     ));
                 }
                 if *timeout > MAX_HOOK_TIMEOUT {
@@ -295,13 +292,13 @@ impl HookAction {
                     ));
                 }
             }
-            HookAction::Agent { name, timeout, .. } => {
+            HookAction::Subagent { name, timeout, .. } => {
                 if name.is_empty() {
-                    return Err("Agent hook has empty agent name".into());
+                    return Err("Subagent hook has empty subagent name".into());
                 }
                 if *timeout > MAX_HOOK_TIMEOUT {
                     return Err(format!(
-                        "Agent hook timeout {}s exceeds maximum {}s",
+                        "Subagent hook timeout {}s exceeds maximum {}s",
                         timeout, MAX_HOOK_TIMEOUT
                     ));
                 }
@@ -323,7 +320,7 @@ impl HookAction {
             Self::Permission { .. } => "permission",
             Self::Http { .. } => "http",
             Self::McpTool { .. } => "mcp_tool",
-            Self::Agent { .. } => "agent",
+            Self::Subagent { .. } => "subagent",
             Self::ActivateSkill { .. } => "activate_skill",
         }
     }
@@ -474,20 +471,24 @@ pub type McpExecutorFn = Arc<
 
 /// Type-erased callback for spawning a subagent from a hook.
 ///
-/// The agent layer injects this via [`HookRegistry::set_agent_executor`]
-/// so that [`HookAction::Agent`] hooks can dispatch a subagent by name
+/// The agent layer injects this via [`HookRegistry::set_subagent_executor`]
+/// so that [`HookAction::Subagent`] hooks can dispatch a subagent by name
 /// without echo-execution depending on the agent layer.
-/// Receives (agent_name, task_prompt) and returns the agent's output text.
-pub type AgentExecutorFn = Arc<
+/// Receives (subagent_name, task_prompt) and returns the subagent's output text.
+pub type SubagentExecutorFn = Arc<
     dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
         + Send
         + Sync,
 >;
 
+tokio::task_local! {
+    static SUBAGENT_HOOK_DEPTH: u8;
+}
+
 // ── Hook Registry ──────────────────────────────────────────────────────
 
 /// Registry of hooks from all sources (skills and user config).
-// We cannot derive Clone/Default because of `McpExecutorFn` (not Clone).
+// Manual Clone keeps the type-erased runtime callbacks attached to snapshots.
 #[derive(Default)]
 pub struct HookRegistry {
     /// Source -> hooks definition.
@@ -498,8 +499,8 @@ pub struct HookRegistry {
     http_client: Option<reqwest::Client>,
     /// Optional MCP tool executor for McpTool hook actions.
     mcp_executor: Option<McpExecutorFn>,
-    /// Optional subagent executor for Agent hook actions.
-    agent_executor: Option<AgentExecutorFn>,
+    /// Optional subagent executor for Subagent hook actions.
+    subagent_executor: Option<SubagentExecutorFn>,
 }
 
 impl Clone for HookRegistry {
@@ -509,7 +510,7 @@ impl Clone for HookRegistry {
             sandbox: self.sandbox.clone(),
             http_client: self.http_client.clone(),
             mcp_executor: self.mcp_executor.clone(),
-            agent_executor: self.agent_executor.clone(),
+            subagent_executor: self.subagent_executor.clone(),
         }
     }
 }
@@ -518,6 +519,7 @@ impl Clone for HookRegistry {
 struct RegisteredHook {
     definition: HooksDefinition,
     source_dir: String,
+    plugin_data_dir: Option<String>,
 }
 
 /// One action that would execute for a hook context, without side effects.
@@ -569,6 +571,7 @@ impl HookRegistry {
             RegisteredHook {
                 definition,
                 source_dir: skill_dir.to_string(),
+                plugin_data_dir: None,
             },
         );
     }
@@ -588,6 +591,7 @@ impl HookRegistry {
             RegisteredHook {
                 definition,
                 source_dir: String::new(),
+                plugin_data_dir: None,
             },
         );
     }
@@ -611,6 +615,7 @@ impl HookRegistry {
         &mut self,
         plugin_name: &str,
         source_dir: &str,
+        plugin_data_dir: &str,
         definition: HooksDefinition,
     ) -> bool {
         if definition.is_empty() {
@@ -639,6 +644,7 @@ impl HookRegistry {
             RegisteredHook {
                 definition: clean,
                 source_dir: source_dir.to_string(),
+                plugin_data_dir: Some(plugin_data_dir.to_string()),
             },
         );
         true
@@ -734,12 +740,12 @@ impl HookRegistry {
         self.mcp_executor = Some(executor);
     }
 
-    /// Set the subagent executor for Agent hook actions.
+    /// Set the subagent executor for Subagent hook actions.
     ///
     /// The executor receives (agent_name, task_prompt) and should dispatch
     /// the named subagent, returning its output text on success.
-    pub fn set_agent_executor(&mut self, executor: AgentExecutorFn) {
-        self.agent_executor = Some(executor);
+    pub fn set_subagent_executor(&mut self, executor: SubagentExecutorFn) {
+        self.subagent_executor = Some(executor);
     }
 
     // -- Public execution methods --
@@ -799,6 +805,13 @@ impl HookRegistry {
                 continue;
             };
             let rules = registered.definition.rules_for(event);
+            let runtime = HookActionRuntime {
+                plugin_data_dir: registered.plugin_data_dir.as_deref(),
+                sandbox: self.sandbox.as_ref(),
+                http_client: self.http_client.as_ref(),
+                mcp_executor: self.mcp_executor.as_ref(),
+                subagent_executor: self.subagent_executor.as_ref(),
+            };
 
             for rule in rules {
                 if !matches_hook(&rule.matcher, context) {
@@ -812,16 +825,8 @@ impl HookRegistry {
                 );
 
                 for action in &rule.hooks {
-                    let result = execute_action(
-                        action,
-                        &registered.source_dir,
-                        context,
-                        self.sandbox.as_ref(),
-                        self.http_client.as_ref(),
-                        self.mcp_executor.as_ref(),
-                        self.agent_executor.as_ref(),
-                    )
-                    .await;
+                    let result =
+                        execute_action(action, &registered.source_dir, context, &runtime).await;
 
                     merge_result(&mut combined, result);
 
@@ -912,14 +917,19 @@ fn matches_tool_name(matcher: &str, tool_name: &str) -> bool {
 
 // ── Action Execution ───────────────────────────────────────────────────
 
+struct HookActionRuntime<'a> {
+    plugin_data_dir: Option<&'a str>,
+    sandbox: Option<&'a Arc<SandboxManager>>,
+    http_client: Option<&'a reqwest::Client>,
+    mcp_executor: Option<&'a McpExecutorFn>,
+    subagent_executor: Option<&'a SubagentExecutorFn>,
+}
+
 async fn execute_action(
     action: &HookAction,
     source_dir: &str,
     context: &HookContext,
-    sandbox: Option<&Arc<SandboxManager>>,
-    http_client: Option<&reqwest::Client>,
-    mcp_executor: Option<&McpExecutorFn>,
-    agent_executor: Option<&AgentExecutorFn>,
+    runtime: &HookActionRuntime<'_>,
 ) -> HookResult {
     match action {
         HookAction::Command {
@@ -932,8 +942,9 @@ async fn execute_action(
                 shell.as_deref(),
                 *timeout,
                 source_dir,
+                runtime.plugin_data_dir,
                 context,
-                sandbox,
+                runtime.sandbox,
             )
             .await
         }
@@ -988,7 +999,7 @@ async fn execute_action(
                 headers.as_ref(),
                 *timeout,
                 context,
-                http_client,
+                runtime.http_client,
             )
             .await
         }
@@ -997,7 +1008,7 @@ async fn execute_action(
             tool,
             arguments,
             timeout,
-        } => match mcp_executor {
+        } => match runtime.mcp_executor {
             Some(executor) => {
                 let fut = executor(server.clone(), tool.clone(), arguments.clone());
                 if *timeout > 0 {
@@ -1010,7 +1021,9 @@ async fn execute_action(
                                 timeout_secs = *timeout,
                                 "McpTool hook timed out"
                             );
-                            HookResult::default()
+                            hook_execution_message(format!(
+                                "McpTool hook {server}::{tool} timed out after {timeout}s"
+                            ))
                         }
                     }
                 } else {
@@ -1023,27 +1036,33 @@ async fn execute_action(
                     action = "mcp_tool",
                     "McpTool hook action configured but no mcp_executor registered"
                 );
-                HookResult::default()
+                hook_execution_message(format!(
+                    "McpTool hook {server}::{tool} skipped because no MCP executor is registered"
+                ))
             }
         },
-        HookAction::Agent {
+        HookAction::Subagent {
             name,
             task,
             timeout,
             ..
         } => {
-            // SK-1: Agent hook action — dispatch a subagent by name.
-            // Uses the injected agent_executor callback (same pattern as
-            // mcp_executor). If no executor is registered, warn and no-op.
+            let depth = SUBAGENT_HOOK_DEPTH.try_with(|depth| *depth).unwrap_or(0);
+            if depth > 0 {
+                return hook_execution_message(format!(
+                    "Subagent hook '{name}' skipped because a subagent hook is already running"
+                ));
+            }
             let task_text = task.clone().unwrap_or_default();
-            match agent_executor {
+            match runtime.subagent_executor {
                 Some(executor) => {
                     let fut = executor(name.clone(), task_text.clone());
+                    let fut = SUBAGENT_HOOK_DEPTH.scope(depth.saturating_add(1), fut);
                     let result = if *timeout > 0 {
                         match tokio::time::timeout(Duration::from_secs(*timeout), fut).await {
                             Ok(r) => r,
                             Err(_) => {
-                                Err(format!("Agent hook '{name}' timed out after {timeout}s"))
+                                Err(format!("Subagent hook '{name}' timed out after {timeout}s"))
                             }
                         }
                     } else {
@@ -1052,32 +1071,31 @@ async fn execute_action(
                     match result {
                         Ok(output) => {
                             let mut hr = HookResult::default();
-                            hr.messages.push(format!("Agent '{name}' output: {output}"));
+                            hr.messages.push(format!(
+                                "Subagent '{name}' output: {}",
+                                truncate_hook_message(&output)
+                            ));
                             hr
                         }
                         Err(e) => {
                             warn!(
                                 event = %context.event.as_str(),
-                                action = "agent",
-                                "Agent hook failed"
+                                action = "subagent",
+                                "Subagent hook failed"
                             );
-                            let mut hr = HookResult::default();
-                            hr.messages.push(format!("Agent hook '{name}' error: {e}"));
-                            hr
+                            hook_execution_message(format!("Subagent hook '{name}' error: {e}"))
                         }
                     }
                 }
                 None => {
                     warn!(
                         event = %context.event.as_str(),
-                        action = "agent",
-                        "Agent hook action triggered but no agent_executor registered"
+                        action = "subagent",
+                        "Subagent hook action triggered but no subagent executor is registered"
                     );
-                    let mut result = HookResult::default();
-                    result.messages.push(format!(
-                        "Agent hook '{name}' skipped — no agent_executor registered"
-                    ));
-                    result
+                    hook_execution_message(format!(
+                        "Subagent hook '{name}' skipped because no subagent executor is registered"
+                    ))
                 }
             }
         }
@@ -1094,25 +1112,10 @@ async fn execute_command_hook(
     shell: Option<&str>,
     timeout_secs: u64,
     source_dir: &str,
+    plugin_data_dir: Option<&str>,
     context: &HookContext,
     sandbox: Option<&Arc<SandboxManager>>,
 ) -> HookResult {
-    // Reject source_dir containing shell-special characters that could break
-    // out of the substituted position when passed to bash -c (P1 — shell injection).
-    if source_dir.contains(['$', '`', '(', ')', ';', '|', '&', '<', '>']) {
-        return HookResult {
-            block: true,
-            block_reason: Some(format!(
-                "source_dir contains shell-special characters: {source_dir}"
-            )),
-            ..Default::default()
-        };
-    }
-    // Variable substitution in command
-    let command = command
-        .replace("${SKILL_DIR}", source_dir)
-        .replace("${CLAUDE_PLUGIN_ROOT}", source_dir);
-
     // Build JSON context for stdin (include hook_event_name for compatibility)
     let mut stdin_value = serde_json::to_value(context).unwrap_or_default();
     stdin_value["hook_event_name"] = json!(context.event.as_str());
@@ -1122,7 +1125,7 @@ async fn execute_command_hook(
 
     // -- Sandbox execution path --
     if let Some(manager) = sandbox {
-        let (program, args) = build_hook_shell_command(&command, shell);
+        let (program, args) = build_hook_shell_command(command, shell);
         let mut sandbox_cmd = SandboxCommand::program(&program, args).with_timeout(timeout);
 
         if !source_dir.is_empty() && Path::new(source_dir).exists() {
@@ -1130,12 +1133,13 @@ async fn execute_command_hook(
         }
 
         // Use minimal environment
-        let env = minimal_hook_env_with_context(
+        let mut env = minimal_hook_env_with_context(
             source_dir,
             &context.session_id,
             context.event.as_str(),
             &context.cwd,
         );
+        add_plugin_hook_env(&mut env, source_dir, plugin_data_dir);
         for (k, v) in env {
             sandbox_cmd = sandbox_cmd.with_env(k, v);
         }
@@ -1155,7 +1159,7 @@ async fn execute_command_hook(
                         "Hook stderr (sandboxed)"
                     );
                 }
-                parse_hook_output(&result.stdout, result.exit_code)
+                parse_hook_output(&result.stdout, &result.stderr, result.exit_code)
             }
             Err(_) => {
                 warn!(
@@ -1164,13 +1168,13 @@ async fn execute_command_hook(
                     sandboxed = true,
                     "Hook sandbox error"
                 );
-                HookResult::default()
+                hook_execution_message("Hook sandbox execution failed".to_string())
             }
         };
     }
 
     // -- Fallback: direct process execution (no sandbox) --
-    let (program, args) = build_hook_shell_command(&command, shell);
+    let (program, args) = build_hook_shell_command(command, shell);
     let mut cmd = tokio::process::Command::new(&program);
     for arg in &args {
         cmd.arg(arg);
@@ -1185,14 +1189,14 @@ async fn execute_command_hook(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    // Use minimal environment
-    let env = minimal_hook_env_with_context(
+    // Preserve the user's trusted local environment and add stable hook fields.
+    let mut env = minimal_hook_env_with_context(
         source_dir,
         &context.session_id,
         context.event.as_str(),
         &context.cwd,
     );
-    cmd.env_clear();
+    add_plugin_hook_env(&mut env, source_dir, plugin_data_dir);
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -1206,7 +1210,7 @@ async fn execute_command_hook(
                 error_kind = ?e.kind(),
                 "Failed to spawn hook command"
             );
-            return HookResult::default();
+            return hook_execution_message(format!("Failed to spawn hook command: {e}"));
         }
     };
 
@@ -1222,6 +1226,7 @@ async fn execute_command_hook(
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
             if !output.stderr.is_empty() {
                 debug!(
@@ -1232,7 +1237,7 @@ async fn execute_command_hook(
                 );
             }
 
-            parse_hook_output(&stdout, output.status.code().unwrap_or(-1))
+            parse_hook_output(&stdout, &stderr, output.status.code().unwrap_or(-1))
         }
         Ok(Err(e)) => {
             warn!(
@@ -1241,7 +1246,7 @@ async fn execute_command_hook(
                 error_kind = ?e.kind(),
                 "Hook command execution error"
             );
-            HookResult::default()
+            hook_execution_message(format!("Hook command execution failed: {e}"))
         }
         Err(_) => {
             warn!(
@@ -1250,7 +1255,7 @@ async fn execute_command_hook(
                 timeout_secs = timeout_secs,
                 "Hook command timed out"
             );
-            HookResult::default()
+            hook_execution_message(format!("Hook command timed out after {timeout_secs}s"))
         }
     }
 }
@@ -1287,18 +1292,21 @@ async fn execute_http_hook(
                 connect = error.is_connect(),
                 "Http hook request failed"
             );
-            return HookResult::default();
+            return hook_execution_message(format!("Http hook request failed: {error}"));
         }
     };
 
     match result.status().is_success() {
         true => {
             let text = result.text().await.unwrap_or_default();
-            parse_hook_output(&text, 0)
+            parse_hook_output(&text, "", 0)
         }
         false => {
             warn!(status = %result.status(), "Http hook non-2xx response");
-            HookResult::default()
+            hook_execution_message(format!(
+                "Http hook returned non-success status {}",
+                result.status()
+            ))
         }
     }
 }
@@ -1320,7 +1328,7 @@ async fn execute_http_hook(
 ///   "metadata": {}
 /// }
 /// ```
-fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
+fn parse_hook_output(stdout: &str, stderr: &str, exit_code: i32) -> HookResult {
     let mut result = HookResult::default();
 
     // Exit code semantics (aligned with Claude Code convention):
@@ -1332,7 +1340,12 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
         0 | 1 => {} // no implicit block
         2 => {
             result.block = true;
-            result.block_reason = Some("Hook exited with code 2 (explicit block)".to_string());
+            let reason = stderr.trim();
+            result.block_reason = Some(if reason.is_empty() {
+                "Hook exited with code 2 (explicit block)".to_string()
+            } else {
+                truncate_hook_message(reason)
+            });
         }
         _ => {
             // Other non-zero: log warning, don't block
@@ -1340,6 +1353,15 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
                 exit_code = exit_code,
                 "Hook exited with unexpected code, treating as warning (not block)"
             );
+            let detail = stderr.trim();
+            result.messages.push(if detail.is_empty() {
+                format!("Hook exited with code {exit_code}")
+            } else {
+                format!(
+                    "Hook exited with code {exit_code}: {}",
+                    truncate_hook_message(detail)
+                )
+            });
         }
     }
 
@@ -1350,18 +1372,64 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
     }
 
     if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
+        let hook_specific = json.get("hookSpecificOutput").unwrap_or(&json);
+        if let Some(message) = json.get("systemMessage").and_then(Value::as_str) {
+            result.messages.push(truncate_hook_message(message));
+        }
+
         // Parse decision field
         if let Some(decision) = json.get("decision").and_then(|v| v.as_str()) {
             match decision {
                 "block" => {
                     result.block = true;
                     if let Some(reason) = json.get("reason").and_then(|v| v.as_str()) {
-                        result.block_reason = Some(reason.to_string());
+                        result.block_reason = Some(truncate_hook_message(reason));
                     }
                 }
                 "allow" => {
                     result.block = false;
                     result.block_reason = None;
+                }
+                _ => {}
+            }
+        }
+
+        // Portable Codex/Claude hook output fields. EKO keeps its native flat
+        // fields below, while accepting these nested fields for plugin reuse.
+        if let Some(decision) = hook_specific
+            .get("permissionDecision")
+            .and_then(Value::as_str)
+        {
+            match decision {
+                "allow" => result.permission_decision = Some(PermissionDecision::Allow),
+                "deny" => {
+                    let reason = hook_specific
+                        .get("permissionDecisionReason")
+                        .and_then(Value::as_str)
+                        .map(truncate_hook_message)
+                        .unwrap_or_else(|| "Hook denied permission".to_string());
+                    result.permission_decision = Some(PermissionDecision::Deny { reason });
+                }
+                "ask" => {
+                    result.permission_decision = Some(PermissionDecision::Ask {
+                        suggestions: Vec::new(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        if let Some(decision) = hook_specific.get("decision").and_then(Value::as_object)
+            && let Some(behavior) = decision.get("behavior").and_then(Value::as_str)
+        {
+            match behavior {
+                "allow" => result.permission_decision = Some(PermissionDecision::Allow),
+                "deny" => {
+                    let reason = decision
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(truncate_hook_message)
+                        .unwrap_or_else(|| "Hook denied permission".to_string());
+                    result.permission_decision = Some(PermissionDecision::Deny { reason });
                 }
                 _ => {}
             }
@@ -1377,8 +1445,8 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
                     let reason = json
                         .get("permission_reason")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("Hook denied permission")
-                        .to_string();
+                        .map(truncate_hook_message)
+                        .unwrap_or_else(|| "Hook denied permission".to_string());
                     result.permission_decision = Some(PermissionDecision::Deny { reason });
                 }
                 "ask" => {
@@ -1421,17 +1489,24 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
             result.stop_propagation = true;
         }
 
-        if let Some(updated) = json.get("updatedInput") {
+        if let Some(updated) = hook_specific
+            .get("updatedInput")
+            .or_else(|| json.get("updatedInput"))
+        {
             result.updated_input = Some(updated.clone());
         }
 
         // Parse lifecycle-specific fields
         if let Some(reason) = json.get("continue_reason").and_then(|v| v.as_str()) {
-            result.continue_reason = Some(reason.to_string());
+            result.continue_reason = Some(truncate_hook_message(reason));
         }
 
-        if let Some(ctx) = json.get("injected_context").and_then(|v| v.as_str()) {
-            result.injected_context = Some(ctx.to_string());
+        if let Some(ctx) = hook_specific
+            .get("additionalContext")
+            .or_else(|| json.get("injected_context"))
+            .and_then(Value::as_str)
+        {
+            result.injected_context = Some(truncate_hook_message(ctx));
         }
 
         // Parse retry field (PermissionDenied hooks)
@@ -1446,10 +1521,53 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
         }
     } else if exit_code == 0 {
         // Non-JSON stdout on exit 0: treat as injected context
-        result.injected_context = Some(trimmed.to_string());
+        result.injected_context = Some(truncate_hook_message(trimmed));
+    }
+
+    // Exit code 2 is an out-of-band blocking signal. Structured stdout may add
+    // context, but it must not downgrade that process-level decision.
+    if exit_code == 2 {
+        result.block = true;
+        let reason = stderr.trim();
+        result.block_reason = Some(if reason.is_empty() {
+            "Hook exited with code 2 (explicit block)".to_string()
+        } else {
+            truncate_hook_message(reason)
+        });
     }
 
     result
+}
+
+fn add_plugin_hook_env(
+    env: &mut HashMap<String, String>,
+    source_dir: &str,
+    plugin_data_dir: Option<&str>,
+) {
+    let Some(plugin_data_dir) = plugin_data_dir else {
+        return;
+    };
+    for key in ["PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "ECHO_PLUGIN_ROOT"] {
+        env.insert(key.to_string(), source_dir.to_string());
+    }
+    for key in ["PLUGIN_DATA", "CLAUDE_PLUGIN_DATA", "ECHO_PLUGIN_DATA"] {
+        env.insert(key.to_string(), plugin_data_dir.to_string());
+    }
+}
+
+fn hook_execution_message(message: String) -> HookResult {
+    let mut result = HookResult::default();
+    result.messages.push(truncate_hook_message(&message));
+    result
+}
+
+fn truncate_hook_message(message: &str) -> String {
+    const MAX_CHARS: usize = 10_000;
+    let mut text = message.chars().take(MAX_CHARS).collect::<String>();
+    if message.chars().count() > MAX_CHARS {
+        text.push_str("...");
+    }
+    text
 }
 
 // ── Shell Command Builder ──────────────────────────────────────────────
@@ -1854,7 +1972,12 @@ mod tests {
             }],
         );
 
-        registry.register_plugin_hooks("data-analysis-pack", "/plugins/data", def);
+        registry.register_plugin_hooks(
+            "data-analysis-pack",
+            "/plugins/data",
+            "/plugin-state/data-analysis-pack",
+            def,
+        );
 
         let sources = registry.list_sources();
         // Should appear as plugin:data-analysis-pack, never as skill:plugin:...
@@ -1897,7 +2020,7 @@ mod tests {
             }],
         );
 
-        registry.register_plugin_hooks("mixed-plugin", "/p", def);
+        registry.register_plugin_hooks("mixed-plugin", "/p", "/data/p", def);
         let sources = registry.list_sources();
         assert!(
             sources
@@ -1910,7 +2033,7 @@ mod tests {
     #[test]
     fn test_register_plugin_hooks_empty_noop() {
         let mut registry = HookRegistry::new();
-        registry.register_plugin_hooks("empty-plugin", "/p", HooksDefinition::default());
+        registry.register_plugin_hooks("empty-plugin", "/p", "/data/p", HooksDefinition::default());
         assert!(registry.is_empty(), "empty definition must not register");
     }
 
@@ -2056,34 +2179,34 @@ Notification:
 
     #[test]
     fn test_parse_hook_output_empty() {
-        let result = parse_hook_output("", 0);
+        let result = parse_hook_output("", "", 0);
         assert!(!result.block);
     }
 
     #[test]
     fn test_parse_hook_output_block() {
-        let result = parse_hook_output(r#"{"decision": "block", "reason": "unsafe"}"#, 0);
+        let result = parse_hook_output(r#"{"decision": "block", "reason": "unsafe"}"#, "", 0);
         assert!(result.block);
         assert_eq!(result.block_reason, Some("unsafe".into()));
     }
 
     #[test]
     fn test_parse_hook_output_allow() {
-        let result = parse_hook_output(r#"{"decision": "allow"}"#, 1);
+        let result = parse_hook_output(r#"{"decision": "allow"}"#, "", 1);
         assert!(!result.block);
     }
 
     #[test]
     fn test_parse_hook_output_nonzero_exit_code_1_no_block() {
         // exit 1 = no block (hook produced output but no block intent)
-        let result = parse_hook_output("", 1);
+        let result = parse_hook_output("", "", 1);
         assert!(!result.block);
     }
 
     #[test]
     fn test_parse_hook_output_exit_code_2_block() {
         // exit 2 = explicit block signal
-        let result = parse_hook_output("", 2);
+        let result = parse_hook_output("", "", 2);
         assert!(result.block);
         assert_eq!(
             result.block_reason,
@@ -2092,29 +2215,47 @@ Notification:
     }
 
     #[test]
+    fn test_parse_hook_output_exit_code_2_uses_stderr_reason() {
+        let result = parse_hook_output("", "Blocked by policy", 2);
+        assert!(result.block);
+        assert_eq!(result.block_reason.as_deref(), Some("Blocked by policy"));
+    }
+
+    #[test]
+    fn test_parse_hook_output_exit_code_2_cannot_be_downgraded() {
+        let result = parse_hook_output(
+            r#"{"decision": "allow", "reason": "ignore"}"#,
+            "Blocked by process",
+            2,
+        );
+        assert!(result.block);
+        assert_eq!(result.block_reason.as_deref(), Some("Blocked by process"));
+    }
+
+    #[test]
     fn test_parse_hook_output_exit_code_other_no_block() {
         // Other non-zero = warning, no block
-        let result = parse_hook_output("", 3);
+        let result = parse_hook_output("", "", 3);
         assert!(!result.block);
-        let result = parse_hook_output("", 127);
+        let result = parse_hook_output("", "", 127);
         assert!(!result.block);
     }
 
     #[test]
     fn test_parse_hook_output_retry_field() {
-        let result = parse_hook_output(r#"{"retry": true}"#, 0);
+        let result = parse_hook_output(r#"{"retry": true}"#, "", 0);
         assert!(result.retry);
     }
 
     #[test]
     fn test_parse_hook_output_retry_false_by_default() {
-        let result = parse_hook_output("", 0);
+        let result = parse_hook_output("", "", 0);
         assert!(!result.retry);
     }
 
     #[test]
     fn test_parse_hook_output_updated_input() {
-        let result = parse_hook_output(r#"{"updatedInput": {"command": "safe-command"}}"#, 0);
+        let result = parse_hook_output(r#"{"updatedInput": {"command": "safe-command"}}"#, "", 0);
         assert!(!result.block);
         assert_eq!(
             result.updated_input,
@@ -2123,8 +2264,42 @@ Notification:
     }
 
     #[test]
+    fn test_parse_hook_output_accepts_portable_nested_fields() {
+        let result = parse_hook_output(
+            r#"{"systemMessage":"audit","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":"echo safe"},"additionalContext":"reviewed"}}"#,
+            "",
+            0,
+        );
+        assert!(
+            result
+                .permission_decision
+                .as_ref()
+                .is_some_and(PermissionDecision::is_allowed)
+        );
+        assert_eq!(result.updated_input, Some(json!({"command": "echo safe"})));
+        assert_eq!(result.injected_context.as_deref(), Some("reviewed"));
+        assert_eq!(result.messages, vec!["audit"]);
+    }
+
+    #[test]
+    fn test_parse_hook_output_accepts_permission_request_decision() {
+        let result = parse_hook_output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Blocked by repository policy"}}}"#,
+            "",
+            0,
+        );
+        assert!(
+            result
+                .permission_decision
+                .as_ref()
+                .is_some_and(PermissionDecision::is_denied)
+        );
+    }
+
+    #[test]
     fn test_parse_hook_output_continue_reason() {
-        let result = parse_hook_output(r#"{"continue_reason": "Run tests before stopping"}"#, 0);
+        let result =
+            parse_hook_output(r#"{"continue_reason": "Run tests before stopping"}"#, "", 0);
         assert_eq!(
             result.continue_reason,
             Some("Run tests before stopping".to_string())
@@ -2133,7 +2308,7 @@ Notification:
 
     #[test]
     fn test_parse_hook_output_injected_context() {
-        let result = parse_hook_output(r#"{"injected_context": "Remember to use bun"}"#, 0);
+        let result = parse_hook_output(r#"{"injected_context": "Remember to use bun"}"#, "", 0);
         assert_eq!(
             result.injected_context,
             Some("Remember to use bun".to_string())
@@ -2142,7 +2317,7 @@ Notification:
 
     #[test]
     fn test_parse_hook_output_non_json_as_context() {
-        let result = parse_hook_output("Remember: use bun, not npm", 0);
+        let result = parse_hook_output("Remember: use bun, not npm", "", 0);
         assert_eq!(
             result.injected_context,
             Some("Remember: use bun, not npm".to_string())
@@ -2151,7 +2326,7 @@ Notification:
 
     #[test]
     fn test_parse_hook_output_permission_decision_allow() {
-        let result = parse_hook_output(r#"{"permission_decision": "allow"}"#, 0);
+        let result = parse_hook_output(r#"{"permission_decision": "allow"}"#, "", 0);
         assert!(result.has_permission_decision());
         assert!(result.permission_decision.unwrap().is_allowed());
     }
@@ -2160,6 +2335,7 @@ Notification:
     fn test_parse_hook_output_permission_decision_deny() {
         let result = parse_hook_output(
             r#"{"permission_decision": "deny", "permission_reason": "unsafe"}"#,
+            "",
             0,
         );
         assert!(result.has_permission_decision());
@@ -2179,14 +2355,14 @@ Notification:
             ("strict", PermissionMode::StrictConfirm),
         ] {
             let output = format!(r#"{{"permission_mode_override":"{wire_value}"}}"#);
-            let result = parse_hook_output(&output, 0);
+            let result = parse_hook_output(&output, "", 0);
             assert_eq!(result.permission_mode_override, Some(expected));
         }
     }
 
     #[test]
     fn test_parse_hook_output_ignores_legacy_permission_mode() {
-        let result = parse_hook_output(r#"{"permission_mode": "auto"}"#, 0);
+        let result = parse_hook_output(r#"{"permission_mode": "auto"}"#, "", 0);
         assert_eq!(result.permission_mode_override, None);
     }
 
@@ -2425,7 +2601,12 @@ Notification:
         let mut registry = HookRegistry::new();
         registry.register_user_hooks(definition());
         registry.register("formatting", "/tmp/skill", definition());
-        assert!(registry.register_plugin_hooks("local-tools", "/tmp/plugin", definition()));
+        assert!(registry.register_plugin_hooks(
+            "local-tools",
+            "/tmp/plugin",
+            "/tmp/plugin-data",
+            definition()
+        ));
 
         let result = registry.dry_run(&HookContext::for_dry_run(HookEvent::PreToolUse, "Bash"));
         assert_eq!(result.matches.len(), 3);
@@ -2531,6 +2712,81 @@ Notification:
             .run_pre_tool_use("Bash", &json!({"command": "ls"}), "")
             .await;
         assert!(!result.block);
+    }
+
+    #[tokio::test]
+    async fn plugin_command_hook_receives_portable_root_and_data_env() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        let plugin_root = std::env::temp_dir().join(format!(
+            "echo-hook-plugin-{} (dev); local",
+            std::process::id()
+        ));
+        let plugin_data =
+            std::env::temp_dir().join(format!("echo-hook-plugin-data-{}", std::process::id()));
+        let mut registry = HookRegistry::new();
+        let mut definition = HooksDefinition::default();
+        definition.add_rules(
+            HookEvent::SessionStart,
+            vec![HookRule {
+                matcher: "startup".to_string(),
+                hooks: vec![HookAction::Command {
+                    command: "printf '%s|%s' \"$PLUGIN_ROOT\" \"$PLUGIN_DATA\"".to_string(),
+                    shell: None,
+                    timeout: 5,
+                }],
+            }],
+        );
+        assert!(registry.register_plugin_hooks(
+            "env-test",
+            &plugin_root.display().to_string(),
+            &plugin_data.display().to_string(),
+            definition,
+        ));
+
+        let result = registry
+            .run_lifecycle_hooks(&HookContext::for_session_start("startup", "session", "eko"))
+            .await;
+
+        assert_eq!(
+            result.injected_context,
+            Some(format!(
+                "{}|{}",
+                plugin_root.display(),
+                plugin_data.display()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_hook_dispatches_through_registered_executor() {
+        let mut registry = HookRegistry::new();
+        registry.set_subagent_executor(Arc::new(|name, task| {
+            Box::pin(async move { Ok(format!("{name}:{task}")) })
+        }));
+        let mut definition = HooksDefinition::default();
+        definition.add_rules(
+            HookEvent::SessionStart,
+            vec![HookRule {
+                matcher: "startup".to_string(),
+                hooks: vec![HookAction::Subagent {
+                    name: "reviewer".to_string(),
+                    task: Some("Review the change".to_string()),
+                    timeout: 5,
+                }],
+            }],
+        );
+        registry.register_user_hooks(definition);
+
+        let result = registry
+            .run_lifecycle_hooks(&HookContext::for_session_start("startup", "session", "eko"))
+            .await;
+
+        assert_eq!(
+            result.messages,
+            vec!["Subagent 'reviewer' output: reviewer:Review the change"]
+        );
     }
 
     #[tokio::test]
@@ -2706,6 +2962,16 @@ Notification:
         assert!(
             matches!(action, HookAction::McpTool { server, tool, .. } if server == "slack" && tool == "send_message")
         );
+    }
+
+    #[test]
+    fn test_hook_action_subagent_deserialize() -> Result<(), String> {
+        let json = r#"{"type":"subagent","name":"reviewer","task":"Review the change"}"#;
+        let action: HookAction = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        assert!(
+            matches!(action, HookAction::Subagent { name, task, .. } if name == "reviewer" && task.as_deref() == Some("Review the change"))
+        );
+        Ok(())
     }
 
     // -- HookAction validation tests --

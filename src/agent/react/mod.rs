@@ -13,7 +13,7 @@ pub use crate::agent::config::{AgentConfig, AgentRole};
 #[cfg(feature = "subagent")]
 use crate::agent::subagent::SubagentRegistry;
 #[cfg(feature = "subagent")]
-use crate::agent::subagent::executor::{SubagentExecutor, SubagentExecutorConfig};
+use crate::agent::subagent::executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig};
 use crate::agent::{Agent, AgentEvent, CancellationToken};
 use crate::compression::ContextManager;
 use crate::error::{LlmError, ReactError, Result};
@@ -48,6 +48,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tracing::{Instrument, info, info_span};
+
+#[cfg(feature = "subagent")]
+struct HookSubagentCancelGuard(CancellationToken);
+
+#[cfg(feature = "subagent")]
+impl Drop for HookSubagentCancelGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
 
 #[cfg(feature = "human-loop")]
 use crate::agent::react::subsystems::approval::ApprovalSubsystem;
@@ -427,6 +437,56 @@ impl ReactAgent {
                 },
             ))
         };
+        #[cfg(feature = "subagent")]
+        {
+            use crate::skills::hooks::SubagentExecutorFn;
+
+            let executor = subagent_executor.clone();
+            let parent_agent = config.agent_name.clone();
+            let hook_executor: SubagentExecutorFn = Arc::new(move |name, task| {
+                let executor = executor.clone();
+                let parent_agent = parent_agent.clone();
+                Box::pin(async move {
+                    let cancel = CancellationToken::new();
+                    let _cancel_guard = HookSubagentCancelGuard(cancel.clone());
+                    let result = executor
+                        .dispatch(DispatchRequest {
+                            agent_name: name,
+                            task,
+                            mode_override: None,
+                            cancel,
+                            parent_agent,
+                            parent_context: None,
+                            delegation_policy: crate::tasks::NestedDelegationPolicy {
+                                can_spawn_subagents: false,
+                                delegate_depth: 0,
+                                max_delegate_depth: 0,
+                            },
+                            runtime_context: None,
+                            message: None,
+                            prompt_payload: None,
+                            constraints: Vec::new(),
+                            background: false,
+                        })
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if result.outcome.status
+                        != crate::agent::subagent::types::SubagentStatus::Completed
+                    {
+                        return Err(format!(
+                            "Subagent finished with status {:?}: {}",
+                            result.outcome.status, result.output
+                        ));
+                    }
+                    Ok(result.output)
+                })
+            });
+            if let Ok(mut registry) = hook_registry.try_write() {
+                registry.set_subagent_executor(hook_executor);
+            } else {
+                tracing::error!("Failed to initialize the hook subagent executor");
+            }
+        }
         #[cfg(not(feature = "subagent"))]
         let _ = &hook_registry; // suppress unused warning
         #[cfg(feature = "human-loop")]
@@ -1310,12 +1370,10 @@ impl ReactAgent {
     /// Wire up the MCP tool executor for `HookAction::McpTool` hook actions
     /// (see `echo_execution::skills::hooks::HookAction`).
     ///
-    /// Call this **after** connecting MCP servers via
-    /// [`connect_mcp_from_config`](Self::connect_mcp_from_config) or
-    /// [`load_mcp_from_file`](Self::load_mcp_from_file).
-    /// Call again after connecting additional servers to refresh the client snapshot.
+    /// Connection and disconnection methods call this automatically so hook
+    /// actions always observe the current MCP client set.
     #[cfg(feature = "mcp")]
-    pub fn setup_hook_mcp_executor(&mut self) {
+    pub async fn setup_hook_mcp_executor(&self) {
         use crate::skills::hooks::McpExecutorFn;
         use std::sync::Arc;
 
@@ -1328,6 +1386,7 @@ impl ReactAgent {
                         Ok(result) => {
                             let mut hook_result = crate::skills::hooks::HookResult::default();
                             let output = serde_json::to_string(&result).unwrap_or_default();
+                            let output = output.chars().take(10_000).collect::<String>();
                             hook_result
                                 .messages
                                 .push(format!("McpTool {}::{} => {}", server, tool, output));
@@ -1342,7 +1401,11 @@ impl ReactAgent {
                                 error = %e,
                                 "McpTool hook call failed"
                             );
-                            crate::skills::hooks::HookResult::default()
+                            let mut result = crate::skills::hooks::HookResult::default();
+                            result
+                                .messages
+                                .push(format!("McpTool hook {}::{} failed: {}", server, tool, e));
+                            result
                         }
                     },
                     None => {
@@ -1351,17 +1414,22 @@ impl ReactAgent {
                             tool = %tool,
                             "McpTool hook: server not found"
                         );
-                        crate::skills::hooks::HookResult::default()
+                        let mut result = crate::skills::hooks::HookResult::default();
+                        result.messages.push(format!(
+                            "McpTool hook {}::{} failed: server is not connected",
+                            server, tool
+                        ));
+                        result
                     }
                 }
             })
         });
 
-        if let Ok(mut hooks) = self.tools.hook_registry.try_write() {
-            hooks.set_mcp_executor(executor);
-        } else {
-            tracing::error!("Failed to acquire hook_registry lock for MCP executor setup");
-        }
+        self.tools
+            .hook_registry
+            .write()
+            .await
+            .set_mcp_executor(executor);
     }
 
     /// Enable the circuit breaker.

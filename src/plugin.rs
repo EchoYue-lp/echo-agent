@@ -8,20 +8,23 @@
 //! ```rust,no_run
 //! use echo_agent::plugin::{PluginRegistry, PluginScope, InstallSource, PluginIntegrator};
 //!
+//! # fn main() -> std::io::Result<()> {
 //! let mut registry = PluginRegistry::new(None);
-//! registry.scan_all().unwrap();
+//! registry.scan_all()?;
 //!
 //! for entry in registry.list_enabled() {
 //!     println!("{}: {}", entry.manifest.name, entry.manifest.description);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 // ── Re-exports from echo-core ──────────────────────────────────────────
 
 pub use echo_core::plugin::{
-    InstallSource, PluginAuthor, PluginCapability, PluginComponents, PluginDependency, PluginEntry,
-    PluginId, PluginLifecycle, PluginLifecycleManager, PluginManifest, PluginRegistry, PluginScope,
-    PluginUserConfigEntry, PluginUserConfigType, PluginVariables, ResolvedComponents,
+    AGENT_PLUGIN_SCHEMA_V1, InstallSource, PluginAuthor, PluginCapability, PluginDependency,
+    PluginEntry, PluginId, PluginLifecycle, PluginLifecycleManager, PluginManifest, PluginRegistry,
+    PluginScope, PluginUserConfigEntry, PluginUserConfigType, PluginVariables, ResolvedComponents,
     plugin_data_base_dir, set_plugin_data_base_dir, set_plugin_data_base_dir_name,
 };
 
@@ -54,12 +57,8 @@ pub struct PluginWiringResult {
     /// LSP config files handed to the application layer. `ReactAgent` does not
     /// own an `LspManager`; EKO starts and stops them in `PluginRuntimeService`.
     pub lsp_discovered: Vec<String>,
-    /// Monitor config files handed to the application scheduler.
-    pub monitors_discovered: Vec<String>,
-    /// Theme files handed to the application UI runtime.
-    pub themes_discovered: Vec<String>,
-    /// Output-style files handed to the application context-projection runtime.
-    pub output_styles_discovered: Vec<String>,
+    /// Non-fatal diagnostics for isolated standard component failures.
+    pub warnings: Vec<String>,
     /// Successful live registrations, grouped for exact unload/reload.
     pub components_by_plugin: HashMap<String, WiredPluginComponents>,
     /// Errors encountered during wiring.
@@ -83,7 +82,7 @@ impl PluginWiringResult {
 
 /// Wires plugin components into the agent's subsystems.
 ///
-/// The integrator reads resolved component paths from a `PluginEntry`
+/// The integrator reads fixed component paths resolved for a `PluginEntry`
 /// and registers them with the appropriate subsystem:
 ///
 /// | Component | Target | Status |
@@ -93,7 +92,6 @@ impl PluginWiringResult {
 /// | MCP servers | `McpManager` via `ReactAgent::load_mcp_from_file` | assembled |
 /// | Agents | application-owned constructor + executable factory | adapter output |
 /// | LSP servers | application-owned `LspManager` | adapter output |
-/// | Monitors / Themes / Output styles | application scheduler/UI/context projection | adapter output |
 ///
 /// This struct lives in the facade crate because it needs access to
 /// types from multiple workspace crates.
@@ -108,9 +106,9 @@ impl PluginIntegrator {
     ///
     /// This is the primary entry point. It:
     /// 1. Scans all plugin scopes and resolves dependencies.
-    /// 2. For each enabled plugin, resolves component paths.
+    /// 2. For each enabled plugin, resolves its fixed component locations.
     /// 3. Wires skills, hooks, and MCP servers into the agent; returns
-    ///    application-owned agent/LSP/monitor/theme/output-style files to the adapter.
+    ///    application-owned agent/LSP files to the adapter.
     ///
     /// # Subagent definitions (agents)
     ///
@@ -121,10 +119,10 @@ impl PluginIntegrator {
     ///
     /// # Application-owned components
     ///
-    /// LSP servers, monitors, themes, and output styles are resolved and
-    /// reported (`*_discovered`) but not assembled by the generic framework:
-    /// `ReactAgent` holds no UI, scheduler, or `LspManager`. EKO consumes all
-    /// of these outputs in its application-layer `PluginRuntimeService`.
+    /// LSP servers are resolved and reported (`lsp_discovered`) but not
+    /// assembled by the generic framework because `ReactAgent` does not own an
+    /// `LspManager`. EKO-specific monitors, themes, and output styles are not
+    /// part of this framework layer and are resolved by the application.
     pub async fn wire_all(
         &self,
         agent: &mut crate::agent::react::ReactAgent,
@@ -146,6 +144,7 @@ impl PluginIntegrator {
         // Collect components from all enabled plugins
         let mut skill_dirs: Vec<(String, PathBuf, PluginVariables)> = Vec::new();
         let mut hooks_defs: Vec<(
+            String,
             String,
             String,
             echo_execution::skills::hooks::HooksDefinition,
@@ -190,6 +189,7 @@ impl PluginIntegrator {
                     continue;
                 }
             };
+            result.warnings.extend(resolved.diagnostics.clone());
 
             // Collect skill dirs, tagged with the owning plugin id so the
             // wiring loop can `tag_source` them for grouped unload (P1-reload).
@@ -206,7 +206,12 @@ impl PluginIntegrator {
                             echo_execution::skills::hooks::HooksDefinition,
                         >(&content)
                         {
-                            Ok(def) => hooks_defs.push((plugin_id.clone(), root_display, def)),
+                            Ok(def) => hooks_defs.push((
+                                plugin_id.clone(),
+                                root_display,
+                                variables.plugin_data.display().to_string(),
+                                def,
+                            )),
                             Err(error) => {
                                 failed_plugins.insert(plugin_id.clone());
                                 result.errors.push(format!(
@@ -238,21 +243,6 @@ impl PluginIntegrator {
             // Discovery-only: report but do not assemble (no framework consumer).
             if let Some(ref lsp_file) = resolved.lsp_config_file {
                 result.lsp_discovered.push(lsp_file.display().to_string());
-            }
-            if let Some(ref monitors_file) = resolved.monitors_file {
-                result
-                    .monitors_discovered
-                    .push(monitors_file.display().to_string());
-            }
-            for theme_file in &resolved.theme_files {
-                result
-                    .themes_discovered
-                    .push(theme_file.display().to_string());
-            }
-            for style_file in &resolved.output_style_files {
-                result
-                    .output_styles_discovered
-                    .push(style_file.display().to_string());
             }
         }
 
@@ -290,8 +280,13 @@ impl PluginIntegrator {
         // `HookSource::Skill("plugin:…")`, collapsing source identity.
         {
             let mut hook_reg = agent.hook_registry().write().await;
-            for (plugin_name, source_dir, def) in &hooks_defs {
-                if hook_reg.register_plugin_hooks(plugin_name, source_dir, def.clone()) {
+            for (plugin_name, source_dir, plugin_data_dir, def) in &hooks_defs {
+                if hook_reg.register_plugin_hooks(
+                    plugin_name,
+                    source_dir,
+                    plugin_data_dir,
+                    def.clone(),
+                ) {
                     result
                         .components_by_plugin
                         .entry(plugin_name.clone())
@@ -311,37 +306,53 @@ impl PluginIntegrator {
         #[cfg(feature = "mcp")]
         {
             for (plugin_id, mcp_file, variables) in &mcp_files {
-                let config = match std::fs::read_to_string(mcp_file)
+                let loaded = match std::fs::read_to_string(mcp_file)
                     .map_err(|error| error.to_string())
                     .and_then(|content| {
-                        crate::mcp::McpConfigFile::parse(&variables.substitute(&content))
-                            .map_err(|error| error.to_string())
+                        crate::mcp::McpConfigFile::parse_agent_plugin(
+                            &content,
+                            &variables.plugin_root,
+                            &variables.plugin_data,
+                        )
+                        .map_err(|error| error.to_string())
                     }) {
-                    Ok(config) => config,
+                    Ok(loaded) => loaded,
                     Err(error) => {
-                        failed_plugins.insert(plugin_id.clone());
-                        result.errors.push(format!(
-                            "Plugin '{plugin_id}' MCP config {}: {error}",
+                        result.warnings.push(format!(
+                            "Plugin '{plugin_id}' MCP disabled for {}: {error}",
                             mcp_file.display()
                         ));
                         continue;
                     }
                 };
+                result.warnings.extend(
+                    loaded
+                        .diagnostics
+                        .into_iter()
+                        .map(|diagnostic| format!("Plugin '{plugin_id}' {diagnostic}")),
+                );
+                let mut config = loaded.config;
                 let mut expected_servers = config.mcp_servers.keys().cloned().collect::<Vec<_>>();
                 expected_servers.sort();
+                let connected = agent
+                    .list_mcp_servers()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<std::collections::HashSet<_>>();
                 let collisions = expected_servers
                     .iter()
-                    .filter(|name| agent.list_mcp_servers().contains(&name.as_str()))
+                    .filter(|name| connected.contains(*name))
                     .cloned()
                     .collect::<Vec<_>>();
-                if !collisions.is_empty() {
-                    failed_plugins.insert(plugin_id.clone());
-                    result.errors.push(format!(
-                        "Plugin '{plugin_id}' MCP server name collision(s): {}",
-                        collisions.join(", ")
-                    ));
-                    continue;
+                for collision in &collisions {
+                    config.mcp_servers.remove(collision);
                 }
+                result.warnings.extend(collisions.into_iter().map(|name| {
+                    format!(
+                        "Plugin '{plugin_id}' MCP server '{name}' skipped because that name is already connected"
+                    )
+                }));
+                expected_servers.retain(|name| config.mcp_servers.contains_key(name));
                 match agent.load_mcp_config(config).await {
                     Ok(clients) => {
                         let connected_servers = clients
@@ -363,17 +374,15 @@ impl PluginIntegrator {
                             .filter(|name| !connected_servers.contains(name))
                             .collect::<Vec<_>>();
                         if !missing.is_empty() {
-                            failed_plugins.insert(plugin_id.clone());
-                            result.errors.push(format!(
-                                "Plugin '{plugin_id}' failed to connect MCP server(s): {}",
+                            result.warnings.push(format!(
+                                "Plugin '{plugin_id}' could not connect MCP server(s): {}",
                                 missing.join(", ")
                             ));
                         }
                     }
                     Err(e) => {
-                        failed_plugins.insert(plugin_id.clone());
-                        result.errors.push(format!(
-                            "Plugin '{plugin_id}' MCP from {}: {e}",
+                        result.warnings.push(format!(
+                            "Plugin '{plugin_id}' MCP entries from {} were skipped: {e}",
                             mcp_file.display()
                         ));
                     }
@@ -383,8 +392,7 @@ impl PluginIntegrator {
 
         #[cfg(not(feature = "mcp"))]
         for (plugin_id, mcp_file, _) in &mcp_files {
-            failed_plugins.insert(plugin_id.clone());
-            result.errors.push(format!(
+            result.warnings.push(format!(
                 "Plugin '{plugin_id}' declares MCP config {}, but the framework was built without the 'mcp' feature",
                 mcp_file.display()
             ));

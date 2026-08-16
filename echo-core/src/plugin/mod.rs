@@ -1,36 +1,29 @@
-//! Plugin system — core types for EchoAgent's extension architecture.
+//! Plugin system — core types for EchoAgent plugin packages.
 //!
-//! A **plugin** is a self-contained component directory that extends EchoAgent
-//! with custom skills, hooks, MCP servers, LSP servers, agents, monitors, and themes.
+//! A **plugin** is a flat package rooted by `plugin.json`. Every component uses
+//! a conventional location, so authors do not repeat paths in the manifest.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! .echo-plugin/
-//! └── manifest.yaml          # Plugin metadata and component paths
-//! skills/                    # SKILL.md files
-//! agents/                    # Agent definition markdown files
-//! hooks/
-//! └── hooks.yaml             # Hook configuration
-//! .mcp.json                  # MCP server configuration
-//! .lsp.yaml                  # LSP server configuration
-//! monitors/
-//! └── monitors.json          # Background monitor configuration
-//! themes/                    # Color theme JSON files
+//! plugin.json
+//! skills/<skill>/SKILL.md
+//! mcp.json
+//! agents/
+//! hooks/hooks.yaml
+//! lsp.yaml
 //! ```
 //!
 //! ## Manifest format
 //!
-//! Plugins declare their components in `manifest.yaml`:
+//! Plugins declare metadata and optional local configuration in `plugin.json`:
 //!
-//! ```yaml
-//! name: my-plugin
-//! version: "1.0.0"
-//! description: "Example plugin"
-//! components:
-//!   skills: "./skills/"
-//!   hooks: "./hooks/hooks.yaml"
-//!   mcp_servers: "./.mcp.json"
+//! ```json
+//! {
+//!   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+//!   "name": "my-plugin",
+//!   "displayName": "My Plugin"
+//! }
 //! ```
 //!
 //! ## Installation scopes
@@ -52,7 +45,7 @@ pub mod variables;
 pub use capability::PluginCapability;
 pub use lifecycle::{PluginLifecycle, PluginLifecycleManager};
 pub use manifest::{
-    PluginAuthor, PluginComponents, PluginDependency, PluginManifest, PluginUserConfigEntry,
+    AGENT_PLUGIN_SCHEMA_V1, PluginAuthor, PluginDependency, PluginManifest, PluginUserConfigEntry,
     PluginUserConfigType,
 };
 pub use registry::{PluginEntry, PluginId, PluginRegistry, ResolvedComponents};

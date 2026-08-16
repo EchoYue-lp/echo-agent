@@ -25,7 +25,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use client::McpClient;
-pub use config_loader::{McpConfigFile, McpServerEntry};
+pub use config_loader::{
+    AGENT_PLUGIN_MCP_SCHEMA_V1, AgentPluginMcpLoad, McpConfigFile, McpServerEntry,
+};
 pub use server::McpServer;
 pub use server_config::{McpServerConfig, TransportConfig};
 pub use tool_adapter::McpToolAdapter;

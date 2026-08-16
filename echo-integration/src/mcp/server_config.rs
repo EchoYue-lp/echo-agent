@@ -19,6 +19,8 @@ pub enum TransportConfig {
         args: Vec<String>,
         /// 额外注入的环境变量
         env: Vec<(String, String)>,
+        /// Working directory for the child process.
+        cwd: Option<std::path::PathBuf>,
     },
     /// HTTP 传输：MCP Streamable HTTP（推荐）
     ///
@@ -68,6 +70,7 @@ impl McpServerConfig {
                 command: command.into(),
                 args: args.into_iter().map(Into::into).collect(),
                 env: vec![],
+                cwd: None,
             },
         }
     }
@@ -85,6 +88,7 @@ impl McpServerConfig {
                 command: command.into(),
                 args: args.into_iter().map(Into::into).collect(),
                 env: env.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                cwd: None,
             },
         }
     }

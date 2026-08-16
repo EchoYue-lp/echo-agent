@@ -766,7 +766,19 @@ impl ReactAgent {
         if let Some((_, variables)) = plugin {
             loader = loader.with_plugin_variables(variables.clone());
         }
-        let descriptors = loader.discover(scopes).await?;
+        let descriptors = match plugin {
+            Some(_) => {
+                let directory = scopes.iter().find_map(|scope| match scope {
+                    DiscoveryScope::Custom(path) => Some(path.clone()),
+                    DiscoveryScope::Project(_) | DiscoveryScope::User => None,
+                });
+                match directory {
+                    Some(directory) => loader.discover_agent_plugin_skills(directory).await?,
+                    None => Vec::new(),
+                }
+            }
+            None => loader.discover(scopes).await?,
+        };
 
         if descriptors.is_empty() {
             info!(
@@ -1284,14 +1296,16 @@ impl ReactAgent {
         self.add_tools(tools);
         let client = {
             let mgr = &self.tools.mcp_manager;
-            mgr.get_client(&name).ok_or_else(|| {
-                crate::error::ReactError::Agent(Box::new(
-                    crate::error::AgentError::InitializationFailed(format!(
-                        "MCP client '{}' not found after connection",
-                        name
-                    )),
-                ))
-            })?
+            mgr.get_client(&name)
+                .ok_or_else(|| {
+                    crate::error::ReactError::Agent(Box::new(
+                        crate::error::AgentError::InitializationFailed(format!(
+                            "MCP client '{}' not found after connection",
+                            name
+                        )),
+                    ))
+                })?
+                .clone()
         };
         tracing::info!(
             agent = %self.config.agent_name,
@@ -1299,7 +1313,8 @@ impl ReactAgent {
             tools = count,
             "MCP server connected"
         );
-        Ok(client.clone())
+        self.setup_hook_mcp_executor().await;
+        Ok(client)
     }
 
     #[cfg(feature = "mcp")]
@@ -1450,7 +1465,9 @@ impl ReactAgent {
         for tool_name in tool_names {
             self.remove_tool(&tool_name);
         }
-        self.tools.mcp_manager.disconnect(name).await
+        let disconnected = self.tools.mcp_manager.disconnect(name).await;
+        self.setup_hook_mcp_executor().await;
+        disconnected
     }
 
     // ── System Prompt ────────────────────────────────────────────────────────

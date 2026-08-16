@@ -1,779 +1,152 @@
 # 插件系统
 
-## 是什么
+EchoAgent 复用 Agent Plugins 1.0 的根清单、Skills 和 MCP 约定，并针对本地个人助理采用扁平插件包。每类组件只有一个固定位置，不引入客户端扩展 namespace，也不在清单中重复声明组件路径。
 
-插件系统允许在不修改核心代码的前提下，通过声明式的 `manifest.yaml` 扩展 Agent 的能力。一个插件是一个自包含的目录，可以提供以下组件：
-
-| 组件 | 当前状态 | 说明 |
-|------|---------|------|
-| Skills | 已接入 `SkillRegistry` | SKILL.md 文件，支持在线装卸 |
-| Hooks | 已接入 `HookRegistry` | 生命周期和工具钩子，支持在线装卸 |
-| MCP Servers | 已接入 `McpManager` | MCP 服务器及工具，支持在线装卸 |
-| Agents | EKO 已接通 | 解析后与可执行 subagent factory 一起注册 |
-| LSP Servers | EKO 已接通 | 由应用层 `LspManager` 启停 |
-| Monitors | EKO 已接通 | 与应用调度器进行增量替换 |
-| Themes | EKO GUI 已接通 | 可选择、应用为 CSS 变量并持久化 |
-| Output Styles | EKO 已接通 | 投影到 Agent 上下文并持久化 |
-
-```
-核心框架:  提供 React Agent 循环、工具执行、上下文管理
-插件:      以目录为单位打包能力，通过 manifest 声明组件，按需加载
-```
-
----
-
-## 解决的问题
-
-没有插件系统时，扩展 Agent 需要：
-- **修改核心代码**：每增加一个能力都要改动框架源码
-- **紧耦合**：自定义工具、钩子、MCP 配置散落在各处
-- **难以分发**：无法将一组能力打包分享给团队或社区
-
-插件系统将扩展点统一为"一个目录 + 一份 manifest"，实现即插即用。
-
----
-
-## 架构
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Plugin System                                │
-│                                                                  │
-│   PluginRegistry                                                 │
-│   ┌──────────────────────────────────────────────────────────┐  │
-│   │  scan_all() → 发现插件                                    │  │
-│   │  install()  → 安装插件（本地/Git）                         │  │
-│   │  enable() / disable() → 启停插件                          │  │
-│   │  resolve_dependencies() → 拓扑排序                        │  │
-│   └──────────────────────────────────────────────────────────┘  │
-│       │                                                          │
-│       ▼                                                          │
-│   PluginIntegrator                                               │
-│   ┌──────────────────────────────────────────────────────────┐  │
-│   │  wire_all() → 按依赖顺序装配                              │  │
-│   │  ┌──────────┐  ┌──────────┐  ┌──────────┐               │  │
-│   │  │ Skills   │  │ Hooks    │  │ MCP      │               │  │
-│   │  │ → Agent  │  │ → Agent  │  │ → Agent  │               │  │
-│   │  └──────────┘  └──────────┘  └──────────┘               │  │
-│   └──────────────────────────────────────────────────────────┘  │
-│       │                                                          │
-│       ▼                                                          │
-│   PluginVariables                                                │
-│   ┌──────────────────────────────────────────────────────────┐  │
-│   │  ${ECHO_PLUGIN_ROOT} → 插件安装目录                       │  │
-│   │  ${ECHO_PLUGIN_DATA} → 持久化数据目录                     │  │
-│   │  ${ECHO_PROJECT_DIR} → 项目根目录                         │  │
-│   │  ${user_config.*}    → 用户配置值                         │  │
-│   └──────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 插件 Manifest 格式
-
-每个插件的根目录下必须有 `.echo-plugin/manifest.yaml`：
-
-```yaml
-name: data-analysis-pack
-display_name: "Data Analysis Pack"
-version: "1.2.0"
-description: "增强数据分析能力，集成 polars 扩展"
-author:
-  name: "Echo Team"
-  email: "team@echo.dev"
-license: MIT
-keywords: [data, analysis, polars]
-
-components:
-  skills: "./skills/"
-  agents:
-    - "./agents/reviewer.md"
-    - "./agents/analyst.md"
-  hooks: "./hooks/hooks.yaml"
-  mcp_servers: "./.mcp.json"
-
-config:
-  api_endpoint:
-    type: string
-    title: "API 端点"
-    description: "数据服务地址"
-    default: "http://localhost:8080"
-  api_token:
-    type: string
-    title: "API Token"
-    sensitive: true
-    required: true
-
-dependencies:
-  - name: base-tools
-    version: ">=1.0.0"
-  - simple-dep
-```
-
-### Manifest 字段说明
-
-| 字段 | 必须 | 说明 |
-|------|------|------|
-| `name` | ✓ | 唯一标识符，kebab-case（小写字母、数字、连字符） |
-| `display_name` | | 人类可读名称，省略时使用 `name` |
-| `version` | | 语义化版本号，如 `"1.2.0"`，默认 `"0.0.0"` |
-| `description` | | 简要描述插件用途 |
-| `author` | | 作者信息（`name`、`email`、`url`） |
-| `license` | | 许可证标识（如 `"MIT"`、`"Apache-2.0"`） |
-| `keywords` | | 发现标签，用于搜索和过滤 |
-| `components` | | 组件声明——相对于插件根目录的路径 |
-| `config` | | 用户可配置项，安装时提示填写 |
-| `dependencies` | | 依赖的其他插件 |
-| `default_enabled` | | 是否默认启用（默认 `true`） |
-
-### 组件路径规则
-
-所有组件路径必须：
-- 以 `./` 开头（如 `"./skills/"`）
-- 不得包含 `..`（禁止路径遍历，防止逃逸出插件根目录）
-
-路径值支持单字符串或字符串数组：
-
-```yaml
-components:
-  skills: "./skills/"              # 单路径
-  agents:                           # 多路径
-    - "./agents/reviewer.md"
-    - "./agents/analyst.md"
-```
-
-省略时，部分组件使用默认路径：
-- `skills` → `./skills/`
-- `mcp_servers` → `./.mcp.json`
-
-### 用户配置项类型
-
-| 类型 | 说明 |
-|------|------|
-| `string` | 自由文本，可设置 `multiple: true` 允许数组 |
-| `number` | 数值，可设置 `min` / `max` |
-| `boolean` | 布尔开关 |
-| `directory` | 目录路径（验证存在性） |
-| `file` | 文件路径（验证存在性） |
-
-配置项通用属性：
-- `sensitive: true` — 在 UI 中遮蔽输入，并在 Hook 命令诊断中持续脱敏替换后的值
-- `required: true` — 必填项
-- `default` — 用户未提供时的默认值
-
-注册表会解析默认值，校验类型、必填项、数值范围和文件路径，再把已验证的
-`user_config` 持久化到应用插件注册表文件。Unix 下 EKO 将该本地文件设置为仅当前用户
-可读写。配置值通过 `${user_config.KEY}` 提供给组件加载器；这里不宣称使用操作系统
-钥匙串。
-
----
-
-## PluginScope：安装作用域
-
-插件可以安装到三个不同的作用域：
-
-| 作用域 | 路径 | 使用场景 |
-|--------|------|---------|
-| `User` | `~/.echo-agent/plugins/` | 个人插件，所有项目可用 |
-| `Project` | `.echo-agent/plugins/` | 团队共享，通过 VCS 提交 |
-| `Local` | `.echo-agent/plugins.local/` | 项目私有，gitignore 不提交 |
-
-```rust
-use echo_agent::plugin::{PluginScope, InstallSource};
-
-// 解析作用域
-let scope = PluginScope::from_arg("user").unwrap();    // "user" | "project" | "local"
-
-// 获取文件系统路径
-let dir = scope.resolve_dir(Some(Path::new("/home/user/my-project")));
-// User    → /home/user/.echo-agent/plugins/
-// Project → /home/user/my-project/.echo-agent/plugins/
-// Local   → /home/user/my-project/.echo-agent/plugins.local/
-```
-
----
-
-## PluginRegistry API
-
-`PluginRegistry` 是插件管理的核心枢纽，负责发现、安装、卸载、启停和依赖解析。
-
-### 创建注册表
-
-```rust
-use echo_agent::plugin::PluginRegistry;
-
-// 默认路径（~/.echo-agent/plugins/）
-let mut registry = PluginRegistry::new(None);
-
-// 指定项目根目录（解析 Project/Local 作用域）
-let mut registry = PluginRegistry::new(Some(PathBuf::from("/home/user/my-project")));
-
-// 自定义路径（测试用）
-let mut registry = PluginRegistry::with_paths(
-    PathBuf::from("/tmp/registry.json"),
-    PathBuf::from("/tmp/data"),
-    Some(PathBuf::from("/tmp/project")),
-);
-```
-
-### 扫描发现
-
-```rust
-// 扫描所有作用域，加载已安装插件
-let count = registry.scan_all().unwrap();
-println!("发现 {} 个插件", count);
-```
-
-扫描逻辑：遍历每个作用域目录，查找包含 `.echo-plugin/manifest.yaml` 的子目录。
-
-### 安装
-
-```rust
-use echo_agent::plugin::{InstallSource, PluginScope};
-
-// 从本地目录安装
-let source = InstallSource::Local(PathBuf::from("/path/to/my-plugin"));
-let plugin_id = registry.install(&source, PluginScope::User)?;
-
-// 从 Git 仓库安装（HTTPS 或 SSH）
-let source = InstallSource::parse("https://github.com/echo/data-plugin.git");
-let plugin_id = registry.install(&source, PluginScope::Project)?;
-
-// 自动检测安装源
-let source = InstallSource::parse("./my-plugin");       // → Local
-let source = InstallSource::parse("https://...git");    // → Git
-```
-
-### 卸载
-
-```rust
-// 卸载并删除数据目录
-registry.uninstall("data-analysis-pack", false)?;
-
-// 卸载但保留数据目录
-registry.uninstall("data-analysis-pack", true)?;
-```
-
-### 启用 / 禁用
-
-```rust
-// 禁用插件（不卸载，保留文件和数据）
-registry.disable("data-analysis-pack")?;
-
-// 重新启用
-registry.enable("data-analysis-pack")?;
-```
-
-启停状态会持久化到 `registry.json`，重启后自动恢复。
-已验证的用户配置也持久化在同一注册表中：
-
-```rust
-registry.configure(
-    "data-analysis-pack",
-    HashMap::from([(
-        "api_endpoint".to_string(),
-        serde_json::json!("http://localhost:8080"),
-    )]),
-)?;
-```
-
-缺少必填配置的插件会以禁用状态启动，只有 `configure` 成功后才能启用。
-
-### 查询
-
-```rust
-// 列出所有已安装插件
-for entry in registry.list() {
-    println!("{} v{} [{}]",
-        entry.manifest.name,
-        entry.manifest.version,
-        if entry.enabled { "enabled" } else { "disabled" }
-    );
-}
-
-// 仅列出已启用插件
-for entry in registry.list_enabled() {
-    println!("{}", entry.manifest.display_name());
-}
-
-// 按关键词搜索（匹配 name、description、keywords）
-let results = registry.search("polars");
-
-// 获取单个插件详情
-if let Some(entry) = registry.get("data-analysis-pack") {
-    println!("安装路径: {}", entry.root.display());
-    println!("作用域: {}", entry.scope);
-}
-
-// 总数
-println!("已安装 {} 个插件", registry.count());
-```
-
-### 依赖解析
-
-```rust
-// 拓扑排序：依赖在前，被依赖者在后
-let ordered = registry.resolve_dependencies()?;
-// 例如 A 依赖 B，B 依赖 C → 返回 [C, B, A]
-
-// 错误情况：
-// - 缺少依赖："Plugin 'a' depends on 'b' which is not installed"
-// - 循环依赖："Circular dependency detected among plugins"
-```
-
----
-
-## 插件生命周期
-
-插件从安装到卸载经历以下阶段：
-
-```
-安装 → 扫描发现 → 解析组件 → 装配到 Agent → 启用/禁用 → 卸载
-  │                                        │
-  │  install()                             │  enable() / disable()
-  │  scan_all()                            │
-  │  resolve_components()                  │
-  │  PluginIntegrator::wire_all()          │
-  ▼                                        ▼
-```
-
-### 生命周期回调（PluginLifecycle trait）
-
-对于需要代码级生命周期管理的插件，实现 `PluginLifecycle` trait：
-
-```rust
-use echo_agent::plugin::PluginLifecycle;
-
-struct MyPluginLifecycle;
-
-impl PluginLifecycle for MyPluginLifecycle {
-    /// 插件加载后调用一次，执行初始化
-    fn init(&self) -> Result<(), String> {
-        // 启动后台进程、建立连接、初始化缓存
-        Ok(())
-    }
-
-    /// 插件启用时调用（或 default_enabled: true 时启动即调用）
-    fn activate(&self) -> Result<(), String> {
-        // 启动监控器等激活时逻辑
-        Ok(())
-    }
-
-    /// 插件禁用时调用
-    fn deactivate(&self) -> Result<(), String> {
-        // 停止后台进程、释放资源
-        Ok(())
-    }
-
-    /// Agent 关闭时调用
-    fn shutdown(&self) -> Result<(), String> {
-        // 刷缓冲、关闭连接、保存状态到 ${ECHO_PLUGIN_DATA}
-        Ok(())
-    }
-}
-```
-
-生命周期流转：
+## 包结构
 
 ```text
-load → init → activate ⇄ deactivate → shutdown
-                   ↑          ↓
-                   └──────────┘  (可循环，如 reload)
+my-plugin/
+├── plugin.json
+├── skills/
+│   └── code-review/
+│       └── SKILL.md
+├── mcp.json
+├── agents/
+│   └── reviewer.md
+├── hooks/
+│   └── hooks.yaml
+├── lsp.yaml
+├── monitors.yaml
+├── themes/
+├── output-styles/
+├── scripts/
+└── README.md
 ```
 
-`PluginLifecycleManager` 持有已注册的回调。Native/plugin host 代码通过
-`PluginRuntimeService::register_lifecycle` 注册回调；声明式 manifest 不负责命名或
-动态实例化 Rust 回调类型。EKO 的共享 `PluginRuntimeService` 为 GUI、TUI、CLI
-驱动同一条调用链。
+`plugin.json` 直接放在插件根目录。旧的 `.echo-plugin/manifest.yaml` 不再兼容，也不会形成第二套解析路径。
 
-每次候选替换均由生命周期原子包围：先停用所有 active 回调，再拆卸旧组件、装配候选
-组件，最后激活候选启用集合的回调。停用、装配或激活任一步失败都会放弃发布候选，恢复
-原组件/LSP/monitor 集合并重新激活原回调。卸载会在 `deactivate` / `shutdown` 后
-unregister 回调，因此重装可以重新注册。`init` 每次注册只执行一次，而成功重载时
-`activate` / `deactivate` 可以循环。
-
----
-
-## 组件装配
-
-`PluginIntegrator` 负责将插件的组件接入 Agent 的各子系统：
-
-```rust
-use echo_agent::plugin::PluginIntegrator;
-
-let integrator = PluginIntegrator::new();
-let result = integrator.wire_all(&mut agent, &mut registry).await;
-
-println!("加载 {} 个 Skills", result.skills_loaded.len());
-println!("注册 {} 个 Hook 源", result.hooks_registered.len());
-println!("连接 {} 个 MCP 服务器", result.mcp_connected.len());
-
-if !result.is_ok() {
-    for err in &result.errors {
-        eprintln!("装配错误: {}", err);
-    }
-}
-
-println!("共装配 {} 个组件", result.total_wired());
-```
-
-装配顺序：
-
-1. `resolve_dependencies()` 确定插件加载顺序
-2. 对每个已启用插件调用 `resolve_components()` 解析路径
-3. 按类型分别接入：
-
-| 组件 | 装配方式 |
-|------|---------|
-| Skills | `agent.load_skills_from_dir()` |
-| Hooks | `hook_registry.register("plugin:{name}", ...)` |
-| MCP Servers | `agent.load_mcp_from_file()` |
-| Agents / LSP / Monitors / Themes / Output Styles | 在框架/应用适配边界返回路径；EKO 的 `PluginRuntimeService` 负责解析并激活 |
-
-`PluginIntegrator::total_wired()` 有意只统计框架拥有的 Skills/Hooks/MCP。EKO 应用在
-同一份 reload summary 中单独报告实际生效的 Agent、LSP、monitor、theme 和
-output-style 数量。
-
-Theme 选择会真正激活并持久化运行时偏好。GUI 和 TUI 都会立即应用所选插件
-Theme；清除、禁用、卸载或重载后 Theme 消失时恢复各自的内置主题。GUI 选择内置主题
-时会先停用插件 Theme 偏好，确保 DOM 变量、前端状态、TUI 渲染和后端持久化状态不会
-分裂。Output Style 使用同一套偏好持久化模型，并刷新可替换的 Agent 上下文投影。
-
-`wire_all` 是唯一的组件装配权威。它返回带来源所有权的 receipt；任一框架组件
-失败时会补偿整代候选组件。禁用、替换或关闭时，使用同一 receipt 调用
-`PluginIntegrator::unwire`。
-
----
-
-## 变量替换
-
-插件配置中可使用变量占位符，运行时自动替换为实际路径或值。
-
-### 内置变量
-
-| 变量 | 值 |
-|------|-----|
-| `${ECHO_PLUGIN_ROOT}` | 插件安装目录的绝对路径 |
-| `${ECHO_PLUGIN_DATA}` | 插件持久化数据目录（跨更新保留） |
-| `${ECHO_PROJECT_DIR}` | 项目根目录 |
-
-### 用户配置变量
-
-通过 `${user_config.KEY}` 引用 manifest 中 `config` 声明的用户配置值：
-
-```yaml
-# manifest.yaml
-config:
-  api_endpoint:
-    type: string
-    title: "API Endpoint"
-    default: "http://localhost:8080"
-```
-
-在组件配置中使用：
+## 清单
 
 ```json
 {
-  "server": {
-    "url": "${user_config.api_endpoint}/api/v1"
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "review.tools",
+  "version": "1.0.0",
+  "description": "Review workflows",
+  "author": { "name": "Example Team" },
+  "license": "MIT",
+  "keywords": ["review"],
+  "displayName": "Review Tools",
+  "defaultEnabled": true,
+  "config": {
+    "endpoint": {
+      "type": "string",
+      "title": "Endpoint",
+      "default": "https://example.com"
+    }
+  },
+  "dependencies": [
+    { "name": "base.tools", "version": ">=1.0.0" }
+  ]
+}
+```
+
+插件身份字段遵循 Agent Plugins 1.0。EchoAgent 额外读取根级 `displayName`、`defaultEnabled`、`config` 和 `dependencies`；未知顶层字段会被报告后忽略。
+
+插件名长度为 1-64 个字符，只能包含小写 ASCII 字母、数字、连字符和句点；首尾必须为字母或数字，且不能包含 `--` 或 `..`。
+
+## 标准 Skills
+
+Skills 使用固定根目录，每个一级子目录表示一个 Skill：
+
+```text
+skills/<skill-name>/SKILL.md
+```
+
+插件 Skills 不递归扫描分类目录。单个无效 Skill 只会跳过自身，不影响同包的其他 Skills 或插件组件。
+
+## 标准 MCP
+
+MCP 使用根目录固定文件 `mcp.json`：
+
+```json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "local-review": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/server.js"],
+      "env": { "CACHE": "${PLUGIN_DATA}/cache" },
+      "cwd": "${PLUGIN_ROOT}"
+    },
+    "remote-review": {
+      "type": "streamable-http",
+      "url": "https://example.com/mcp",
+      "headers": { "X-Tenant": "public" }
+    }
   }
 }
 ```
 
-变量替换发生在所有文本型插件组件解析之前：Hooks、MCP、Agent 定义、LSP、monitor、
-Theme、Output Style，以及插件拥有的完整 `SKILL.md`。因此 Skill YAML frontmatter
-Hook Action 中的变量与 Markdown 指令中的变量具有完全相同的解析结果。
+支持 `stdio`、`streamable-http` 和旧版 `sse`。stdio 的 `command` 是一个裸可执行文件名，或以 `./` 开头的插件相对路径；框架不会把它交给 shell 解释。
 
-### 环境变量
+EchoAgent 向 stdio 子进程提供 `PLUGIN_ROOT` 和 `PLUGIN_DATA`。`${PLUGIN_ROOT}`、`${PLUGIN_DATA}` 只在 `args`、环境变量值和 `cwd` 中进行一次非递归展开；不会在环境变量名、`command`、远程 URL 或 HTTP headers 中展开。插件不能覆盖这两个保留环境变量。
 
-`${ENV_VAR}` 形式的 OS 环境变量也会被替换。未找到的变量保持原样不删除。
+顶层 `mcp.json` 无效时，只禁用该插件的 MCP；单个服务配置无效、不可连接或重名时，只跳过该服务。
 
-### 编程使用
+## 固定本地组件
 
-```rust
-use echo_agent::plugin::PluginVariables;
-use std::collections::HashMap;
+其余组件从固定根位置发现：
 
-let vars = PluginVariables::new(
-    "my-plugin",
-    PathBuf::from("/home/user/.echo-agent/plugins/my-plugin"),
-    PathBuf::from("/home/user/my-project"),
-);
+| 位置 | 消费方 |
+|---|---|
+| `agents/*.md` | Subagent 适配器 |
+| `hooks/hooks.yaml` | Hook registry |
+| `lsp.yaml` | 宿主应用 LSP manager |
+| `monitors.yaml` | EKO 调度器 |
+| `themes/*.json` | EKO GUI/TUI 主题目录 |
+| `output-styles/*.md` | EKO system context 投影 |
 
-// 添加用户配置
-let mut config = HashMap::new();
-config.insert("api_endpoint".into(), "http://localhost:9090".into());
-let vars = vars.with_user_config(config);
+`scripts/` 和 `README.md` 是插件资源，不会自动执行；Skill 或 Hook 可以显式引用脚本。
 
-// 替换变量
-let result = vars.substitute("run ${ECHO_PLUGIN_ROOT}/scripts/start.sh");
-// → "run /home/user/.echo-agent/plugins/my-plugin/scripts/start.sh"
+## 框架与应用分层
 
-let result = vars.substitute("connect to ${user_config.api_endpoint}");
-// → "connect to http://localhost:9090"
+通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义和 LSP 适配输出。EKO 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 adapter 不重复拥有依赖排序、组件所有权或重载语义。
 
-// 解析相对路径
-let abs = vars.resolve_path("./skills/my-skill");
-// → /home/user/.echo-agent/plugins/my-plugin/skills/my-skill
+## 发现与生命周期
 
-// 确保数据目录存在
-vars.ensure_data_dir()?;
+默认扫描范围：
+
+| 作用域 | 默认位置 |
+|---|---|
+| User | `~/.echo-agent/plugins/<name>/plugin.json` |
+| Project | `<project>/.echo-agent/plugins/<name>/plugin.json` |
+| Local | `<project>/.echo-agent/plugins.local/<name>/plugin.json` |
+
+应用可以覆盖插件数据根目录，EKO 会将其设为 `~/.eko`。
+
+插件按依赖顺序加载。清单致命错误会跳过整个包；组件错误按最小可行边界隔离。运行时记录每个插件的组件所有权，因此 disable、uninstall 和 reload 能精确卸载对应组件。
+
+## API
+
+```rust,no_run
+use echo_agent::plugin::{InstallSource, PluginRegistry, PluginScope};
+
+let mut registry = PluginRegistry::new(Some(std::env::current_dir()?));
+registry.scan_all()?;
+
+let id = registry.install(
+    &InstallSource::Local("./review-tools".into()),
+    PluginScope::Project,
+)?;
+registry.disable(&id)?;
+registry.enable(&id)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-### 导出为环境变量
+需要安装前报告时，使用 `PluginRegistry::validate_plugin_dir`。
 
-将插件变量导出为进程环境变量（供 hook 脚本等子进程使用）：
+## 设计依据
 
-```rust
-use echo_agent::plugin::variables::export_to_env;
-
-// ⚠️ 必须在单线程初始化阶段调用（set_var 非线程安全）
-export_to_env(&vars);
-// 设置: ECHO_PLUGIN_ROOT, ECHO_PLUGIN_DATA, ECHO_PROJECT_DIR
-// 用户配置: ECHO_PLUGIN_OPTION_{KEY} (大写)
-```
-
----
-
-## 安全性
-
-### Git 克隆限制
-
-EKO 接受本地用户选择的加密 Git 传输：HTTPS、`ssh://` 和
-`git@host:path` 形式；明文 HTTP/Git 和畸形输入会被拒绝：
-
-```rust
-// 允许
-InstallSource::parse("https://github.com/echo/plugin.git")
-InstallSource::parse("git@github.com:echo/private-plugin.git")
-
-// 拒绝
-InstallSource::parse("file:///path/to/plugin")     // 应改用 Local 来源
-InstallSource::parse("git://host/repo")            // 明文传输
-InstallSource::parse("http://host/repo")           // 明文传输
-```
-
-这是本地可信扩展边界，不是公网多租户服务：用户主动配置的私网和 loopback Git
-主机是合法来源。
-
-### 路径遍历防护
-
-Manifest 验证器拒绝所有包含 `..` 的组件路径：
-
-```yaml
-# ❌ 验证失败
-components:
-  skills: "../shared-skills/"   # 路径遍历！
-
-# ✅ 正确
-components:
-  skills: "./skills/"
-```
-
-### 变量名校验
-
-导出环境变量时，用户配置的 key 仅允许 `[A-Z0-9_]` 字符，防止环境变量注入攻击：
-
-```rust
-// 合法: "API_ENDPOINT" → ECHO_PLUGIN_OPTION_API_ENDPOINT
-// 非法: "api;rm -rf /" → 跳过并记录警告
-```
-
-### Manifest 验证
-
-`PluginManifest::validate()` 执行全面检查：
-
-```rust
-let manifest = PluginManifest::from_file(&path)?;
-let errors = manifest.validate();
-
-// 检查项：
-// - name 非空且为 kebab-case
-// - version 为合法 semver
-// - 所有组件路径以 ./ 开头，不含 ..
-// - config key 为合法标识符
-// - multiple 仅用于 string 类型
-// - 依赖名称为 kebab-case
-
-if !errors.is_empty() {
-    for e in &errors {
-        eprintln!("{}: {}", e.field, e.message);
-    }
-}
-```
-
----
-
-## 示例：创建插件 Manifest
-
-创建一个简单的代码审查插件：
-
-### 目录结构
-
-```
-code-review-plugin/
-├── .echo-plugin/
-│   └── manifest.yaml
-├── skills/
-│   └── code-review/
-│       ├── SKILL.md
-│       └── references/
-│           └── checklist.md
-├── hooks/
-│   └── hooks.yaml
-└── .mcp.json
-```
-
-### .echo-plugin/manifest.yaml
-
-```yaml
-name: code-review-plugin
-display_name: "Code Review Plugin"
-version: "1.0.0"
-description: "自动化代码审查，支持自定义检查清单和安全扫描"
-author:
-  name: "My Team"
-license: MIT
-keywords: [code-review, security, quality]
-
-components:
-  skills: "./skills/"
-  hooks: "./hooks/hooks.yaml"
-  mcp_servers: "./.mcp.json"
-
-config:
-  strict_mode:
-    type: boolean
-    title: "严格模式"
-    description: "启用后任何警告都会阻止提交"
-    default: false
-  exclude_patterns:
-    type: string
-    title: "排除模式"
-    description: "跳过检查的文件 glob 模式"
-    multiple: true
-    default: ["*.generated.*", "vendor/**"]
-
-default_enabled: true
-```
-
-### hooks/hooks.yaml
-
-```yaml
-hooks:
-  PreToolUse:
-    - matcher: "Bash"
-      hooks:
-        - type: prompt
-          prompt: "执行命令前请确认不会影响代码仓库状态"
-  PostToolUse:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: "${ECHO_PLUGIN_ROOT}/scripts/log_tool_usage.sh"
-          timeout: 3
-```
-
----
-
-## 示例：编程安装和使用插件
-
-```rust
-use echo_agent::prelude::*;
-use echo_agent::plugin::{
-    PluginRegistry, PluginScope, InstallSource,
-    PluginIntegrator, PluginVariables,
-};
-use std::path::PathBuf;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. 创建 Agent
-    let config = AgentConfig::new("qwen3-max", "assistant", "你是一个有帮助的助手")
-        .enable_tool(true);
-    let mut agent = ReactAgent::new(config);
-
-    // 2. 创建插件注册表
-    let project_root = PathBuf::from("/home/user/my-project");
-    let mut registry = PluginRegistry::new(Some(project_root.clone()));
-
-    // 3. 扫描已安装插件
-    let count = registry.scan_all()?;
-    println!("发现 {} 个已安装插件", count);
-
-    // 4. 从本地目录安装新插件
-    let source = InstallSource::Local(PathBuf::from("/path/to/code-review-plugin"));
-    let plugin_id = registry.install(&source, PluginScope::User)?;
-    println!("已安装: {}", plugin_id);
-
-    // 5. 从 Git 安装
-    let source = InstallSource::parse("https://github.com/echo/data-plugin.git");
-    let plugin_id = registry.install(&source, PluginScope::Project)?;
-    println!("已安装: {}", plugin_id);
-
-    // 6. 查看已启用插件
-    for entry in registry.list_enabled() {
-        println!("- {} v{}: {}",
-            entry.manifest.name,
-            entry.manifest.version,
-            entry.manifest.description
-        );
-    }
-
-    // 7. 装配所有插件到 Agent
-    let integrator = PluginIntegrator::new();
-    let result = integrator.wire_all(&mut agent, &mut registry).await;
-    println!("装配完成: {} 个组件", result.total_wired());
-
-    if !result.is_ok() {
-        for err in &result.errors {
-            eprintln!("警告: {}", err);
-        }
-    }
-
-    // 8. 使用变量替换
-    if let Some(entry) = registry.get("code-review-plugin") {
-        let vars = PluginVariables::new(
-            "code-review-plugin",
-            entry.root.clone(),
-            project_root,
-        );
-        let cmd = vars.substitute("${ECHO_PLUGIN_ROOT}/scripts/run.sh");
-        println!("执行: {}", cmd);
-    }
-
-    // 9. 禁用不需要的插件
-    registry.disable("data-plugin")?;
-
-    // 10. 卸载插件
-    registry.uninstall("data-plugin", false)?;
-
-    // 11. 现在 Agent 已具备所有插件能力，正常使用
-    let response = agent.execute("请审查这段代码").await?;
-    println!("{}", response);
-
-    Ok(())
-}
-```
-
----
-
-## 插件数据目录
-
-每个插件拥有独立的持久化数据目录，跨更新保留：
-
-```
-~/.echo-agent/plugins/data/
-├── code-review-plugin/     ← code-review-plugin 的数据
-├── data-analysis-pack/     ← data-analysis-pack 的数据
-└── my-plugin/              ← my-plugin 的数据
-```
-
-数据目录名称由插件名自动清理（非 `[a-zA-Z0-9_-]` 字符替换为 `-`）。
-
-卸载时可选择保留数据目录：
-
-```rust
-registry.uninstall("my-plugin", true)?;  // keep_data = true
-```
+本设计复用 Agent Plugins 1.0 官方的 [manifest](https://agent-plugins.org/plugin-authors/manifest)、[Skills](https://agent-plugins.org/plugin-authors/skills)、[MCP](https://agent-plugins.org/plugin-authors/mcp-servers) 和 [loading](https://agent-plugins.org/client-implementers/loading-and-discovery) 约定。EKO 作为本地个人助理，额外组件有意采用固定根位置，不引入客户端扩展 namespace。
