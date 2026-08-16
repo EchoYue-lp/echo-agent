@@ -39,36 +39,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Procedural macros now resolve their owning split crate directly:
+  core-owned macros accept `echo_core`, while `#[handler]` accepts
+  `echo_orchestration` plus `echo_core`; neither requires the facade package.
+
 - `HookResult` 新增 `activate_skill: Option<(String, String)>` 字段 +
   `with_activate_skill` 构造函数。
 - `HookAction` enum 新增 `ActivateSkill` 变体（validate/execute_action/merge）。
 - `minimal_env` 白名单 +HOME。
 - `ReactAgent` 新增 `hook_activation_cache` 字段 + public getter。
 - `SandboxManager` 默认 `local_only()`。
+- Task graph mutation and execution now have one authority:
+  `TaskRevisionService` owns CRUD and relation commits, while
+  `RuntimeDagExecutor` owns ready-frontier, retry, cancellation, and terminal
+  settlement. `ManagedTask` remains a rich projection DTO rather than a
+  mutable graph.
+- `TaskToolPolicy` implementations must now provide the idempotent
+  `abort_scope_preparation` hook. `TaskRevisionService::create_from_tool`
+  invokes it after any post-`ensure_scope` preparation, validation, load, or
+  commit failure so product adapters can discard unpublished scope resources
+  without duplicating framework DAG validation. A failing `ensure_scope` must
+  clean its own unpublished side effects before it returns.
+- Team collaboration is now declared with `TeamSpec` / `TeamStrategy`. The
+  shared `SubagentExecutor` resolves every member, compiles the intent into the
+  revisioned Task graph, and executes it through `RuntimeDagExecutor`; Team no
+  longer owns Agent instances, a registry, or a scheduler.
+- `JsonlChangeLog::new` and `MemoryRuntimeIntegrationBuilder` initialization
+  now return `Result` and fail closed on complete-record corruption. Stable
+  audit IDs can be replayed through `ChangeLog::record_idempotent`; identical
+  entries are not duplicated and ID collisions with different content fail.
+- Dropping an Agent event stream now cancels the run and lets already-started
+  tools reach their bounded terminal safe point before a reaper can hard-abort
+  the run, preserving durable tool cleanup without leaking the active turn.
+- Documentation no longer references the deprecated `Checkpointer` API across
+  `README{,.zh}.md`, `echo-core/README.md`, `echo-state/README.md`, and the
+  `docs/{en,zh}/` guides. The memory guide now documents
+  `RuntimeStateStore`, `ConversationStore`, and `Store` as separate layers.
+- Doc comments in `src/memory.rs`, `src/agent/config.rs`,
+  `src/agent/snapshot.rs`, and `echo-state/src/memory/store.rs` no longer
+  reference the legacy checkpoint trait.
 
 ### Removed
+
+- Removed the safe `PluginVariables::export_to_env` API, whose process-global
+  environment mutation required an unenforceable single-threaded precondition.
+  Plugin consumers should use `PluginVariables::substitute` or pass explicit
+  environment entries to the subprocess they own.
 
 - **`Checkpointer` trait and its implementations** (`FileCheckpointer`,
   `InMemoryCheckpointer`) are gone from the source tree. The trait was
   already absent from public re-exports as of 0.2.0, and its setters were
   no-ops on `ReactAgent`. New code should use:
-  - [`RuntimeStateStore`](src/state/mod.rs) — full runtime checkpoint
-    (messages + current plan + active skills + blocked reason + TaskNode
-    DAG) for crash recovery; concrete implementation:
-    `SqliteRuntimeStateStore`.
+  - [`RuntimeStateStore`](src/state/mod.rs) — ReAct runtime checkpoint
+    (messages + current plan + active skills + blocked reason) for crash
+    recovery; concrete implementations: `FileRuntimeStateStore` and the
+    optional `SqliteRuntimeStateStore`. Revisioned task graphs are persisted
+    separately by the canonical task runtime.
   - `ConversationStore` — user-visible transcript projection;
-    concrete implementation: `SqliteConversationStore`.
-
-### Changed
-
-- Documentation overhaul: removed all references to the deprecated
-  `Checkpointer` API across `README{,.zh}.md`, `echo-core/README.md`,
-  `echo-state/README.md`, and the `docs/{en,zh}/` guides. The memory
-  chapter (`docs/{en,zh}/03-memory.md`) is now organized around the three
-  layers: `RuntimeStateStore`, `ConversationStore`, and `Store`.
-- Doc-comments in `src/memory.rs`, `src/agent/config.rs`,
-  `src/agent/snapshot.rs`, and `echo-state/src/memory/store.rs` no longer
-  reference the legacy trait.
+    concrete implementations include `FileConversationStore` and the optional
+    `SqliteConversationStore`.
+- The parallel legacy Task authority was removed: `TaskManager`, `TaskStore`,
+  `SqliteTaskStore`, `TaskExecutor`, `TaskScheduler`, composite execution,
+  Task hooks, and replanners. Migrate graph CRUD to `TaskRevisionService`, DAG
+  execution to `RuntimeDagExecutor`, and independent background futures to
+  `TaskSpawner`.
+- Runtime-state `TaskNode` / `TaskNodeStatus` APIs were removed. ReAct
+  `RuntimeStateStore` checkpoints now contain only resumable Agent state;
+  revisioned task progress remains in the canonical Task graph.
+- The old Team object model (`Team`, `TeamMember`, `TeamRole`, raw Agent
+  ownership, and manager-owned scheduling) was removed. Register ordinary
+  Subagents once and attach a declarative `TeamSpec` to the Team-mode
+  `SubagentDefinition`.
 
 ## [0.2.0] — 2026-05-29
 
@@ -157,7 +198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of echo-agent framework
 - ReAct engine with Thought → Action → Observation loop
-- Multi-agent orchestration (SubAgent, Handoff, Plan-and-Execute, Self-Reflection)
+- Multi-agent orchestration (Subagent, Handoff, Plan-and-Execute, Self-Reflection)
 - Dual-layer memory (Store + Checkpointer)
 - Tool system with `#[tool]` macro
 - Context compression (SlidingWindow / Summary / Hybrid)

@@ -39,7 +39,7 @@ pub struct Run {
     /// Unique run identifier.
     pub run_id: String,
 
-    /// Parent run ID for sub-agent invocations.
+    /// Parent run ID for subagent invocations.
     #[serde(default)]
     pub parent_run_id: Option<String>,
 
@@ -408,11 +408,11 @@ pub enum RunEvent {
         /// Iteration count at transition.
         iteration: usize,
     },
-    /// A sub-agent was dispatched.
-    SubAgentRun {
+    /// A subagent was dispatched.
+    SubagentRun {
         /// Sub-agent name.
         agent_name: String,
-        /// Task given to the sub-agent.
+        /// Task given to the subagent.
         task: String,
         /// Outcome: "completed", "failed", "cancelled".
         outcome: String,
@@ -952,7 +952,11 @@ impl RunStore for JsonlRunStore {
         bytes.push(b'\n');
         let path = self.run_path(run_id)?;
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            echo_core::utils::fs::append_existing(&path, &bytes)
+            echo_core::utils::fs::append_existing(
+                &path,
+                &bytes,
+                echo_core::utils::fs::FileDurability::SyncData,
+            )
         })
         .await
         .map_err(|error| {

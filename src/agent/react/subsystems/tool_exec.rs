@@ -1,7 +1,7 @@
 //! Tool execution subsystem
 //!
 //! Centralized management of tool registration/execution, Skill, Hook, MCP,
-//! SubAgent, Sandbox, intervention callbacks, and other components directly
+//! Subagent, Sandbox, intervention callbacks, and other components directly
 //! related to tool invocation.
 
 use crate::agent::InterventionCallback;
@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Tool execution subsystem
 ///
 /// Aggregates all components directly related to tool invocation: tool registry,
-/// Skill/Hook system, MCP connection management, SubAgent scheduling, sandbox
+/// Skill/Hook system, MCP connection management, Subagent scheduling, sandbox
 /// environment, and intervention callbacks.
 pub(crate) struct ToolExecutionSubsystem {
     /// Tool registry (Arc for sharing with StreamRunner).

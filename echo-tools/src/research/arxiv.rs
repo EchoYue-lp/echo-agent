@@ -226,7 +226,15 @@ fn parse_arxiv_atom(xml: &str) -> Result<Vec<Value>> {
                 }
             }
             Ok(Event::Text(e)) => {
-                let text = e.unescape().unwrap_or_default().to_string();
+                let text = e
+                    .xml10_content()
+                    .ok()
+                    .and_then(|decoded| {
+                        quick_xml::escape::unescape(&decoded)
+                            .ok()
+                            .map(|unescaped| unescaped.into_owned())
+                    })
+                    .unwrap_or_default();
                 match current_tag.as_str() {
                     "title" if in_entry => title = text,
                     "summary" if in_entry => summary = text,

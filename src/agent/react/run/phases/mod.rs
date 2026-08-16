@@ -40,9 +40,6 @@ pub(crate) struct LoopState {
     pub stop_hook_continued: bool,
     /// Number of times the verifier has rejected an answer this turn.
     pub verifier_retry_count: usize,
-    /// TaskNode id created by `prepare_turn` for DAG status tracking. `None`
-    /// when no `RuntimeStateStore` is configured.
-    pub task_node_id: Option<String>,
     /// Invocation-local budget counters. They remain in the loop state while
     /// HITL approval awaits and therefore are preserved across pause/resume.
     pub budget: RunBudgetState,
@@ -65,11 +62,10 @@ impl RunBudgetState {
 }
 
 impl LoopState {
-    pub(crate) fn new(task_node_id: Option<String>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             stop_hook_continued: false,
             verifier_retry_count: 0,
-            task_node_id,
             budget: RunBudgetState {
                 usage_complete: true,
                 ..RunBudgetState::default()
@@ -82,8 +78,8 @@ impl LoopState {
 
 /// What `prepare_turn` decided.
 pub(crate) enum PrepareOutcome {
-    /// Proceed into the iteration loop with the given task node id.
-    Continue { task_node_id: Option<String> },
+    /// Proceed into the iteration loop.
+    Continue,
     /// `UserPromptSubmit` hook returned `block: true`. A `FinalAnswer` event
     /// has already been yielded and `SessionEnd("blocked")` has been fired.
     BlockedAndDone,
@@ -175,7 +171,7 @@ mod budget_tests {
 
     #[tokio::test]
     async fn budget_counters_survive_async_pause_resume_boundary() {
-        let mut state = LoopState::new(None);
+        let mut state = LoopState::new();
         state.budget.record_usage(12, true);
 
         // HITL approval pauses inside the same run future. Crossing an await

@@ -8,8 +8,8 @@
 //! - **ConversationStore** — User-visible transcript projection (one row per
 //!   message, `StoredMessage` shape). Drives the GUI/TUI history panes.
 //!   The framework persists this automatically at `run_core_loop` finalization.
-//! - **RuntimeStateStore** — Full runtime checkpoint (messages + plan +
-//!   active_skills + blocked_reason + TaskNode DAG) used to resume an
+//! - **RuntimeStateStore** — ReAct runtime checkpoint (messages + plan +
+//!   active_skills + blocked_reason) used to resume an
 //!   in-flight conversation across process restarts. See [`crate::state`].
 //!
 //! # Quick Start

@@ -97,31 +97,19 @@ async fn main() -> Result<()> {
         .add_rules(vec![
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "plan".to_string(),
+                    pattern: "task_create".to_string(),
                 },
                 RuleSource::Session,
             ),
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "create_task".to_string(),
+                    pattern: "task_update".to_string(),
                 },
                 RuleSource::Session,
             ),
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "list_tasks".to_string(),
-                },
-                RuleSource::Session,
-            ),
-            PermissionRule::allow(
-                RuleMatcher::Pattern {
-                    pattern: "visualize_dependencies".to_string(),
-                },
-                RuleSource::Session,
-            ),
-            PermissionRule::allow(
-                RuleMatcher::Pattern {
-                    pattern: "get_execution_order".to_string(),
+                    pattern: "task_list".to_string(),
                 },
                 RuleSource::Session,
             ),
@@ -161,7 +149,7 @@ async fn main() -> Result<()> {
     let system_prompt = r#"你是一个出差费用核算助手，需要综合运用以下所有能力完成任务。
 
 **工作流程**：
-1. 先分析费用结构，再用 plan + create_task 将各费用类别拆成并行子任务
+1. 先分析费用结构，再用一次 task_create 将各费用类别组成完整任务图
 2. 独立的费用计算任务不设依赖，可以并行执行；汇总类任务依赖所有费用任务
 3. 使用 add / subtract / multiply 工具完成计算
 4. 所有费用算出后，使用 divide 工具计算人均分摊金额
@@ -169,7 +157,7 @@ async fn main() -> Result<()> {
 
 **重要规则**：
 - 每次回复尽可能并行调用多个工具
-- 不要手动调用 update_task 修改任务状态，执行阶段由系统自动推进
+- 每批计算完成后用 task_update 原子更新对应任务状态
 - divide 工具执行前需要人工确认（这是设计行为，请正常调用，系统会自动弹出确认）
 - 报告中需包含：各类总额、费用总计、人均分摊、与预算的差额
 "#;
@@ -179,7 +167,6 @@ async fn main() -> Result<()> {
         .model("qwen3-max")
         .name("expense_agent")
         .system_prompt(system_prompt)
-        .enable_tools()
         .enable_tools()
         .enable_human_in_loop()
         .token_limit(3000)

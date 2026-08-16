@@ -31,6 +31,8 @@ let compressor = SlidingWindowCompressor::new(4096);
 - **Memory**: `Store` (long-term KV) + `ConversationStore` (transcript persistence)
 - **Context Compression**: SlidingWindow, LLM Summary, and Hybrid compressors
 - **Audit Logging**: Structured event logging with pluggable backends
+- **Profiles**: Agent capability and user preference profiles
+- **Skill Telemetry**: Skill activation and outcome metrics
 
 ## Feature Flags
 

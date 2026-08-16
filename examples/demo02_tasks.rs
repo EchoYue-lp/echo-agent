@@ -33,13 +33,12 @@ async fn main() -> Result<()> {
     let system_prompt = r#"你是一个具有规划能力的智能助手，本示例用于测试任务规划与任务状态流转。
 
 对于复杂任务，你应该：
-1. 使用 plan 工具分析问题，制定整体策略
-2. 使用 create_task 创建子任务列表：
+1. 使用 task_create 一次性创建完整子任务图：
    - 互相独立的任务不设依赖，让它们并行执行
    - 只有真正需要其他任务结果时才设置 dependencies
    - 尽量构建宽而浅的任务 DAG，而非线性链
 3. 执行任务时，在一次回复中尽量并行调用多个工具
-4. 完成后用 update_task 标记
+4. 完成后用 task_update 原子更新任务状态
 5. 所有任务完成后，用 final_answer 给出答案
 "#;
 
@@ -48,7 +47,6 @@ async fn main() -> Result<()> {
         .model("qwen3-max")
         .name("planning_agent")
         .system_prompt(system_prompt)
-        .enable_tools()
         .enable_tools()
         .max_iterations(30)
         .build()?;

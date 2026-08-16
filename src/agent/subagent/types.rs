@@ -23,11 +23,7 @@ pub enum ExecutionMode {
     Fork,
     /// Teammate: parallel independent agent with message-passing coordination.
     Teammate,
-    /// Sprint 11: multi-agent team dispatch. Routes through `dispatch_team`
-    /// which builds a `TeamAgent` from the `TeamSpec` on the definition.
-    /// Unlike `Teammate` (single async agent poll), `Team` runs the full
-    /// ManagerSubagent plan→fan-out→synthesize pipeline with optional
-    /// checkpoint/resume (when a `RuntimeStateStore` is configured).
+    /// Team intent compiled into the canonical revisioned task DAG runtime.
     Team,
 }
 
@@ -90,32 +86,6 @@ pub enum SubagentKind {
     },
 }
 
-// ── Team Spec (Sprint 11) ─────────────────────────────────────────────────────
-
-/// Specification for a team-mode subagent (Sprint 11).
-///
-/// Carried on [`SubagentDefinition::team`]. The manager + subagents are
-/// referenced **by name** (late binding) — `dispatch_team` resolves them from
-/// the `SubagentRegistry` at dispatch time. This decouples team topology from
-/// instance lifetimes: each member is itself a normal registered subagent
-/// (D-11-team-2: name-based late binding).
-///
-/// Only `TeamStrategy::ManagerSubagent` is frontmatter-declarable (it's a unit
-/// variant); `Pipeline`/`Debate`/`Swarm` carry inline agent-name data and are
-/// programmatic-only (they remain without production callers — see spec §三
-/// "范围外").
-#[derive(Debug, Clone)]
-pub struct TeamSpec {
-    /// Strategy (typically `ManagerSubagent`; others are programmatic-only).
-    pub strategy: super::team::strategy::TeamStrategy,
-    /// Manager/leader subagent name (must be separately registered).
-    pub manager: String,
-    /// Team member subagent names (must each be separately registered).
-    pub subagents: Vec<String>,
-    /// Team runtime config (concurrency, timeout, etc.). Reuses `TeamConfig`.
-    pub config: super::team::TeamConfig,
-}
-
 // ── Subagent Definition ───────────────────────────────────────────────────────
 
 /// Declarative specification of a subagent.
@@ -144,7 +114,8 @@ pub struct SubagentDefinition {
     pub system_prompt: Option<String>,
     /// Restrict available tools by name (None = inherit all from parent).
     pub tool_filter: Option<Vec<String>>,
-    /// Max agent iterations (None = unlimited).
+    /// Maximum agent iterations. `None` leaves the concrete factory's bounded
+    /// default in effect; a `ReactAgentBuilder` rejects an explicit zero.
     pub max_iterations: Option<usize>,
     /// Token limit for this subagent (None = use default).
     pub token_limit: Option<usize>,
@@ -159,9 +130,9 @@ pub struct SubagentDefinition {
     pub can_delegate: bool,
     /// Tags for discovery / filtering.
     pub tags: Vec<String>,
-    /// Whether this sub-agent uses the lightweight (infrastructure-sharing) mode.
+    /// Whether this subagent uses the lightweight (infrastructure-sharing) mode.
     ///
-    /// When `true`, the sub-agent shares the parent's LLM client, ToolManager,
+    /// When `true`, the subagent shares the parent's LLM client, ToolManager,
     /// and GuardManager instead of creating new instances.
     pub lightweight: bool,
     /// Whether Fork-dispatched execution of this subagent should run inside an
@@ -188,11 +159,8 @@ pub struct SubagentDefinition {
     /// of `isolate_worktree` / `isolate_workspace` (worktree takes precedence if
     /// both are set, since a worktree also provides disjoint FS).
     pub isolate_workspace: bool,
-    /// Sprint 11: team-mode specification. When `Some` AND
-    /// `execution_mode == Team`, `dispatch_team` uses this to build the
-    /// TeamAgent (resolving manager + subagents by name from the registry).
-    /// `None` for normal Sync/Fork/Teammate subagents.
-    pub team: Option<TeamSpec>,
+    /// Declarative Team intent compiled by the canonical task runtime.
+    pub team: Option<super::team::TeamSpec>,
     /// When `true`, the role prefers background dispatch (Phase 2 schedules
     /// asynchronously). Phase 1 only stores the flag from frontmatter.
     pub is_background: bool,
@@ -751,6 +719,7 @@ pub struct RegisteredSubagent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::subagent::{TeamConfig, TeamSpec, TeamStrategy};
 
     #[test]
     fn test_execution_mode_default() {
@@ -762,8 +731,20 @@ mod tests {
         assert_eq!(ExecutionMode::Sync.to_string(), "sync");
         assert_eq!(ExecutionMode::Fork.to_string(), "fork");
         assert_eq!(ExecutionMode::Teammate.to_string(), "teammate");
-        // Sprint 11: Team variant.
         assert_eq!(ExecutionMode::Team.to_string(), "team");
+
+        let spec = TeamSpec {
+            strategy: TeamStrategy::ManagerSubagent,
+            manager: "planner".to_string(),
+            subagents: vec!["researcher".to_string()],
+            config: TeamConfig::default(),
+        };
+        let definition = SubagentDefinition {
+            team: Some(spec),
+            execution_mode: ExecutionMode::Team,
+            ..SubagentDefinition::new("review-team", "Review Team")
+        };
+        assert!(definition.team.is_some());
     }
 
     #[test]
@@ -787,29 +768,6 @@ mod tests {
         assert_eq!(summary.chars().count(), DEFAULT_SUMMARY_CHARS);
         // Must not panic and must start with the multi-byte prefix.
         assert!(summary.starts_with("中文"));
-    }
-
-    #[test]
-    fn test_team_spec_construction() {
-        // Sprint 11: a TeamSpec with ManagerSubagent strategy can be constructed
-        // and attached to a SubagentDefinition. Subagents are name-references.
-        use super::super::team::TeamConfig;
-        use super::super::team::strategy::TeamStrategy;
-        let spec = TeamSpec {
-            strategy: TeamStrategy::ManagerSubagent,
-            manager: "planner".to_string(),
-            subagents: vec!["explorer".to_string(), "summarizer".to_string()],
-            config: TeamConfig::default(),
-        };
-        let mut def = SubagentDefinition::new("team-research", "team research subagent");
-        assert!(def.team.is_none());
-        def.team = Some(spec.clone());
-        assert_eq!(def.team.as_ref().unwrap().manager, "planner");
-        assert_eq!(def.team.as_ref().unwrap().subagents.len(), 2);
-        assert_eq!(
-            def.team.as_ref().unwrap().strategy,
-            TeamStrategy::ManagerSubagent
-        );
     }
 
     #[test]

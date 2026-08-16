@@ -3,7 +3,7 @@
 //! - Tool registration (`add_tool` / `add_tools` / `add_need_appeal_tool`)
 //! - Skill installation (`add_skill` / `add_skills` / `discover_skills` / `load_skills_from_dir`)
 //! - MCP connections (`connect_mcp` / `load_mcp_from_file`)
-//! - SubAgent, compressor, callbacks, etc.
+//! - Subagent, compressor, callbacks, etc.
 
 use super::ReactAgent;
 #[cfg(feature = "subagent")]
@@ -33,6 +33,17 @@ use tokio::sync::{OwnedMutexGuard, RwLock};
 use tracing::{info, warn};
 
 const SKILL_CATALOG_PROJECTION: &str = "echo-agent:skill-catalog";
+
+pub(crate) async fn project_skill_activation(
+    context: &Arc<tokio::sync::Mutex<ContextManager>>,
+    skill_name: &str,
+    prompt_block: &str,
+) {
+    context.lock().await.replace_projection(
+        format!("echo-agent:skill:{skill_name}"),
+        Some(crate::llm::types::Message::system(prompt_block.to_string())),
+    );
+}
 
 /// A validated token-limit update with exclusive ownership of the live context.
 ///
@@ -412,7 +423,7 @@ impl ReactAgent {
         self.tools.tool_manager.list_tools()
     }
 
-    // ── SubAgent ─────────────────────────────────────────────────────────────
+    // ── Subagent ─────────────────────────────────────────────────────────────
 
     /// Register a subagent with the subagent registry.
     ///
@@ -1114,13 +1125,7 @@ impl ReactAgent {
 
         let content = self.tools.skill_registry.activate(skill_name).await?;
         let block = content.to_prompt_block();
-        {
-            let mut ctx = self.memory.context.lock().await;
-            ctx.replace_projection(
-                projection_marker,
-                Some(crate::llm::types::Message::system(block)),
-            );
-        }
+        project_skill_activation(&self.memory.context, skill_name, &block).await;
 
         tracing::info!(
             agent = %self.config.agent_name,
@@ -1222,9 +1227,8 @@ impl ReactAgent {
     /// Create a `TaskHookBridge` that lets an application-owned task runtime
     /// translate its durable lifecycle events into the central registry.
     ///
-    /// Framework [`TaskExecutor`](crate::tasks::TaskExecutor) users should set
-    /// `TaskExecutorConfig::unified_hook_executor` instead; the executor is the
-    /// lifecycle emission owner on that path.
+    /// Task runtime adapters invoke lifecycle hooks at `TaskRevisionService`
+    /// commit and `RuntimeDagController` execution boundaries.
     ///
     /// The bridge fires task lifecycle events
     /// (`TaskCreated`, `TaskStarted`, and terminal `TaskCompleted`) into the

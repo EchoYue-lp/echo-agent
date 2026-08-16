@@ -10,7 +10,7 @@ echo-agent's memory system has three orthogonal layers, each solving a different
 | **Transcript** | `ConversationStore` | Chat log | User-visible message history projection (drives GUI/TUI history panes) |
 | **Long-term knowledge** | `Store` | Notebook | Persist user preferences, domain facts, task results across sessions |
 
-Runtime checkpoint and transcript address the same conversation from different angles: the checkpoint is the *complete* runtime state (messages + plan + active skills + blocked reason + TaskNode DAG) used to restart the loop; the transcript is the *user-visible* projection of just the message stream. The Store is the orthogonal long-term knowledge backend.
+Runtime checkpoint and transcript address the same conversation from different angles: the checkpoint contains the ReAct loop state (messages + current plan text + active skills + blocked reason) used to restart the loop; the transcript is the *user-visible* projection of just the message stream. Revisioned task relations and lifecycle state live in the canonical task runtime, not in this checkpoint. The Store is the orthogonal long-term knowledge backend.
 
 ---
 
@@ -71,14 +71,16 @@ See `echo-agent/src/state/mod.rs` for the trait and `SqliteRuntimeStateStore` im
 
 - Keyed by `conversation_id` (same key as `RuntimeStateStore`).
 - Independent of `RuntimeStateStore` — you can enable either, both, or neither.
-- Concrete implementation: `SqliteConversationStore` (`echo-agent/echo-state/src/memory/sqlite_conversation.rs`).
+- Built-in implementations: dependency-free `FileConversationStore`, or
+  `SqliteConversationStore` when the `sqlite` feature is enabled.
 
 ```rust,no_run
+use echo_agent::memory::FileConversationStore;
 use echo_agent::prelude::*;
 use std::sync::Arc;
 
 # async fn demo() -> echo_agent::error::Result<()> {
-let conv_store = Arc::new(SqliteConversationStore::open("./conversations.db").await?);
+let conv_store = Arc::new(FileConversationStore::new("./agent-data")?);
 let agent = ReactAgentBuilder::new()
     .model("qwen3-max")
     .conversation_id("user-alice-conv-001")
@@ -211,8 +213,8 @@ Day 3, brand new conversation_id:
 use echo_agent::prelude::*;
 
 let store = InMemoryStore::new(); // data lost on process exit
-// For RuntimeStateStore / ConversationStore in tests, use the SQLite implementations
-// against a temp file (see `tempfile::NamedTempFile`) or a `:memory:` SQLite URI.
+// FileConversationStore works with a temporary directory and needs no feature.
+// SQLite implementations remain available behind the `sqlite` feature.
 ```
 
 ---
@@ -223,12 +225,12 @@ Each Agent has an independent Store namespace and `conversation_id`:
 
 ```
 Main Agent    conversation_id = "main-conv-001"     namespace = ["main_agent", "memories"]
-SubAgent A    conversation_id = "sub-a-conv-001"    namespace = ["sub_a", "memories"]
-SubAgent B    conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memories"]
+Subagent A    conversation_id = "sub-a-conv-001"    namespace = ["sub_a", "memories"]
+Subagent B    conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memories"]
 ```
 
-- SubAgent A cannot read SubAgent B's memories (different namespace).
-- SubAgent A cannot see the main Agent's runtime state (different `conversation_id`).
+- Subagent A cannot read Subagent B's memories (different namespace).
+- Subagent A cannot see the main Agent's runtime state (different `conversation_id`).
 - The main Agent holds the `Store` / `RuntimeStateStore` objects and can explicitly read any conversation or namespace (for auditing).
 
 ---
@@ -237,8 +239,6 @@ SubAgent B    conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memor
 
 - `conversation_id`: durable conversation identity. Keys both `RuntimeStateStore` (full runtime state) and `ConversationStore` (transcript projection). This is the field you set to resume across process restarts.
 - `session_id`: in-process logical run-grouping label. Not persisted; not used to drive restore.
-
-See: `examples/demo14_memory_isolation.rs`
 
 ---
 

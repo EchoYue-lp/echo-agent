@@ -80,6 +80,7 @@ pub struct MockLlmClient {
     responses: Arc<Mutex<VecDeque<MockLlmResponse>>>,
     /// The list of messages received on each call, recorded in order
     calls: Arc<Mutex<Vec<Vec<Message>>>>,
+    user_ids: Arc<Mutex<Vec<Option<String>>>>,
     tool_choices: Arc<Mutex<Vec<Option<String>>>>,
     tool_counts: Arc<Mutex<Vec<usize>>>,
     /// Optional delay before returning each response. When set, `chat` and
@@ -102,6 +103,7 @@ impl MockLlmClient {
             model_name: "mock-model".to_string(),
             responses: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
+            user_ids: Arc::new(Mutex::new(Vec::new())),
             tool_choices: Arc::new(Mutex::new(Vec::new())),
             tool_counts: Arc::new(Mutex::new(Vec::new())),
             delay: None,
@@ -339,6 +341,14 @@ impl MockLlmClient {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Cache-partition identities received by each request.
+    pub fn all_user_ids(&self) -> Vec<Option<String>> {
+        self.user_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Tool-choice values received by each request.
     pub fn all_tool_choices(&self) -> Vec<Option<String>> {
         self.tool_choices
@@ -366,6 +376,18 @@ impl MockLlmClient {
     /// Clear all recorded call history (response queue is unaffected)
     pub fn reset_calls(&self) {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.user_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.tool_choices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.tool_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// Pop the next response (text or tool calls)
@@ -401,6 +423,10 @@ impl LlmClient for MockLlmClient {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(request.tools.as_ref().map_or(0, Vec::len));
+            self.user_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.user_id.clone());
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -512,6 +538,10 @@ impl LlmClient for MockLlmClient {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(request.tools.as_ref().map_or(0, Vec::len));
+            self.user_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.user_id.clone());
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

@@ -110,6 +110,13 @@ impl SubagentBuilder {
         self
     }
 
+    /// Compile the supplied Team intent through the revisioned DAG runtime.
+    pub fn team(mut self, spec: super::team::TeamSpec) -> Self {
+        self.definition.execution_mode = ExecutionMode::Team;
+        self.definition.team = Some(spec);
+        self
+    }
+
     /// Override the model for this subagent.
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.definition.model = Some(model.into());
@@ -191,17 +198,6 @@ impl SubagentBuilder {
     /// at most one of `.isolate_worktree()` / `.isolate_workspace()`.
     pub fn isolate_workspace(mut self) -> Self {
         self.definition.isolate_workspace = true;
-        self
-    }
-
-    /// Sprint 11: declare this subagent as a team-mode dispatcher with the
-    /// given `TeamSpec`. Also sets `execution_mode = Team` so the dispatch
-    /// router routes to `dispatch_team`. The manager + subagents named in the
-    /// spec must be separately registered subagents (resolved by name at
-    /// dispatch time — late binding, D-11-team-2).
-    pub fn team(mut self, spec: super::types::TeamSpec) -> Self {
-        self.definition.execution_mode = ExecutionMode::Team;
-        self.definition.team = Some(spec);
         self
     }
 

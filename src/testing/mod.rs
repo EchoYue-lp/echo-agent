@@ -7,7 +7,7 @@
 //! |------|---------|
 //! | [`MockLlmClient`] | Replaces a real LLM, used for testing `SummaryCompressor` and other components that depend on `LlmClient` |
 //! | [`MockTool`] | Replaces a real tool, used for testing Agent tool call / error handling behavior |
-//! | [`MockAgent`] | Replaces a real SubAgent, used for testing multi-Agent orchestration logic |
+//! | [`MockAgent`] | Replaces a real Subagent, used for testing multi-Agent orchestration logic |
 //! | [`FailingMockAgent`] | Always returns an error, used for testing orchestration fault-tolerance paths |
 //!
 //! # Design Principles
@@ -102,7 +102,7 @@ mod mock_embedder;
 mod mock_llm;
 mod mock_tool;
 
-pub use mock_agent::{FailingMockAgent, MockAgent, MockAgentStep};
+pub use mock_agent::{FailingMockAgent, MockAgent, MockAgentFailure, MockAgentStep};
 pub use mock_embedder::MockEmbedder;
 pub use mock_llm::{MockLlmClient, StreamChunk};
 pub use mock_tool::{MockTool, MockToolContext};

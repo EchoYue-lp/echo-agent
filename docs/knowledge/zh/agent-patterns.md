@@ -1,7 +1,7 @@
 # AI Agent 核心模式
 
 > **重要说明**：Plan 是投影到单一 TaskRun graph 的版本化 artifact，不是独立运行时或 Agent 类型：
-> - **任务规划**：通过 `.enable_tasks()` 启用 `task_create`、`task_update`、`task_list`
+> - **任务规划**：使用默认的 `task_create`、`task_update`、`task_list`，需要持久化时注入 `TaskRevisionService`
 > - **自我审查**：使用 `ReviewTool` 工具
 > 
 > 这与业界最佳实践（Hermes、Claude Code、LangGraph）保持一致，其中反思和规划是可组合的工具能力，而不是单独的 Agent 类型。
@@ -126,7 +126,7 @@ Plan-and-Execute 由 Wei et al. 提出 [2]，将复杂任务分解为显式的**
 │   │              │              │                               │   │
 │   │              └──▶ step_3 ──┘                               │   │
 │   │                                                              │   │
-│   │  [TaskManager] 按拓扑序调度，独立步骤并行执行               │   │
+│   │  [RuntimeDagExecutor] 驱动已提交任务版本                    │   │
 │   └─────────────────────────────────────────────────────────────┘   │
 │                                                                      │
 │   Phase 3: Replanning (on failure)                                  │

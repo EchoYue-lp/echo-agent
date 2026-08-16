@@ -433,7 +433,7 @@ pub struct AgentYamlConfig {
     pub name: String,
     /// System prompt (shapes agent behaviour and tone).
     pub system_prompt: String,
-    /// Maximum iterations (max reasoning steps per conversation turn). 0 means unlimited.
+    /// Maximum iterations (max reasoning steps per conversation turn). Must be non-zero.
     pub max_iterations: usize,
     /// Enable tools (when false, agent does text-only conversation).
     pub enable_tools: bool,
@@ -474,7 +474,7 @@ impl Default for AgentYamlConfig {
         Self {
             name: "echo-assistant".to_string(),
             system_prompt: DEFAULT_AGENT_SYSTEM_PROMPT.to_string(),
-            max_iterations: 0,
+            max_iterations: 10,
             enable_tools: true,
             enable_memory: true,
             enable_human_in_loop: true,
@@ -830,7 +830,7 @@ mod tests {
         assert_eq!(config.model.provider, "deepseek");
         assert_eq!(config.model.name, "deepseek-v4-flash");
         assert_eq!(config.agent.name, "echo-assistant");
-        assert_eq!(config.agent.max_iterations, 0);
+        assert_eq!(config.agent.max_iterations, 10);
         assert!(config.agent.enable_tools);
         assert!(config.agent.enable_memory);
         assert!(config.agent.enable_human_in_loop);
@@ -850,7 +850,7 @@ mod tests {
         assert!(agent_config.is_tool_enabled());
         assert!(agent_config.is_memory_enabled());
         assert!(agent_config.is_human_in_loop_enabled());
-        assert_eq!(agent_config.get_max_iterations(), 0);
+        assert_eq!(agent_config.get_max_iterations(), 10);
         assert_eq!(agent_config.get_max_tool_output_tokens(), None);
     }
 

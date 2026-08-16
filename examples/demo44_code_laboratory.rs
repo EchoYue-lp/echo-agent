@@ -485,7 +485,8 @@ print(f"Fibonacci(10) = {result}")
         match event? {
             AgentEvent::ThinkStart => print!("🤔 "),
             AgentEvent::ThinkEnd { .. } => println!(),
-            AgentEvent::ToolCall { name, .. } => {
+            AgentEvent::ToolCall { invocation, .. } => {
+                let name = invocation.name;
                 match name.as_str() {
                     "check_syntax" => used_syntax = true,
                     "analyze_code" => used_analysis = true,
@@ -494,8 +495,8 @@ print(f"Fibonacci(10) = {result}")
                 }
                 println!("🔧 使用工具: {}", name);
             }
-            AgentEvent::ToolResult { output, .. } => {
-                let preview: String = output.chars().take(100).collect();
+            AgentEvent::ToolResult { result, .. } => {
+                let preview: String = result.output.chars().take(100).collect();
                 println!("   ✓ 结果: {}...", preview);
             }
             AgentEvent::Token(token) => {

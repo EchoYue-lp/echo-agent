@@ -1,273 +1,83 @@
-# Multi-Agent Orchestration — SubAgent and TeamAgent
+# Multi-Agent Orchestration
 
-## Overview
+echo-agent has one Subagent dispatch surface and one task-relationship runtime.
+Use `Sync`, `Fork`, or `Teammate` for one registered Subagent. Use `Team` when a
+declarative collaboration intent should be compiled into a revisioned task DAG.
 
-echo-agent provides two multi-agent patterns:
+## Single-Subagent Modes
 
-1. **SubAgent** — Parent-child delegation with 3 execution modes (Sync, Fork, Teammate)
-2. **TeamAgent** — Peer collaboration with 4 strategies (ManagerSubagent, Pipeline, Debate, Swarm)
+| Mode | Parent behavior | Context default |
+|---|---|---|
+| `Sync` | Waits for the result | Fresh focused context |
+| `Fork` | Runs through an owned async dispatch | Explicit filtered history |
+| `Teammate` | Returns a join/cancel handle | Fresh independent context |
 
-Both are feature-gated behind `subagent`.
+Every mode resolves the target through `SubagentRegistry` and executes through
+`SubagentExecutor`. Direct tool dispatch and programmatic dispatch therefore
+share hooks, cancellation, prompt compilation, isolation, and typed events.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                   Multi-Agent Patterns                   │
-│                                                         │
-│  ┌─────────────────────┐  ┌──────────────────────────┐  │
-│  │      SubAgent        │  │       TeamAgent          │  │
-│  │  (parent → child)    │  │  (peer ↔ peer)           │  │
-│  │                      │  │                          │  │
-│  │  • Sync (blocking)   │  │  • ManagerSubagent         │  │
-│  │  • Fork (independent)│  │  • Pipeline              │  │
-│  │  • Teammate (handle) │  │  • Debate                │  │
-│  │                      │  │  • Swarm                 │  │
-│  └─────────────────────┘  └──────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
+## Team Intent
 
----
-
-## Feature Gate
-
-```toml
-[dependencies]
-echo_agent = { version = "0.2", features = ["subagent"] }
-```
-
----
-
-## SubAgent — Parent-Child Delegation
-
-SubAgent is the simpler pattern: a parent agent dispatches tasks to child agents.
-
-### Execution Modes
-
-| Mode | Context Inheritance | Communication | Use Case |
-|------|-------------------|---------------|----------|
-| **Sync** | None (shared state via mutex) | Return value | Simple delegation, blocking wait |
-| **Fork** | System prompt + tools + recent history | Return value | Independent subtask with parent context |
-| **Teammate** | None | Join/cancel handle | Parallel independent work |
-
-### Registration
+`TeamSpec` contains registered Subagent names only. It does not hold Agent
+instances, a relationship store, or a scheduler.
 
 ```rust
-use echo_agent::prelude::*;
-use echo_agent::agent::subagent::SubagentBuilder;
+use echo_agent::agent::subagent::{
+    SubagentBuilder, TeamConfig, TeamSpec, TeamStrategy,
+};
 
-let parent = ReactAgentBuilder::new()
-    .model("qwen3-max")
-    .system_prompt("You are a coordinator")
-    .enable_subagent()
-    .subagent(
-        SubagentBuilder::new("code-explorer")
-            .description("Explores and reads code files")
-            .model("qwen3-max")
-            .system_prompt("You are a code exploration expert")
-            .build()
-    )
-    .subagent(
-        SubagentBuilder::new("web-researcher")
-            .description("Searches the web for information")
-            .model("qwen3-max")
-            .system_prompt("You are a web research expert")
-            .build()
-    )
-    .build()?;
-```
-
-### Dispatch Tool
-
-When `enable_subagent()` is called, the parent agent gets an `agent_dispatch` tool automatically. The LLM can call it to delegate tasks:
-
-```
-User: "Read src/main.rs and find related documentation online"
-  → Agent calls agent_dispatch("code-explorer", "Read src/main.rs")
-  → Agent calls agent_dispatch("web-researcher", "Find documentation for the patterns in src/main.rs")
-  → Agent synthesizes results
-```
-
-### Context Isolation
-
-Each SubAgent runs in its own context. By default:
-- No memory sharing (each has its own Store / runtime state)
-- No tool sharing (each has its own ToolManager)
-- No history sharing (each has its own message list)
-
-This prevents context contamination between agents.
-
----
-
-## TeamAgent — Peer Collaboration
-
-TeamAgent is the advanced pattern: multiple agents collaborate as peers under a strategy.
-
-### Team Roles
-
-| Role | Responsibility |
-|------|---------------|
-| **Leader** | Decomposes tasks, assigns work, synthesizes results |
-| **Subagent** | Executes assigned subtasks |
-| **Reviewer** | Validates outputs (optional) |
-
-### Four Collaboration Strategies
-
-#### 1. ManagerSubagent (default)
-
-The leader decomposes the task, fans out to subagents, and synthesizes the result.
-
-```
-           ┌─────────┐
-           │ Manager  │
-           └────┬────┘
-        ┌───────┼───────┐
-        ▼       ▼       ▼
-   ┌────────┐┌────────┐┌────────┐
-   │Subagent 1││Subagent 2││Subagent 3│
-   └────┬───┘└────┬───┘└────┬───┘
-        └───────┬─┘─────────┘
-                ▼
-           ┌─────────┐
-           │ Manager  │ (synthesize)
-           └─────────┘
-```
-
-```rust
-use echo_agent::agent::subagent::team::{TeamAgent, TeamAgentBuilder, TeamStrategy};
-
-let team = TeamAgentBuilder::new()
-    .model("qwen3-max")
-    .strategy(TeamStrategy::ManagerSubagent)
-    .member("researcher", "Search for relevant information", TeamRole::Subagent)
-    .member("analyst", "Analyze the findings", TeamRole::Subagent)
-    .member("writer", "Write the final report", TeamRole::Subagent)
-    .build()?;
-
-let result = team.execute("Write a report about Rust async patterns").await?;
-```
-
-#### 2. Pipeline
-
-Agents run in sequence: each agent's output becomes the next agent's input.
-
-```
-┌──────────┐    ┌──────────┐    ┌──────────┐
-│ Agent 1  │───▶│ Agent 2  │───▶│ Agent 3  │
-│ (research)│   │ (analyze) │   │ (write)  │
-└──────────┘    └──────────┘    └──────────┘
-```
-
-```rust
-let team = TeamAgentBuilder::new()
-    .model("qwen3-max")
-    .strategy(TeamStrategy::Pipeline(vec![
-        "researcher".into(),
-        "analyst".into(),
-        "writer".into(),
-    ]))
-    .member("researcher", "Research the topic", TeamRole::Subagent)
-    .member("analyst", "Analyze the research", TeamRole::Subagent)
-    .member("writer", "Write the final output", TeamRole::Subagent)
-    .build()?;
-```
-
-#### 3. Debate
-
-Multiple agents independently propose solutions. A judge selects the best one.
-
-```
-┌──────────┐  ┌──────────┐  ┌──────────┐
-│Debater 1 │  │Debater 2 │  │Debater 3 │
-│(propose) │  │(propose) │  │(propose) │
-└────┬─────┘  └────┬─────┘  └────┬─────┘
-     └─────────────┼─────────────┘
-                   ▼
-            ┌──────────┐
-            │  Judge   │ (select best)
-            └──────────┘
-```
-
-```rust
-let team = TeamAgentBuilder::new()
-    .model("qwen3-max")
-    .strategy(TeamStrategy::Debate {
-        judge: "judge".into(),
-        debaters: vec!["architect-a".into(), "architect-b".into()],
+let definition = SubagentBuilder::new("review-team")
+    .description("Review a change from independent perspectives")
+    .team(TeamSpec {
+        strategy: TeamStrategy::ManagerSubagent,
+        manager: "review-lead".to_string(),
+        subagents: vec!["correctness".to_string(), "tests".to_string()],
+        config: TeamConfig { max_concurrent: 2 },
     })
-    .member("judge", "Evaluate proposals and select the best", TeamRole::Reviewer)
-    .member("architect-a", "Propose architecture A", TeamRole::Subagent)
-    .member("architect-b", "Propose architecture B", TeamRole::Subagent)
-    .build()?;
+    .build();
+
+assert_eq!(definition.name, "review-team");
 ```
 
-#### 4. Swarm
+Register the Team definition and every referenced member in the same
+`SubagentRegistry`. Dispatch the Team definition with `ExecutionMode::Team`, or
+invoke `agent_tool` with `mode: "team"`.
 
-Work is split across agents by module/file. Each agent inspects its portion, then a reducer merges findings.
+The strategies compile to ordinary task dependencies:
 
-```
-┌──────────┐  ┌──────────┐  ┌──────────┐
-│Subagent 1  │  │Subagent 2  │  │Subagent 3  │
-│(src/a/)  │  │(src/b/)  │  │(src/c/)  │
-└────┬─────┘  └────┬─────┘  └────┬─────┘
-     └─────────────┼─────────────┘
-                   ▼
-            ┌──────────┐
-            │ Reducer  │ (merge findings)
-            └──────────┘
-```
+| Strategy | Canonical graph |
+|---|---|
+| `ManagerSubagent` | manager planning -> member tasks -> manager synthesis |
+| `Pipeline(names)` | one dependency chain in the supplied order |
+| `Debate { judge, debaters }` | parallel proposals -> judge synthesis |
+| `Swarm { reducer }` | declared member shards -> reducer synthesis |
 
-```rust
-let team = TeamAgentBuilder::new()
-    .model("qwen3-max")
-    .strategy(TeamStrategy::Swarm {
-        batch_size: 3,
-        reducer: "synthesizer".into(),
-    })
-    .member("subagent-1", "Analyze files in src/agent/", TeamRole::Subagent)
-    .member("subagent-2", "Analyze files in src/tools/", TeamRole::Subagent)
-    .member("subagent-3", "Analyze files in src/memory/", TeamRole::Subagent)
-    .member("synthesizer", "Merge all findings into a report", TeamRole::Reviewer)
-    .build()?;
-```
+Completed dependency outputs are appended to the dependent Subagent's task
+prompt. The framework does not infer a second status from free-form model text:
+the canonical `SubagentResult.outcome.status` settles each task claim.
 
----
+## Runtime Authority
 
-## SubAgent vs TeamAgent
+The production flow is:
 
-| Aspect | SubAgent | TeamAgent |
-|--------|----------|-----------|
-| Relationship | Parent-child | Peer-to-peer |
-| Direction | One-way dispatch | Bidirectional collaboration |
-| Context | Isolated (no sharing) | Isolated member executions |
-| Coordination | Parent decides | Strategy-driven |
-| Complexity | Simple | Advanced |
-| Use case | Tool-like delegation | Complex multi-step workflows |
-| Feature gate | `subagent` | `subagent` |
-
-### When to Use Which
-
-- **SubAgent**: When you need to delegate specific tasks to specialized agents (like calling a tool). The parent knows exactly what to ask.
-- **TeamAgent**: When you need agents to collaborate on a complex task that requires decomposition, parallel execution, or debate.
-
----
-
-## Execution Lifecycle
-
-Teammate dispatch returns a handle that owns join and cancellation. TeamAgent
-member execution uses the same canonical Subagent dispatcher, so lifecycle
-events, isolation, timeout, cancellation, usage, and terminal status are not
-reimplemented by a separate team protocol.
-
----
-
-## Configuration
-
-```rust
-TeamConfig {
-    max_concurrent: 5,           // Max concurrent subagents
-    default_timeout_secs: 600,   // Aggregate team execution timeout
-}
+```text
+TeamSpec
+  -> TaskRevisionService + InMemoryRevisionedTaskStore
+  -> RuntimeDagExecutor
+  -> SubagentExecutor
+  -> typed SubagentResult
+  -> exact claim settlement in the same revisioned graph
 ```
 
----
+`RuntimeDagExecutor` exclusively owns ready-frontier traversal, dependency
+blocking, bounded waves, cancellation, and terminal outcome selection. Team
+code only compiles intent and supplies a thin dispatch adapter. ReAct
+checkpoints do not duplicate task nodes or task lifecycle state.
 
-See also: [06 - SubAgent Orchestration](./06-subagent.md) for the original SubAgent documentation.
+## Choosing A Mode
+
+- Use `Sync` for one focused call whose result is immediately required.
+- Use `Fork` for one isolated call with explicit context transfer.
+- Use `Teammate` when the caller needs a live join/cancel handle.
+- Use `Team` when collaboration has explicit member dependencies and a final
+  synthesis step.

@@ -10,7 +10,7 @@ Thought（推理）→ Action（调用工具）→ Observation（观测结果）
 
 循环执行，直到 LLM 认为任务已完成并调用 `final_answer` 工具输出结果。
 
-echo-agent 的核心实现是 `ReactAgent`，它将 ReAct 范式与工具管理、记忆、压缩、人工介入、SubAgent 编排等能力全部集成在一个结构体中。
+echo-agent 的核心实现是 `ReactAgent`，它将 ReAct 范式与工具管理、记忆、压缩、人工介入、Subagent 编排等能力全部集成在一个结构体中。
 
 ---
 
@@ -58,16 +58,11 @@ execute(task)
 
 ---
 
-## Agent 角色
+## 可组合能力
 
-`AgentRole` 控制 Agent 的执行模式：
-
-| 角色 | 说明 |
-|------|------|
-| `Subagent`（默认） | 直接执行任务，使用工具 |
-| `Orchestrator` | 编排者，优先通过 `agent_tool` 将任务分发给 SubAgent |
-
-> **注意：** 任务规划能力通过 `.enable_task(true)` 启用（注册 `plan`/`create_task`/`update_task` 工具），无需单独的 `Planner` 角色。
+Agent 不使用单独的角色状态机。普通 `ReactAgent` 启用 Subagent 调度并注册
+Subagent 后即可承担编排职责；版本化的 `task_create`、`task_update` 和
+`task_list` 工具提供规划能力，无需切换 Agent 运行时角色。
 
 ---
 
@@ -76,8 +71,7 @@ execute(task)
 ```rust
 AgentConfig::new("qwen3-max", "my_agent", "你是一个助手")
     .enable_tool(true)          // 启用工具调用（默认 true）
-    .enable_task(true)          // 启用 DAG 任务规划
-    .enable_subagent(true)      // 启用 SubAgent 编排（Orchestrator 模式）
+    .enable_subagent(true)      // 启用 Subagent 编排（Orchestrator 模式）
     .enable_memory(true)        // 启用长期记忆（Store + remember/recall/forget 工具）
     .enable_human_in_loop(true) // 启用人工介入
     .enable_cot(true)           // 启用 Chain-of-Thought 引导语（Builder 默认 true）

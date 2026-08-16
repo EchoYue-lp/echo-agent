@@ -73,7 +73,7 @@ Every mutation to memory/skills/rules is written to the change audit log (`chang
 | **SkillSimilarityDetector / SkillMerger** | Detect overlapping skills and merge | `evolution/` |
 | **SkillHealthMonitor** | Skill health scoring (drives deprecation) | `evolution/` |
 | **SkillPatcher** | Generate skill patches from failure telemetry | `evolution/` |
-| **RulePromoter** | High-confidence memory → AGENTS.md rules | `echo-agent-app-core` |
+| **RulePromoter** | High-confidence memory → product-owned learned rules | `echo-agent-app-core` |
 | **ReviewIntegration / Dashboard** | Product-layer review scheduling and status dashboard | `echo-agent-app-core` |
 
 ---
@@ -224,7 +224,7 @@ use std::path::PathBuf;
 let mgr = MemoryLayerManager::new(
     PathBuf::from(".echo-agent"),
     arc_store,
-    Box::new(JsonlChangeLog::new(PathBuf::from(".echo-agent/evolution/change-log.jsonl"))),
+    Box::new(JsonlChangeLog::new(PathBuf::from(".echo-agent/evolution/change-log.jsonl"))?),
 );
 
 // Write (auto-scans secrets/injection, promotes to hot based on confidence)
@@ -332,14 +332,16 @@ let transitions = curator.apply_transitions()?; // auto-transition by idle time
    // report.new_candidates / report.reinforced
    ```
 
-2. **`SkillDraftGenerator`** generates a draft `SKILL.md` from a candidate via template, saved to `.echo-agent/skills/_drafts/<name>/SKILL.md`.
+2. **`SkillDraftGenerator`** generates a draft `SKILL.md` from a candidate via template, saved under the consumer-supplied evolution root at `skills/_drafts/<name>/SKILL.md`.
 
    ```rust
    use echo_agent::evolution::SkillDraftGenerator;
-   let gen = SkillDraftGenerator::new(".echo-agent".into(), &change_log);
+   let gen = SkillDraftGenerator::new(".eko".into(), &change_log);
    let result = gen.generate_from_candidate(&candidate).await?;
    // result.skill_md_path points to the generated draft
    ```
+
+   EKO currently supplies `.eko`, so its drafts live at `.eko/skills/_drafts/<name>/SKILL.md`. That product-owned location should be verified against the [EKO app-core source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src).
 
 3. After human review, `/skill-promote <name>` moves Draft → Active and the skill appears in the skill catalog.
 
@@ -367,7 +369,7 @@ for report in monitor.analyze_all_skills().await? {
 
 ### Rule Promotion (product layer)
 
-`RulePromoter` (in `echo-agent-app-core`) scans high-confidence memory (confidence≥0.95, stability≥0.9, revision_count==0), generates a `RuleProposal`, and after human approval via `/rule-promote` writes it into `.echo-agent/AGENTS.md`, marking the source memory as `Superseded`.
+`RulePromoter` is an EKO product policy, not a framework persistence contract. EKO currently reviews high-confidence memory proposals before writing approved rules to `.eko/learned-rules.md`; consult the [EKO app-core source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) for the authoritative thresholds and workflow.
 
 ### Security Hardening — `EvolutionSecurityGuard`
 

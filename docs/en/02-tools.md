@@ -30,9 +30,9 @@ ToolManager                       ← registry + executor
 
 Built-in tools (builtin):
     ├─ final_answer               ← output final result (always registered)
-    ├─ plan                       ← trigger planning mode (Planner role)
-    ├─ create_task / update_task  ← manage DAG sub-tasks
-    ├─ agent_tool                 ← dispatch to SubAgent (Orchestrator role)
+    ├─ task_create / task_update  ← revisioned task-graph CRUD
+    ├─ task_list                  ← read the committed graph revision
+    ├─ agent_tool                 ← dispatch to a registered Subagent
     ├─ human_in_loop              ← request human text input
     ├─ remember / recall / forget ← long-term memory operations
     └─ think                      ← explicit CoT tool (superseded by CoT text approach)
@@ -267,7 +267,7 @@ impl Tool for DeleteFileTool {
 | `ShellExec` | 3 | `shell`, `execute` |
 | `Destructive` | 3 | `delete_file`, `drop_table` |
 
-See [Tool Permissions](./tool-permissions.md) for the full permission model, rule engine, and risk classification.
+See [Security and Permissions](./security.md) for the full permission model, rule engine, and risk classification.
 
 ---
 
@@ -411,7 +411,7 @@ let config = AgentConfig::new("qwen3-max", "agent", "...")
 
 ## Restricting Tools with Allowlist
 
-Use `allowed_tools` to limit which tools a given Agent can call. Commonly used to enforce capability boundaries on SubAgents:
+Use `allowed_tools` to limit which tools a given Agent can call. Commonly used to enforce capability boundaries on Subagents:
 
 ```rust
 use echo_agent::tools::others::math::{AddTool, SubtractTool};
@@ -434,11 +434,10 @@ agent.add_tools(vec![
 | Tool Name | Module | Description |
 |-----------|--------|-------------|
 | `final_answer` | builtin | Output final result (auto-registered) |
-| `plan` | builtin | Trigger task planning (Planner mode) |
-| `create_task` | builtin | Create a DAG sub-task |
-| `update_task` | builtin | Update sub-task status |
-| `list_tasks` | builtin | List all sub-tasks |
-| `agent_tool` | builtin | Dispatch task to a SubAgent |
+| `task_create` | builtin | Atomically create or append to a revisioned task graph |
+| `task_update` | builtin | Apply an optimistic graph patch |
+| `task_list` | builtin | Read the committed task graph revision |
+| `agent_tool` | builtin | Dispatch task to a Subagent |
 | `human_in_loop` | builtin | Request human text input |
 | `remember` | builtin | Write a memory to Store |
 | `recall` | builtin | Search memories in Store |
@@ -535,4 +534,4 @@ let agent = ReactAgentBuilder::new()
     .build(config);
 ```
 
-See [demo64_tool_pipeline.rs](../examples/demo64_tool_pipeline.rs).
+See [demo64_tool_pipeline.rs](../../examples/demo64_tool_pipeline.rs).

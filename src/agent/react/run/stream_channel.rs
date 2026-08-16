@@ -15,15 +15,55 @@
 //! guard yields a terminal stream without entering `run_core_loop`.
 
 use super::super::ReactAgent;
+use super::STREAM_CANCELLATION_SETTLE_PERIOD;
 use super::phases::{self, IterOutcome, LoopState, PrepareOutcome};
 use super::types::{StreamInit, StreamMode};
 use crate::agent::AgentEvent;
 use crate::error::Result;
 use crate::llm::types::{ContentPart, Message, MessageContent};
+use futures::Stream;
 use std::ops::ControlFlow;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tracing::debug;
+
+struct ManagedAgentEventStream {
+    receiver: tokio_stream::wrappers::ReceiverStream<Result<AgentEvent>>,
+    cancel: crate::agent::CancellationToken,
+    task: Option<tokio::task::JoinHandle<()>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Stream for ManagedAgentEventStream {
+    type Item = Result<AgentEvent>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let stream = self.get_mut();
+        Pin::new(&mut stream.receiver).poll_next(cx)
+    }
+}
+
+impl Drop for ManagedAgentEventStream {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        let Some(mut task) = self.task.take() else {
+            return;
+        };
+        let reaper = self.runtime.spawn(async move {
+            if tokio::time::timeout(STREAM_CANCELLATION_SETTLE_PERIOD, &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
+        });
+        // The runtime owns the bounded reaper after the consumer releases the stream.
+        std::mem::drop(reaper);
+    }
+}
 
 // ── ReactAgent: entry point ──────────────────────────────────────────
 
@@ -251,9 +291,22 @@ impl ReactAgent {
         snap.current_turn_id = Some(turn_id);
         snap.current_message = message.clone();
         snap.trace_run_id = trace_run_id;
+        let consumer_cancel = snap
+            .cancel_token
+            .as_ref()
+            .or(snap.external_cancel.as_deref())
+            .map(crate::agent::CancellationToken::child_token)
+            .unwrap_or_default();
+        snap.cancel_token = Some(consumer_cancel.clone());
+        snap.external_cancel = Some(Arc::new(consumer_cancel.clone()));
         active_turn_lease.set_steerable(true);
 
-        tokio::spawn(async move {
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            crate::error::ReactError::Other(format!(
+                "stream execution requires a Tokio runtime: {error}"
+            ))
+        })?;
+        let task = runtime.spawn(async move {
             // Move the guard into the spawned task — held for full stream duration
             let _execution_guard = execution_guard;
             let _active_turn_lease = active_turn_lease;
@@ -274,7 +327,12 @@ impl ReactAgent {
             }
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(Box::pin(ManagedAgentEventStream {
+            receiver: tokio_stream::wrappers::ReceiverStream::new(rx),
+            cancel: consumer_cancel,
+            task: Some(task),
+            runtime,
+        }))
     }
 }
 
@@ -372,7 +430,7 @@ impl AgentSnapshot {
         )
         .await?
         {
-            PrepareOutcome::Continue { task_node_id } => LoopState::new(task_node_id),
+            PrepareOutcome::Continue => LoopState::new(),
             PrepareOutcome::BlockedAndDone => return Ok(()),
             PrepareOutcome::Abandoned => {
                 self.finalize_run(
@@ -388,13 +446,9 @@ impl AgentSnapshot {
         let agent_name = self.config.agent_name.clone();
 
         // ── The single core ReAct loop ───────────────────────────────
-        // max_iterations == 0 means unlimited. Use usize::MAX as a practical
-        // sentinel so the rest of the loop keeps normal for-loop semantics.
-        let max_iterations = if self.config.max_iterations == 0 {
-            usize::MAX
-        } else {
-            self.config.max_iterations
-        };
+        // Builders reject zero. A directly constructed or restored invalid
+        // config still remains bounded here and reaches typed finalization.
+        let max_iterations = self.config.max_iterations;
         for iteration in 0..max_iterations {
             for cb in self.config.callbacks.iter() {
                 cb.on_iteration(&agent_name, iteration).await;
@@ -409,7 +463,6 @@ impl AgentSnapshot {
 
             let remaining = max_iterations.saturating_sub(iteration);
             if !state.budget.wind_down_emitted
-                && self.config.max_iterations > 0
                 && self
                     .config
                     .run_budget
@@ -481,34 +534,31 @@ impl AgentSnapshot {
 
             // Think: callbacks + interventions + LLM stream → buffered output
             let final_only = state.budget.final_only;
-            let think = match phases::think::run_think(
-                &self, &context, &tx, &mut state, messages, final_only,
-            )
-            .await?
-            {
-                phases::ThinkOutcome::Continue(t) => t,
-                phases::ThinkOutcome::Abandoned | phases::ThinkOutcome::Blocked => {
-                    self.finalize_run(
-                        crate::trace::RunStatus::Cancelled,
-                        None,
-                        Some("event consumer disconnected or intervention blocked the run"),
-                    )
-                    .await;
-                    return Ok(());
-                }
-                phases::ThinkOutcome::Cancelled => {
-                    return Ok(());
-                }
-                phases::ThinkOutcome::Failed => {
-                    self.finalize_run(
-                        crate::trace::RunStatus::Failed,
-                        None,
-                        Some("model response failed"),
-                    )
-                    .await;
-                    return Ok(());
-                }
-            };
+            let think =
+                match phases::think::run_think(&self, &context, &tx, messages, final_only).await? {
+                    phases::ThinkOutcome::Continue(t) => t,
+                    phases::ThinkOutcome::Abandoned | phases::ThinkOutcome::Blocked => {
+                        self.finalize_run(
+                            crate::trace::RunStatus::Cancelled,
+                            None,
+                            Some("event consumer disconnected or intervention blocked the run"),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                    phases::ThinkOutcome::Cancelled => {
+                        return Ok(());
+                    }
+                    phases::ThinkOutcome::Failed => {
+                        self.finalize_run(
+                            crate::trace::RunStatus::Failed,
+                            None,
+                            Some("model response failed"),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                };
 
             let iteration_tokens = think.pt.saturating_add(think.ct);
             state
@@ -656,7 +706,7 @@ impl AgentSnapshot {
                     }
                 }
                 IterOutcome::NoResponse => {
-                    return phases::finalize::finalize_no_response(&self, &state, tx).await;
+                    return phases::finalize::finalize_no_response(&self, tx).await;
                 }
                 IterOutcome::Abandoned => {
                     self.finalize_run(
@@ -671,7 +721,7 @@ impl AgentSnapshot {
         }
 
         // ── Post-loop: max iterations exceeded ───────────────────────
-        phases::finalize::finalize_max_iterations(&self, &context, &state, tx).await
+        phases::finalize::finalize_max_iterations(&self, &context, tx).await
     }
 }
 
@@ -886,7 +936,91 @@ mod tests {
     use crate::state::RuntimeStateStore;
     use crate::testing::{MockLlmClient, MockTool, StreamChunk};
 
+    struct InvocationRewrite;
+
+    impl crate::agent::InterventionCallback for InvocationRewrite {
+        fn on_tool_call<'a>(
+            &'a self,
+            _agent: &'a str,
+            _tool: &'a str,
+            _args: &'a serde_json::Value,
+        ) -> futures::future::BoxFuture<'a, crate::agent::InterventionResult> {
+            Box::pin(async {
+                crate::agent::InterventionResult {
+                    redirect_to: Some("effective_tool".to_string()),
+                    modified_args: Some(serde_json::json!({"value": "rewritten"})),
+                    ..crate::agent::InterventionResult::default()
+                }
+            })
+        }
+    }
+
+    struct CapturingArgsTool {
+        name: &'static str,
+        calls: Arc<std::sync::Mutex<Vec<crate::tools::ToolParameters>>>,
+        permissions: Vec<echo_core::tools::permission::ToolPermission>,
+    }
+
+    impl crate::tools::Tool for CapturingArgsTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Returns the effective value and records the executed arguments"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"]
+            })
+        }
+
+        fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+            self.permissions.clone()
+        }
+
+        fn execute(
+            &self,
+            params: crate::tools::ToolParameters,
+        ) -> futures::future::BoxFuture<'_, Result<crate::tools::ToolResult>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(params.clone());
+                let value = params
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| ReactError::Other("effective value is missing".to_string()))?;
+                Ok(crate::tools::ToolResult::success(value))
+            })
+        }
+    }
+
+    #[cfg(feature = "human-loop")]
+    struct ModifiedArgsApproval;
+
+    #[cfg(feature = "human-loop")]
+    impl crate::human_loop::HumanLoopProvider for ModifiedArgsApproval {
+        fn request(
+            &self,
+            _request: crate::human_loop::HumanLoopRequest,
+        ) -> futures::future::BoxFuture<'_, Result<crate::human_loop::HumanLoopResponse>> {
+            Box::pin(async {
+                Ok(crate::human_loop::HumanLoopResponse::ModifiedArgs {
+                    args: serde_json::json!({"value": "approved"}),
+                    scope: crate::human_loop::ApprovalScope::Once,
+                })
+            })
+        }
+    }
+
     struct DelayedTerminalTool {
+        started: Arc<tokio::sync::Notify>,
+        completed: Arc<tokio::sync::Notify>,
         finished: Arc<std::sync::atomic::AtomicBool>,
     }
 
@@ -908,9 +1042,11 @@ mod tests {
             _params: crate::tools::ToolParameters,
         ) -> futures::future::BoxFuture<'_, Result<crate::tools::ToolResult>> {
             Box::pin(async move {
+                self.started.notify_one();
                 tokio::time::sleep(std::time::Duration::from_millis(75)).await;
                 self.finished
                     .store(true, std::sync::atomic::Ordering::Release);
+                self.completed.notify_one();
                 Ok(crate::tools::ToolResult::success(
                     "terminal state persisted",
                 ))
@@ -924,30 +1060,6 @@ mod tests {
     }
 
     impl crate::state::RuntimeStateStore for RecordingRuntimeStateStore {
-        fn save_node<'a>(
-            &'a self,
-            _conversation_id: &'a str,
-            _node: &'a crate::state::TaskNode,
-        ) -> futures::future::BoxFuture<'a, Result<()>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn load_nodes<'a>(
-            &'a self,
-            _conversation_id: &'a str,
-        ) -> futures::future::BoxFuture<'a, Result<Vec<crate::state::TaskNode>>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn update_status<'a>(
-            &'a self,
-            _conversation_id: &'a str,
-            _node_id: &'a str,
-            _status: crate::state::TaskNodeStatus,
-        ) -> futures::future::BoxFuture<'a, Result<()>> {
-            Box::pin(async { Ok(()) })
-        }
-
         fn get_checkpoint<'a>(
             &'a self,
             _conversation_id: &'a str,
@@ -1333,6 +1445,339 @@ mod tests {
             .collect()
     }
 
+    async fn collect_events_result(agent: &ReactAgent, text: &str) -> Result<Vec<AgentEvent>> {
+        let mut stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: text.into(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event?);
+        }
+        Ok(events)
+    }
+
+    #[tokio::test]
+    async fn q_flt_v09_effective_rewrite_is_the_only_executed_invocation() -> Result<()> {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let llm = MockLlmClient::new()
+            .then_tool_call("rewrite-1", "requested_tool", r#"{"value":"requested"}"#)
+            .with_response("done");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("Use the requested tool.")
+            .tool(Box::new(
+                MockTool::new("requested_tool").with_response("wrong tool"),
+            ))
+            .tool(Box::new(CapturingArgsTool {
+                name: "effective_tool",
+                calls: calls.clone(),
+                permissions: Vec::new(),
+            }))
+            .intervention_callback(Arc::new(InvocationRewrite))
+            .build()?;
+
+        let events = collect_events_result(&agent, "rewrite the call").await?;
+        let invocation = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolCall {
+                    call_id,
+                    invocation,
+                } if call_id == "rewrite-1" => Some(invocation),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("canonical ToolCall was not emitted".to_string()))?;
+        assert_eq!(invocation.requested_name, "requested_tool");
+        assert_eq!(
+            invocation.requested_args,
+            serde_json::json!({"value": "requested"})
+        );
+        assert_eq!(invocation.name, "effective_tool");
+        assert_eq!(invocation.args, serde_json::json!({"value": "rewritten"}));
+        assert_eq!(
+            invocation.rewrites,
+            vec![
+                crate::agent::ToolInvocationRewrite::InterventionRedirect,
+                crate::agent::ToolInvocationRewrite::InterventionArguments,
+            ]
+        );
+        let terminal = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id,
+                    name,
+                    result,
+                } if call_id == "rewrite-1" => Some((name, result)),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("typed ToolResult was not emitted".to_string()))?;
+        assert_eq!(terminal.0, "effective_tool");
+        assert_eq!(terminal.1.output, "rewritten");
+        let executed = calls.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(executed.len(), 1);
+        assert_eq!(
+            executed
+                .first()
+                .and_then(|params| params.get("value"))
+                .and_then(serde_json::Value::as_str),
+            Some("rewritten")
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn react_emits_and_executes_approval_modified_arguments() -> Result<()> {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = Arc::new(crate::human_loop::PermissionService::from_provider(
+            Arc::new(ModifiedArgsApproval),
+        ));
+        let llm = MockLlmClient::new()
+            .then_tool_call("approval-1", "approval_tool", r#"{"value":"requested"}"#)
+            .with_response("done");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("Use the approval tool.")
+            .enable_human_in_loop()
+            .permission_service(service)
+            .tool(Box::new(CapturingArgsTool {
+                name: "approval_tool",
+                calls: calls.clone(),
+                permissions: vec![echo_core::tools::permission::ToolPermission::Write],
+            }))
+            .build()?;
+
+        let events = collect_events_result(&agent, "run the approved call").await?;
+        let invocation = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolCall {
+                    call_id,
+                    invocation,
+                } if call_id == "approval-1" => Some(invocation),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("approval ToolCall was not emitted".to_string()))?;
+        assert_eq!(
+            invocation.requested_args,
+            serde_json::json!({"value": "requested"})
+        );
+        assert_eq!(invocation.args, serde_json::json!({"value": "approved"}));
+        assert_eq!(
+            invocation.rewrites,
+            vec![crate::agent::ToolInvocationRewrite::Approval]
+        );
+        let result = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id, result, ..
+                } if call_id == "approval-1" => Some(result),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("approval ToolResult was not emitted".to_string()))?;
+        assert_eq!(result.output, "approved");
+        let executed = calls.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            executed
+                .first()
+                .and_then(|params| params.get("value"))
+                .and_then(serde_json::Value::as_str),
+            Some("approved")
+        );
+        Ok(())
+    }
+
+    async fn assert_spilled_tool_result(
+        agent: &ReactAgent,
+        call_id: &str,
+        marker_key: &str,
+        marker_value: &str,
+        original: &str,
+    ) -> Result<()> {
+        let events = collect_events_result(agent, "produce a large result").await?;
+        assert!(events.iter().all(|event| {
+            !matches!(
+                event,
+                AgentEvent::ToolStream {
+                    event: crate::tools::ToolStreamEvent::Complete(_),
+                    ..
+                }
+            )
+        }));
+        let result = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id: current,
+                    result,
+                    ..
+                } if current == call_id => Some(result),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("spilled ToolResult was not emitted".to_string()))?;
+        assert!(result.success);
+        assert!(result.truncated);
+        assert_eq!(
+            result.metadata.get(marker_key).map(String::as_str),
+            Some(marker_value)
+        );
+        assert_eq!(
+            result.metadata.get("output_handling").map(String::as_str),
+            Some("spilled")
+        );
+        let artifact =
+            echo_core::tools::artifact::ToolOutputArtifactRef::from_metadata(&result.metadata)
+                .ok_or_else(|| {
+                    ReactError::Other("ToolResult lost its artifact reference".to_string())
+                })?;
+        let recovered = std::fs::read_to_string(&artifact.path)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(recovered, original);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn q_flt_v03_huge_output_spills_to_digest_bound_artifact() -> Result<()> {
+        let artifact_dir =
+            tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let original = format!("{}END", "non-stream 中文🙂\n".repeat(2_000));
+        let llm = MockLlmClient::new()
+            .then_tool_call("non-stream-1", "large_non_stream", "{}")
+            .with_response("done");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("Use the large output tool.")
+            .tool_output_artifacts(
+                echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                    artifact_dir.path(),
+                    "test",
+                )
+                .threshold_bytes(8),
+            )
+            .tool(Box::new(
+                MockTool::new("large_non_stream").with_result(
+                    crate::tools::ToolResult::success(original.clone())
+                        .with_meta("transport", "non_stream"),
+                ),
+            ))
+            .build()?;
+
+        assert_spilled_tool_result(&agent, "non-stream-1", "transport", "non_stream", &original)
+            .await
+    }
+
+    #[tokio::test]
+    async fn react_streaming_tool_preserves_rich_spilled_terminal() -> Result<()> {
+        let artifact_dir =
+            tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let original = format!("{}END", "stream 中文🙂\n".repeat(2_000));
+        let llm = MockLlmClient::new()
+            .then_tool_call("stream-1", "large_stream", "{}")
+            .with_response("done");
+        let stream_result =
+            crate::tools::ToolResult::success(original.clone()).with_meta("transport", "stream");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("Use the streaming output tool.")
+            .tool_output_artifacts(
+                echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                    artifact_dir.path(),
+                    "test",
+                )
+                .threshold_bytes(8),
+            )
+            .tool(Box::new(MockTool::new("large_stream").with_stream_script(
+                vec![
+                    crate::tools::ToolStreamEvent::Output {
+                        channel: crate::tools::ToolOutputChannel::Stdout,
+                        chunk: "partial".to_string(),
+                    },
+                    crate::tools::ToolStreamEvent::Complete(stream_result),
+                ],
+            )))
+            .build()?;
+
+        assert_spilled_tool_result(&agent, "stream-1", "transport", "stream", &original).await
+    }
+
+    #[tokio::test]
+    async fn activate_skill_tool_replaces_protected_projection_across_compression() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let skill_dir = root.path().join("replaceable-skill");
+        std::fs::create_dir_all(&skill_dir)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: replaceable-skill\ndescription: Replaceable instructions\n---\nActivation argument: ${ARGUMENTS}\n",
+        )
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+
+        let llm = MockLlmClient::new()
+            .then_tool_call(
+                "activate-first",
+                "activate_skill",
+                r#"{"name":"replaceable-skill","arguments":"first"}"#,
+            )
+            .then_tool_call(
+                "activate-second",
+                "activate_skill",
+                r#"{"name":"replaceable-skill","arguments":"second"}"#,
+            )
+            .with_response("done");
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("Activate the requested skill.")
+            .build()?;
+        agent
+            .discover_skills(&[crate::skills::external::DiscoveryScope::Custom(
+                root.path().to_path_buf(),
+            )])
+            .await?;
+
+        let events = collect_events_result(&agent, "activate and refresh the skill").await?;
+        let activations = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ToolResult {
+                        result: crate::tools::ToolResult {
+                            kind: echo_core::tools::ToolResultKind::SkillActivation { name },
+                            ..
+                        },
+                        ..
+                    } if name == "replaceable-skill"
+                )
+            })
+            .count();
+        assert_eq!(activations, 2);
+
+        let compressor = crate::compression::compressor::SlidingWindowCompressor::new(1);
+        agent.force_compress_with(&compressor).await?;
+        let messages = agent.memory.context.lock().await.messages().to_vec();
+        let projections = messages
+            .iter()
+            .filter_map(|message| message.content.as_text_ref())
+            .filter(|text| text.contains("echo-agent:skill:replaceable-skill"))
+            .collect::<Vec<_>>();
+        assert_eq!(projections.len(), 1);
+        assert!(projections.first().is_some_and(|text| {
+            text.contains("Activation argument: second")
+                && !text.contains("Activation argument: first")
+        }));
+        Ok(())
+    }
+
     /// A single-turn text answer: the mock LLM replies with plain content, so
     /// the loop should emit a Token + a terminal FinalAnswer and stop (no tool
     /// phase). Guards the core-loop text branch.
@@ -1455,7 +1900,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deepseek_malformed_tool_turn_replays_reasoning_before_retry() -> Result<()> {
+    async fn q_flt_v01_malformed_tool_json_has_no_phantom_execution() -> Result<()> {
         let llm = Arc::new(
             MockLlmClient::new()
                 .then_reasoning_tool_call(
@@ -1519,7 +1964,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_tool_batch_is_checkpointed_before_next_model_call() -> Result<()> {
+    async fn q_flt_v08_completed_batch_effects_are_checkpointed_before_progress() -> Result<()> {
         let store = Arc::new(RecordingRuntimeStateStore::default());
         let llm = MockLlmClient::new()
             .then_tool_call("write-1", "mock_write", r#"{"path":"结果-🧪.md"}"#)
@@ -1893,7 +2338,7 @@ mod tests {
     /// cancels the agent's token mid-flight. The stream must terminate well
     /// before the 30s delay — proving the cancel propagated to the LLM layer.
     #[tokio::test]
-    async fn test_run_stream_cancelled_mid_llm_call() {
+    async fn q_flt_v05_cancellation_stops_the_provider_without_final_success() {
         use std::time::Duration;
 
         use crate::agent::CancellationToken;
@@ -1973,6 +2418,8 @@ mod tests {
             .llm_client(Arc::new(llm))
             .system_prompt("Run the requested tool.")
             .tool(Box::new(DelayedTerminalTool {
+                started: Arc::new(tokio::sync::Notify::new()),
+                completed: Arc::new(tokio::sync::Notify::new()),
                 finished: finished.clone(),
             }))
             .build()?;
@@ -2006,6 +2453,60 @@ mod tests {
         })??;
 
         assert!(finished.load(std::sync::atomic::Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn q_flt_v06_dropping_consumer_drains_upstream_and_releases_turn() -> Result<()> {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let llm = MockLlmClient::new()
+            .then_tool_call("drop-1", "delayed_terminal", "{}")
+            .with_response("second run completed");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .tool(Box::new(DelayedTerminalTool {
+                started: Arc::clone(&started),
+                completed: Arc::clone(&completed),
+                finished: Arc::clone(&finished),
+            }))
+            .build()?;
+        let mut stream = agent.execute_stream("start durable tool").await?;
+        let saw_call = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event?, AgentEvent::ToolCall { .. }) {
+                    return Ok::<bool, ReactError>(true);
+                }
+            }
+            Ok(false)
+        })
+        .await
+        .map_err(|_| ReactError::Other("durable tool call was not emitted".to_string()))??;
+        assert!(saw_call);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .map_err(|_| ReactError::Other("durable tool did not start".to_string()))?;
+
+        drop(stream);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), completed.notified())
+            .await
+            .map_err(|_| ReactError::Other("dropped stream did not drain its tool".to_string()))?;
+        assert!(finished.load(std::sync::atomic::Ordering::Acquire));
+
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            agent.execute("run after consumer disconnect"),
+        )
+        .await
+        .map_err(|_| ReactError::Other("dropped stream retained the turn".to_string()))??;
+        assert_eq!(answer, "second run completed");
+        assert!(matches!(
+            agent.steer_input(None, Message::user("late steer".to_string())),
+            Err(crate::agent::TurnSteerError::NoActiveTurn)
+        ));
         Ok(())
     }
 
@@ -2236,8 +2737,8 @@ mod tests {
 
     // Truncated / clean-disconnect stream: the loop must NOT accept the
     // partial output as a complete final answer (Q-FLT-01-P1-01). This
-    // fixture is red until M3 lands the finish_reason/terminal check; it is
-    // pinned here so the fix lands with a failing-then-passing test.
+    // fixture remains active in the mandatory suite so terminal regressions
+    // cannot be hidden behind an ignored test.
     #[tokio::test]
     async fn truncated_stream_is_not_accepted_as_complete() {
         let llm = MockLlmClient::new().with_stream_script(vec![

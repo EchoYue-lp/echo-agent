@@ -587,8 +587,8 @@ impl crate::agent::snapshot::AgentRunSnapshot {
     /// Approach: pragmatic structured-return flush — the LLM decides what's
     /// durable and returns a JSON array; the framework writes each item via the
     /// shared `MemoryLayerManager` (typed memory, security checks, audit hooks).
-    /// This is the user-chosen variant (overrides D14-G1's "真 sub-agent" — a
-    /// sub-agent fork was judged higher-cost for equivalent durable-extraction
+    /// This is the user-chosen variant (overrides D14-G1's "真 subagent" — a
+    /// subagent fork was judged higher-cost for equivalent durable-extraction
     /// value on a local single-user assistant). Best-effort — errors/timeouts
     /// never block compaction. Gated by `ContextManager::should_compress()` so it
     /// only fires when compaction is imminent, not every ReAct iteration.

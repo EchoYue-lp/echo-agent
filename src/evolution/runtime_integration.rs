@@ -5,6 +5,7 @@
 //! lifecycle policy and scheduling remain in app code.
 
 use super::{ChangeLog, EvolutionObserver, JsonlChangeLog, MemoryLayerManager};
+use crate::error::Result;
 use crate::memory::Store;
 use crate::skills::hooks::{HookContext, HookRegistry};
 use futures::future::BoxFuture;
@@ -51,30 +52,30 @@ impl MemoryRuntimeIntegrationBuilder {
     }
 
     /// Create a JSONL change log, ensuring the parent directory exists.
-    pub fn create_change_log(&self) -> Box<dyn ChangeLog> {
+    pub fn create_change_log(&self) -> Result<Box<dyn ChangeLog>> {
         let log_path = self
             .change_log_path
             .clone()
             .unwrap_or_else(|| self.default_change_log_path());
         if let Some(parent) = log_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
-        Box::new(JsonlChangeLog::new(log_path))
+        Ok(Box::new(JsonlChangeLog::new(log_path)?))
     }
 
     /// Create the fully wired layer manager.
-    pub fn build_layer_manager(&self) -> MemoryLayerManager {
+    pub fn build_layer_manager(&self) -> Result<MemoryLayerManager> {
         let mut layer_manager = MemoryLayerManager::new(
             self.echo_agent_dir.clone(),
             self.store.clone(),
-            self.create_change_log(),
+            self.create_change_log()?,
         );
 
         if let Some(observer) = &self.evolution_observer {
             layer_manager = layer_manager.with_evolution_observer(observer.clone());
         }
 
-        layer_manager
+        Ok(layer_manager)
     }
 }
 
@@ -211,7 +212,7 @@ mod tests {
 
         let manager = MemoryRuntimeIntegrationBuilder::new(echo_agent_dir.clone(), store)
             .evolution_observer(observer)
-            .build_layer_manager();
+            .build_layer_manager()?;
 
         let meta = MemoryMeta::new(
             MemoryType::ProjectFact,

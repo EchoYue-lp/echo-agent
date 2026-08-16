@@ -3,7 +3,7 @@
 
 use super::super::processor::process_stream_chunk;
 use super::super::stream_macros::{try_send_or, yield_event_or};
-use super::{LoopState, ThinkOutcome, ThinkOutput};
+use super::{ThinkOutcome, ThinkOutput};
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::Result;
@@ -22,12 +22,11 @@ use tokio::sync::{Mutex, mpsc};
 /// - [`ThinkOutcome::Abandoned`] when the channel was closed mid-stream.
 /// - [`ThinkOutcome::Cancelled`] / [`ThinkOutcome::Blocked`] when an
 ///   intervention callback aborted the turn (the error has already been
-///   forwarded to the channel and the TaskNode status updated).
+///   forwarded to the channel).
 pub(crate) async fn run_think(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: &mpsc::Sender<Result<AgentEvent>>,
-    state: &mut LoopState,
     messages: Vec<Message>,
     final_only: bool,
 ) -> Result<ThinkOutcome> {
@@ -40,10 +39,6 @@ pub(crate) async fn run_think(
     for intervention in &snap.tools.intervention_callbacks {
         let result = intervention.on_think_start(agent, &messages).await;
         if result.cancel {
-            if let Some(ref node_id) = state.task_node_id {
-                snap.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
-                    .await;
-            }
             snap.finalize_run(
                 crate::trace::RunStatus::Cancelled,
                 None,
@@ -57,15 +52,6 @@ pub(crate) async fn run_think(
             let reason = result
                 .block_reason
                 .unwrap_or_else(|| "blocked by intervention at think".into());
-            if let Some(ref node_id) = state.task_node_id {
-                snap.update_node_status(
-                    node_id,
-                    crate::state::TaskNodeStatus::Blocked {
-                        reason: reason.clone(),
-                    },
-                )
-                .await;
-            }
             let _ = tx
                 .send(Ok(AgentEvent::error_message(
                     "intervention",

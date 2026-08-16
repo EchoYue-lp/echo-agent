@@ -12,7 +12,6 @@ Use this file to decide whether an example should be tightened into an acceptanc
 
 These are the most suitable examples for deterministic local verification.
 
-- `demo16_testing.rs`
 - `demo30_mcp_server.rs`
 - `demo32_token_budget.rs`
 - `demo37_declarative_workflow.rs`
@@ -28,7 +27,6 @@ These examples are expected to fail loudly when their prerequisites are missing.
 - `demo09_file_shell.rs`
 - `demo12_resilience.rs`
 - `demo13_tool_execution.rs`
-- `demo14_memory_isolation.rs`
 - `demo18_semantic_memory.rs`
 - `demo26_provider_factory.rs`
 - `demo27_sqlite_memory.rs`
@@ -68,7 +66,6 @@ These examples stay focused on API understanding, interaction style, or walkthro
 - `demo17_chat.rs`
 - `demo19_guard.rs`
 - `demo20_audit.rs`
-- `demo22_plan_execute.rs`
 - `demo23_a2a.rs`
 - `demo24_topology.rs`
 - `demo25_macros.rs`
@@ -91,10 +88,13 @@ These examples stay focused on API understanding, interaction style, or walkthro
 - `demo60_data_quality.rs`
 - `demo61_agent_factory.rs`
 - `demo62_prompt_templates.rs`
-- `demo63_tiered_memory.rs`
 - `demo64_tool_pipeline.rs`
 - `demo65_context_assembler.rs`
 - `demo66_context_selector.rs`
+- `demo67_progress.rs`
+- `demo68_human_gate.rs`
+- `demo70_scheduler.rs`
+- `smoke_usage_passthrough.rs`
 
 ## Maintenance Rules
 

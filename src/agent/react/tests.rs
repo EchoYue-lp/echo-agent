@@ -942,7 +942,7 @@ fn react_agent_builder_full_featured() {
     assert!(agent.config().is_cot_enabled());
 }
 
-// ── SubAgent Tests ───────────────────────────────────────────────────────────────
+// ── Subagent Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(feature = "subagent")]
 #[test]
@@ -1462,7 +1462,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
     assert!(
         repeat_activation
             .output
-            .contains(&String::from("already activated"))
+            .contains(&String::from("Use skill one."))
     );
 
     let second_activation = agent
@@ -1660,7 +1660,7 @@ async fn execute_tool_injects_pre_and_post_hook_messages_into_context() -> crate
         Ok(output) => output,
         Err(failure) => return Err(failure.error),
     };
-    assert_eq!(result, "tool ok");
+    assert_eq!(result.result.output, "tool ok");
 
     let messages: Vec<String> = agent
         .get_messages()
@@ -1699,7 +1699,7 @@ async fn shell_skill_uses_agent_sandbox_manager_when_present() -> crate::error::
         .execute_tool_with_policy("shell-test".to_string(), "shell", &params, &input, None)
         .await;
     match result {
-        Ok(output) => assert!(output.contains(&String::from("sandboxed"))),
+        Ok(output) => assert!(output.result.output.contains(&String::from("sandboxed"))),
         Err(failure) => return Err(failure.error),
     }
     Ok(())
@@ -2073,7 +2073,7 @@ async fn invocation_history_is_inserted_before_current_input() -> Result<(), Str
 }
 
 #[tokio::test]
-async fn corrupt_runtime_checkpoint_blocks_restore_without_overwrite() -> Result<(), String> {
+async fn q_flt_v07_corrupt_checkpoint_fails_closed_without_overwrite() -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
     let checkpoint_dir = temp
         .path()

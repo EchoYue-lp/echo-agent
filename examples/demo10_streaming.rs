@@ -146,9 +146,10 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
                 final_answer = answer;
                 println!();
             }
-            AgentEvent::ToolError { name, error, .. } => {
+            AgentEvent::ToolResult { name, result, .. } if !result.success => {
                 return Err(echo_agent::error::ReactError::Other(format!(
-                    "demo10 验收失败：文本流式执行中工具 `{name}` 出错: {error}"
+                    "demo10 验收失败：文本流式执行中工具 `{name}` 出错: {}",
+                    result.error.unwrap_or(result.output)
                 )));
             }
             _ => {}
@@ -205,16 +206,20 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
                 print!("{}", token);
                 std::io::stdout().flush().ok();
             }
-            AgentEvent::ToolCall { name, args, .. } => {
-                println!("\n  🔧 工具调用: {name}({:?})", args);
+            AgentEvent::ToolCall { invocation, .. } => {
+                println!(
+                    "\n  🔧 工具调用: {}({:?})",
+                    invocation.name, invocation.args
+                );
             }
-            AgentEvent::ToolResult { name, output, .. } => {
-                println!("  📤 工具结果: [{name}] → {}", truncate(&output, 60));
-            }
-            AgentEvent::ToolError { name, error, .. } => {
-                return Err(echo_agent::error::ReactError::Other(format!(
-                    "demo10 验收失败：工具流式执行中 `{name}` 出错: {error}"
-                )));
+            AgentEvent::ToolResult { name, result, .. } => {
+                if !result.success {
+                    return Err(echo_agent::error::ReactError::Other(format!(
+                        "demo10 验收失败：工具流式执行中 `{name}` 出错: {}",
+                        result.error.unwrap_or(result.output)
+                    )));
+                }
+                println!("  📤 工具结果: [{name}] → {}", truncate(&result.output, 60));
             }
             AgentEvent::FinalAnswer(answer) => {
                 final_answer = answer.clone();

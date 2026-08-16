@@ -16,11 +16,10 @@ Add to your `Cargo.toml`:
 echo_core = "0.2"
 ```
 
-Use the prelude to import all core traits:
+Import the core traits from their owning modules:
 
 ```rust
-use echo_core::prelude::*;
-use echo_core::error::AgentError;
+use echo_core::agent::Agent;
 
 // Implement the Agent trait
 struct MyAgent;
@@ -31,7 +30,7 @@ impl Agent for MyAgent {
 
 ## Contents
 
-- **Agent traits**: `Agent`, `ReActAgent`, `SubAgent`
+- **Agent traits and events**: `Agent`, `AgentEvent`, `AgentCallback`, `CancellationToken`
 - **LLM abstractions**: `LlmClient`, `ChatRequest`, `ChatResponse`, `TokenUsage`
 - **Tool system**: `Tool`, `TypedTool`, `ToolResult`, `ToolPermission`
 - **Memory traits**: `Store`, `ConversationStore`, `Embedder`, tiered memory, decay, scope isolation

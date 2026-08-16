@@ -1,15 +1,12 @@
-//! ManagedTask event system — lifecycle notifications for task state changes
+//! Lossy progress projections for user-interface consumers.
 //!
 //! Uses async broadcast channel for non-blocking event distribution.
 //! Listeners can subscribe and receive events in their own async tasks.
 
 use super::progress::TaskProgress;
-use super::runtime::TaskStatus;
-use super::task::ManagedTask;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::info;
 
 /// Default channel capacity for the event bus
 ///
@@ -17,35 +14,9 @@ use tracing::info;
 /// If your workload generates many events, consider using a larger capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 512;
 
-/// Lifecycle event emitted by the TaskManager
+/// Non-authoritative progress projection emitted by progress reporters.
 #[derive(Debug, Clone, Serialize)]
-// Created carries the complete public ManagedTask snapshot; boxing would break consumers.
-#[allow(clippy::large_enum_variant)]
 pub enum TaskEvent {
-    Created {
-        task: ManagedTask,
-    },
-    Updated {
-        task_id: String,
-        old_status: TaskStatus,
-        new_status: TaskStatus,
-    },
-    Deleted {
-        task_id: String,
-    },
-    Assigned {
-        task_id: String,
-        agent: String,
-    },
-    Failed {
-        task_id: String,
-        error: String,
-        attempt: u32,
-    },
-    Completed {
-        task_id: String,
-        result: String,
-    },
     /// Intra-task progress update (percentage, current phase, ETA).
     ///
     /// Emitted by [`ProgressReporter`](super::progress::ProgressReporter) for
@@ -59,12 +30,6 @@ pub enum TaskEvent {
 impl TaskEvent {
     pub fn task_id(&self) -> &str {
         match self {
-            TaskEvent::Created { task } => &task.id,
-            TaskEvent::Updated { task_id, .. } => task_id,
-            TaskEvent::Deleted { task_id } => task_id,
-            TaskEvent::Assigned { task_id, .. } => task_id,
-            TaskEvent::Failed { task_id, .. } => task_id,
-            TaskEvent::Completed { task_id, .. } => task_id,
             TaskEvent::Progress { task_id, .. } => task_id,
         }
     }
@@ -87,52 +52,6 @@ pub struct LoggingListener;
 impl TaskEventListener for LoggingListener {
     fn on_event(&self, event: &TaskEvent) {
         match event {
-            TaskEvent::Created { task } => {
-                info!(task_id = %task.id, subject = %task.subject, "task_created");
-            }
-            TaskEvent::Updated {
-                task_id,
-                old_status,
-                new_status,
-            } => {
-                info!(
-                    task_id = %task_id,
-                    old_status = ?old_status,
-                    new_status = ?new_status,
-                    "task_updated"
-                );
-            }
-            TaskEvent::Deleted { task_id } => {
-                info!(task_id = %task_id, "task_deleted");
-            }
-            TaskEvent::Assigned { task_id, agent } => {
-                info!(task_id = %task_id, agent = %agent, "task_assigned");
-            }
-            TaskEvent::Failed {
-                task_id,
-                error,
-                attempt,
-            } => {
-                info!(
-                    task_id = %task_id,
-                    error = %error,
-                    attempt = attempt,
-                    "task_failed"
-                );
-            }
-            TaskEvent::Completed { task_id, result } => {
-                let result_preview = if result.chars().count() > 100 {
-                    let truncated: String = result.chars().take(100).collect();
-                    format!("{truncated}...")
-                } else {
-                    result.clone()
-                };
-                info!(
-                    task_id = %task_id,
-                    result = %result_preview,
-                    "task_completed"
-                );
-            }
             TaskEvent::Progress {
                 task_id, progress, ..
             } => {

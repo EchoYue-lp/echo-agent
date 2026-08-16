@@ -8,7 +8,7 @@
 //! |--------|-------------|
 //! | [`workflow`] | Graph workflow engine — `GraphBuilder`, `Graph`, streaming events |
 //! | [`human_loop`] | Human-in-the-loop approvals — console, webhook, WebSocket, permission pipeline |
-//! | [`tasks`] | DAG task management — `TaskManager`, scheduling, hooks, events |
+//! | [`tasks`] | Revisioned task graphs, DAG execution, scheduling, and progress events |
 //! | [`scheduler`] | Cron-based task scheduling — `CronTask`, `SchedulerRunner` |
 //! | [`planning`] | Structured task planning — `PlanSpec`, `PlanValidator` |
 //!

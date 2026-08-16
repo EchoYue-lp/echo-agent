@@ -37,15 +37,16 @@ pub use echo_core::agent::builder::AgentBuilder as AgentBuilderTrait;
 pub use echo_core::agent::{
     AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentEvent, AgentInvocationContext,
     CancellationToken, EventEnvelope, EventIdentity, InterventionCallback, InterventionResult,
-    StepType, envelope_event_stream, envelope_event_stream_after, validate_event_trajectory,
+    StepType, ToolInvocation, ToolInvocationRewrite, envelope_event_stream,
+    envelope_event_stream_after, validate_event_trajectory,
 };
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// SubAgent registry type alias
+/// Subagent registry type alias
 #[allow(dead_code)]
-pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<dyn Agent>>>>;
+pub(crate) type SubagentMap = Arc<RwLock<HashMap<String, Arc<dyn Agent>>>>;
 
 // ── Core sub-modules ───────────────────────────────────────────────────────
 
@@ -70,7 +71,7 @@ pub use crate::agent::react::{
     PreparedAgentModelGeneration, PreparedCriticUpdate, PreparedTokenLimit, ReactAgent,
 };
 pub use crate::agent::steer::TurnSteerError;
-pub use config::{AgentConfig, AgentRole};
+pub use config::AgentConfig;
 
 /// Agent factory types — re-exported from echo-core with facade-level overrides.
 ///

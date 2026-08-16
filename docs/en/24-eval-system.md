@@ -232,7 +232,7 @@ for m in &metrics {
 
 ## Trigger Accuracy
 
-Measure how well sub-agent routing works:
+Measure how well subagent routing works:
 
 ```rust
 use echo_agent::eval::{TriggerAccuracy, trigger::TriggerTestCase};

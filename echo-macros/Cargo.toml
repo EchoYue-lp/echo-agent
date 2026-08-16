@@ -26,3 +26,7 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
 proc-macro-crate = "3"
+
+[dev-dependencies]
+echo_core = { version = "0.2.0", path = "../echo-core" }
+echo_orchestration = { version = "0.2.0", path = "../echo-orchestration" }

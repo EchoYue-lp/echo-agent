@@ -1,0 +1,54 @@
+[graph]
+all-features = true
+
+[advisories]
+ignore = [
+    # Polars 0.53 enables its file-cache/cloud plumbing through the streaming
+    # CSV/JSON/Parquet feature set. Polars currently pins object_store 0.13,
+    # which pins quick-xml 0.39. echo-agent's data-tool API accepts local Path
+    # and File inputs only; it does not expose object-store cloud configuration
+    # or URIs. Remove both exceptions when Polars accepts object_store
+    # 0.14 / quick-xml 0.41. Owner: echo-agent maintainers. Review by 2026-11-16.
+    { id = "RUSTSEC-2026-0194", reason = "unreachable Polars object-store XML path; upstream version constraint" },
+    { id = "RUSTSEC-2026-0195", reason = "unreachable Polars object-store XML path; upstream version constraint" },
+
+    # SQLx 0.8 uses rsa for MySQL authentication encryption with a server
+    # public key. The advisory concerns observable timing of private-key
+    # operations; echo-agent and SQLx never load an RSA private key on this
+    # path. No patched rsa release exists. Remove when SQLx migrates.
+    # Owner: echo-agent maintainers. Review by 2026-11-16.
+    { id = "RUSTSEC-2023-0071", reason = "SQLx MySQL public-key encryption path; no private-key operation or patched release" },
+
+    # Polars 0.53 uses bincode internally and upstream has not migrated to a
+    # maintained serializer. This is a maintenance-status advisory, not a
+    # vulnerability. Remove when Polars migrates. Owner: echo-agent maintainers.
+    # Review by 2026-11-16.
+    { id = "RUSTSEC-2025-0141", reason = "unmaintained Polars implementation dependency; no compatible maintained release" },
+]
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

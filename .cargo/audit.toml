@@ -1,0 +1,23 @@
+[advisories]
+# Polars 0.53 enables object_store 0.13 through its Parquet streaming path,
+# which pins quick-xml 0.39. echo-agent's data tools accept local Path/File
+# inputs only, so the affected object-store XML parser is not reachable through
+# the framework API. Remove these entries when Polars accepts object_store 0.14.
+# Owner: echo-agent maintainers. Review by 2026-11-16.
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+
+    # SQLx 0.8 uses rsa for MySQL authentication encryption with a server
+    # public key. RUSTSEC-2023-0071 concerns private-key timing; this dependency
+    # path never loads a private key and no patched rsa release exists.
+    "RUSTSEC-2023-0071",
+
+    # Polars 0.53 uses bincode internally and has no compatible maintained
+    # replacement release. This advisory reports maintenance status rather
+    # than a vulnerability.
+    "RUSTSEC-2025-0141",
+]
+
+# Every exception above is owned by the echo-agent maintainers and must be
+# reviewed by 2026-11-16.

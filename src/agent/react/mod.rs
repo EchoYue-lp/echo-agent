@@ -9,7 +9,7 @@
 //! | `capabilities.rs` | Capability configuration (tool / skill / MCP / subagent registration) |
 //! | `extract.rs` | Structured JSON extraction (`extract_json` / `extract`) |
 
-pub use crate::agent::config::{AgentConfig, AgentRole};
+pub use crate::agent::config::AgentConfig;
 #[cfg(feature = "subagent")]
 use crate::agent::subagent::SubagentRegistry;
 #[cfg(feature = "subagent")]
@@ -112,7 +112,7 @@ pub struct ReactAgent {
     /// Runtime-mutable system prompt override (set via `set_system_prompt` trait method).
     /// When set, this overrides `config.system_prompt` for subsequent turns.
     pub(crate) mutable_system_prompt: std::sync::RwLock<Option<String>>,
-    /// Tool execution subsystem: tool registry/execution, Skill, Hook, MCP, SubAgent, Sandbox
+    /// Tool execution subsystem: tool registry/execution, Skill, Hook, MCP, Subagent, Sandbox
     pub(crate) tools: ToolExecutionSubsystem,
     /// Guard & safety subsystem: guards, permission policy, audit logging, circuit breaker
     pub(crate) guard: GuardSubsystem,
@@ -431,7 +431,6 @@ impl ReactAgent {
                     default_timeout_secs: config.subagent_timeout_secs,
                     worktree_factory: config.subagent_worktree_factory.clone(),
                     data_workspace_factory: config.subagent_data_workspace_factory.clone(),
-                    runtime_state_store: config.subagent_runtime_state_store.clone(),
                     prompt_compiler: config.subagent_prompt_compiler.clone(),
                     ..SubagentExecutorConfig::default()
                 },
@@ -1795,10 +1794,6 @@ impl ReactAgent {
                 );
             }
 
-            // Hydrate any Running TaskNodes (mark them as Hydrated for resume)
-            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
-            snapshot.hydrate_running_nodes().await;
-
             // Restore working directory for worktree-isolated sessions (N-P1-7, BUG-3)
             if let Some(ref wd) = cp.working_dir {
                 self.set_working_dir(Some(wd.clone()));
@@ -2015,14 +2010,6 @@ impl ReactAgent {
         let _ = self.close().await;
     }
 
-    /// Set the maximum number of ReAct loop iterations at runtime.
-    ///
-    /// This allows dynamic adjustment of the agent's reasoning depth — for example,
-    /// `/think low` sets a low iteration count for quick responses, while
-    /// `/think high` allows more reasoning steps.
-    ///
-    /// Passing 0 means unlimited; the run loop will continue until the task
-    /// completes, is cancelled, or another runtime safety mechanism stops it.
     /// Get a reference to the shared context manager (for stats/display).
     pub fn context(&self) -> &Arc<tokio::sync::Mutex<crate::compression::ContextManager>> {
         &self.memory.context
@@ -2090,8 +2077,22 @@ impl ReactAgent {
         &self.config.permission_mode
     }
 
-    pub fn set_max_iterations(&mut self, max: usize) {
+    /// Update the hard iteration ceiling.
+    ///
+    /// This allows dynamic adjustment of the agent's reasoning depth while
+    /// preserving a finite safety cap.
+    ///
+    /// # Errors
+    /// Returns a configuration error when `max` is zero.
+    pub fn set_max_iterations(&mut self, max: usize) -> Result<()> {
+        if max == 0 {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "max_iterations must be greater than zero".to_string(),
+            )
+            .into());
+        }
         self.config.max_iterations = max;
+        Ok(())
     }
 
     /// Delegate a task to a subagent by name.

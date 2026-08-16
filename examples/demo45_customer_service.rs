@@ -12,7 +12,7 @@
 //! | 护栏系统 | `RuleGuard` 敏感词过滤 |
 //! | 人工审批 | `PermissionService` 退款需要人工批准 |
 //! | 审计日志 | `InMemoryAuditLogger` 记录操作 |
-//! | 任务规划 | `plan` + `create_task` 复杂问题拆解 |
+//! | 任务规划 | `task_create` / `task_update` 维护版本化任务图 |
 //! | 快照回滚 | `SnapshotPolicy` 支持会话恢复 |
 //! | 多模态 | `execute_with_image_url()` 处理图片问题 |
 //!
@@ -254,37 +254,25 @@ async fn main() -> Result<()> {
             ),
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "plan".to_string(),
+                    pattern: "task_create".to_string(),
                 },
                 RuleSource::Session,
             ),
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "create_task".to_string(),
+                    pattern: "task_update".to_string(),
                 },
                 RuleSource::Session,
             ),
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "list_tasks".to_string(),
+                    pattern: "task_list".to_string(),
                 },
                 RuleSource::Session,
             ),
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "update_task".to_string(),
-                },
-                RuleSource::Session,
-            ),
-            PermissionRule::allow(
-                RuleMatcher::Pattern {
-                    pattern: "visualize_dependencies".to_string(),
-                },
-                RuleSource::Session,
-            ),
-            PermissionRule::allow(
-                RuleMatcher::Pattern {
-                    pattern: "get_execution_order".to_string(),
+                    pattern: "task_list".to_string(),
                 },
                 RuleSource::Session,
             ),
@@ -485,14 +473,15 @@ async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<ChatRunSum
                 print!("{}", token);
                 std::io::stdout().flush().ok();
             }
-            AgentEvent::ToolCall { name, .. } => {
+            AgentEvent::ToolCall { invocation, .. } => {
+                let name = invocation.name;
                 summary.tool_calls.push(name.clone());
                 print!("\n   🔧 [工具: {}]\n", name);
                 std::io::stdout().flush().ok();
             }
-            AgentEvent::ToolResult { output, .. } => {
-                let preview: String = output.chars().take(100).collect();
-                if output.len() > 100 {
+            AgentEvent::ToolResult { result, .. } => {
+                let preview: String = result.output.chars().take(100).collect();
+                if result.output.chars().count() > 100 {
                     println!("   ✓ 结果: {}...", preview);
                 } else {
                     println!("   ✓ 结果: {}", preview);
@@ -558,7 +547,7 @@ const CUSTOMER_SERVICE_PROMPT: &str = r#"你是一个专业、友好的电商客
 1. 使用 remember 工具记录客户偏好和历史问题
 2. 使用 recall/search_memory 工具查找相关记忆和政策
 3. 使用业务工具（query_order, process_refund, check_inventory, create_ticket）解决问题
-4. 对于复杂问题，使用 plan 工具制定处理步骤
+4. 对于复杂问题，使用 task_create 一次性提交完整任务图，并用 task_update 更新
 5. 完成后使用 final_answer 给出最终答复
 
 【服务原则】

@@ -1172,8 +1172,8 @@ impl std::fmt::Display for HookSource {
 /// orchestration/subagent layers that don't have direct access to
 /// `HookRegistry` (which lives in `echo-execution`).
 ///
-/// The agent layer injects this via construction so that `TaskExecutor`
-/// and `SubagentExecutor` can fire `TaskCreated`/`TaskCompleted` and
+/// The agent layer injects this via construction so that revisioned task
+/// runtimes and `SubagentExecutor` can fire `TaskCreated`/`TaskCompleted` and
 /// `SubagentStart`/`SubagentStop` events into the unified system.
 ///
 /// Handles Lifecycle, Subagent, and Task events (not just Lifecycle).

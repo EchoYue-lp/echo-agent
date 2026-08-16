@@ -203,12 +203,12 @@ futures = "0.3"
 | 主题 | 文档 |
 |------|------|
 | ReAct 引擎详解 | [01-react-agent.md](./01-react-agent.md) |
-| 工具系统 | [02-tool-system.md](./02-tool-system.md) |
+| 工具系统 | [02-tools.md](./02-tools.md) |
 | 记忆系统 | [03-memory.md](./03-memory.md) |
-| 流式输出 | [04-streaming.md](./04-streaming.md) |
-| 上下文压缩 | [05-context-compression.md](./05-context-compression.md) |
-| MCP 协议 | [06-mcp.md](./06-mcp.md) |
-| 多 Agent 编排 | [07-multi-agent.md](./07-multi-agent.md) |
+| 流式输出 | [10-streaming.md](./10-streaming.md) |
+| 上下文压缩 | [04-compression.md](./04-compression.md) |
+| MCP 协议 | [08-mcp.md](./08-mcp.md) |
+| 多 Agent 编排 | [26-multi-agent.md](./26-multi-agent.md) |
 
 也可以直接运行仓库中的示例：
 
@@ -219,4 +219,4 @@ cargo run --example demo04_subagent       # 多 Agent 编排
 cargo run --example demo06_mcp            # MCP 协议集成
 ```
 
-完整示例列表见 [examples/](../examples/) 目录。
+完整示例列表见 [examples/](../../examples/) 目录。

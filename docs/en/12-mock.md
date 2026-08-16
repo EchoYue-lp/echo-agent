@@ -8,10 +8,10 @@ The `echo_agent::testing` module provides a suite of tools for testing component
 |------|----------|-------------|
 | `MockLlmClient` | Real LLM (OpenAI, etc.) | Test `SummaryCompressor` and any component that depends on `LlmClient` |
 | `MockTool` | Real tools (databases, HTTP APIs, etc.) | Test tool parameter parsing, error handling |
-| `MockAgent` | Real SubAgent | Test multi-agent orchestration logic |
-| `FailingMockAgent` | An always-failing SubAgent | Test orchestration fault-tolerance paths |
+| `MockAgent` | Real Subagent | Test multi-agent orchestration logic |
+| `FailingMockAgent` | An always-failing Subagent | Test orchestration fault-tolerance paths |
 
-Combined with the built-in `InMemoryStore`, these cover the vast majority of unit and integration test scenarios. For tests that need a `RuntimeStateStore` or `ConversationStore`, use the SQLite implementations against a temp file or `:memory:` URI.
+Combined with the built-in `InMemoryStore`, these cover the vast majority of unit and integration test scenarios. Tests that need a `ConversationStore` can use `FileConversationStore` with a temporary directory and no optional feature; SQLite implementations remain available behind the `sqlite` feature.
 
 ---
 
@@ -158,7 +158,7 @@ assert_eq!(last["city"], "Seattle");
 
 ## MockAgent
 
-Implements the `Agent` trait. Use it to replace real SubAgents when testing orchestration logic.
+Implements the `Agent` trait. Use it to replace real Subagents when testing orchestration logic.
 
 ### Basic usage
 
@@ -190,14 +190,13 @@ let math  = MockAgent::new("math_agent").with_response("The answer is 42");
 let writer = MockAgent::new("writer_agent").with_response("Report generated");
 
 let config = AgentConfig::new("qwen3-max", "orchestrator", "Delegate to specialists")
-    .role(AgentRole::Orchestrator)
     .enable_subagent(true);
 
 let mut orchestrator = ReactAgent::new(config);
 orchestrator.register_agent(Box::new(math));
 orchestrator.register_agent(Box::new(writer));
 
-// Orchestrator uses real LLM; SubAgents are mocked
+// Orchestrator uses real LLM; Subagents are mocked
 let result = orchestrator.execute("Complete the task").await?;
 ```
 
@@ -250,7 +249,7 @@ assert_eq!(results.len(), 1);
 # }
 ```
 
-For `RuntimeStateStore` / `ConversationStore` in tests, instantiate `SqliteRuntimeStateStore` / `SqliteConversationStore` against a `tempfile::NamedTempFile` or the `:memory:` SQLite URI.
+For `ConversationStore` tests, instantiate `FileConversationStore` against a temporary directory. When the `sqlite` feature is under test, `SqliteRuntimeStateStore` / `SqliteConversationStore` can instead use a temporary database or the `:memory:` SQLite URI.
 
 ---
 
@@ -322,7 +321,7 @@ mod tests {
 | Tool error handling | `MockTool::with_failure()` | No |
 | Sliding-window compression | `SlidingWindowCompressor` directly | No |
 | LLM summary compression | `MockLlmClient` + `SummaryCompressor` | No |
-| SubAgent orchestration logic | `MockAgent` + real orchestrator | Yes (orchestrator) |
+| Subagent orchestration logic | `MockAgent` + real orchestrator | Yes (orchestrator) |
 | Orchestration fault tolerance | `FailingMockAgent` | Yes (orchestrator) |
 | Memory storage | `InMemoryStore` | No |
 | Runtime state restore | `SqliteRuntimeStateStore` (`:memory:` URI) | No |
@@ -330,10 +329,6 @@ mod tests {
 
 ---
 
-## Full Example
+## Complete Reference
 
-See: `examples/demo16_testing.rs`
-
-```bash
-cargo run --example demo16_testing
-```
+See the runnable doctests and utility contracts in the [testing module](../../src/testing/mod.rs).

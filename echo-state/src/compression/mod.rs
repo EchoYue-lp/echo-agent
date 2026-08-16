@@ -2421,9 +2421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sliding_window_compressor() -> Result<()> {
-        println!("=== Example 1: Sliding window compression ===");
-
-        let mut ctx = ContextManager::builder(200)
+        let mut ctx = ContextManager::builder(10)
             .compressor(SlidingWindowCompressor::new(4))
             .build();
 
@@ -2433,17 +2431,24 @@ mod tests {
             ctx.push(Message::assistant(format!("助手回复 {}", i)));
         }
 
-        println!("压缩前消息数：{}", ctx.messages().len());
+        let before = ctx.messages().len();
         let result = ctx.prepare(None).await?;
         let messages = result.messages;
-        println!("压缩后消息数：{}", messages.len());
-        for m in &messages {
-            println!(
-                "  [{}] {}",
-                m.role.as_str(),
-                m.content.as_text_ref().unwrap_or("")
-            );
-        }
+        assert!(messages.len() < before);
+        assert!(messages.first().is_some_and(|message| {
+            message.role == Role::System
+                && message.content.as_text_ref() == Some("You are an assistant.")
+        }));
+        assert!(messages.iter().any(|message| {
+            message.role == Role::User && message.content.as_text_ref() == Some("用户消息 6")
+        }));
+        assert!(messages.iter().any(|message| {
+            message.role == Role::Assistant && message.content.as_text_ref() == Some("助手回复 6")
+        }));
+        assert!(messages.iter().all(|message| {
+            message.content.as_text_ref() != Some("用户消息 1")
+                && message.content.as_text_ref() != Some("助手回复 1")
+        }));
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-//! Subagent system — multi-level agent delegation and team coordination.
+//! Subagent system — multi-level agent delegation.
 //!
 //! Provides three execution modes:
 //! - **Sync**: parent blocks until subagent returns (current `AgentDispatchTool` behavior)
@@ -39,6 +39,7 @@ pub use prompt::{
     with_compiled_task,
 };
 pub use registry::{AgentFactory, FnAgentFactory, SubagentRegistry};
+pub use team::{TeamConfig, TeamSpec, TeamStrategy};
 pub use types::{
     ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentArtifact, SubagentDefinition,
     SubagentKind, SubagentOutcome, SubagentResult, SubagentStatus, SubagentTouchedFiles,

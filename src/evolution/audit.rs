@@ -9,7 +9,8 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::Result;
@@ -54,7 +55,7 @@ pub enum EntityType {
 // ── ChangeEntry ─────────────────────────────────────────────────────────
 
 /// A single recorded change in the evolution audit log.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangeEntry {
     /// Unique identifier for this change.
     pub change_id: String,
@@ -86,6 +87,12 @@ pub trait ChangeLog: Send + Sync {
     /// Record a change entry.
     fn record(&self, entry: ChangeEntry) -> Result<()>;
 
+    /// Atomically record an entry identified by its stable `change_id`.
+    ///
+    /// Replaying an identical entry succeeds without appending a second line.
+    /// Reusing the ID for different content fails closed.
+    fn record_idempotent(&self, entry: ChangeEntry) -> Result<ChangeRecordOutcome>;
+
     /// Query changes matching the given filters.
     fn query(&self, filter: &ChangeFilter) -> Result<Vec<ChangeEntry>>;
 
@@ -99,6 +106,15 @@ pub trait ChangeLog: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Result of an idempotent audit append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeRecordOutcome {
+    /// The entry was durably appended.
+    Appended,
+    /// An identical entry with the same stable ID was already durable.
+    AlreadyRecorded,
 }
 
 // ── ChangeFilter ────────────────────────────────────────────────────────
@@ -195,51 +211,164 @@ pub struct JsonlChangeLog {
 impl JsonlChangeLog {
     /// Create a new JSONL change log at the given path.
     ///
-    /// Creates the file if it doesn't exist; loads existing entries if it does.
-    pub fn new(path: PathBuf) -> Self {
-        let entries = Self::load_from_disk(&path).unwrap_or_default();
-        Self {
+    /// Loads and validates existing entries. The data file is created on the
+    /// first durable record.
+    pub fn new(path: PathBuf) -> Result<Self> {
+        let log = Self {
             path,
-            entries: std::sync::Mutex::new(entries),
-        }
+            entries: std::sync::Mutex::new(Vec::new()),
+        };
+        let entries = log.with_disk_lock(|| Self::load_from_disk(&log.path))?;
+        *log.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = entries;
+        Ok(log)
     }
 
     /// Load entries from the JSONL file.
     ///
-    /// Corrupt/unparseable lines are skipped but logged with a `warn!` and a
-    /// running count, so silent audit loss (e.g. a torn final line from a
-    /// crash mid-append) is observable rather than invisible.
-    fn load_from_disk(path: &PathBuf) -> std::io::Result<Vec<ChangeEntry>> {
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(path)?;
+    /// Every newline-terminated record must parse. Only a final record without
+    /// a newline can be a crash-torn append: a valid record receives its
+    /// missing newline, while an invalid tail is truncated to the last durable
+    /// record. Interior corruption is never skipped.
+    fn load_from_disk(path: &Path) -> std::io::Result<Vec<ChangeEntry>> {
+        let content = match echo_core::utils::fs::read_existing(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
         let mut entries = Vec::new();
-        let mut skipped = 0usize;
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<ChangeEntry>(line) {
-                Ok(entry) => entries.push(entry),
-                Err(e) => {
-                    skipped += 1;
-                    // Log once per line at trace, but aggregate at warn so we
-                    // don't spam; a single load with N bad lines still warns N
-                    // times, which is acceptable for an audit log.
+        let mut change_ids = HashSet::new();
+        let mut committed_len = 0_u64;
+
+        for (line_index, segment) in content.split_inclusive(|byte| *byte == b'\n').enumerate() {
+            let complete = segment.last().is_some_and(|byte| *byte == b'\n');
+            let line = if complete {
+                segment.strip_suffix(b"\n").unwrap_or(segment)
+            } else {
+                segment
+            };
+            match serde_json::from_slice::<ChangeEntry>(line) {
+                Ok(entry) => {
+                    if !change_ids.insert(entry.change_id.clone()) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "audit log {} repeats change_id {:?} at line {}",
+                                path.display(),
+                                entry.change_id,
+                                line_index.saturating_add(1)
+                            ),
+                        ));
+                    }
+                    entries.push(entry);
+                }
+                Err(error) if !complete => {
                     tracing::warn!(
                         path = ?path,
-                        error = %e,
-                        line_preview = %line.chars().take(120).collect::<String>(),
-                        "audit log: skipping unparseable JSONL line (possible torn write from a prior crash)"
+                        error = %error,
+                        tail_preview = %String::from_utf8_lossy(line).chars().take(120).collect::<String>(),
+                        "audit log: truncating crash-torn final JSONL record"
                     );
+                    echo_core::utils::fs::truncate_existing(
+                        path,
+                        committed_len,
+                        echo_core::utils::fs::FileDurability::SyncData,
+                    )?;
+                    return Ok(entries);
+                }
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "audit log {} has corrupt complete record at line {}: {}; preview={:?}",
+                            path.display(),
+                            line_index.saturating_add(1),
+                            error,
+                            String::from_utf8_lossy(line)
+                                .chars()
+                                .take(120)
+                                .collect::<String>()
+                        ),
+                    ));
                 }
             }
-        }
-        if skipped > 0 {
-            tracing::warn!(path = ?path, skipped = skipped, "audit log: loaded with {skipped} corrupt line(s) skipped");
+
+            if complete {
+                committed_len = committed_len
+                    .checked_add(u64::try_from(segment.len()).map_err(|error| {
+                        std::io::Error::other(format!("audit record length overflow: {error}"))
+                    })?)
+                    .ok_or_else(|| std::io::Error::other("audit log length overflow"))?;
+            } else {
+                echo_core::utils::fs::append_existing(
+                    path,
+                    b"\n",
+                    echo_core::utils::fs::FileDurability::SyncData,
+                )?;
+            }
         }
         Ok(entries)
+    }
+
+    fn with_disk_lock<T>(
+        &self,
+        operation: impl FnOnce() -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let lock_path = self.path.with_extension("jsonl.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        use fs2::FileExt;
+        const MAX_ATTEMPTS: u32 = 600;
+        const BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+        let mut got_lock = false;
+        for _ in 0..MAX_ATTEMPTS {
+            match lock_file.try_lock_exclusive() {
+                Ok(()) => {
+                    got_lock = true;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(BACKOFF);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if !got_lock {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("audit log lock unavailable after {MAX_ATTEMPTS} attempts"),
+            ));
+        }
+
+        let result = operation();
+        let unlock_result = lock_file.unlock();
+        match (result, unlock_result) {
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    fn create_log_file_if_missing(&self) -> std::io::Result<()> {
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                echo_core::utils::fs::atomic_write(&self.path, b"")
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Append an entry to the JSONL file.
@@ -253,71 +382,61 @@ impl JsonlChangeLog {
     ///
     /// `sync_all` per append is the durability/cost trade-off appropriate for
     /// an *audit* log whose entire purpose is a complete, durable record.
-    fn append_to_disk(&self, entry: &ChangeEntry) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let line = serde_json::to_string(entry)?;
-
-        // Cross-process advisory lock on a sidecar file. Kill-safe (flock
-        // auto-releases on fd close), bounded retry so a wedged peer cannot
-        // hang us forever.
-        let lock_path = self.path.with_extension("jsonl.lock");
-        let lock_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        use fs2::FileExt;
-        const MAX_ATTEMPTS: u32 = 600;
-        const BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
-        let mut got_lock = false;
-        for _ in 0..MAX_ATTEMPTS {
-            if lock_file.lock_exclusive().is_ok() {
-                got_lock = true;
-                break;
-            }
-            std::thread::sleep(BACKOFF);
-        }
-        if !got_lock {
+    fn record_idempotent_inner(&self, entry: ChangeEntry) -> Result<ChangeRecordOutcome> {
+        if entry.change_id.is_empty() {
             return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                format!("audit log lock unavailable after {MAX_ATTEMPTS} attempts"),
-            ));
+                std::io::ErrorKind::InvalidInput,
+                "audit change_id must not be empty",
+            )
+            .into());
         }
 
-        use std::io::Write;
-        let result = (|| -> std::io::Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?;
-            writeln!(file, "{line}")?;
-            // Durability: flush + fsync so a crash after record() returns
-            // cannot lose this audit line.
-            file.flush()?;
-            file.sync_all()?;
-            Ok(())
-        })();
+        let mut cached = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (entries, outcome) = self.with_disk_lock(|| {
+            let mut entries = Self::load_from_disk(&self.path)?;
+            if let Some(existing) = entries
+                .iter()
+                .find(|existing| existing.change_id == entry.change_id)
+            {
+                if existing == &entry {
+                    return Ok((entries, ChangeRecordOutcome::AlreadyRecorded));
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "audit change_id {:?} already identifies different content",
+                        entry.change_id
+                    ),
+                ));
+            }
 
-        if let Err(unlock_error) = lock_file.unlock()
-            && result.is_ok()
-        {
-            return Err(unlock_error);
-        }
-        result
+            let mut line = serde_json::to_vec(&entry).map_err(std::io::Error::other)?;
+            line.push(b'\n');
+            self.create_log_file_if_missing()?;
+            echo_core::utils::fs::append_existing(
+                &self.path,
+                &line,
+                echo_core::utils::fs::FileDurability::SyncData,
+            )?;
+            entries.push(entry);
+            Ok((entries, ChangeRecordOutcome::Appended))
+        })?;
+        *cached = entries;
+        Ok(outcome)
     }
 }
 
 impl ChangeLog for JsonlChangeLog {
     fn record(&self, entry: ChangeEntry) -> Result<()> {
-        self.append_to_disk(&entry)?;
-        self.entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(entry);
+        self.record_idempotent_inner(entry)?;
         Ok(())
+    }
+
+    fn record_idempotent(&self, entry: ChangeEntry) -> Result<ChangeRecordOutcome> {
+        self.record_idempotent_inner(entry)
     }
 
     fn query(&self, filter: &ChangeFilter) -> Result<Vec<ChangeEntry>> {
@@ -430,7 +549,10 @@ impl ChangeEntryBuilder {
         }
     }
 
-    /// Build with explicit ID and timestamp (for testing).
+    /// Build with a caller-owned stable ID and timestamp.
+    ///
+    /// Recovery workflows persist these values and replay the same complete
+    /// entry through [`ChangeLog::record_idempotent`].
     pub fn build_with(self, change_id: impl Into<String>, timestamp: DateTime<Utc>) -> ChangeEntry {
         ChangeEntry {
             change_id: change_id.into(),
@@ -456,6 +578,9 @@ impl ChangeLog for NullChangeLog {
     fn record(&self, _entry: ChangeEntry) -> Result<()> {
         Ok(())
     }
+    fn record_idempotent(&self, _entry: ChangeEntry) -> Result<ChangeRecordOutcome> {
+        Ok(ChangeRecordOutcome::AlreadyRecorded)
+    }
     fn query(&self, _filter: &ChangeFilter) -> Result<Vec<ChangeEntry>> {
         Ok(vec![])
     }
@@ -477,39 +602,43 @@ impl ChangeLog for NullChangeLog {
 mod tests {
     use super::*;
 
-    fn temp_log() -> JsonlChangeLog {
-        let dir =
-            std::env::temp_dir().join(format!("echo_changelog_test_{}", uuid::Uuid::new_v4()));
-        let path = dir.join("change-log.jsonl");
-        JsonlChangeLog::new(path)
+    fn sample_entry(change_id: &str, entity_key: &str) -> ChangeEntry {
+        ChangeEntryBuilder::new(EntityType::Memory, entity_key, ChangeType::Create)
+            .reason("Test")
+            .trigger("test")
+            .build_with(change_id, Utc::now())
     }
 
     #[test]
-    fn test_record_and_query() {
-        let log = temp_log();
+    fn test_record_and_query() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let log = JsonlChangeLog::new(dir.path().join("change-log.jsonl"))?;
 
         let entry = ChangeEntryBuilder::new(EntityType::Memory, "mem_001", ChangeType::Create)
             .reason("Auto-extracted observation")
             .trigger("auto_memory")
             .build_with("chg_000001", Utc::now());
 
-        log.record(entry).unwrap();
+        log.record(entry)?;
         assert_eq!(log.len(), 1);
 
-        let results = log
-            .query(
-                &ChangeFilter::new()
-                    .with_entity_type(EntityType::Memory)
-                    .with_limit(10),
-            )
-            .unwrap();
+        let results = log.query(
+            &ChangeFilter::new()
+                .with_entity_type(EntityType::Memory)
+                .with_limit(10),
+        )?;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].entity_key, "mem_001");
+        assert_eq!(
+            results.first().map(|entry| entry.entity_key.as_str()),
+            Some("mem_001")
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_latest_for() {
-        let log = temp_log();
+    fn test_latest_for() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let log = JsonlChangeLog::new(dir.path().join("change-log.jsonl"))?;
 
         let entry1 = ChangeEntryBuilder::new(EntityType::Memory, "mem_001", ChangeType::Create)
             .reason("Created")
@@ -521,17 +650,21 @@ mod tests {
             .trigger("memory_reviewer")
             .build_with("chg_000002", Utc::now());
 
-        log.record(entry1).unwrap();
-        log.record(entry2).unwrap();
+        log.record(entry1)?;
+        log.record(entry2)?;
 
-        let latest = log.latest_for(EntityType::Memory, "mem_001").unwrap();
-        assert!(latest.is_some());
-        assert_eq!(latest.unwrap().change_type, ChangeType::Update);
+        let latest = log.latest_for(EntityType::Memory, "mem_001")?;
+        assert_eq!(
+            latest.map(|entry| entry.change_type),
+            Some(ChangeType::Update)
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_filter_by_change_type() {
-        let log = temp_log();
+    fn test_filter_by_change_type() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let log = JsonlChangeLog::new(dir.path().join("change-log.jsonl"))?;
 
         for (i, ct) in [ChangeType::Create, ChangeType::Update, ChangeType::Promote]
             .iter()
@@ -541,19 +674,22 @@ mod tests {
                 .reason("Test")
                 .trigger("test")
                 .build_with(format!("chg_{:06}", i + 1), Utc::now());
-            log.record(entry).unwrap();
+            log.record(entry)?;
         }
 
-        let promotes = log
-            .query(&ChangeFilter::new().with_change_type(ChangeType::Promote))
-            .unwrap();
+        let promotes = log.query(&ChangeFilter::new().with_change_type(ChangeType::Promote))?;
         assert_eq!(promotes.len(), 1);
-        assert_eq!(promotes[0].change_type, ChangeType::Promote);
+        assert_eq!(
+            promotes.first().map(|entry| entry.change_type),
+            Some(ChangeType::Promote)
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_filter_by_key_prefix() {
-        let log = temp_log();
+    fn test_filter_by_key_prefix() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let log = JsonlChangeLog::new(dir.path().join("change-log.jsonl"))?;
 
         let entry1 = ChangeEntryBuilder::new(EntityType::Memory, "build/java8", ChangeType::Create)
             .reason("Test")
@@ -565,13 +701,98 @@ mod tests {
                 .trigger("test")
                 .build_with("chg_000002", Utc::now());
 
-        log.record(entry1).unwrap();
-        log.record(entry2).unwrap();
+        log.record(entry1)?;
+        log.record(entry2)?;
 
-        let build_entries = log
-            .query(&ChangeFilter::new().with_key_prefix("build/"))
-            .unwrap();
+        let build_entries = log.query(&ChangeFilter::new().with_key_prefix("build/"))?;
         assert_eq!(build_entries.len(), 1);
-        assert_eq!(build_entries[0].entity_key, "build/java8");
+        assert_eq!(
+            build_entries.first().map(|entry| entry.entity_key.as_str()),
+            Some("build/java8")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn interior_corruption_fails_closed_without_mutation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("change-log.jsonl");
+        let first = serde_json::to_vec(&sample_entry("promotion-1", "rule/one"))?;
+        let second = serde_json::to_vec(&sample_entry("promotion-2", "rule/two"))?;
+        let mut bytes = first;
+        bytes.extend_from_slice(b"\n{not-json}\n");
+        bytes.extend_from_slice(&second);
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes)?;
+
+        assert!(JsonlChangeLog::new(path.clone()).is_err());
+        assert_eq!(std::fs::read(path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn torn_final_record_is_truncated_to_last_complete_entry()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("change-log.jsonl");
+        let first = serde_json::to_vec(&sample_entry("promotion-1", "rule/one"))?;
+        let mut durable = first;
+        durable.push(b'\n');
+        let mut bytes = durable.clone();
+        bytes.extend_from_slice(b"{\"change_id\":\"promotion-2\"");
+        std::fs::write(&path, bytes)?;
+
+        let log = JsonlChangeLog::new(path.clone())?;
+        assert_eq!(log.len(), 1);
+        assert_eq!(std::fs::read(path)?, durable);
+        Ok(())
+    }
+
+    #[test]
+    fn valid_final_record_without_newline_is_preserved_and_terminated()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("change-log.jsonl");
+        let mut expected = serde_json::to_vec(&sample_entry("promotion-1", "rule/one"))?;
+        std::fs::write(&path, &expected)?;
+
+        let log = JsonlChangeLog::new(path.clone())?;
+        expected.push(b'\n');
+        assert_eq!(log.len(), 1);
+        assert_eq!(std::fs::read(path)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn stable_change_id_is_idempotent_and_rejects_content_collision()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("change-log.jsonl");
+        let log = JsonlChangeLog::new(path.clone())?;
+        let entry = sample_entry("promotion-stable", "rule/one");
+
+        assert_eq!(
+            log.record_idempotent(entry.clone())?,
+            ChangeRecordOutcome::Appended
+        );
+        assert_eq!(
+            log.record_idempotent(entry.clone())?,
+            ChangeRecordOutcome::AlreadyRecorded
+        );
+        assert_eq!(log.len(), 1);
+
+        let mut conflicting = entry;
+        conflicting.reason = "different promotion payload".to_string();
+        assert!(log.record_idempotent(conflicting).is_err());
+        assert_eq!(log.len(), 1);
+        assert_eq!(JsonlChangeLog::new(path.clone())?.len(), 1);
+
+        let durable = std::fs::read(&path)?;
+        let mut duplicated = durable.clone();
+        duplicated.extend_from_slice(&durable);
+        std::fs::write(&path, duplicated)?;
+        assert!(JsonlChangeLog::new(path).is_err());
+        Ok(())
     }
 }

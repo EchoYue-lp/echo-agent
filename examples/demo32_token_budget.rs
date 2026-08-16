@@ -234,10 +234,10 @@ async fn collect_tool_output(
     let mut tool_output = None;
 
     while let Some(event) = stream.next().await {
-        if let AgentEvent::ToolResult { name, output, .. } = event?
+        if let AgentEvent::ToolResult { name, result, .. } = event?
             && name == "get_file_content"
         {
-            tool_output = Some(output);
+            tool_output = Some(result.output);
         }
     }
 

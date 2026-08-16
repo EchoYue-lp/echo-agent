@@ -1,6 +1,6 @@
 //! Filesystem safety primitives shared by framework crates.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 /// Validate an external identifier before using it as one filesystem segment.
@@ -65,11 +65,43 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(error);
     }
-    if let Err(error) = std::fs::rename(&tmp, path) {
+    if let Err(error) = replace_temp_file(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(error);
     }
     sync_parent_directory(parent)
+}
+
+#[cfg(not(windows))]
+fn replace_temp_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_temp_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let mut source_wide = source.as_os_str().encode_wide().collect::<Vec<_>>();
+    source_wide.push(0);
+    let mut destination_wide = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+    destination_wide.push(0);
+    // SAFETY: both buffers are NUL-terminated, remain alive for the call, and
+    // MoveFileExW does not retain their pointers after returning.
+    let replaced = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Atomically replace a file only when its locked current bytes satisfy a
@@ -119,35 +151,120 @@ where
     }
 }
 
-/// Append to an existing regular file without following a final symlink.
-///
-/// Durable JSONL stores use this instead of a check-then-open sequence so a
-/// path replacement cannot redirect an append outside the store root.
-pub fn append_existing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Durability requested after mutating an existing file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileDurability {
+    /// Flush language-level buffers without requesting a disk barrier.
+    Flush,
+    /// Request that mutated file data reach durable storage.
+    SyncData,
+}
+
+#[derive(Clone, Copy)]
+enum ExistingFileAccess {
+    Read,
+    Append,
+    Write,
+}
+
+fn open_existing_regular(
+    path: &Path,
+    access: ExistingFileAccess,
+) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
-    options.append(true);
+    if matches!(access, ExistingFileAccess::Read) {
+        options.read(true);
+    } else {
+        options.write(true);
+    }
+    if matches!(access, ExistingFileAccess::Append) {
+        options.append(true);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    #[cfg(not(unix))]
-    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("refusing to append through a symlink: {}", path.display()),
+            std::io::ErrorKind::Unsupported,
+            "atomic no-follow existing-file mutation is unavailable on this platform",
         ));
     }
 
-    let mut file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing to mutate a reparse point: {}", path.display()),
+            ));
+        }
+    }
+    if !metadata.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("append target is not a regular file: {}", path.display()),
+            format!("mutation target is not a regular file: {}", path.display()),
         ));
     }
+    Ok(file)
+}
+
+fn finish_existing_mutation(
+    file: &mut std::fs::File,
+    durability: FileDurability,
+) -> std::io::Result<()> {
+    match durability {
+        FileDurability::Flush => file.flush(),
+        FileDurability::SyncData => file.sync_data(),
+    }
+}
+
+/// Append to an existing regular file without following a final symlink.
+///
+/// Durable JSONL stores use this instead of a check-then-open sequence so a
+/// path replacement cannot redirect an append outside the store root.
+pub fn append_existing(
+    path: &Path,
+    bytes: &[u8],
+    durability: FileDurability,
+) -> std::io::Result<()> {
+    let mut file = open_existing_regular(path, ExistingFileAccess::Append)?;
     file.write_all(bytes)?;
-    file.sync_data()
+    finish_existing_mutation(&mut file, durability)
+}
+
+/// Read an existing regular file without following a final symlink.
+///
+/// The file is opened before its handle metadata is validated, avoiding a
+/// check-then-open race at the final path component.
+pub fn read_existing(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut file = open_existing_regular(path, ExistingFileAccess::Read)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Truncate an existing regular file without following a final symlink.
+///
+/// Recovery code uses this after it has validated the last complete record;
+/// the function never creates a missing target.
+pub fn truncate_existing(path: &Path, len: u64, durability: FileDurability) -> std::io::Result<()> {
+    let mut file = open_existing_regular(path, ExistingFileAccess::Write)?;
+    file.set_len(len)?;
+    finish_existing_mutation(&mut file, durability)
 }
 
 #[cfg(unix)]
@@ -238,9 +355,24 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn append_existing_supports_flush_and_sync_data() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("echo-core-append-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let path = root.join("run.jsonl");
+        std::fs::write(&path, b"start\n")?;
+
+        append_existing(&path, b"flush\n", FileDurability::Flush)?;
+        append_existing(&path, b"sync\n", FileDurability::SyncData)?;
+
+        assert_eq!(std::fs::read(&path)?, b"start\nflush\nsync\n");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
-    fn append_existing_rejects_symlink_target() -> std::io::Result<()> {
+    fn append_existing_rejects_symlink_target_for_both_modes() -> std::io::Result<()> {
         use std::os::unix::fs::symlink;
 
         let root = std::env::temp_dir().join(format!("echo-core-append-{}", uuid::Uuid::new_v4()));
@@ -250,8 +382,79 @@ mod tests {
         std::fs::write(&outside, b"outside\n")?;
         symlink(&outside, &link)?;
 
-        assert!(append_existing(&link, b"event\n").is_err());
+        for durability in [FileDurability::Flush, FileDurability::SyncData] {
+            assert!(append_existing(&link, b"event\n", durability).is_err());
+        }
         assert_eq!(std::fs::read(&outside)?, b"outside\n");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn truncate_existing_supports_flush_and_sync_data() -> std::io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("echo-core-truncate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let path = root.join("journal.jsonl");
+        std::fs::write(&path, b"abcdef")?;
+
+        truncate_existing(&path, 4, FileDurability::Flush)?;
+        assert_eq!(std::fs::read(&path)?, b"abcd");
+        truncate_existing(&path, 2, FileDurability::SyncData)?;
+        assert_eq!(std::fs::read(&path)?, b"ab");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn truncate_existing_rejects_symlink_target_for_both_modes() -> std::io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("echo-core-truncate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let outside = root.join("outside.jsonl");
+        let link = root.join("journal.jsonl");
+        std::fs::write(&outside, b"outside\n")?;
+        symlink(&outside, &link)?;
+
+        for durability in [FileDurability::Flush, FileDurability::SyncData] {
+            assert!(truncate_existing(&link, 0, durability).is_err());
+        }
+        assert_eq!(std::fs::read(&outside)?, b"outside\n");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_existing_reads_regular_file() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("echo-core-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let path = root.join("events.jsonl");
+        std::fs::write(&path, "first\n第二\n")?;
+
+        assert_eq!(read_existing(&path)?, "first\n第二\n".as_bytes());
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_existing_rejects_symlink_target() -> std::io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("echo-core-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let target = root.join("target.json");
+        let link = root.join("link.json");
+        std::fs::write(&target, b"outside")?;
+        symlink(&target, &link)?;
+
+        assert!(read_existing(&link).is_err());
+
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

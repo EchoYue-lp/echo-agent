@@ -31,36 +31,6 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Attribute, Data, DeriveInput, Fields, Ident, LitStr, Token};
 
-/// Resolve the echo-agent (or echo-core) crate path for code generation.
-/// Tries `echo_core` first (for crates that only depend on echo-core),
-/// then falls back to `echo_agent` (the facade crate).
-fn resolve_echo_crate_path() -> syn::Result<syn::Path> {
-    match proc_macro_crate::crate_name("echo_core") {
-        Ok(proc_macro_crate::FoundCrate::Itself) => Ok(syn::parse_quote!(::echo_core)),
-        Ok(proc_macro_crate::FoundCrate::Name(name)) => {
-            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
-            Ok(syn::parse_quote!(::#ident))
-        }
-        Err(_) => {
-            // Fallback to echo_agent (facade)
-            match proc_macro_crate::crate_name("echo_agent") {
-                Ok(proc_macro_crate::FoundCrate::Itself) => Ok(syn::parse_quote!(::echo_agent)),
-                Ok(proc_macro_crate::FoundCrate::Name(name)) => {
-                    let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
-                    Ok(syn::parse_quote!(::#ident))
-                }
-                Err(e) => Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "Cannot find `echo_core` or `echo_agent` in dependencies: {}",
-                        e
-                    ),
-                )),
-            }
-        }
-    }
-}
-
 // ── Parsed attributes ──────────────────────────────────────────────────────────
 
 /// Parsed `#[tool(...)]` struct-level attributes
@@ -223,7 +193,9 @@ struct ParamField {
 // ── Main entry point ───────────────────────────────────────────────────────────
 
 pub fn derive_tool_impl(input: DeriveInput) -> syn::Result<TokenStream> {
-    let echo_crate = resolve_echo_crate_path()?;
+    let echo_crate = crate::resolve_echo_crate_path(crate::MacroCrate::Core)?;
+    let serde_crate = crate::macro_support_crate_path(&echo_crate, "serde");
+    let schemars_crate = crate::macro_support_crate_path(&echo_crate, "schemars");
     let struct_ident = &input.ident;
     let struct_name_str = struct_ident.to_string();
     let params_ident = format_ident!("{}Params", struct_name_str);
@@ -355,6 +327,8 @@ pub fn derive_tool_impl(input: DeriveInput) -> syn::Result<TokenStream> {
     let generated = quote! {
         /// Auto-generated parameter struct for [`#struct_ident`].
         #[derive(#echo_crate::__macro_support::serde::Deserialize, #echo_crate::__macro_support::schemars::JsonSchema)]
+        #[serde(crate = #serde_crate)]
+        #[schemars(crate = #schemars_crate)]
         #[allow(non_camel_case_types)]
         pub struct #params_ident {
             #(#param_field_defs),*
@@ -430,6 +404,8 @@ fn generate_unit_tool(
     tool_desc: &str,
     tool_attrs: &ToolStructAttrs,
 ) -> syn::Result<TokenStream> {
+    let serde_crate = crate::macro_support_crate_path(echo_crate, "serde");
+    let schemars_crate = crate::macro_support_crate_path(echo_crate, "schemars");
     let risk_level_override = if let Some(level) = &tool_attrs.risk_level {
         let level_path = match level.as_str() {
             "ReadOnly" => quote! { #echo_crate::tools::ToolRiskLevel::ReadOnly },
@@ -467,10 +443,11 @@ fn generate_unit_tool(
     Ok(quote! {
         /// Auto-generated empty parameter struct for [`#struct_ident`].
         #[derive(#echo_crate::__macro_support::serde::Deserialize, #echo_crate::__macro_support::schemars::JsonSchema)]
+        #[serde(crate = #serde_crate)]
+        #[schemars(crate = #schemars_crate)]
         #[allow(non_camel_case_types)]
         pub struct #params_ident {}
 
-        #[allow(dead_code)]
         #[allow(dead_code)]
         impl #echo_crate::tools::Tool for #struct_ident {
             fn name(&self) -> &str { #tool_name }

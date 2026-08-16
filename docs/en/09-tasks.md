@@ -1,245 +1,103 @@
-# DAG Task Planning System
+# Revisioned Task Graphs
 
-## What It Is
+## Overview
 
-The DAG task planning system allows an Agent to decompose a complex goal into sub-tasks with dependencies, forming a Directed Acyclic Graph (DAG). Tasks are then executed in topological order — tasks with no interdependencies can run in parallel, while dependent tasks are sequenced.
+echo-agent represents single tasks, todo-style lists, and dependency DAGs as
+one revisioned task graph. There is no separate task-manager state machine.
 
-This is the core mechanism behind `AgentRole::Planner`.
+- `TaskRevisionService` is the only CRUD, relation, validation, and revision
+  authority.
+- `RuntimeDagExecutor` is the only dependency execution kernel.
+- `ManagedTask` is a rich serialization and presentation DTO. Converting or
+  mutating it does not commit graph state.
+- `TaskSpawner` tracks process-local background futures only; it does not own
+  durable task relationships.
 
----
+## Task Model
 
-## Problem It Solves
-
-Simple ReAct loops struggle with complex multi-step tasks:
-- **Implicit planning**: The LLM makes ad-hoc decisions at each step, lacking a global view
-- **No result reuse**: Cannot easily carry intermediate results between steps
-- **Serial bottleneck**: Parallelizable sub-tasks are forced to run sequentially
-- **Opaque state**: Task progress is hard to track or visualize
-
-DAG task planning follows a "think first, then act" approach: the LLM first decomposes the goal into a structured task graph, then executes it efficiently following dependency order.
-
----
-
-## Core Concepts
-
-### Task Node
+Each committed node separates immutable specification from mutable execution
+state:
 
 ```rust
-Task {
-    id: String,                   // unique identifier
-    description: String,          // what to do
-    status: TaskStatus,           // see status enum below
-    dependencies: Vec<String>,    // IDs of prerequisite tasks
-    priority: u8,                 // priority (0-10, 10 = highest)
-    result: Option<String>,       // execution result
-    reasoning: Option<String>,    // notes or rationale
-    // Other fields: assigned_agent, tags, parent_id, created_at, updated_at,
-    //               subject, timeout_secs, max_retries, retry_count, execute_fn
+pub struct Task {
+    pub spec: TaskSpec,
+    pub execution: TaskExecution,
 }
 ```
 
-### TaskStatus (enum)
+`TaskSpec` contains the task id, title, description, kind, Subagent role,
+dependencies, file scope, tool constraints, verification requirements, and
+retry limit. `TaskExecution` contains status, retry count, failure fingerprint,
+and an optional attempt-scoped claim.
 
-```rust
-pub enum TaskStatus {
-    Pending,                           // waiting to execute
-    InProgress,                        // currently executing
-    Completed,                         // succeeded
-    Failed(String),                    // execution failed
-    Cancelled,                         // cancelled
-    Blocked(String),                   // blocked by dependencies
-    TimedOut { error: String },        // timed out
-    Retrying { attempt: u32, last_error: String }, // retrying
-}
-```
+The shared lifecycle includes `Pending`, `Running`, `Blocked`, `Retrying`,
+`Paused`, `Completed`, `Failed`, `TimedOut`, `Skipped`, and `Cancelled`.
+Transitions are validated by `TaskStatus::transition_to`.
 
-**State transitions:**
-```
-Pending → InProgress → Completed
-                    ↘ Failed → Retrying → InProgress
-                    ↘ TimedOut
-                    ↘ Cancelled
-       → Blocked (dependencies not met)
-```
+## Canonical CRUD Service
 
-### TaskManager
+The default framework Agent registers three task tools:
 
-Provides:
-- `add_task()` — add a task node
-- `detect_circular_dependencies()` — detect cycles
-- `get_topological_order()` — topological sort (Kahn's algorithm)
-- `get_ready_tasks()` — tasks whose dependencies are all completed
-- `get_next_task()` — highest-priority ready task
-- `update_task()` — update task status
-- `visualize_dependencies()` — output a Mermaid diagram
+| Tool | Contract |
+|------|----------|
+| `task_create` | Atomically creates one complete graph, or appends with `base_revision` |
+| `task_update` | Applies one optimistic patch to specs, relations, order, skip, or status |
+| `task_list` | Reads the current committed graph revision |
 
----
+The first `task_create` call must carry every related task in one `tasks`
+array. Later mutations include the current `base_revision`; stale writers fail
+with a revision conflict instead of overwriting newer state.
 
-## Usage (Planner Mode)
-
-```rust
-use echo_agent::prelude::*;
-
-let config = AgentConfig::new(
-    "qwen3-max",
-    "planner",
-    "You are a task planning expert. For complex tasks:
-     1. Use the plan tool to declare your planning intent
-     2. Use create_task for each sub-task with proper dependencies
-     3. Use update_task to mark tasks complete and record results
-     4. Use final_answer to summarize when all tasks are done"
-)
-.role(AgentRole::Planner)
-.enable_tool(true)
-.enable_task(true);
-
-let mut agent = ReactAgent::new(config);
-agent.add_tool(Box::new(WebSearchTool));
-agent.add_tool(Box::new(CalculatorTool));
-
-let answer = agent.execute(
-    "Research and compare Rust vs Go concurrency performance, then give a recommendation"
-).await?;
-```
-
-The LLM's planning process (fully observable):
-```
-[think] Need to search Rust concurrency info, Go concurrency info, then compare
-[create_task] id="search_rust"  description="Search Rust concurrency benchmarks"    deps=[]
-[create_task] id="search_go"    description="Search Go concurrency benchmarks"      deps=[]
-[create_task] id="compare"      description="Analyze and compare the findings"       deps=["search_rust","search_go"]
-[create_task] id="recommend"    description="Produce a selection recommendation"     deps=["compare"]
-```
-
----
-
-## Direct TaskManager API
-
-```rust
-use echo_agent::tasks::{Task, TaskManager, TaskStatus};
-
-let mut mgr = TaskManager::default();
-
-// Build a DAG: task3 depends on task1 and task2
-mgr.add_task(Task { id: "task1".into(), description: "Fetch raw data".into(),
-    status: TaskStatus::Pending, dependencies: vec![], priority: 8, ..Default::default() });
-mgr.add_task(Task { id: "task2".into(), description: "Clean data".into(),
-    status: TaskStatus::Pending, dependencies: vec!["task1".into()], priority: 7, ..Default::default() });
-mgr.add_task(Task { id: "task3".into(), description: "Analyze data".into(),
-    status: TaskStatus::Pending, dependencies: vec!["task2".into()], priority: 9, ..Default::default() });
-
-// Cycle detection
-if mgr.has_circular_dependencies() {
-    eprintln!("Circular dependency detected!");
-}
-
-// Topological order
-let order = mgr.get_topological_order()?;
-println!("Execution order: {:?}", order); // ["task1", "task2", "task3"]
-
-// Get currently executable tasks
-let ready = mgr.get_ready_tasks();
-println!("Ready: {}", ready[0].id); // "task1"
-
-// Mark complete
-mgr.update_task("task1", TaskStatus::Completed);
-let ready = mgr.get_ready_tasks();
-println!("Next ready: {}", ready[0].id); // "task2"
-
-// Mermaid visualization
-println!("{}", mgr.visualize_dependencies());
-```
-
-Mermaid output:
-```
-graph TD
-    task1["Fetch raw data"]
-    task2["Clean data"]
-    task3["Analyze data"]
-    task2 --> task1
-    task3 --> task2
-```
-
----
-
-## Built-in Task Tools
-
-When `enable_task(true)` is set, these tools are automatically registered for the LLM to call:
-
-| Tool | Purpose |
-|------|---------|
-| `plan` | Declare planning intent (triggers Planner mode) |
-| `create_task` | Create a sub-task with dependencies |
-| `update_task` | Update task status and result |
-| `list_tasks` | List all tasks and their statuses |
-| `get_execution_order` | Get topological execution order |
-| `visualize_dependencies` | Output a Mermaid dependency graph |
-
-See: `examples/demo02_tasks.rs`
-
----
-
-## Composite Task Execution (CompositePlan)
-
-> Module: `echo_agent::tasks::composite` (feature = `tasks`)
-
-Composite tasks chain multiple heterogeneous steps in sequential or parallel execution, with upstream result passing between steps — ideal for multi-stage pipelines like "search → summarize → report".
-
-### CompositeStrategy
-
-| Variant | Behavior |
-|---------|----------|
-| `Sequential` | Execute in order, inject upstream output into downstream `TaskContext` |
-| `Parallel` | Execute all steps concurrently via `tokio::spawn` |
-
-### CompositeStep
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `String` | Unique identifier, referenced by `input_from` |
-| `name` | `String` | Human-readable name |
-| `execute_fn` | `TaskExecuteFn` | Async execution function, receives `TaskContext` |
-| `input_from` | `Vec<String>` | IDs of upstream steps this step depends on |
-
-### Usage Example
+Applications that need durable storage or product policy inject their own
+`RevisionedTaskStore` and `TaskToolPolicy`:
 
 ```rust,ignore
-use echo_agent::tasks::composite::{CompositePlan, CompositeStep, CompositeStrategy, execute_composite};
+use echo_agent::tasks::{
+    DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, TaskRevisionService,
+};
 use std::sync::Arc;
 
-let plan = CompositePlan {
-    steps: vec![
-        CompositeStep {
-            id: "fetch".into(),
-            name: "Fetch Data".into(),
-            execute_fn: Arc::new(|ctx| Box::pin(async move {
-                Ok("raw_data: 42 records".to_string())
-            })),
-            input_from: vec![],
-        },
-        CompositeStep {
-            id: "parse".into(),
-            name: "Parse Data".into(),
-            execute_fn: Arc::new(|ctx| Box::pin(async move {
-                let upstream = ctx.upstream_results.iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>().join(", ");
-                Ok(format!("parsed from: {upstream}"))
-            })),
-            input_from: vec!["fetch".into()],
-        },
-    ],
-    strategy: CompositeStrategy::Sequential,
-};
+let service = Arc::new(TaskRevisionService::new(
+    Arc::new(InMemoryRevisionedTaskStore::new()),
+    Arc::new(DefaultTaskToolPolicy::new("run-42")),
+));
 
-let results = execute_composite(plan).await?;
-// [("fetch", "raw_data: 42 records"),
-//  ("parse", "parsed from: fetch=raw_data: 42 records")]
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .task_revision_service(service)
+    .build()?;
 ```
 
-**Design notes:**
-- Sequential guarantees order; Parallel does not
-- Any step failure causes the entire plan to fail (fail-fast)
-- `input_from` only applies in Sequential mode
+The policy adapter may resolve scope and attach product metadata, but generic
+patch semantics and DAG validation stay in the framework.
 
-Runnable example: `cargo run --example demo69_composite`
+## Runtime Execution
+
+`RuntimeDagExecutor<C>` repeatedly loads a committed `RuntimePlanSnapshot`
+from its `RuntimeDagController`:
+
+1. Validate the complete snapshot and detect cycles.
+2. Compute the ready frontier from committed dependencies and statuses.
+3. Atomically claim tasks with revision, attempt, spec hash, and unique claim id.
+4. Dispatch a bounded, conflict-free Subagent wave.
+5. Resolve or abandon every claim with compare-and-set semantics.
+6. Reload at the next safe point so a newer revision can take effect.
+
+The controller is a thin application adapter for persistence, Subagent
+dispatch, review, and product-specific resource policy. It must not implement
+a second ready-frontier loop or dependency state machine.
+
+The executor handles transitive failure blocking, skip and pause states,
+bounded retries, cancellation settlement, superseded claims, and stall
+detection. Attempt-scoped claim identity prevents an old dispatch from
+overwriting a reclaimed attempt.
+
+## Projection and Progress
+
+`ManagedTask`, `TaskEvent`, and `TaskProgress` are consumer-facing projections.
+They can carry richer display, evidence, and progress data, but the next
+runtime decision is always made from a committed revision loaded through the
+canonical service/controller boundary.
+
+See `demo48_personal_assistant` for direct service use and the
+`runtime_executor` tests for a deterministic controller implementation.

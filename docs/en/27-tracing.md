@@ -32,7 +32,7 @@ The top-level execution record for a single agent invocation:
 ```rust
 pub struct Run {
     pub run_id: String,                    // e.g. "run_<uuid>"
-    pub parent_run_id: Option<String>,     // set for sub-agent runs
+    pub parent_run_id: Option<String>,     // set for subagent runs
     pub session_id: String,                // session this run belongs to
     pub status: RunStatus,                 // Pending → Running → Completed/Failed/Cancelled
     pub input: String,                     // user input that triggered this run
@@ -114,7 +114,7 @@ pub enum RunEvent {
     FileEdit { tool, path },
     TestRun { command, passed, failure_count },
     PhaseTransition { phase, iteration },
-    SubAgentRun { agent_name, task, outcome },
+    SubagentRun { agent_name, task, outcome },
 }
 ```
 
@@ -132,7 +132,7 @@ pub enum RunEvent {
 | `FileEdit` | Act | After a write tool edits a file |
 | `TestRun` | Act | After a test command runs |
 | `PhaseTransition` | Loop | At each ReAct phase: "recall", "think", "act", "finalize" |
-| `SubAgentRun` | Dispatch | When a sub-agent completes — "completed", "failed", "cancelled" |
+| `SubagentRun` | Dispatch | When a subagent completes — "completed", "failed", "cancelled" |
 
 ### Secret Redaction
 

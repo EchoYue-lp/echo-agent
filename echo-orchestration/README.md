@@ -16,29 +16,27 @@ echo_orchestration = "0.2"
 
 ```rust
 use echo_orchestration::workflow::GraphBuilder;
-use echo_orchestration::human_loop::ConsoleApproval;
-use echo_orchestration::tasks::TaskManager;
+use echo_orchestration::human_loop::ConsoleHumanLoopProvider;
+use echo_orchestration::tasks::{
+    DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, TaskRevisionService,
+};
+use std::sync::Arc;
 
-// Build a workflow graph
-let graph = GraphBuilder::new()
-    .add_node("analyze", analyze_step)
-    .add_node("execute", execute_step)
-    .edge("analyze", "execute")
-    .build()?;
-
-// Human-in-the-loop approval
-let approval = ConsoleApproval::new();
-
-// Task scheduling with hooks
-let mut tasks = TaskManager::new();
-tasks.on_complete(|task| println!("Done: {}", task.id));
+let _graph = GraphBuilder::new("pipeline");
+let _approval = ConsoleHumanLoopProvider;
+let _tasks = TaskRevisionService::new(
+    Arc::new(InMemoryRevisionedTaskStore::new()),
+    Arc::new(DefaultTaskToolPolicy::default()),
+);
 ```
 
 ## Contents
 
 - **Workflow Engine**: Graph + DAG + Sequential workflows with YAML/JSON support
 - **Human-in-the-Loop**: Approval gates via Console, Webhook, or WebSocket
-- **Task Management**: DAG task scheduling with hooks
+- **Task Management**: revisioned task CRUD plus a single runtime DAG executor
+- **Planning**: Structured plan specifications and validation
+- **Scheduling**: Cron-backed scheduled tasks
 
 ## Feature Flags
 

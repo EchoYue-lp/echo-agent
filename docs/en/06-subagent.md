@@ -1,8 +1,8 @@
-# Multi-Agent Orchestration (SubAgent)
+# Multi-Agent Orchestration (Subagent)
 
 ## What It Is
 
-Multi-Agent orchestration allows a main Agent (Orchestrator) to decompose a task and delegate parts to specialized SubAgents, then aggregate the results. Each Agent is an independent `ReactAgent` instance with its own context, tool set, memory, and system prompt.
+Multi-Agent orchestration allows a main Agent (Orchestrator) to decompose a task and delegate parts to specialized Subagents, then aggregate the results. Each Agent is an independent `ReactAgent` instance with its own context, tool set, memory, and system prompt.
 
 ---
 
@@ -18,19 +18,12 @@ Multi-Agent orchestration splits a "generalist" into multiple "specialists" coor
 
 ---
 
-## Three Agent Roles
+## Capability Composition
 
-```rust
-AgentConfig::new(...).role(AgentRole::Orchestrator) // coordinator
-AgentConfig::new(...).role(AgentRole::Subagent)        // executor (default)
-AgentConfig::new(...).role(AgentRole::Planner)       // task planner
-```
-
-| Role | Behavior |
-|------|----------|
-| `Orchestrator` | Receives user task → decomposes → dispatches via `agent_tool` → aggregates |
-| `Subagent` | Receives specific task → executes with its own tools → returns result |
-| `Planner` | Receives complex task → generates DAG with `plan` tool → executes step by step |
+There is one `ReactAgent` runtime. A coordinating Agent enables Subagent
+dispatch and registers specialized `ReactAgent` or `MockAgent` instances. Task
+planning is an independent, revisioned tool capability rather than an Agent
+role or a second execution engine.
 
 ---
 
@@ -56,7 +49,7 @@ math_agent.execute("Calculate 7 * 8")
 | Isolation Dimension | Guarantee |
 |--------------------|-----------|
 | Context (message history) | Each Agent is an independent `ReactAgent` Rust object — `ContextManager` has no shared references |
-| Tool set | Each SubAgent registers its own tools; Orchestrator's tools are invisible to SubAgents |
+| Tool set | Each Subagent registers its own tools; Orchestrator's tools are invisible to Subagents |
 | Long-term memory | Each Agent uses `[agent_name, "memories"]` as an independent Store namespace |
 | Short-term session | Each Agent has an independent `conversation_id`; `RuntimeStateStore` tracks per-conversation state |
 
@@ -69,7 +62,7 @@ use echo_agent::prelude::*;
 use echo_agent::tools::others::math::{AddTool, MultiplyTool};
 use echo_agent::tools::others::weather::WeatherTool;
 
-// 1. Create specialized SubAgents
+// 1. Create specialized Subagents
 let math_agent = {
     let config = AgentConfig::new("qwen3-max", "math_agent", "You are a math expert")
         .enable_tool(true)
@@ -97,7 +90,6 @@ let main_config = AgentConfig::new(
      - weather_agent: weather queries
      Do NOT calculate or query directly yourself.",
 )
-.role(AgentRole::Orchestrator)
 .enable_subagent(true)
 .enable_tool(true);
 
@@ -113,7 +105,7 @@ println!("{}", result);
 
 ---
 
-## SubAgent Dispatch Flow
+## Subagent Dispatch Flow
 
 ```
 main_agent.execute("...")
@@ -123,7 +115,7 @@ main_agent.execute("...")
     │
     ├─ AgentDispatchTool::execute()
     │      ├─ Find "math_agent" in the subagents HashMap
-    │      ├─ Lock (AsyncMutex — serializes concurrent calls to same SubAgent)
+    │      ├─ Lock (AsyncMutex — serializes concurrent calls to same Subagent)
     │      └─ math_agent.execute("Calculate 25 * 3")
     │              ├─ Runs with its own independent context
     │              ├─ Uses its own tools (add/multiply)
@@ -135,9 +127,9 @@ main_agent.execute("...")
 
 ---
 
-## Concurrent SubAgent Calls
+## Concurrent Subagent Calls
 
-When the main Agent dispatches to multiple **different** SubAgents in a single LLM response (multiple tool_calls), the framework executes them in parallel:
+When the main Agent dispatches to multiple **different** Subagents in a single LLM response (multiple tool_calls), the framework executes them in parallel:
 
 ```
 LLM returns in one response:
@@ -145,14 +137,14 @@ LLM returns in one response:
     agent_tool("weather_agent", "Get weather") ┤  parallel (join_all)
 ```
 
-Concurrent calls to the **same SubAgent** are serialized by `AsyncMutex` to maintain state consistency.
+Concurrent calls to the **same Subagent** are serialized by `AsyncMutex` to maintain state consistency.
 
 ---
 
-## Memory Isolation per SubAgent
+## Memory Isolation per Subagent
 
 ```rust
-// SubAgent with its own session and memory, fully isolated from the main Agent
+// Subagent with its own session and memory, fully isolated from the main Agent
 let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
     .session_id("sub-a-session-001")
     .conversation_id("sub-a-conv-001")       // unique conversation_id for RuntimeStateStore
@@ -164,9 +156,9 @@ let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
 
 ## Best Practices
 
-1. **Set clear `allowed_tools` for each SubAgent** to prevent capability overreach
-2. **Explicitly list each SubAgent's responsibility in the Orchestrator's system prompt** to guide correct dispatching
-3. **Don't enable `enable_subagent(true)` on SubAgents** — avoid recursive nesting that's hard to debug
-4. **Use Planner role + DAG task system for complex tasks** rather than relying on ad-hoc Orchestrator decisions
+1. **Set clear `allowed_tools` for each Subagent** to prevent capability overreach
+2. **Explicitly list each Subagent's responsibility in the Orchestrator's system prompt** to guide correct dispatching
+3. **Don't enable `enable_subagent(true)` on Subagents** — avoid recursive nesting that's hard to debug
+4. **Use the revisioned task graph for complex task relationships** instead of prompt-only hidden state
 
-See: `examples/demo04_subagent.rs`, `examples/demo14_memory_isolation.rs`
+See: `examples/demo04_subagent.rs`

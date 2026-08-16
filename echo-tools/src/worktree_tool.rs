@@ -1,6 +1,6 @@
 //! Worktree tool wrappers — expose git worktree management as agent-callable tools.
 //!
-//! Provides three tools for parallel sub-agent isolation:
+//! Provides three tools for parallel subagent isolation:
 //! - `enter_worktree`: Create a new git worktree for isolated parallel work
 //! - `exit_worktree`: Remove a managed worktree (optionally merging changes back)
 //! - `list_worktrees`: List all worktrees in the repository
@@ -22,7 +22,7 @@ use crate::git_worktree::{
 
 /// Creates a new git worktree for isolated parallel work.
 ///
-/// When multiple sub-agents need to work on the same repository simultaneously,
+/// When multiple subagents need to work on the same repository simultaneously,
 /// each should create its own worktree to avoid file conflicts. Worktrees share
 /// the same .git object store, so they are lightweight.
 pub struct EnterWorktreeTool;
@@ -34,7 +34,7 @@ impl Tool for EnterWorktreeTool {
 
     fn description(&self) -> &str {
         "Create a new git worktree for isolated parallel work. \
-         Use this when a sub-agent needs to work on a separate branch \
+         Use this when a subagent needs to work on a separate branch \
          without conflicting with other agents or the main working tree. \
          NOTE: this only creates the worktree on disk — it does NOT switch the \
          agent's runtime working directory. To run subsequent tools inside the \
@@ -111,7 +111,7 @@ impl Tool for EnterWorktreeTool {
 
             let msg = format!(
                 "Created worktree at '{}' on branch '{}'. \
-                 Use this directory as the working root for the sub-agent. \
+                 Use this directory as the working root for the subagent. \
                  When done, call exit_worktree to clean up.",
                 worktree.path.display(),
                 worktree.branch

@@ -11,14 +11,15 @@ Domain tools for the [echo-agent](https://crates.io/crates/echo_agent) framework
 
 | Feature | Tools | Dependencies |
 |---------|-------|-------------|
-| `files` | FileRead, FileWrite, FileDelete, FileList, FileDiff, FileEdit, FileGlob, FileGrep | default |
-| `shell` | ShellTool (sandboxed command execution) | default |
+| `artifact` | Verified, paged reads of spilled tool output | sha2 |
+| `files` | Artifact reader plus FileRead, FileWrite, FileDelete, FileList, FileDiff, FileEdit, FileGlob, FileGrep | tree-sitter, encoding_rs |
+| `shell` | ShellTool (sandboxed command execution) | none |
 | `web` | WebFetchTool, WebSearchTool, WebExtractTool + 3 search providers | scraper, html2text, url |
-| `media` | ImageFetch, WebFetchEnhanced, PDF, Word, Excel | pdf-extract, lopdf, calamine, docx-rs |
+| `media` | ImageFetch, WebFetchEnhanced, PDF, Word, Excel | lopdf, calamine, docx-rs |
 | `chart` | ChartTool (vega-lite) | — |
 | `data` | DataTool (polars-based analysis) | polars |
 | `database` | DatabaseTool (sqlx-based queries) | sqlx |
-| `git` | GitTool | — |
+| `git` | GitStatus, GitDiff, GitLog, GitBlame, GitBranch, GitCommit | — |
 | `rag` | RAG retrieval tool | uuid |
 | `research` | Paper search, PDF/BibTeX tools, OpenAlex/Crossref/Europe PMC/Zotero clients | reqwest, quick-xml |
 

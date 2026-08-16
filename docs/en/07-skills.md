@@ -14,7 +14,7 @@ Tool:  a single atomic operation ("read file")
 Skill: a domain capability pack ("filesystem" = read_file + write_file + list_dir + usage guidance)
 ```
 
-The framework half (`Skill` trait + `SkillRegistry`) lives in `echo-agent/echo-core/` and `echo-agent/echo-execution/`. The product half (the user-facing skill **catalogue / marketplace** under `~/.echo-agent/skills/`) lives in `echo-agent-cli/echo-agent-app-core/src/skills_hub/` and is orthogonal to the runtime registry — see [SkillsHub vs SkillRegistry](#skillshub-vs-skillregistry) below.
+The framework contract (`Skill` trait + `SkillRegistry`) lives in `echo-core` and `echo-execution`. Product catalogues are separate consumers of this API. For example, EKO currently stores its user-facing catalogue under `~/.eko/skills/`; that application-owned behavior is documented by the [EKO SkillsHub source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub), not by this framework API.
 
 ---
 
@@ -56,7 +56,7 @@ agent.add_skill(Box::new(ShellSkill));
 # }
 ```
 
-> **Heads-up**: older revisions of this doc listed `CalculatorSkill` and `WeatherSkill`. Those are gone — only `FileSystemSkill` and `ShellSkill` remain in-tree as code-based skills. Domain capabilities (web search, paper search, coding, etc.) now live as **file-based skills** under `echo-agent-cli/skills/` (see [Built-in File-based Skills](#built-in-file-based-skills)).
+> **Heads-up**: older revisions of this doc listed `CalculatorSkill` and `WeatherSkill`. Those are gone; `FileSystemSkill` and `ShellSkill` are the in-tree code-based examples. Applications can add their own file-based skills through discovery.
 
 ---
 
@@ -163,7 +163,7 @@ Skill directory: ${SKILL_DIR}
 
 ### Frontmatter Fields (Current)
 
-Defined in `echo-agent/echo-execution/src/skills/external/types.rs` (`SkillDescriptor` at line 75 and `RawFrontmatter` at line 415).
+Defined by `SkillDescriptor` and `RawFrontmatter` in `echo-execution/src/skills/external/types.rs`.
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -175,14 +175,14 @@ Defined in `echo-agent/echo-execution/src/skills/external/types.rs` (`SkillDescr
 | `paths` | | Conditional activation file glob patterns (e.g., `["*.py"]`) — also surfaced in catalog |
 | `triggers` | | User-phrase triggers consumed by `KeywordClassifier` (see [Two activation paths](#two-skill-activation-paths)) |
 | `allowed-tools` (alias `allowed_tools`) | | Whitelist of pre-registered tools this skill is allowed to use — **not** a list of tools to register |
-| `depends_on` | | Other skills auto-activated first; cycles are detected and warned (`loader.rs:387-446`) |
+| `depends_on` | | Other skills auto-activated first; cycles are detected and warned by `SkillLoader` |
 | `hooks` | | Rules for any of the 31 main Hook events; see [Hooks System](./23-hooks.md) |
 | `sandbox` | | Per-skill sandbox policy: `isolation`, `network`, `allowed_paths`, `denied_paths`, `timeout` |
 | `metadata` | | Arbitrary key-value pairs |
 
 ### Frontmatter Fields (Legacy)
 
-The following fields still parse but are deprecated; activating a skill that uses them logs a deprecation warning at load time (`loader.rs:279-285`). They will be removed in a future release.
+The following fields still parse but are deprecated; activating a skill that uses them logs a deprecation warning at load time. They will be removed in a future release.
 
 | Legacy field | Replacement |
 |--------------|-------------|
@@ -266,7 +266,7 @@ let skills = agent.load_skills_from_dir("./skills").await?;
 # }
 ```
 
-After discovery, three progressive-disclosure tools are automatically registered (`capabilities.rs:577-587`):
+After discovery, `ReactAgent::discover_skills` automatically registers three progressive-disclosure tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -278,17 +278,15 @@ If the same agent later calls `discover_skills()` again and finds additional fil
 
 ### Dependencies and Cycle Detection
 
-When a skill declares `depends_on`, every dependency is recursively activated before the requested skill (`registry.rs:236-325`). Cycles are detected by a DFS pass during loading and produce a warning (`loader.rs:387-446`); the loader does not block — duplicates are deduplicated and one acyclic activation order is picked.
+When a skill declares `depends_on`, `SkillRegistry` recursively activates every dependency before the requested skill. `SkillLoader` detects cycles with a DFS pass and produces a warning; duplicates are deduplicated and one acyclic activation order is picked.
 
 ---
 
-## Two Skill Activation Paths
+## One Activation Projection
 
-> ⚠️ **Important: the two paths produce slightly different message types and one of them is *not* protected from compression.**
+Both activation entry points use the same wrapped skill content and the same protected context-projection authority.
 
-### Path 1: LLM-driven activation via `activate_skill` tool
-
-The LLM calls the `activate_skill` tool. The tool's success result is wrapped in an XML envelope by `ActivateContent::to_prompt_block` (`echo-execution/src/skills/external/types.rs:334-372`):
+The LLM can call `activate_skill`; application code and `IntentRouter` can call `ReactAgent::activate_skill`. `ActivateContent::to_prompt_block` wraps the activated content in this XML envelope:
 
 ```
 <skill_content name="paper-search">
@@ -302,22 +300,11 @@ Skill directory: ...
 </skill_content>
 ```
 
-This block lands in the message stream as a `Role::Tool` message and contains the substring `"<skill_content"` registered as a **protected marker** in `ContextManager` (`agent/react/capabilities.rs:589-597`). The compaction passes therefore exclude it via `is_protected` (`compression/mod.rs:456-465`) and re-insert it via `merge_protected` after compression.
-
-### Path 2: IntentRouter pre-classification
-
-When a `KeywordClassifier` / `LlmIntentClassifier` returns `Intent::SkillRequired`, `react_loop.rs:738-764` activates the skill **and pushes the raw `content.instructions` as a `Message::system`**:
-
-```rust
-self.memory.context.lock().await
-    .push(Message::system(content.instructions));
-```
-
-It does **not** call `to_prompt_block()`, so the resulting message lacks the `<skill_content` substring. ⚠️ **The IntentRouter-injected skill content is therefore *not* protected from compression** — sliding-window or summary compaction can drop it. This divergence is tracked in [07-cross-cutting.md §3](../../../echo-agent-cli/docs/system-deep-dive/07-cross-cutting.md).
+`ReactAgent::activate_skill` writes the block with `ContextManager::replace_projection` under the exact marker `echo-agent:skill:<name>`. The `activate_skill` tool returns a typed activation fact; the ReAct tool phase projects its block under the same marker. Re-activation replaces that projection instead of accumulating another authority. Context projections are excluded from compression and reinserted after compaction.
 
 ### Where triggers come from
 
-`KeywordClassifier` is populated at runtime from each `SkillDescriptor.triggers` (`echo-agent-cli/echo-agent-app-core/src/runtime.rs:196-255`). If a skill ships zero `triggers`, the IntentRouter cannot fire on it — the LLM tool path remains the only entry.
+Consumers can populate `KeywordClassifier` from each `SkillDescriptor.triggers`. If a skill has no triggers, keyword routing cannot select it; explicit API activation and the LLM tool path remain available.
 
 ---
 
@@ -480,60 +467,28 @@ Additional runtime guarantees:
 
 ## Context Protection
 
-Activated skill instructions delivered through the **`activate_skill` tool path** are protected from compression — even when the context exceeds the token limit, that wrapped block survives compaction.
+Activated skill instructions are stored as named context projections. Both the `activate_skill` tool and direct `ReactAgent::activate_skill` path use `echo-agent:skill:<name>`, so the wrapped block survives compaction and repeated activation replaces the prior projection.
 
 ```rust,ignore
-// Internal mechanism: messages containing "<skill_content" are excluded from compression
-ctx.add_protected_marker("<skill_content".to_string());
+ctx.replace_projection(
+    "echo-agent:skill:code-review",
+    Some(Message::system(block)),
+);
 ```
 
-⚠️ The protection is registered via `try_lock` (`agent/react/capabilities.rs:589-597`); if the lock is contended at install time, the marker registration is silently skipped. Subsequent skill activations would then be vulnerable to compression. Skills delivered through the **IntentRouter path** are not protected at all — see [Two activation paths](#two-skill-activation-paths).
-
 ---
 
-## SkillsHub vs SkillRegistry
+## Framework Registry vs Product Catalogues
 
-These are **two completely different concepts** and they coexist in the codebase. Don't confuse them.
+`SkillRegistry` owns the reusable runtime lifecycle: discovery, activation, dependency ordering, resource access, and sandbox policy. It does not install or uninstall marketplace packages.
 
-| Concern | `SkillRegistry` (framework) | `SkillsHub` (product) |
-|---------|----------------------------|-----------------------|
-| Crate | `echo-agent/echo-execution/src/skills/registry.rs` | `echo-agent-cli/echo-agent-app-core/src/skills_hub/` |
-| Purpose | Runtime lifecycle: discover → catalog → activate → resources for an agent instance | Local skill **catalogue / marketplace** UI: browse, install, uninstall on disk |
-| Default scan path | `<project>/skills/`, `<project>/.agents/skills/`, `~/.agents/skills/` | `~/.echo-agent/skills/` only |
-| Frontmatter parser | Full `serde_yaml_ng` (`loader.rs`) | Hand-rolled tiny key-value parser (no full YAML) |
-| State | Activation set, sandbox policies, code-based skills, session_id | Just a list of locally-installed skill metadata |
-| Used by | Every `ReactAgent` turn | The CLI `/skills` slash command (list / search / install / uninstall) |
-| Install/uninstall | Not responsible for installation; discovers runtime Skills | `git clone https-only` + local copy + uninstall |
-
-The `SkillsHub` does **not** load skills into agents. Built-in skills under `echo-agent-cli/skills/` are loaded into the agent through the framework's `discover_skills` path at boot (`echo-agent-cli/echo-agent-app-core/src/runtime.rs:133-153`), independent of the hub.
-
----
-
-## Built-in File-based Skills
-
-Eleven file-based skills ship under `echo-agent-cli/skills/` and are loaded at startup via the discovery path above:
-
-| Skill | One-line role |
-|-------|---------------|
-| `coding` | Programming and software engineering: write/debug/refactor/review code |
-| `data-visualization` | Charts and visualisation (bar/line/dashboard) |
-| `data-wrangling` | Loading, cleaning, EDA on CSV/Excel/JSON |
-| `doc-writing` | Reports, technical docs, articles, emails, proposals |
-| `evidence-medicine` | Medical literature search + evidence-based analysis (PubMed, ClinicalTrials, PICO, GRADE) |
-| `git-workflow` | Git ops (branches, commits, PR/MR, conflicts) |
-| `paper-reader` | Deep reading + critical evaluation of a single paper |
-| `paper-search` | Academic paper search across ArXiv + Semantic Scholar (non-medical) |
-| `statistical-analysis` | Statistical tests (t/χ²/ANOVA), regression, modelling |
-| `translation` | Translation, proof-reading, localisation |
-| `web-search` | Internet info retrieval + cross-source verification |
-
-Each ships with `SKILL.md` + an optional `references/` subdirectory. They are managed independently from `SkillsHub`.
+Applications may add a separate catalogue. EKO's current `SkillsHub` scans `~/.eko/skills/` for its UI and installation workflow; it does not replace the framework registry. Treat the [EKO SkillsHub source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) as the authority for those product details because they can evolve independently from echo-agent.
 
 ---
 
 ## Skill Telemetry
 
-A separate module `echo-state/src/skill_telemetry.rs` defines `SkillExecutionRecord` and `SkillTelemetry` types backed by the `Store` trait under namespace `["agent", "skill_telemetry"]`. The CLI's `evolution` command reads these records (`echo-agent-cli/src/cli/cmd_impls/evolution.rs:7,344`).
+A separate module `echo-state/src/skill_telemetry.rs` defines `SkillExecutionRecord` and `SkillTelemetry` types backed by the `Store` trait under namespace `["agent", "skill_telemetry"]`.
 
 ⚠️ **The runtime does not currently write to this store.** No `record_execution` call site exists in the agent runtime today; the schema is in place but the producer side is not yet wired into activation paths.
 

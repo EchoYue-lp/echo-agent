@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    println!("🧪 demo04 - SubAgent 编排 + Human-in-the-Loop 演示\n");
+    println!("🧪 demo04 - Subagent 编排 + Human-in-the-Loop 演示\n");
 
     let human_loop = Arc::new(HumanLoopManager::new());
     let input_count = Arc::new(AtomicUsize::new(0));
@@ -173,7 +173,6 @@ async fn main() -> Result<()> {
         .system_prompt(
             "你是主编排 Agent。遇到缺失上下文的专业问题先分派给对应 subagent，再汇总结果，不要自己直接计算。",
         )
-        .role(AgentRole::Orchestrator)
         .enable_subagent()
         .llm_client(orchestrator_llm)
         .max_iterations(8)
@@ -191,7 +190,7 @@ async fn main() -> Result<()> {
 
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
-            "demo04 验收失败：SubAgent 编排示例返回空结果".to_string(),
+            "demo04 验收失败：Subagent 编排示例返回空结果".to_string(),
         ));
     }
     if input_count.load(Ordering::Relaxed) == 0 {

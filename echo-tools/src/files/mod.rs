@@ -1,15 +1,24 @@
 pub mod artifact;
+#[cfg(feature = "files")]
 pub mod code_search;
+#[cfg(feature = "files")]
 pub mod diff;
+#[cfg(feature = "files")]
 pub mod edit;
+#[cfg(feature = "files")]
 #[allow(clippy::module_inception)]
 pub mod files;
+#[cfg(feature = "files")]
 pub mod glob;
+#[cfg(feature = "files")]
 pub mod grep;
+#[cfg(feature = "files")]
 pub mod repo_map;
 
+#[cfg(feature = "files")]
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(feature = "files")]
 use echo_core::error::{Result, ToolError};
 
 /// Resolve a user-supplied relative/absolute path into a safe absolute path.
@@ -32,6 +41,7 @@ use echo_core::error::{Result, ToolError};
 /// After textual normalization, `std::fs::canonicalize()` is used to resolve symlinks
 /// and verify the real path stays within the allowed directory. For write operations
 /// where the target file doesn't exist yet, the parent directory is canonicalized instead.
+#[cfg(feature = "files")]
 fn resolve_path(
     tool: &str,
     path_str: &str,
@@ -132,6 +142,7 @@ fn resolve_path(
 }
 
 /// Filesystem-independent path normalization (resolves `.` and `..`)
+#[cfg(feature = "files")]
 fn normalize_path(path: &Path) -> PathBuf {
     let mut components = Vec::new();
     for component in path.components() {

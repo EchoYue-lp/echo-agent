@@ -400,13 +400,13 @@ impl Tool for AgentDispatchTool {
             .unwrap_or_default();
         let agent_names: Vec<String> = catalog.iter().map(|entry| entry.name.clone()).collect();
         let catalog_text = if catalog.is_empty() {
-            "No SubAgents are currently registered.".to_string()
+            "No Subagents are currently registered.".to_string()
         } else {
             let lines: Vec<String> = catalog
                 .iter()
                 .map(|entry| format!("{}: {}", entry.name, entry.description))
                 .collect();
-            format!("Available SubAgents: {}", lines.join("; "))
+            format!("Available Subagents: {}", lines.join("; "))
         };
 
         let agent_name_schema = if agent_names.is_empty() {
@@ -428,21 +428,21 @@ impl Tool for AgentDispatchTool {
                 "agent_name": agent_name_schema,
                 "task": {
                     "type": "string",
-                    "description": "Specific task description to assign to the SubAgent. Write its natural-language prose in the user's current language, then include relevant paths, scope, constraints, and required result format."
+                    "description": "Specific task description to assign to the Subagent. Write its natural-language prose in the user's current language, then include relevant paths, scope, constraints, and required result format."
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["sync", "fork", "teammate", "team"],
-                    "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = independent background Subagent with a join/cancel handle; \"team\" = ManagerSubagent (requires TeamSpec)."
+                    "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = independent background Subagent with a join/cancel handle. \"team\" = execute the role's TeamSpec through the canonical revisioned task DAG."
                 },
                 "constraints": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional. Explicit constraints or boundary rules the SubAgent must respect — scope limits, files/dirs to avoid, verification expectations, output format. Rendered into the task context even for fresh-context dispatches."
+                    "description": "Optional. Explicit constraints or boundary rules the Subagent must respect — scope limits, files/dirs to avoid, verification expectations, output format. Rendered into the task context even for fresh-context dispatches."
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Optional. When true, start the SubAgent without blocking this turn; returns {status:\"started\", execution_id, agent_name}. Also true when the target role declares is_background."
+                    "description": "Optional. When true, start the Subagent without blocking this turn; returns {status:\"started\", execution_id, agent_name}. Also true when the target role declares is_background."
                 }
             },
             "required": ["agent_name", "task"]

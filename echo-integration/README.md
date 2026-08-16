@@ -14,22 +14,19 @@ Integration layer for the [echo-agent](https://crates.io/crates/echo_agent) fram
 echo_integration = "0.2"
 ```
 
-```rust
-use echo_integration::providers::ProviderFactory;
-use echo_integration::mcp::McpManager;
-use echo_integration::channels::ChannelManager;
+```rust,no_run
+use echo_integration::providers::{LlmConfig, ProviderFactory};
 
-// Create an LLM provider
-let provider = ProviderFactory::create_openai("gpt-5.5", std::env::var("OPENAI_API_KEY")?)?;
-
-// Connect to an MCP server
-let mut mcp = McpManager::new();
-mcp.connect_stdio("my-server", &["node", "./server.js"]).await?;
+# fn build() -> echo_core::error::Result<()> {
+let config = LlmConfig::openai(std::env::var("OPENAI_API_KEY")?, "gpt-5.5");
+let _provider = ProviderFactory::from_config(&config)?;
+# Ok(())
+# }
 ```
 
 ## Contents
 
-- **LLM Providers**: OpenAI, Anthropic, DeepSeek, Qwen (DashScope), Ollama
+- **LLM Providers**: OpenAI, Anthropic, DeepSeek, Qwen (DashScope), Moonshot, Zhipu
 - **MCP Protocol**: Model Context Protocol client/server (stdio, SSE, HTTP transports)
 - **IM Channels**: QQ Bot (WebSocket) and Feishu (Webhook) integrations
 

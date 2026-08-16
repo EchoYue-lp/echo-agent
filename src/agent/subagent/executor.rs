@@ -367,12 +367,6 @@ pub struct SubagentExecutorConfig {
     /// `None` = no workspace isolation available. Application supplies a
     /// tmpdir-backed impl.
     pub data_workspace_factory: Option<super::workspace::SharedDataWorkspaceFactory>,
-    /// Sprint 11: optional state store for team-mode checkpoint/resume. When
-    /// set AND a team subagent's `TeamSpec` is dispatched, `dispatch_team`
-    /// plumbs this into `TeamAgent` so `ManagerSubagentOrchestrator` can
-    /// read/write checkpoint nodes keyed by `run_id`. `None` → teams run
-    /// in-memory (no persistence, today's behavior).
-    pub runtime_state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
     /// Compiler shared by direct `agent_tool` and programmatic delegation.
     pub prompt_compiler: Arc<dyn SubagentPromptCompiler>,
 }
@@ -386,7 +380,6 @@ impl Default for SubagentExecutorConfig {
             unified_hook_executor: None,
             worktree_factory: None,
             data_workspace_factory: None,
-            runtime_state_store: None,
             prompt_compiler: Arc::new(super::prompt::DefaultSubagentPromptCompiler),
         }
     }
@@ -688,8 +681,6 @@ impl SubagentExecutor {
                         Err(e) => Err(e),
                     }
                 }
-                // Sprint 11: Team mode routes to dispatch_team (Task 5 fills
-                // the body). Stub returns a clear error until Task 5.
                 ExecutionMode::Team => self.dispatch_team(&req).await,
             };
 
@@ -928,7 +919,6 @@ impl SubagentExecutor {
                 unified_hook_executor: self.config.unified_hook_executor.clone(),
                 worktree_factory: self.config.worktree_factory.clone(),
                 data_workspace_factory: self.config.data_workspace_factory.clone(),
-                runtime_state_store: self.config.runtime_state_store.clone(),
                 prompt_compiler: self.config.prompt_compiler.clone(),
             },
             semaphore: self.semaphore.clone(),
@@ -1211,63 +1201,39 @@ impl SubagentExecutor {
         })
     }
 
-    /// Sprint 11: dispatch a team-mode subagent. Builds a `TeamAgent` from the
-    /// definition's `TeamSpec` (manager + subagents resolved by name from the
-    /// registry), plumbs `run_id` + `state_store` for checkpoint/resume, and
-    /// runs it.
-    ///
-    /// Timeout: relies on `TeamAgent::execute`'s own `tokio::time::timeout`
-    /// wrapper (uses `TeamConfig.default_timeout_secs`) — no second timeout
-    /// here (would double-wrap). Subagents are wrapped in `ArcAgentBox` since
-    /// the builder consumes `Box<dyn Agent>` but the registry returns
-    /// `Arc<dyn Agent>` (shared singletons).
-    async fn dispatch_team(
-        &self,
-        req: &DispatchRequest,
-    ) -> std::result::Result<SubagentResult, crate::error::ReactError> {
-        use super::team::{ArcAgentBox, TeamAgent, TeamDispatchFn, TeamExecutionResult};
-
-        let registered = self.registry.get(&req.agent_name).await.ok_or_else(|| {
-            crate::error::ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
-        })?;
-        let spec = registered.definition.team.as_ref().ok_or_else(|| {
-            crate::error::ReactError::Other(
-                "Team mode requested but definition has no TeamSpec".into(),
-            )
-        })?;
-
-        // Resolve manager + subagents by name (late binding, D-11-team-2).
-        let manager_def = self
-            .registry
-            .get(&spec.manager)
-            .await
-            .ok_or_else(|| {
-                crate::error::ReactError::Other(format!(
-                    "Team manager '{}' not registered",
-                    spec.manager
-                ))
-            })?
-            .definition
-            .clone();
-        let manager_agent = self
-            .registry
-            .get_agent(&spec.manager)
-            .await
-            .ok_or_else(|| {
-                crate::error::ReactError::Other(format!(
-                    "Cannot get manager agent instance '{}'",
-                    spec.manager
-                ))
+    /// Compile Team intent to one revisioned graph and execute it through the
+    /// canonical `RuntimeDagExecutor`.
+    async fn dispatch_team(&self, req: &DispatchRequest) -> Result<SubagentResult> {
+        let registered =
+            self.registry.get(&req.agent_name).await.ok_or_else(|| {
+                ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
             })?;
-
-        let team_parent = req.agent_name.clone();
-        let team_cancel = req.cancel.child_token();
+        let spec = registered.definition.team.clone().ok_or_else(|| {
+            ReactError::Other("Team mode requested but definition has no TeamSpec".to_string())
+        })?;
+        let delegation_policy = req.delegation_policy.child_policy().ok_or_else(|| {
+            ReactError::Other(format!(
+                "Delegation depth exceeded before Team '{}' (max {})",
+                req.agent_name, req.delegation_policy.max_delegate_depth
+            ))
+        })?;
+        let compiled = self.compile_invocation(
+            req,
+            ExecutionMode::Team,
+            registered.definition.inherit_history,
+        );
+        let run_id = req
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.run_id.clone())
+            .unwrap_or_else(|| format!("team-{}", uuid::Uuid::new_v4().as_simple()));
+        let parent_agent = req.agent_name.clone();
         let team_runtime = req.runtime_context.clone();
-        let team_policy = req.delegation_policy;
+        let team_cancel = req.cancel.child_token();
         let spawned = self.clone_for_spawn();
-        let member_dispatch: TeamDispatchFn = Arc::new(move |agent_name, task| {
+        let dispatch: super::team::TeamDispatchFn = Arc::new(move |agent_name, task| {
             let executor = spawned.clone_for_spawn();
-            let parent_agent = team_parent.clone();
+            let parent_agent = parent_agent.clone();
             let cancel = team_cancel.child_token();
             let runtime_context = team_runtime.clone().map(|mut context| {
                 context.execution_id =
@@ -1279,22 +1245,16 @@ impl SubagentExecutor {
                 context
             });
             Box::pin(async move {
-                let registered = executor
+                let member = executor
                     .registry
                     .get(&agent_name)
                     .await
-                    .ok_or_else(|| format!("Team subagent '{agent_name}' not registered"))?;
-                if registered.definition.execution_mode == ExecutionMode::Team {
+                    .ok_or_else(|| format!("Team Subagent '{agent_name}' not registered"))?;
+                if member.definition.execution_mode == ExecutionMode::Team {
                     return Err(format!(
-                        "Nested Team mode is not supported for member '{agent_name}'"
+                        "nested Team mode is not supported for '{agent_name}'"
                     ));
                 }
-                let delegation_policy = team_policy.child_policy().ok_or_else(|| {
-                    format!(
-                        "Delegation depth exceeded before Team member '{agent_name}' (max {})",
-                        team_policy.max_delegate_depth
-                    )
-                })?;
                 executor
                     .dispatch_owned(DispatchRequest {
                         agent_name,
@@ -1314,74 +1274,22 @@ impl SubagentExecutor {
                     .map_err(|error| error.to_string())
             })
         });
-
-        let mut builder = TeamAgent::builder()
-            .manager(
-                &spec.manager,
-                Box::new(ArcAgentBox(manager_agent.clone())),
-                manager_def,
-            )
-            .strategy(spec.strategy.clone())
-            .config(spec.config.clone())
-            .cancel(req.cancel.child_token())
-            .member_dispatch(member_dispatch)
-            .run_id(
-                req.runtime_context
-                    .as_ref()
-                    .and_then(|context| context.run_id.clone()),
-            )
-            .state_store(self.config.runtime_state_store.clone());
-
-        for name in &spec.subagents {
-            let subagent_definition = self
-                .registry
-                .get(name)
-                .await
-                .ok_or_else(|| {
-                    crate::error::ReactError::Other(format!(
-                        "Team subagent '{}' not registered",
-                        name
-                    ))
-                })?
-                .definition
-                .clone();
-            let subagent_agent = self.registry.get_agent(name).await.ok_or_else(|| {
-                crate::error::ReactError::Other(format!(
-                    "Cannot get team subagent instance '{}'",
-                    name
-                ))
-            })?;
-            builder = builder.subagent(
-                name,
-                Box::new(ArcAgentBox(subagent_agent.clone())),
-                subagent_definition,
-            );
-        }
-        let team_agent = builder.build();
-
-        let start = std::time::Instant::now();
-        let compiled = self.compile_invocation(
-            req,
-            ExecutionMode::Team,
-            registered.definition.inherit_history,
-        );
-        let TeamExecutionResult { output, usage } = team_agent
-            .execute_with_usage(&compiled.task_input)
-            .await
-            .map_err(|error| {
-                if error.to_ascii_lowercase().contains("timed out") {
-                    crate::error::ReactError::Agent(Box::new(AgentError::Timeout(error)))
-                } else {
-                    crate::error::ReactError::Other(format!("Team execution failed: {error}"))
-                }
-            })?;
-        let tokens_used = usage
+        let start = Instant::now();
+        let result = super::team::execute_team(
+            &spec,
+            &compiled.task_input,
+            &run_id,
+            req.cancel.child_token(),
+            dispatch,
+        )
+        .await?;
+        let tokens_used = result
+            .usage
             .as_ref()
-            .map(|stats| usize::try_from(stats.total_tokens).unwrap_or(usize::MAX));
-
+            .map(|usage| usize::try_from(usage.total_tokens).unwrap_or(usize::MAX));
         Ok(SubagentResult {
             agent_name: req.agent_name.clone(),
-            output,
+            output: result.output,
             outcome: SubagentOutcome {
                 status: SubagentStatus::Completed,
                 ..SubagentOutcome::default()
@@ -1392,7 +1300,7 @@ impl SubagentExecutor {
             was_truncated: false,
             mode: ExecutionMode::Team,
             isolation_observed: ObservedIsolation::Subagent,
-            usage,
+            usage: result.usage,
         }
         .with_structured(
             req.runtime_context
@@ -1496,8 +1404,6 @@ impl SubagentExecutor {
         let mut usage_stats = super::usage::LlmUsageStats::default();
         let mut pending_verification = HashMap::<String, String>::new();
         let mut pending_file_access = HashMap::<String, (bool, String)>::new();
-        let mut pending_tool_completions =
-            HashMap::<String, (HashMap<String, String>, bool)>::new();
         let mut observed_verification = Vec::new();
         let mut touched_files = SubagentTouchedFiles::default();
         let mut observed_artifacts = Vec::new();
@@ -1584,13 +1490,15 @@ impl SubagentExecutor {
                 }
                 AgentEvent::ToolCall {
                     call_id,
-                    name,
-                    args,
+                    invocation,
                 } => {
-                    if let Some(check) = verification_check_from_tool(&name, &args) {
+                    if let Some(check) =
+                        verification_check_from_tool(&invocation.name, &invocation.args)
+                    {
                         pending_verification.insert(call_id.clone(), check);
                     }
-                    if let Some(access) = file_access_from_tool(&name, &args) {
+                    if let Some(access) = file_access_from_tool(&invocation.name, &invocation.args)
+                    {
                         pending_file_access.insert(call_id.clone(), access);
                     }
                     registry
@@ -1599,8 +1507,7 @@ impl SubagentExecutor {
                             parent: parent.to_string(),
                             agent: subagent.to_string(),
                             call_id,
-                            name,
-                            args,
+                            invocation,
                             execution_id: execution_id.clone(),
                             run_id: run_id.clone(),
                         });
@@ -1608,83 +1515,36 @@ impl SubagentExecutor {
                 AgentEvent::ToolResult {
                     call_id,
                     name,
-                    output,
+                    result,
                 } => {
-                    let (metadata, truncated) = pending_tool_completions
-                        .remove(&call_id)
-                        .unwrap_or_else(|| (HashMap::new(), false));
+                    let detail = result
+                        .error
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or(&result.output);
                     if let Some(check) = pending_verification.remove(&call_id) {
                         observed_verification.push(SubagentVerification {
                             check,
-                            status: SubagentVerificationStatus::Passed,
-                            details: bounded_detail(&output),
+                            status: if result.success {
+                                SubagentVerificationStatus::Passed
+                            } else {
+                                SubagentVerificationStatus::Failed
+                            },
+                            details: bounded_detail(detail),
                             source: SubagentVerificationSource::Observed,
                         });
                     }
-                    if let Some((write, path)) = pending_file_access.remove(&call_id) {
+                    if result.success
+                        && let Some((write, path)) = pending_file_access.remove(&call_id)
+                    {
                         if write {
                             push_unique(&mut touched_files.written, path);
                         } else {
                             push_unique(&mut touched_files.read, path);
                         }
+                    } else {
+                        pending_file_access.remove(&call_id);
                     }
-                    registry
-                        .event_bus()
-                        .emit(SubagentEvent::DispatchToolCompleted {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            call_id,
-                            name,
-                            result: output,
-                            success: true,
-                            failure: None,
-                            metadata,
-                            truncated,
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        });
-                }
-                AgentEvent::ToolError {
-                    call_id,
-                    name,
-                    error,
-                    failure,
-                } => {
-                    let (metadata, truncated) = pending_tool_completions
-                        .remove(&call_id)
-                        .unwrap_or_else(|| (HashMap::new(), false));
-                    if let Some(check) = pending_verification.remove(&call_id) {
-                        observed_verification.push(SubagentVerification {
-                            check,
-                            status: SubagentVerificationStatus::Failed,
-                            details: bounded_detail(&error),
-                            source: SubagentVerificationSource::Observed,
-                        });
-                    }
-                    pending_file_access.remove(&call_id);
-                    registry
-                        .event_bus()
-                        .emit(SubagentEvent::DispatchToolCompleted {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            call_id,
-                            name,
-                            result: error,
-                            success: false,
-                            failure: Some(failure),
-                            metadata,
-                            truncated,
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        });
-                }
-                AgentEvent::ToolStream {
-                    call_id,
-                    event: echo_core::tools::ToolStreamEvent::Complete(result),
-                    ..
-                } => {
-                    pending_tool_completions
-                        .insert(call_id, (result.metadata.clone(), result.truncated));
                     if let Some(artifact) =
                         echo_core::tools::artifact::ToolOutputArtifactRef::from_metadata(
                             &result.metadata,
@@ -1699,6 +1559,17 @@ impl SubagentExecutor {
                             available: artifact.path.is_file(),
                         });
                     }
+                    registry
+                        .event_bus()
+                        .emit(SubagentEvent::DispatchToolCompleted {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            call_id,
+                            name,
+                            result,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
+                        });
                 }
                 AgentEvent::FinalAnswer(answer) if !answer.is_empty() => {
                     output = answer;
@@ -2260,6 +2131,8 @@ mod tests {
     };
     use crate::agent::subagent::registry::FnAgentFactory;
     use crate::testing::{FailingMockAgent, MockAgent};
+    use echo_core::agent::{ToolInvocation, ToolInvocationRewrite};
+    use echo_core::tools::{ToolResult, ToolResultKind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -2324,6 +2197,69 @@ mod tests {
 
     struct CancellationAwareStreamAgent {
         cancellation_seen: Arc<tokio::sync::Notify>,
+    }
+
+    struct RichToolEventAgent;
+
+    impl Agent for RichToolEventAgent {
+        fn name(&self) -> &str {
+            "rich-tool-events"
+        }
+
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            Box::pin(async {
+                let invocation = ToolInvocation {
+                    requested_name: "requested_tool".to_string(),
+                    requested_args: serde_json::json!({"value": "requested"}),
+                    name: "effective_tool".to_string(),
+                    args: serde_json::json!({"value": "effective"}),
+                    rewrites: vec![ToolInvocationRewrite::Approval],
+                };
+                let result = ToolResult {
+                    kind: ToolResultKind::Json,
+                    success: true,
+                    output: "{\"ok\":true}".to_string(),
+                    error: None,
+                    failure: None,
+                    data: Some(serde_json::json!({"ok": true})),
+                    truncated: true,
+                    mime_type: Some("application/json".to_string()),
+                    metadata: HashMap::from([("source".to_string(), "fixture".to_string())]),
+                };
+                let events = vec![
+                    Ok(AgentEvent::ToolCall {
+                        call_id: "call-rich".to_string(),
+                        invocation,
+                    }),
+                    Ok(AgentEvent::ToolResult {
+                        call_id: "call-rich".to_string(),
+                        name: "effective_tool".to_string(),
+                        result,
+                    }),
+                    Ok(AgentEvent::FinalAnswer("done".to_string())),
+                ];
+                Ok(Box::pin(futures::stream::iter(events))
+                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
     }
 
     impl Agent for CancellationAwareStreamAgent {
@@ -2401,6 +2337,79 @@ mod tests {
         let registry = Arc::new(SubagentRegistry::new());
         let executor = SubagentExecutor::new(registry.clone(), SubagentExecutorConfig::default());
         (registry, executor)
+    }
+
+    #[tokio::test]
+    async fn dispatch_preserves_rich_tool_events_without_parallel_adapters()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                SubagentDefinition::new("rich-tool-events", "Rich tool events"),
+                Box::new(RichToolEventAgent),
+            )
+            .await;
+        let mut events = registry.event_bus().subscribe();
+
+        let dispatched = executor
+            .dispatch(DispatchRequest {
+                agent_name: "rich-tool-events".to_string(),
+                task: "preserve typed events".to_string(),
+                mode_override: None,
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                prompt_payload: None,
+                constraints: Vec::new(),
+                background: false,
+            })
+            .await?;
+        assert_eq!(dispatched.output, "done");
+
+        let mut started = None;
+        let mut completed = None;
+        while let Ok(event) = events.try_recv() {
+            match event.as_ref() {
+                SubagentEvent::DispatchToolStarted { invocation, .. } => {
+                    started = Some(invocation.clone());
+                }
+                SubagentEvent::DispatchToolCompleted { name, result, .. } => {
+                    completed = Some((name.clone(), result.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        let Some(invocation) = started else {
+            return Err(std::io::Error::other("missing typed tool-start event").into());
+        };
+        assert_eq!(invocation.requested_name, "requested_tool");
+        assert_eq!(invocation.name, "effective_tool");
+        assert_eq!(invocation.rewrites, vec![ToolInvocationRewrite::Approval]);
+        assert_eq!(
+            invocation
+                .args
+                .get("value")
+                .and_then(serde_json::Value::as_str),
+            Some("effective")
+        );
+
+        let Some((name, result)) = completed else {
+            return Err(std::io::Error::other("missing typed tool-result event").into());
+        };
+        assert_eq!(name, "effective_tool");
+        assert_eq!(result.kind, ToolResultKind::Json);
+        assert_eq!(result.data, Some(serde_json::json!({"ok": true})));
+        assert_eq!(result.mime_type.as_deref(), Some("application/json"));
+        assert!(result.truncated);
+        assert_eq!(
+            result.metadata.get("source").map(String::as_str),
+            Some("fixture")
+        );
+        Ok(())
     }
 
     fn collect_terminal_events(
@@ -3386,6 +3395,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn team_dispatch_rejects_unregistered_member_without_false_completion() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let definition = super::super::builder::SubagentBuilder::new("pipeline-team")
+            .team(super::super::team::TeamSpec {
+                strategy: super::super::team::TeamStrategy::Pipeline(vec![
+                    "missing-member".to_string(),
+                ]),
+                manager: String::new(),
+                subagents: Vec::new(),
+                config: super::super::team::TeamConfig::default(),
+            })
+            .build();
+        registry
+            .register(definition, Box::new(MockAgent::new("pipeline-team")))
+            .await;
+
+        let error = executor
+            .dispatch(DispatchRequest {
+                agent_name: "pipeline-team".to_string(),
+                task: "run pipeline".to_string(),
+                mode_override: None,
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                prompt_payload: None,
+                constraints: Vec::new(),
+                background: false,
+            })
+            .await
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("unregistered Team member completed successfully".to_string())
+            })?;
+        assert!(error.to_string().contains("not registered"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn teammate_dispatch_creates_fresh_agent_per_request() -> Result<()> {
         let (registry, executor) = make_executor().await;
         let mut definition = super::super::types::SubagentDefinition::new("explorer", "Explorer");
@@ -3532,93 +3582,6 @@ mod tests {
             matches!(error, ReactError::Agent(inner) if matches!(*inner, AgentError::Interrupted))
         );
         Ok(())
-    }
-
-    // ── Sprint 11: Team dispatch (ExecutionMode::Team + TeamSpec) ─────────
-
-    #[tokio::test]
-    async fn test_dispatch_team_routes_and_runs() {
-        // Register a team-mode subagent + its named manager + subagent. Dispatch
-        // must route to dispatch_team and return the synthesized result.
-        let (registry, executor) = make_executor().await;
-
-        // Manager: MockAgent returns plan first, then synthesis.
-        let manager = MockAgent::new("mgr")
-            .with_response("sub1\nsub2")
-            .with_response("SYNTH");
-        let mgr_def = super::super::types::SubagentDefinition::new("mgr", "Manager");
-        registry.register(mgr_def, Box::new(manager)).await;
-
-        // Subagent: returns a canned result.
-        let subagent = MockAgent::new("wk").with_default_success("subagent-out");
-        let w_def = super::super::types::SubagentDefinition::new("wk", "Subagent");
-        registry.register(w_def, Box::new(subagent)).await;
-
-        // Team definition: references mgr + wk by name.
-        let team_spec = super::super::types::TeamSpec {
-            strategy: super::super::team::strategy::TeamStrategy::ManagerSubagent,
-            manager: "mgr".to_string(),
-            subagents: vec!["wk".to_string()],
-            config: super::super::team::TeamConfig::default(),
-        };
-        let mut team_def =
-            super::super::types::SubagentDefinition::new("team-research", "team dispatcher");
-        team_def.execution_mode = ExecutionMode::Team;
-        team_def.team = Some(team_spec);
-        // The team definition itself needs an agent instance registered too
-        // (dispatch looks up the definition by name), but it's never executed
-        // as an agent — use a placeholder mock.
-        let placeholder = MockAgent::new("team-research");
-        registry.register(team_def, Box::new(placeholder)).await;
-
-        let req = DispatchRequest {
-            agent_name: "team-research".into(),
-            task: "research X".into(),
-            mode_override: None,
-            cancel: CancellationToken::new(),
-            parent_agent: "parent".into(),
-            parent_context: None,
-            delegation_policy: DispatchRequest::policy_from_depth(0),
-            runtime_context: None,
-            message: None,
-            prompt_payload: None,
-            constraints: Vec::new(),
-            background: false,
-        };
-
-        let result = executor.dispatch(req).await.unwrap();
-        assert_eq!(result.mode, ExecutionMode::Team);
-        // Manager's second execute() is synthesis → "SYNTH".
-        assert_eq!(result.output, "SYNTH");
-    }
-
-    #[tokio::test]
-    async fn test_dispatch_team_without_spec_errors() {
-        // A Team-mode definition with no TeamSpec → clear error.
-        let (registry, executor) = make_executor().await;
-        let agent = MockAgent::new("broken");
-        let mut def = super::super::types::SubagentDefinition::new("broken", "no spec");
-        def.execution_mode = ExecutionMode::Team;
-        def.team = None;
-        registry.register(def, Box::new(agent)).await;
-
-        let req = DispatchRequest {
-            agent_name: "broken".into(),
-            task: "task".into(),
-            mode_override: None,
-            cancel: CancellationToken::new(),
-            parent_agent: "parent".into(),
-            parent_context: None,
-            delegation_policy: DispatchRequest::policy_from_depth(0),
-            runtime_context: None,
-            message: None,
-            prompt_payload: None,
-            constraints: Vec::new(),
-            background: false,
-        };
-
-        let err = executor.dispatch(req).await.unwrap_err();
-        assert!(err.to_string().contains("no TeamSpec"));
     }
 
     // ── Sprint 8: Fork worktree isolation ──────────────────────────────────

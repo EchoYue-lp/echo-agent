@@ -249,7 +249,8 @@ async fn demo_simple_research() -> Result<()> {
         match event? {
             AgentEvent::ThinkStart => print!("🤔 "),
             AgentEvent::ThinkEnd { .. } => println!(),
-            AgentEvent::ToolCall { name, .. } => {
+            AgentEvent::ToolCall { invocation, .. } => {
+                let name = invocation.name;
                 if name == "web_search" {
                     used_search = true;
                 }
@@ -258,8 +259,8 @@ async fn demo_simple_research() -> Result<()> {
                 }
                 println!("🔧 使用工具: {}", name);
             }
-            AgentEvent::ToolResult { output, .. } => {
-                let preview: String = output.chars().take(150).collect();
+            AgentEvent::ToolResult { result, .. } => {
+                let preview: String = result.output.chars().take(150).collect();
                 println!("   ✓ 结果: {}...", preview);
             }
             AgentEvent::Token(token) => {
@@ -443,7 +444,6 @@ async fn demo_multi_agent_research() -> Result<()> {
 3. 汇总所有子 Agent 的研究结果
 4. 生成最终的研究报告",
         )
-        .role(echo_agent::agent::AgentRole::Orchestrator)
         .enable_subagent()
         .enable_tools()
         .max_iterations(30)

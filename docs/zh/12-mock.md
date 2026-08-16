@@ -8,10 +8,10 @@
 |------|---------|---------|
 | `MockLlmClient` | 真实 LLM（OpenAI 等） | 测试 `SummaryCompressor` 等依赖 `LlmClient` 的组件 |
 | `MockTool` | 真实工具（数据库、HTTP API 等） | 测试工具参数解析、错误处理 |
-| `MockAgent` | 真实 SubAgent | 测试多 Agent 编排逻辑 |
-| `FailingMockAgent` | 总是失败的 SubAgent | 测试编排容错路径 |
+| `MockAgent` | 真实 Subagent | 测试多 Agent 编排逻辑 |
+| `FailingMockAgent` | 总是失败的 Subagent | 测试编排容错路径 |
 
-配合框架内置的 `InMemoryStore`，可以覆盖绝大多数场景的单元 / 集成测试。需要 `RuntimeStateStore` 或 `ConversationStore` 时，使用 SQLite 实现配合临时文件或 `:memory:` URI。
+配合框架内置的 `InMemoryStore`，可以覆盖绝大多数场景的单元 / 集成测试。需要 `ConversationStore` 时，可将 `FileConversationStore` 指向临时目录，无需可选 feature；启用 `sqlite` feature 后仍可测试 SQLite 实现。
 
 ---
 
@@ -159,7 +159,7 @@ assert_eq!(last["city"], "Beijing");
 
 ## MockAgent
 
-实现 `Agent` trait，用于在测试编排逻辑时替换真实的 SubAgent。
+实现 `Agent` trait，用于在测试编排逻辑时替换真实的 Subagent。
 
 ### 基本用法
 
@@ -171,14 +171,14 @@ let mut math_agent = MockAgent::new("math_agent")
     .with_response("6 × 7 = 42")
     .with_response("√144 = 12");
 
-// 模拟编排者调用 SubAgent
+// 模拟编排者调用 Subagent
 let r1 = math_agent.execute("计算 6 * 7").await?;
 assert_eq!(r1, "6 × 7 = 42");
 
 let r2 = math_agent.execute("计算 √144").await?;
 assert_eq!(r2, "√144 = 12");
 
-// 验证 SubAgent 被正确调用
+// 验证 Subagent 被正确调用
 assert_eq!(math_agent.call_count(), 2);
 assert_eq!(math_agent.calls()[0], "计算 6 * 7");
 ```
@@ -189,20 +189,19 @@ assert_eq!(math_agent.calls()[0], "计算 6 * 7");
 use echo_agent::prelude::*;
 use echo_agent::testing::MockAgent;
 
-// 创建 Mock SubAgent
+// 创建 Mock Subagent
 let math = MockAgent::new("math_agent").with_response("结果是 42");
 let writer = MockAgent::new("writer_agent").with_response("报告已生成");
 
 // 注入到真实编排 Agent
 let config = AgentConfig::new("qwen3-max", "orchestrator", "...")
-    .role(AgentRole::Orchestrator)
     .enable_subagent(true);
 
 let mut orchestrator = ReactAgent::new(config);
 orchestrator.register_agent(Box::new(math));
 orchestrator.register_agent(Box::new(writer));
 
-// 编排器使用真实 LLM，SubAgent 使用 Mock
+// 编排器使用真实 LLM，Subagent 使用 Mock
 let result = orchestrator.execute("完成任务").await?;
 ```
 
@@ -255,7 +254,7 @@ assert_eq!(results.len(), 1);
 # }
 ```
 
-测试中需要 `RuntimeStateStore` / `ConversationStore` 时，使用 `SqliteRuntimeStateStore` / `SqliteConversationStore` 配合 `tempfile::NamedTempFile` 或 `:memory:` SQLite URI 即可。
+测试 `ConversationStore` 时，可将 `FileConversationStore` 指向临时目录。需要覆盖 `sqlite` feature 时，再让 `SqliteRuntimeStateStore` / `SqliteConversationStore` 使用临时数据库或 `:memory:` SQLite URI。
 
 ---
 
@@ -327,7 +326,7 @@ mod tests {
 | 工具错误处理 | `MockTool::with_failure()` | 否 |
 | 滑动窗口压缩 | 直接测试 `SlidingWindowCompressor` | 否 |
 | LLM 摘要压缩 | `MockLlmClient` + `SummaryCompressor` | 否 |
-| SubAgent 编排逻辑 | `MockAgent` + 真实编排器 | 是（编排器本身） |
+| Subagent 编排逻辑 | `MockAgent` + 真实编排器 | 是（编排器本身） |
 | 编排容错 | `FailingMockAgent` | 是（编排器本身） |
 | 记忆存储 | `InMemoryStore` | 否 |
 | 运行时状态恢复 | `SqliteRuntimeStateStore`（`:memory:` URI） | 否 |
@@ -335,10 +334,6 @@ mod tests {
 
 ---
 
-## 完整示例
+## 完整参考
 
-对应示例：`examples/demo16_testing.rs`
-
-```bash
-cargo run --example demo16_testing
-```
+可运行的 doctest 与工具契约见 [testing 模块](../../src/testing/mod.rs)。

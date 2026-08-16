@@ -136,10 +136,8 @@ opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics"], opti
 opentelemetry-otlp = { version = "0.27", features = ["tonic", "metrics"], optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
 axum = { version = "0.7", optional = true }
-# SECURITY: jsonwebtoken v9 has known CVE (algorithm confusion, JWT forgery).
-# Only enabled behind the optional "a2a" feature. Before enabling in production,
-# migrate to v10+ or an alternative (josekit, biscuit).
-# See: RUSTSEC-2022-0080 / CVE-2022-23529
+# Optional A2A JWT verification. JwtConfig binds each accepted algorithm to the
+# matching key family and never accepts caller-supplied mixed algorithm lists.
 jsonwebtoken = { version = "9", optional = true }
 rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
 
@@ -338,10 +336,6 @@ required-features = ["tasks"]
 [[example]]
 name = "demo68_human_gate"
 required-features = ["tasks", "subagent", "human-loop"]
-
-[[example]]
-name = "demo69_composite"
-required-features = ["tasks"]
 
 [[example]]
 name = "demo70_scheduler"

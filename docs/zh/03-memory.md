@@ -10,7 +10,7 @@ echo-agent 的记忆系统包含三个正交层次，每层解决不同的"记�
 | **历史投影** | `ConversationStore` | 聊天记录 | 用户可见的消息历史投影（驱动 GUI/TUI 历史面板） |
 | **长期知识** | `Store` | 笔记本 | 跨会话保留用户偏好、领域知识、任务结果 |
 
-运行时检查点和历史投影针对同一段对话从不同角度切入：检查点保存**完整运行时状态**（消息 + 计划 + 激活技能 + 阻塞原因 + TaskNode DAG），用于重启循环；历史投影是**用户可见**的消息流投影。Store 是正交的长期知识后端。
+运行时检查点和历史投影针对同一段对话从不同角度切入：检查点保存 ReAct 循环状态（消息 + 当前计划文本 + 激活技能 + 阻塞原因），用于重启循环；历史投影是**用户可见**的消息流投影。版本化任务关系与生命周期只属于 canonical task runtime，不进入该检查点。Store 是正交的长期知识后端。
 
 ---
 
@@ -71,14 +71,16 @@ trait 与 `SqliteRuntimeStateStore` 实现位于 `echo-agent/src/state/mod.rs`�
 
 - 以 `conversation_id` 为键（与 `RuntimeStateStore` 同键）
 - 与 `RuntimeStateStore` 独立 —— 可单独启用、同时启用、都不启用
-- 具体实现：`SqliteConversationStore`（`echo-agent/echo-state/src/memory/sqlite_conversation.rs`）
+- 内置实现：无额外依赖的 `FileConversationStore`；启用 `sqlite` feature 后也可使用
+  `SqliteConversationStore`。
 
 ```rust,no_run
+use echo_agent::memory::FileConversationStore;
 use echo_agent::prelude::*;
 use std::sync::Arc;
 
 # async fn demo() -> echo_agent::error::Result<()> {
-let conv_store = Arc::new(SqliteConversationStore::open("./conversations.db").await?);
+let conv_store = Arc::new(FileConversationStore::new("./agent-data")?);
 let agent = ReactAgentBuilder::new()
     .model("qwen3-max")
     .conversation_id("user-alice-conv-001")
@@ -215,8 +217,8 @@ let namespaces = store.list_namespaces(None).await?;
 use echo_agent::prelude::*;
 
 let store = InMemoryStore::new(); // 进程退出后数据丢失
-// 测试中需要 RuntimeStateStore / ConversationStore 时，
-// 使用 SQLite 实现配合临时文件（参见 `tempfile::NamedTempFile`）或 `:memory:` SQLite URI。
+// FileConversationStore 可直接使用临时目录，不需要额外 feature。
+// SQLite 实现仍可在启用 `sqlite` feature 后使用。
 ```
 
 ---
@@ -227,12 +229,12 @@ let store = InMemoryStore::new(); // 进程退出后数据丢失
 
 ```
 主 Agent    conversation_id = "main-conv-001"     namespace = ["main_agent", "memories"]
-SubAgent A  conversation_id = "sub-a-conv-001"    namespace = ["sub_a", "memories"]
-SubAgent B  conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memories"]
+Subagent A  conversation_id = "sub-a-conv-001"    namespace = ["sub_a", "memories"]
+Subagent B  conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memories"]
 ```
 
-- SubAgent A 无法读取 SubAgent B 的记忆（不同 namespace）
-- SubAgent A 无法看到主 Agent 的运行时状态（不同 `conversation_id`）
+- Subagent A 无法读取 Subagent B 的记忆（不同 namespace）
+- Subagent A 无法看到主 Agent 的运行时状态（不同 `conversation_id`）
 - 主 Agent 持有 `Store` / `RuntimeStateStore` 对象，可显式跨 conversation / namespace 读取（用于审计）
 
 ---
@@ -241,8 +243,6 @@ SubAgent B  conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memorie
 
 - `conversation_id`：持久化的对话标识。同时作为 `RuntimeStateStore`（完整运行时状态）和 `ConversationStore`（历史投影）的键。这是跨进程恢复时设置的字段。
 - `session_id`：进程内 run-grouping 标签，不持久化、不参与恢复。
-
-对应示例：`examples/demo14_memory_isolation.rs`
 
 ---
 

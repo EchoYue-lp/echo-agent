@@ -1571,4 +1571,58 @@ mod tests {
             other => panic!("expected Text placeholder, got {other:?}"),
         }
     }
+
+    #[test]
+    fn literal_stream_events_preserve_usage_tool_identity_and_partial_json()
+    -> std::result::Result<(), serde_json::Error> {
+        let start: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":13,"output_tokens":0,"cache_read_input_tokens":4}}}"#,
+        )?;
+        assert!(matches!(
+            start,
+            AnthropicStreamEvent::MessageStart {
+                message: MessageStartBody {
+                    usage: Some(AnthropicUsage {
+                        input_tokens: 13,
+                        cache_read_input_tokens: Some(4),
+                        ..
+                    })
+                }
+            }
+        ));
+
+        let tool: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu-9","name":"read_file","input":{}}}"#,
+        )?;
+        assert!(matches!(
+            tool,
+            AnthropicStreamEvent::ContentBlockStart {
+                index: 2,
+                content_block: ContentBlockStartBody::ToolUse { id, name }
+            } if id == "toolu-9" && name == "read_file"
+        ));
+
+        let delta: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"文档.md\"}"}}"#,
+        )?;
+        assert!(matches!(
+            delta,
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 2,
+                delta: ContentDelta { partial_json: Some(value), .. }
+            } if value == "{\"path\":\"文档.md\"}"
+        ));
+
+        let terminal: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}"#,
+        )?;
+        assert!(matches!(
+            terminal,
+            AnthropicStreamEvent::MessageDelta {
+                delta: MessageDeltaBody { stop_reason: Some(reason) },
+                usage: Some(AnthropicDeltaUsage { output_tokens: 7 })
+            } if reason == "tool_use"
+        ));
+        Ok(())
+    }
 }

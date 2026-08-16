@@ -20,12 +20,12 @@ exclude = ["**/.DS_Store"]
 
 [features]
 default = ["files", "shell"]
-files = ["echo_tools/files"]
-shell = ["echo_tools/shell"]
+files = ["dep:echo_tools", "echo_tools/files"]
+shell = ["dep:echo_tools", "echo_tools/shell"]
 
 [dependencies]
 echo_core = { version = "0.2.0", path = "../echo-core" }
-echo_tools = { version = "0.2.0", path = "../echo-tools", default-features = false }
+echo_tools = { version = "0.2.0", path = "../echo-tools", default-features = false, optional = true }
 # From echo-sandbox
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }

@@ -1,18 +1,18 @@
-//! Trigger accuracy evaluation — measures how well sub-agents activate.
+//! Trigger accuracy evaluation — measures how well subagents activate.
 //!
 //! Evaluates precision (does it trigger when it should?) and recall
-//! (does it NOT trigger when it shouldn't?) for sub-agent routing.
+//! (does it NOT trigger when it shouldn't?) for subagent routing.
 
 use serde::{Deserialize, Serialize};
 
-/// A test case for sub-agent trigger accuracy.
+/// A test case for subagent trigger accuracy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerTestCase {
     /// The user query.
     pub query: String,
-    /// Which sub-agent should handle this (expected).
+    /// Which subagent should handle this (expected).
     pub expected_agent: String,
-    /// Whether this query should trigger ANY sub-agent (false = should not trigger).
+    /// Whether this query should trigger ANY subagent (false = should not trigger).
     pub should_trigger: bool,
     /// Number of runs per query for computing trigger rate. Default: 1.
     #[serde(default = "default_runs")]

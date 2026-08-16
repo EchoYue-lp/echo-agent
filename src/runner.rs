@@ -19,7 +19,7 @@
 //! This mirrors the architectural layers from the framework design:
 //! - **Context Engine** → [`ContextAssembler`]
 //! - **Tool Runtime** → [`ToolExecutionPipeline`]
-//! - **Orchestration** → [`TeamAgent`]
+//! - **Orchestration** → revisioned task DAGs and `TeamSpec`
 //! - **Evaluation** → [`EvalRunner`] (feature `eval`)
 //! - **Trace** → [`RunStore`]
 

@@ -176,45 +176,6 @@ fn substitute_env_vars(input: &str) -> String {
     result
 }
 
-/// Export plugin variables as environment variables for subprocess hooks.
-///
-/// # Safety
-/// This function modifies the process environment using `std::env::set_var()`, which
-/// is inherently unsafe in multi-threaded programs (data race on libc `environ`).
-///
-/// **Caller must ensure** this function is called during single-threaded plugin
-/// initialization only (typically at startup before background threads are spawned).
-///
-/// All user-controlled variable names are validated to contain only `[A-Z0-9_]`
-/// characters to prevent environment variable injection attacks.
-pub fn export_to_env(vars: &PluginVariables) {
-    // SAFETY: Caller must ensure this is called during single-threaded initialization.
-    // std::env::set_var is not thread-safe — concurrent calls from multiple threads
-    // can cause data races on the process environment.
-    unsafe {
-        std::env::set_var("ECHO_PLUGIN_ROOT", &vars.plugin_root);
-        std::env::set_var("ECHO_PLUGIN_DATA", &vars.plugin_data);
-        std::env::set_var("ECHO_PROJECT_DIR", &vars.project_dir);
-
-        for (key, value) in &vars.user_config {
-            let upper_key = key.to_uppercase();
-            // Validate env var name: only allow [A-Z0-9_] to prevent injection
-            if !upper_key
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-            {
-                tracing::warn!(
-                    "Skipping plugin env var with invalid characters in key: '{}'",
-                    key
-                );
-                continue;
-            }
-            let env_key = format!("ECHO_PLUGIN_OPTION_{}", upper_key);
-            std::env::set_var(&env_key, value);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

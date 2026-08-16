@@ -1,7 +1,6 @@
 //! File-backed [`RuntimeStateStore`] — a no-dependency JSON-file backend.
 //!
 //! One directory per conversation under `<base>/runtime_state/<safe_id>/`:
-//!   - `nodes.json`       — the task-node DAG for that conversation
 //!   - `checkpoint.json`  — the latest agent checkpoint (single-row upsert)
 //!
 //! This is the no-SQLite alternative to [`SqliteRuntimeStateStore`](crate::state::sqlite::SqliteRuntimeStateStore)
@@ -12,9 +11,8 @@
 //!
 //! - **Path-safe ids.** Conversation ids are sanitized before joining into the
 //!   path (rejecting `/`, `\`, `..`, empty) to prevent directory escapes.
-//! - **Corrupt JSON is an error.** A malformed `nodes.json` / `checkpoint.json`
-//!   surfaces as `ReactError::Other` rather than silently returning `None` /
-//!   an empty list (which previously looked indistinguishable from "no data").
+//! - **Corrupt JSON is an error.** A malformed `checkpoint.json` surfaces as
+//!   `ReactError::Other` rather than silently returning `None`.
 //! - **Unique temp names.** Each atomic write uses a uuid-suffixed temp file
 //!   (no cross-write collisions; multi-process belt-and-suspenders).
 //!
@@ -24,17 +22,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use chrono::Utc;
 use echo_core::error::ReactError;
 use futures::future::BoxFuture;
 
-use super::{AgentCheckpoint, RuntimeStateStore, TaskNode, TaskNodeStatus};
+use super::{AgentCheckpoint, RuntimeStateStore};
 
 /// File-backed runtime state store.
 pub struct FileRuntimeStateStore {
     base: PathBuf,
-    /// Serializes all writes (the framework trait is `&self`; a Mutex keeps the
-    /// read-modify-write in `save_node`/`update_status` atomic).
+    /// Serializes checkpoint reads, writes, and deletion.
     lock: Mutex<()>,
 }
 
@@ -55,33 +51,8 @@ impl FileRuntimeStateStore {
         Ok(self.base.join(safe))
     }
 
-    fn nodes_path(&self, conversation_id: &str) -> Result<PathBuf, ReactError> {
-        Ok(self.conv_dir(conversation_id)?.join("nodes.json"))
-    }
-
     fn checkpoint_path(&self, conversation_id: &str) -> Result<PathBuf, ReactError> {
         Ok(self.conv_dir(conversation_id)?.join("checkpoint.json"))
-    }
-
-    /// Read nodes. Missing file → empty Vec; corrupt file → `Err`.
-    fn read_nodes_file(path: &Path) -> Result<Vec<TaskNode>, ReactError> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s)
-                .map_err(|e| ReactError::Other(format!("parse {}: {e}", path.display()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(ReactError::Other(format!("read {}: {e}", path.display()))),
-        }
-    }
-
-    fn write_nodes_file(path: &Path, nodes: &[TaskNode]) -> Result<(), ReactError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ReactError::Other(format!("create dir: {e}")))?;
-        }
-        let json = serde_json::to_string_pretty(nodes)
-            .map_err(|e| ReactError::Other(format!("serialize nodes: {e}")))?;
-        atomic_write(path, json.as_bytes())
-            .map_err(|e| ReactError::Other(format!("write nodes: {e}")))
     }
 
     fn to_react_err(e: impl std::fmt::Display) -> ReactError {
@@ -90,64 +61,6 @@ impl FileRuntimeStateStore {
 }
 
 impl RuntimeStateStore for FileRuntimeStateStore {
-    fn save_node<'a>(
-        &'a self,
-        conversation_id: &'a str,
-        node: &'a TaskNode,
-    ) -> BoxFuture<'a, crate::error::Result<()>> {
-        Box::pin(async move {
-            let _g = self.lock.lock().map_err(Self::to_react_err)?;
-            let path = self.nodes_path(conversation_id)?;
-            let mut nodes = Self::read_nodes_file(&path)?;
-            // Upsert: replace if same id, else push.
-            if let Some(existing) = nodes.iter_mut().find(|n| n.id == node.id) {
-                *existing = node.clone();
-            } else {
-                nodes.push(node.clone());
-            }
-            Self::write_nodes_file(&path, &nodes)?;
-            Ok(())
-        })
-    }
-
-    fn load_nodes<'a>(
-        &'a self,
-        conversation_id: &'a str,
-    ) -> BoxFuture<'a, crate::error::Result<Vec<TaskNode>>> {
-        Box::pin(async move {
-            let _g = self.lock.lock().map_err(Self::to_react_err)?;
-            Self::read_nodes_file(&self.nodes_path(conversation_id)?)
-        })
-    }
-
-    fn update_status<'a>(
-        &'a self,
-        conversation_id: &'a str,
-        node_id: &'a str,
-        status: TaskNodeStatus,
-    ) -> BoxFuture<'a, crate::error::Result<()>> {
-        Box::pin(async move {
-            let _g = self.lock.lock().map_err(Self::to_react_err)?;
-            let path = self.nodes_path(conversation_id)?;
-            let mut nodes = Self::read_nodes_file(&path)?;
-            let now = Utc::now();
-            let mut found = false;
-            for n in nodes.iter_mut() {
-                if n.id == node_id {
-                    n.status = status.clone();
-                    n.updated_at = now;
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                Self::write_nodes_file(&path, &nodes)?;
-            }
-            // Match SQL semantics: UPDATE on 0 rows is a no-op (no error).
-            Ok(())
-        })
-    }
-
     fn get_checkpoint<'a>(
         &'a self,
         conversation_id: &'a str,
@@ -180,7 +93,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
             }
             let json = serde_json::to_string_pretty(checkpoint)
                 .map_err(|e| ReactError::Other(format!("serialize checkpoint: {e}")))?;
-            atomic_write(&path, json.as_bytes())
+            echo_core::utils::fs::atomic_write(&path, json.as_bytes())
                 .map_err(|e| ReactError::Other(format!("write checkpoint: {e}")))?;
             Ok(())
         })
@@ -201,48 +114,6 @@ impl RuntimeStateStore for FileRuntimeStateStore {
             }
         })
     }
-}
-
-/// Write `bytes` to `path` atomically (unique tmp + fsync + rename).
-///
-/// On Unix, the parent directory is fsynced after rename so the directory entry
-/// is durable as well as the file content.
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other(format!("path has no parent: {}", path.display())))?;
-    std::fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("data"),
-        uuid::Uuid::new_v4()
-    ));
-    let write_result = (|| {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()
-    })();
-    if let Err(error) = write_result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error);
-    }
-    if let Err(error) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error);
-    }
-    sync_parent_directory(parent)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
-    std::fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 /// Sanitize an arbitrary id string into a single safe filesystem segment.
@@ -273,32 +144,16 @@ fn safe_segment(id: &str) -> Result<String, ReactError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[tokio::test]
-    async fn file_runtime_state_lifecycle() {
+    async fn file_runtime_state_lifecycle() -> crate::error::Result<()> {
         let tmp = std::env::temp_dir().join(format!(
             "echo-file-runtime-state-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let store = FileRuntimeStateStore::new(&tmp).unwrap();
-
-        let node = TaskNode::new("node-1", "Plan task")
-            .with_status(TaskNodeStatus::Running)
-            .with_dependencies(vec!["dep-1".to_string()]);
-        store.save_node("conv-1", &node).await.unwrap();
-
-        let nodes = store.load_nodes("conv-1").await.unwrap();
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].id, "node-1");
-        assert!(matches!(nodes[0].status, TaskNodeStatus::Running));
-
-        store
-            .update_status("conv-1", "node-1", TaskNodeStatus::Success)
-            .await
-            .unwrap();
-        let nodes = store.load_nodes("conv-1").await.unwrap();
-        assert!(matches!(nodes[0].status, TaskNodeStatus::Success));
+        let store = FileRuntimeStateStore::new(&tmp)?;
 
         let checkpoint = AgentCheckpoint {
             conversation_id: "conv-1".to_string(),
@@ -309,60 +164,68 @@ mod tests {
             working_dir: None,
             timestamp: Utc::now(),
         };
-        store.save_checkpoint(&checkpoint).await.unwrap();
-        let cp = store.get_checkpoint("conv-1").await.unwrap().unwrap();
+        store.save_checkpoint(&checkpoint).await?;
+        let cp = store
+            .get_checkpoint("conv-1")
+            .await?
+            .ok_or_else(|| ReactError::Other("checkpoint missing after save".to_string()))?;
         assert_eq!(cp.active_skills, vec!["coding"]);
 
-        // update_status on a missing node is a no-op (matches SQL).
-        store
-            .update_status("conv-1", "nope", TaskNodeStatus::Failed)
-            .await
-            .unwrap();
-        let nodes = store.load_nodes("conv-1").await.unwrap();
-        assert_eq!(nodes.len(), 1);
-
-        store.clear_conversation("conv-1").await.unwrap();
-        assert!(store.load_nodes("conv-1").await.unwrap().is_empty());
-        assert!(store.get_checkpoint("conv-1").await.unwrap().is_none());
+        store.clear_conversation("conv-1").await?;
+        assert!(store.get_checkpoint("conv-1").await?.is_none());
 
         // clear on a never-existing conversation is a no-op.
-        store.clear_conversation("never").await.unwrap();
+        store.clear_conversation("never").await?;
 
         let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn corrupt_nodes_file_surfaces_as_error() {
+    async fn corrupt_checkpoint_surfaces_as_error() -> crate::error::Result<()> {
         let tmp = std::env::temp_dir().join(format!(
             "echo-file-runtime-state-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let store = FileRuntimeStateStore::new(&tmp).unwrap();
-        // Seed a corrupt nodes.json on disk.
-        std::fs::create_dir_all(tmp.join("runtime_state").join("c1")).unwrap();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        std::fs::create_dir_all(tmp.join("runtime_state").join("c1"))
+            .map_err(|error| ReactError::Other(error.to_string()))?;
         std::fs::write(
-            tmp.join("runtime_state").join("c1").join("nodes.json"),
+            tmp.join("runtime_state").join("c1").join("checkpoint.json"),
             b"{ not valid json",
         )
-        .unwrap();
-        let err = store.load_nodes("c1").await.unwrap_err();
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        let err = store
+            .get_checkpoint("c1")
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("corrupt checkpoint was accepted".to_string()))?;
         assert!(err.to_string().contains("parse"));
         let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn path_traversal_conversation_id_is_rejected() {
+    async fn path_traversal_conversation_id_is_rejected() -> crate::error::Result<()> {
         let tmp = std::env::temp_dir().join(format!(
             "echo-file-runtime-state-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let store = FileRuntimeStateStore::new(&tmp).unwrap();
-        let err = store.load_nodes("../escape").await.unwrap_err();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        let err = store
+            .get_checkpoint("../escape")
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("unsafe conversation id was accepted".to_string()))?;
         assert!(err.to_string().contains("path segment") || err.to_string().contains("unsafe"));
         // No directory was created outside base.
-        assert!(!tmp.parent().unwrap().join("escape").exists());
+        let parent = tmp
+            .parent()
+            .ok_or_else(|| ReactError::Other("temporary path has no parent".to_string()))?;
+        assert!(!parent.join("escape").exists());
         let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
     }
 }

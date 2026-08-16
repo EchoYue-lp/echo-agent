@@ -14,7 +14,7 @@ use tracing::info;
 
 /// Tools-branch terminal: a `final_answer` tool call has passed verifier.
 /// Runs `on_final_answer` callbacks + interventions, audit, runtime
-/// checkpoint, transcript projection, TaskNode Success, emits the
+/// checkpoint and transcript projection, emits the
 /// `FinalAnswer` event, runs the `Stop` hook (best-effort continuation
 /// injection without retry — `finish` is genuinely terminal here), then
 /// fires `SessionEnd("complete")`.
@@ -98,11 +98,6 @@ pub(crate) async fn finalize_completed_run(
     snap.save_runtime_checkpoint(context, None).await?;
     // Persist transcript projection so product layers see the final state.
     snap.save_transcript_projection(context).await;
-    // Update TaskNode to Success
-    if let Some(ref node_id) = state.task_node_id {
-        snap.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
-            .await;
-    }
     snap.finalize_run(crate::trace::RunStatus::Completed, Some(output), None)
         .await;
     if tx
@@ -123,8 +118,8 @@ pub(crate) async fn finalize_completed_run(
 /// Text-branch terminal: the LLM produced content that passed verification.
 /// Runs `on_think_end` + `on_final_answer` callbacks, pushes the assistant
 /// message, takes an auto-snapshot, audits the final answer, takes a
-/// runtime checkpoint + transcript projection, updates the TaskNode to
-/// `Success`, finalizes the trace, emits the `FinalAnswer` event, and runs
+/// runtime checkpoint + transcript projection, finalizes the trace, emits the
+/// `FinalAnswer` event, and runs
 /// the `Stop` hook with one-shot continuation.
 ///
 /// Returns:
@@ -199,11 +194,6 @@ pub(crate) async fn emit_final_text(
     // for GUI/TUI history. Product layers should rely on this instead of
     // re-implementing save_messages on every chat turn.
     snap.save_transcript_projection(context).await;
-    // Update TaskNode to Success
-    if let Some(ref node_id) = state.task_node_id {
-        snap.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
-            .await;
-    }
     // Finalize trace before moving the answer into the event
     snap.finalize_run(crate::trace::RunStatus::Completed, Some(&answer), None)
         .await;
@@ -223,7 +213,6 @@ pub(crate) async fn emit_final_text(
 /// LLM produced neither tool calls nor content — terminal failure.
 pub(crate) async fn finalize_no_response(
     snap: &AgentRunSnapshot,
-    state: &LoopState,
     tx: mpsc::Sender<Result<AgentEvent>>,
 ) -> Result<()> {
     snap.finalize_run(
@@ -232,10 +221,6 @@ pub(crate) async fn finalize_no_response(
         Some("No response from LLM"),
     )
     .await;
-    if let Some(ref node_id) = state.task_node_id {
-        snap.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
-            .await;
-    }
     let error = ReactError::Agent(Box::new(AgentError::NoResponse {
         model: snap.config.model_name.clone(),
         agent: snap.config.agent_name.clone(),
@@ -248,7 +233,6 @@ pub(crate) async fn finalize_no_response(
 pub(crate) async fn finalize_max_iterations(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
-    state: &LoopState,
     tx: mpsc::Sender<Result<AgentEvent>>,
 ) -> Result<()> {
     snap.fire_hook(
@@ -267,11 +251,6 @@ pub(crate) async fn finalize_max_iterations(
     // Even on failure we save the transcript so the user sees what was
     // attempted in the GUI/TUI history pane.
     snap.save_transcript_projection(context).await;
-    // Update TaskNode to Failed
-    if let Some(ref node_id) = state.task_node_id {
-        snap.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
-            .await;
-    }
     snap.finalize_run(
         crate::trace::RunStatus::Failed,
         None,
@@ -316,10 +295,8 @@ mod tests {
     #[tokio::test]
     async fn finalize_no_response_sends_error_and_marks_trace_failed() {
         let (snap, store, _agent) = snap_with_trace("agent-noresp").await;
-        let state = LoopState::new(None);
-
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
-        finalize_no_response(&snap, &state, tx)
+        finalize_no_response(&snap, tx)
             .await
             .expect("finalize_no_response must succeed");
 
@@ -358,10 +335,8 @@ mod tests {
     #[tokio::test]
     async fn finalize_max_iterations_sends_error_and_marks_trace_failed() {
         let (snap, store, agent) = snap_with_trace("agent-maxiter").await;
-        let state = LoopState::new(None);
-
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
-        finalize_max_iterations(&snap, &agent.memory.context, &state, tx)
+        finalize_max_iterations(&snap, &agent.memory.context, tx)
             .await
             .expect("finalize_max_iterations must succeed");
 

@@ -219,4 +219,4 @@ cargo run --example demo04_subagent       # Multi-agent orchestration
 cargo run --example demo06_mcp            # MCP protocol integration
 ```
 
-See the full list of 52 demos in the [examples/](../examples/) directory.
+See the full list of demos in the [examples/](../../examples/) directory.

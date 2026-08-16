@@ -1,10 +1,10 @@
-//! Mock Agent, implementing the [`Agent`] trait, for replacing real SubAgents
+//! Mock Agent, implementing the [`Agent`] trait, for replacing real Subagents
 //! when testing multi-Agent orchestration.
 //!
 //! When testing orchestration logic, we typically want to:
 //! - Avoid making real LLM calls
-//! - Control the return content of each SubAgent
-//! - Verify how many times a SubAgent was called, and what task it received each time
+//! - Control the return content of each Subagent
+//! - Verify how many times a Subagent was called, and what task it received each time
 //!
 //! # Example
 //!
@@ -13,24 +13,24 @@
 //! use echo_agent::agent::Agent;
 //!
 //! # #[tokio::main]
-//! # async fn main() {
-//! let mut agent = MockAgent::new("math_agent")
+//! # async fn main() -> echo_agent::error::Result<()> {
+//! let agent = MockAgent::new("math_agent")
 //!     .with_response("The result is 42")
 //!     .with_response("The result is 100");
 //!
-//! let r1 = agent.execute("compute 6 * 7").await.unwrap();
-//! let r2 = agent.execute("compute 10 * 10").await.unwrap();
+//! let r1 = agent.execute("compute 6 * 7").await?;
+//! let r2 = agent.execute("compute 10 * 10").await?;
 //! assert_eq!(r1, "The result is 42");
 //! assert_eq!(r2, "The result is 100");
 //! assert_eq!(agent.call_count(), 2);
-//! assert_eq!(agent.calls()[0], "compute 6 * 7");
+//! assert_eq!(agent.calls().first().map(String::as_str), Some("compute 6 * 7"));
+//! # Ok(())
 //! # }
 //! ```
 
 use crate::agent::{Agent, AgentEvent, CancellationToken};
 use crate::error::{AgentError, ReactError, Result};
 use futures::future::BoxFuture;
-use futures::stream;
 use futures::stream::BoxStream;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -44,6 +44,29 @@ pub enum MockAgentStep {
     Event(Box<AgentEvent>),
     Error(String),
     Delay(std::time::Duration),
+}
+
+/// Failure category emitted by [`FailingMockAgent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MockAgentFailure {
+    Initialization,
+    Subagent,
+    Timeout,
+    Cancelled,
+    PermissionDenied,
+}
+
+impl MockAgentFailure {
+    fn error(self, message: String) -> ReactError {
+        let error = match self {
+            Self::Initialization => AgentError::InitializationFailed(message),
+            Self::Subagent => AgentError::SubagentError(message),
+            Self::Timeout => AgentError::Timeout(message),
+            Self::Cancelled => AgentError::Cancelled(message),
+            Self::PermissionDenied => AgentError::PermissionDenied(message),
+        };
+        ReactError::Agent(Box::new(error))
+    }
 }
 
 /// A scriptable Mock Agent.
@@ -470,6 +493,8 @@ impl Agent for MockAgent {
 pub struct FailingMockAgent {
     name: String,
     error_message: String,
+    failure: MockAgentFailure,
+    event_scripts: Arc<Mutex<VecDeque<Vec<MockAgentStep>>>>,
     calls: Arc<Mutex<Vec<String>>>,
 }
 
@@ -479,13 +504,78 @@ impl FailingMockAgent {
         Self {
             name: name.into(),
             error_message: error_message.into(),
+            failure: MockAgentFailure::Initialization,
+            event_scripts: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Choose the typed agent failure returned by every invocation.
+    pub fn with_failure(mut self, failure: MockAgentFailure) -> Self {
+        self.failure = failure;
+        self
+    }
+
+    /// Append partial events, delays, and the eventual error for one stream.
+    ///
+    /// `MockAgentStep::Error` is mapped to the selected typed failure category.
+    /// When no script remains, the configured default error is emitted.
+    pub fn with_event_script(self, steps: Vec<MockAgentStep>) -> Self {
+        self.event_scripts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push_back(steps);
+        self
     }
 
     /// Get the number of times this Mock Agent has been called.
     pub fn call_count(&self) -> usize {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// All historical call task strings in chronological order.
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn record_call(&self, task: &str) {
+        self.calls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(task.to_string());
+    }
+
+    fn next_event_stream<'a>(
+        &'a self,
+        cancel: CancellationToken,
+    ) -> BoxStream<'a, Result<AgentEvent>> {
+        let steps = self
+            .event_scripts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+            .unwrap_or_else(|| vec![MockAgentStep::Error(self.error_message.clone())]);
+        let events = async_stream::stream! {
+            for step in steps {
+                match step {
+                    MockAgentStep::Event(event) => yield Ok(*event),
+                    MockAgentStep::Error(message) => {
+                        yield Err(self.failure.error(message));
+                        return;
+                    }
+                    MockAgentStep::Delay(delay) => {
+                        tokio::select! {
+                            _ = cancel.cancelled() => {
+                                yield Ok(AgentEvent::Cancelled);
+                                return;
+                            }
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                    }
+                }
+            }
+        };
+        Box::pin(events)
     }
 }
 
@@ -504,13 +594,8 @@ impl Agent for FailingMockAgent {
 
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            self.calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(task.to_string());
-            Err(ReactError::Agent(Box::new(
-                AgentError::InitializationFailed(self.error_message.clone()),
-            )))
+            self.record_call(task);
+            Err(self.failure.error(self.error_message.clone()))
         })
     }
 
@@ -519,13 +604,19 @@ impl Agent for FailingMockAgent {
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
-            let err = self.execute(task).await.err().unwrap_or_else(|| {
-                ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                    "FailingMockAgent unexpectedly completed".to_string(),
-                )))
-            });
-            let event_stream = stream::once(async move { Err(err) });
-            Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
+            self.record_call(task);
+            Ok(self.next_event_stream(CancellationToken::new()))
+        })
+    }
+
+    fn execute_stream_with_cancel<'a>(
+        &'a self,
+        task: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            self.record_call(task);
+            Ok(self.next_event_stream(cancel))
         })
     }
 
@@ -537,5 +628,58 @@ impl Agent for FailingMockAgent {
         Box::pin(async move {
             self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn mock_agent_scripts_partial_event_then_error() -> Result<()> {
+        let agent = MockAgent::new("partial").with_event_script(vec![
+            MockAgentStep::Event(Box::new(AgentEvent::Token("part".to_string()))),
+            MockAgentStep::Error("stream failed".to_string()),
+        ]);
+        let mut events = agent.execute_stream("work").await?;
+
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(AgentEvent::Token(token))) if token == "part"
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Err(ReactError::Agent(error)))
+                if matches!(*error, AgentError::SubagentError(ref message) if message == "stream failed")
+        ));
+        assert!(events.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failing_mock_agent_scripts_partial_event_then_typed_error() -> Result<()> {
+        let agent = FailingMockAgent::new("partial-failure", "default failure")
+            .with_failure(MockAgentFailure::Timeout)
+            .with_event_script(vec![
+                MockAgentStep::Event(Box::new(AgentEvent::Token("part".to_string()))),
+                MockAgentStep::Error("deadline".to_string()),
+            ]);
+        let mut events = agent
+            .execute_stream_with_cancel("work", CancellationToken::new())
+            .await?;
+
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(AgentEvent::Token(token))) if token == "part"
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Err(ReactError::Agent(error)))
+                if matches!(*error, AgentError::Timeout(ref message) if message == "deadline")
+        ));
+        assert!(events.next().await.is_none());
+        assert_eq!(agent.calls(), vec!["work".to_string()]);
+        Ok(())
     }
 }

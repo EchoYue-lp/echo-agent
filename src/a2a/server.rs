@@ -263,17 +263,18 @@ impl A2AServer {
                                 });
                                 first_chunk = false;
                             }
-                            Ok(AgentEvent::ToolCall { name, .. }) => {
+                            Ok(AgentEvent::ToolCall { invocation, .. }) => {
                                 yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
                                     task_id: task_id.clone(),
                                     status: A2ATaskStatus::with_message(
                                         TaskState::Working,
-                                        A2AMessage::agent_text(format!("Calling tool: {name}")),
+                                        A2AMessage::agent_text(format!("Calling tool: {}", invocation.name)),
                                     ),
                                     is_final: false,
                                 });
                             }
-                            Ok(AgentEvent::ToolResult { name, output, .. }) => {
+                            Ok(AgentEvent::ToolResult { name, result, .. }) => {
+                                let output = result.error.unwrap_or(result.output);
                                 yield A2AStreamEvent::ArtifactUpdate(TaskArtifactUpdateEvent {
                                     task_id: task_id.clone(),
                                     artifact: A2AArtifact {

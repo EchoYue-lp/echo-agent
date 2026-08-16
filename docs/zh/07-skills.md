@@ -14,7 +14,7 @@ Tool:  单一原子操作（"读取文件"）
 Skill: 领域能力包（"文件系统操作" = read_file + write_file + list_dir + 使用说明提示词）
 ```
 
-框架那一半（`Skill` trait + `SkillRegistry`）位于 `echo-agent/echo-core/` 与 `echo-agent/echo-execution/`。产品那一半（用户可见的技能**目录 / 市场**，位于 `~/.echo-agent/skills/`）实现在 `echo-agent-cli/echo-agent-app-core/src/skills_hub/`，与运行时注册表正交 —— 详见下文 [SkillsHub vs SkillRegistry](#skillshub-vs-skillregistry)。
+框架契约（`Skill` trait + `SkillRegistry`）位于 `echo-core` 与 `echo-execution`。产品目录是该 API 的独立消费方。例如，EKO 当前把用户可见的目录放在 `~/.eko/skills/`；这项应用层行为应以 [EKO SkillsHub 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) 为准，不属于框架 API 契约。
 
 ---
 
@@ -56,7 +56,7 @@ agent.add_skill(Box::new(ShellSkill));
 # }
 ```
 
-> **提醒**：此前文档曾列出 `CalculatorSkill` 与 `WeatherSkill`，它们已经移除。现在仅 `FileSystemSkill` 和 `ShellSkill` 作为框架内置的 code-based skill 存在。领域型能力（网页搜索、论文检索、编码等）改为 **file-based skill** 形式发行在 `echo-agent-cli/skills/` —— 见后文 [内置 File-based Skill](#内置-file-based-skill)。
+> **提醒**：此前文档曾列出 `CalculatorSkill` 与 `WeatherSkill`，它们已经移除；`FileSystemSkill` 和 `ShellSkill` 是仓库内的 code-based 示例。应用可以通过发现机制加入自己的 file-based skill。
 
 ---
 
@@ -174,14 +174,14 @@ Skill 目录: ${SKILL_DIR}
 | `paths` | | 条件激活的 glob 模式（如 `["*.py"]`），同时进入目录 |
 | `triggers` | | 用户语句触发词，由 `KeywordClassifier` 消费（参见 [两条激活路径](#两条-skill-激活路径)） |
 | `allowed-tools`（别名 `allowed_tools`） | | 已注册工具的白名单 —— **不**是要注册的工具列表 |
-| `depends_on` | | 自动先行激活的其他 skill；DFS 检测循环并 warn（`loader.rs:387-446`） |
+| `depends_on` | | 自动先行激活的其他 skill；`SkillLoader` 用 DFS 检测循环并 warn |
 | `hooks` | | 31 个主 Hook 事件中的任意事件规则；见 [Hooks 系统](./23-hooks.md) |
 | `sandbox` | | 单 skill 沙箱策略：`isolation`、`network`、`allowed_paths`、`denied_paths`、`timeout` |
 | `metadata` | | 任意键值对 |
 
 ### Frontmatter 字段（Legacy）
 
-下列字段仍能被解析，但已废弃；激活使用它们的 skill 时会在加载阶段输出弃用警告（`loader.rs:279-285`），未来版本会移除。
+下列字段仍能被解析，但已废弃；激活使用它们的 skill 时会在加载阶段输出弃用警告，未来版本会移除。
 
 | Legacy 字段 | 替代方案 |
 |------------|---------|
@@ -263,7 +263,7 @@ let skills = agent.load_skills_from_dir("./skills").await?;
 # }
 ```
 
-发现完成后，框架会自动注册三个渐进披露工具（`capabilities.rs:577-587`）：
+发现完成后，`ReactAgent::discover_skills` 会自动注册三个渐进披露工具：
 
 | 工具 | 用途 |
 |------|------|
@@ -275,17 +275,15 @@ let skills = agent.load_skills_from_dir("./skills").await?;
 
 ### 依赖与循环检测
 
-skill 声明 `depends_on` 时，每个依赖会在被请求 skill 之前递归激活（`registry.rs:236-325`）。加载阶段通过 DFS 检测依赖循环并产生警告（`loader.rs:387-446`）；loader 不会阻塞 —— 重复项被去重，最后选取一条无环的激活顺序。
+skill 声明 `depends_on` 时，`SkillRegistry` 会在被请求 skill 之前递归激活每个依赖。`SkillLoader` 在加载阶段通过 DFS 检测依赖循环并产生警告；重复项被去重，最后选取一条无环的激活顺序。
 
 ---
 
-## 两条 Skill 激活路径
+## 单一激活投影
 
-> ⚠️ **重要：两条路径产出消息类型略有不同，且其中一条路径 *不受* 压缩保护。**
+两种激活入口使用同一份 wrapped skill 内容，也使用同一个受保护上下文投影权威。
 
-### 路径 1：LLM 通过 `activate_skill` 工具激活
-
-LLM 调用 `activate_skill` 工具。工具成功结果由 `ActivateContent::to_prompt_block`（`echo-execution/src/skills/external/types.rs:334-372`）包裹为 XML 信封：
+LLM 可以调用 `activate_skill` 工具；应用代码和 `IntentRouter` 可以调用 `ReactAgent::activate_skill`。`ActivateContent::to_prompt_block` 会把激活内容包裹为以下 XML 信封：
 
 ```
 <skill_content name="paper-search">
@@ -299,22 +297,11 @@ Skill directory: ...
 </skill_content>
 ```
 
-该块作为 `Role::Tool` 消息进入消息流，包含子串 `"<skill_content"`，已在 `ContextManager`（`agent/react/capabilities.rs:589-597`）注册为**保护 marker**。压缩流程通过 `is_protected`（`compression/mod.rs:456-465`）将其跳过，并在压缩后由 `merge_protected` 重新插回原位。
-
-### 路径 2：IntentRouter 预分类
-
-`KeywordClassifier` / `LlmIntentClassifier` 返回 `Intent::SkillRequired` 时，`react_loop.rs:738-764` 激活 skill 并把 **`content.instructions` 原文作为 `Message::system` 推入**：
-
-```rust
-self.memory.context.lock().await
-    .push(Message::system(content.instructions));
-```
-
-它**不**调用 `to_prompt_block()`，所以这条消息没有 `<skill_content` 子串。⚠️ **由 IntentRouter 注入的 skill 内容因而*不受*压缩保护** —— 滑动窗口或摘要压缩可能把它丢掉。该分歧记录在 [07-cross-cutting.md §3](../../../echo-agent-cli/docs/system-deep-dive/07-cross-cutting.md)。
+`ReactAgent::activate_skill` 用 `ContextManager::replace_projection` 把该块写到精确 marker `echo-agent:skill:<name>`。`activate_skill` 工具返回 typed activation fact，ReAct 工具阶段再把其内容投影到同一 marker。重复激活会替换旧投影，不会累积第二份权威。上下文压缩会跳过 projection，并在压缩后重新插回。
 
 ### triggers 来自哪里
 
-`KeywordClassifier` 在运行时从每个 `SkillDescriptor.triggers` 字段填充（`echo-agent-cli/echo-agent-app-core/src/runtime.rs:196-255`）。如果某 skill 的 `triggers` 为空，IntentRouter 永远不会为它触发 —— 此时只能走 LLM 工具路径。
+消费方可以用每个 `SkillDescriptor.triggers` 填充 `KeywordClassifier`。如果某 skill 没有 trigger，关键词路由无法选择它；显式 API 激活与 LLM 工具路径仍然可用。
 
 ---
 
@@ -469,60 +456,28 @@ allowed-tools:
 
 ## 上下文保护
 
-通过 **`activate_skill` 工具路径**送入的已激活 skill 指令受压缩保护 —— 上下文超过 token 上限时，该 wrapped 块在压缩中存活。
+已激活 skill 指令存放在命名上下文投影中。`activate_skill` 工具与直接 `ReactAgent::activate_skill` 路径都使用 `echo-agent:skill:<name>`，因此 wrapped block 能在压缩后保留，重复激活则替换旧投影。
 
 ```rust,ignore
-// 内部机制：含 "<skill_content" 子串的消息被排除在压缩外
-ctx.add_protected_marker("<skill_content".to_string());
+ctx.replace_projection(
+    "echo-agent:skill:code-review",
+    Some(Message::system(block)),
+);
 ```
 
-⚠️ 该保护通过 `try_lock` 注册（`agent/react/capabilities.rs:589-597`）；安装时若锁被争用，marker 注册会静默跳过，后续 skill 激活就可能被压缩掉。**通过 IntentRouter 路径**送入的 skill 内容则完全无保护 —— 见 [两条激活路径](#两条-skill-激活路径)。
-
 ---
 
-## SkillsHub vs SkillRegistry
+## 框架 Registry 与产品 Catalogue
 
-这是**两个完全不同的概念**，并存于代码库中。请勿混淆。
+`SkillRegistry` 负责可复用运行时生命周期：发现、激活、依赖排序、资源访问和沙箱策略；它不负责安装或卸载市场包。
 
-| 关注点 | `SkillRegistry`（框架） | `SkillsHub`（产品） |
-|--------|------------------------|--------------------|
-| crate | `echo-agent/echo-execution/src/skills/registry.rs` | `echo-agent-cli/echo-agent-app-core/src/skills_hub/` |
-| 用途 | Agent 实例的运行时生命周期：发现 → 目录 → 激活 → 资源 | 本地技能**目录 / 市场** UI：浏览、安装、卸载到磁盘 |
-| 默认扫描路径 | `<project>/skills/`、`<project>/.agents/skills/`、`~/.agents/skills/` | 仅 `~/.echo-agent/skills/` |
-| Frontmatter 解析 | 完整 `serde_yaml_ng`（`loader.rs`） | 手写 mini key-value 解析器（无完整 YAML） |
-| 状态 | 已激活集合、沙箱策略、code-based skill、session_id | 仅本地已安装 skill 元数据列表 |
-| 谁在用 | 每一轮 `ReactAgent` 都会调用 | CLI `/skills` 命令（list / search / install / uninstall） |
-| 安装/卸载 | 不负责安装；只负责运行时发现 | `git clone https-only` + 本地拷贝 + uninstall |
-
-`SkillsHub` 不会把 skill 装载进 agent。`echo-agent-cli/skills/` 下的内置 skill 由框架的 `discover_skills` 路径在启动时载入（`echo-agent-cli/echo-agent-app-core/src/runtime.rs:133-153`），与 hub 无关。
-
----
-
-## 内置 File-based Skill
-
-11 个 file-based skill 发布在 `echo-agent-cli/skills/`，由上文的发现路径在启动时载入：
-
-| Skill | 一句话角色 |
-|-------|----------|
-| `coding` | 编程与软件工程：编写/调试/重构/审查代码 |
-| `data-visualization` | 图表与可视化（柱状图/折线图/仪表盘） |
-| `data-wrangling` | CSV/Excel/JSON 加载、清洗、EDA |
-| `doc-writing` | 报告、技术文档、文章、邮件、提案 |
-| `evidence-medicine` | 医学文献检索 + 循证分析（PubMed、ClinicalTrials、PICO、GRADE） |
-| `git-workflow` | Git 操作（分支、提交、PR/MR、冲突） |
-| `paper-reader` | 单篇论文的深度阅读与批判性评估 |
-| `paper-search` | 跨 ArXiv + Semantic Scholar 的学术论文搜索（非医学） |
-| `statistical-analysis` | 统计检验（t/χ²/ANOVA）、回归、建模 |
-| `translation` | 翻译、校对、本地化 |
-| `web-search` | 网络信息检索 + 多源交叉验证 |
-
-每个均带 `SKILL.md` + 可选 `references/` 子目录。它们与 `SkillsHub` 独立管理。
+应用可以另加产品目录。EKO 当前的 `SkillsHub` 扫描 `~/.eko/skills/`，服务其 UI 与安装流程，但不会取代框架 registry。产品细节可能独立于 echo-agent 演化，应以 [EKO SkillsHub 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) 为准。
 
 ---
 
 ## Skill 遥测（Telemetry）
 
-独立模块 `echo-state/src/skill_telemetry.rs` 定义了 `SkillExecutionRecord` 和 `SkillTelemetry` 类型，由 `Store` trait 在命名空间 `["agent", "skill_telemetry"]` 下背书。CLI `evolution` 命令读取这些记录（`echo-agent-cli/src/cli/cmd_impls/evolution.rs:7,344`）。
+独立模块 `echo-state/src/skill_telemetry.rs` 定义了 `SkillExecutionRecord` 和 `SkillTelemetry` 类型，由 `Store` trait 在命名空间 `["agent", "skill_telemetry"]` 下背书。
 
 ⚠️ **运行时目前并未向该 store 写入。** 至今没有任何 `record_execution` 调用点存在于 agent runtime；schema 已就位，但生产者侧尚未接入激活路径。
 

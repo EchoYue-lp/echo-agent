@@ -72,10 +72,9 @@ impl TaskHookBridge {
 
     /// Fire TaskCreated — a task node entered the executable graph.
     ///
-    /// For the framework `TaskExecutor`, task creation coincides with enqueue,
-    /// so this maps to the enqueue moment. For application runtimes (EKO
-    /// task_runtime), this should fire at plan-revision-commit time (where the
-    /// PlanTask is actually created), NOT at execute_task before.
+    /// Task runtime adapters invoke this after the authoritative plan revision
+    /// commits and before the canonical DAG controller makes the task
+    /// executable.
     pub async fn on_created(&self, task_id: &str, task_subject: &str) {
         self.on_created_with_correlation(task_id, task_subject, HookCorrelation::default())
             .await;

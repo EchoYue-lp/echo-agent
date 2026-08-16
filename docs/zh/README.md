@@ -15,7 +15,7 @@
 | [03 - 记忆系统](03-memory.md) | Memory | Store（长期）、RuntimeStateStore（运行时检查点）、ConversationStore（对话历史） |
 | [04 - 上下文压缩](04-compression.md) | Compression | SlidingWindow、Summary、Hybrid、ContextManager |
 | [05 - 人工介入](05-human-loop.md) | Human-in-the-Loop | 审批 Guard、Console/Webhook/WebSocket Provider |
-| [06 - 多 Agent 编排](06-subagent.md) | SubAgent / Orchestration | Orchestrator/Subagent/Planner、上下文隔离 |
+| [06 - 多 Agent 编排](06-subagent.md) | Subagent / Orchestration | Orchestrator/Subagent/Planner、上下文隔离 |
 | [07 - Skill 系统](07-skills.md) | Skills | 能力包、系统提示词注入、外部 SKILL.md 加载 |
 | [08 - MCP 协议](08-mcp.md) | MCP | stdio/HTTP 传输、工具适配、多服务端管理 |
 | [09 - 任务规划](09-tasks.md) | Tasks / DAG | 有向无环图、拓扑排序、循环依赖检测、Mermaid 可视化 |
@@ -38,7 +38,7 @@
 | [23 - Hooks 系统](23-hooks.md) | Hooks | Skills hooks（31 个事件、7 种动作）、Task hooks、Subagent hooks |
 | [24 - 评估系统](24-eval-system.md) | Eval | EvalCase、SuccessCriteria、LlmGrader、A/B 对比、回归套件、HTML 报告 |
 | [25 - 自进化系统](25-self-improvement.md) | Improve / Evolution | Analyzer、ImprovementLoop、EvalDrivenImprovement、分层记忆、技能自创建、合并/健康/补丁、规则晋升、变更审计 |
-| [26 - 多 Agent 模式](26-multi-agent.md) | SubAgent / TeamAgent | 父子委托（Sync/Fork/Teammate）、对等协作（ManagerSubagent/Pipeline/Debate/Swarm） |
+| [26 - 多 Agent 模式](26-multi-agent.md) | Subagent / Team intent | 单次调度模式与 TeamSpec 到 runtime DAG 的协作 |
 | [27 - 追踪系统](27-tracing.md) | Trace | Run、RunEvent（11 种类型）、RunStore、JsonlRunStore、生命周期、密钥脱敏 |
 | [28 - 配置参考](28-config-reference.md) | Config | AgentConfig、ReactAgentBuilder、ToolExecutionConfig、TokenBudgetConfig、YAML 配置、Feature Flags |
 | [29 - 运行时与任务系统](29-long-running-tasks.md) | Runtime & Tasks | 统一运行时、执行序列化、DAG 编排、ProgressBridge、后台任务、定时调度 |
@@ -70,7 +70,6 @@
 | 文档 | 功能模块 | 核心关键词 |
 |------|---------|-----------|
 | [安全指南](security.md) | Security | 安全模型、沙箱配置、密钥管理、MCP 信任边界 |
-| [工具权限系统](tool-permissions.md) | Tool Permissions | ToolPermission、PermissionMode、RuleRegistry、deny-first、ToolRiskClassifier |
 
 ### 知识库
 
@@ -147,7 +146,7 @@ async fn main() -> Result<()> {
 │  └──────────────┘  └────────────┘  └─────────────────┘  │
 │                                                         │
 │  ┌──────────────────────────────────────────────────┐   │
-│  │              SubAgent 注册表                      │   │
+│  │              Subagent 注册表                      │   │
 │  └──────────────────────────────────────────────────┘   │
 └────────────────────────┬────────────────────────────────┘
                          │ HTTP（metadata 选择 wire protocol）
@@ -170,8 +169,8 @@ async fn main() -> Result<()> {
 | 单次任务执行 | `execute()` / `execute_stream()` | — |
 | **多轮对话** | **`chat()` / `chat_stream()`** | — |
 | 工具调用 | `enable_tool` | `true` |
-| DAG 任务规划 | `enable_task` | `false` |
-| SubAgent 编排 | `enable_subagent` | `false` |
+| 版本化任务图 | `task_create` / `task_update` / `task_list` | 已注册 |
+| Subagent 编排 | `enable_subagent` | `false` |
 | 长期记忆 (Store) | `enable_memory` | `false` |
 | 人工介入 | `enable_human_in_loop` | `false` |
 | Chain-of-Thought 提示词 | `enable_cot` | `true` |
@@ -191,7 +190,7 @@ async fn main() -> Result<()> {
 | `examples/demo01_tools.rs` | 基础工具注册与调用 |
 | `examples/demo02_tasks.rs` | DAG 任务规划 |
 | `examples/demo03_approval.rs` | 人工审批 |
-| `examples/demo04_subagent.rs` | SubAgent 编排 |
+| `examples/demo04_subagent.rs` | Subagent 编排 |
 | `examples/demo05_compressor.rs` | 上下文压缩 |
 | `examples/demo06_mcp.rs` | MCP 协议集成 |
 | `examples/demo07_skills.rs` | Skill 系统 |
@@ -201,14 +200,11 @@ async fn main() -> Result<()> {
 | `examples/demo11_callbacks.rs` | 生命周期回调 |
 | `examples/demo12_resilience.rs` | 容错与重试 |
 | `examples/demo13_tool_execution.rs` | 工具执行配置 |
-| `examples/demo14_memory_isolation.rs` | 记忆隔离与上下文隔离 |
 | `examples/demo15_structured_output.rs` | 结构化输出（extract / JSON Schema） |
-| `examples/demo16_testing.rs` | Mock 测试基础设施（零真实 LLM 调用） |
 | `examples/demo17_chat.rs` | 多轮对话（chat / chat_stream / reset） |
 | `examples/demo18_semantic_memory.rs` | Store 语义搜索（EmbeddingStore / 向量检索） |
 | `examples/demo19_guard.rs` | Guard 系统（规则 / LLM 内容过滤） |
 | `examples/demo20_audit.rs` | 审计日志 |
-| `examples/demo22_plan_execute.rs` | Plan-and-Execute 规划执行 |
 | `examples/demo23_a2a.rs` | A2A 协议 |
 | `examples/demo24_topology.rs` | 多 Agent 拓扑可视化 |
 | `examples/demo25_macros.rs` | 宏系统综合展示 |

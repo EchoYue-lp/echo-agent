@@ -30,9 +30,9 @@ ToolManager                      ← 注册表 + 执行器
 
 内置工具（builtin）：
     ├─ final_answer              ← Agent 输出最终结果（必须注册）
-    ├─ plan                      ← 触发规划模式（Planner 角色）
-    ├─ create_task / update_task ← 管理 DAG 子任务
-    ├─ agent_tool                ← 分派任务给 SubAgent（Orchestrator 角色）
+    ├─ task_create / task_update ← 版本化任务图 CRUD
+    ├─ task_list                 ← 读取已提交任务图版本
+    ├─ agent_tool                ← 分派任务给已注册 Subagent
     ├─ human_in_loop             ← 向人类请求文本输入
     ├─ remember / recall / forget ← 长期记忆操作
     └─ think                     ← CoT 显式思维工具（已被 CoT 文本方案替代）
@@ -267,7 +267,7 @@ impl Tool for DeleteFileTool {
 | `ShellExec` | 3 | `shell`、`execute` |
 | `Destructive` | 3 | `delete_file`、`drop_table` |
 
-详见 [权限系统](./tool-permissions.md) 了解完整的权限模型、规则引擎和风险分类。
+详见 [安全与权限](./security.md) 了解完整的权限模型、规则引擎和风险分类。
 
 ---
 
@@ -411,7 +411,7 @@ let config = AgentConfig::new("qwen3-max", "agent", "...")
 
 ## 限制特定工具
 
-通过 `allowed_tools` 白名单，限制 Agent 只能使用指定工具，常用于 SubAgent 的能力边界控制：
+通过 `allowed_tools` 白名单，限制 Agent 只能使用指定工具，常用于 Subagent 的能力边界控制：
 
 ```rust
 use echo_agent::tools::others::math::{AddTool, SubtractTool};
@@ -434,11 +434,10 @@ agent.add_tools(vec![
 | 工具名 | 模块 | 说明 |
 |--------|------|------|
 | `final_answer` | builtin | 输出最终结果（自动注册） |
-| `plan` | builtin | 触发任务规划（Planner 模式） |
-| `create_task` | builtin | 创建 DAG 子任务 |
-| `update_task` | builtin | 更新子任务状态 |
-| `list_tasks` | builtin | 列出所有子任务 |
-| `agent_tool` | builtin | 分派任务到 SubAgent |
+| `task_create` | builtin | 原子创建任务图或追加任务 |
+| `task_update` | builtin | 应用乐观并发任务图 patch |
+| `task_list` | builtin | 读取已提交任务图版本 |
+| `agent_tool` | builtin | 分派任务到 Subagent |
 | `human_in_loop` | builtin | 请求人类输入 |
 | `remember` | builtin | 向 Store 写入记忆 |
 | `recall` | builtin | 从 Store 检索记忆 |
@@ -535,4 +534,4 @@ let agent = ReactAgentBuilder::new()
     .build(config);
 ```
 
-详见 [demo64_tool_pipeline.rs](../examples/demo64_tool_pipeline.rs)。
+详见 [demo64_tool_pipeline.rs](../../examples/demo64_tool_pipeline.rs)。

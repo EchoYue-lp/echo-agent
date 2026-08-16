@@ -10,7 +10,7 @@ use crate::agent::InterventionCallback;
 use crate::audit::AuditLogger;
 use crate::memory::snapshot::SnapshotManager;
 use crate::skills::hooks::HookRegistry;
-use crate::tools::{ToolExecutionConfig, ToolFailure, ToolManager};
+use crate::tools::{ToolExecutionConfig, ToolFailure, ToolManager, ToolResult};
 use crate::trace::{RunEvent, RunStatus, RunStore};
 use echo_core::circuit_breaker::CircuitBreaker;
 use echo_core::llm::types::{Message, Role};
@@ -28,8 +28,14 @@ pub(crate) struct ProcessedToolOutput {
 }
 
 pub(crate) struct ToolCallFailure {
+    pub name: String,
     pub error: crate::error::ReactError,
-    pub failure: ToolFailure,
+    pub result: ToolResult,
+}
+
+pub(crate) struct ToolCallSuccess {
+    pub name: String,
+    pub result: ToolResult,
 }
 
 fn is_internal_transcript_message(message: &Message) -> bool {
@@ -756,81 +762,6 @@ impl AgentRunSnapshot {
         }
     }
 
-    // ── TaskNode DAG helpers ─────────────────────────────────────────
-
-    /// Create a new TaskNode for the current execution turn.
-    ///
-    /// Returns the node ID if a state store is configured, `None` otherwise.
-    pub async fn create_execution_node(&self, user_input: &str) -> Option<String> {
-        let store = self.state_store.as_ref()?;
-        let conv_id = self.config.conversation_id.as_ref()?;
-
-        let node_id = format!("exec-{}", uuid::Uuid::new_v4());
-        let name = if user_input.chars().count() > 100 {
-            format!("{}...", user_input.chars().take(100).collect::<String>())
-        } else {
-            user_input.to_string()
-        };
-
-        let node = crate::state::TaskNode::new(&node_id, &name)
-            .with_status(crate::state::TaskNodeStatus::Running);
-
-        if let Err(e) = store.save_node(conv_id, &node).await {
-            tracing::warn!(error = %e, "Failed to create execution TaskNode");
-            return None;
-        }
-
-        tracing::debug!(node_id = %node_id, "Created execution TaskNode (Running)");
-        Some(node_id)
-    }
-
-    /// Update a TaskNode's status.
-    pub async fn update_node_status(&self, node_id: &str, status: crate::state::TaskNodeStatus) {
-        let Some(store) = self.state_store.as_ref() else {
-            return;
-        };
-        let Some(conv_id) = self.config.conversation_id.as_ref() else {
-            return;
-        };
-
-        if let Err(e) = store.update_status(conv_id, node_id, status.clone()).await {
-            tracing::warn!(error = %e, node_id = %node_id, "Failed to update TaskNode status");
-        } else {
-            tracing::debug!(node_id = %node_id, status = ?status, "TaskNode status updated");
-        }
-    }
-
-    /// On resume: set any `Running` TaskNodes to `Hydrated`.
-    pub async fn hydrate_running_nodes(&self) {
-        let Some(store) = self.state_store.as_ref() else {
-            return;
-        };
-        let Some(conv_id) = self.config.conversation_id.as_ref() else {
-            return;
-        };
-
-        let nodes = match store.load_nodes(conv_id).await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to load TaskNodes for hydration");
-                return;
-            }
-        };
-
-        for node in &nodes {
-            if node.status == crate::state::TaskNodeStatus::Running {
-                if let Err(e) = store
-                    .update_status(conv_id, &node.id, crate::state::TaskNodeStatus::Hydrated)
-                    .await
-                {
-                    tracing::warn!(error = %e, node_id = %node.id, "Failed to hydrate TaskNode");
-                } else {
-                    tracing::debug!(node_id = %node.id, "Hydrated previously Running TaskNode");
-                }
-            }
-        }
-    }
-
     // ── Tool execution helpers (delegated from Pipeline stages) ─────
 
     /// Check tool approval via PermissionService.
@@ -1316,9 +1247,9 @@ impl AgentRunSnapshot {
         params: &'a crate::tools::ToolParameters,
         input: &'a serde_json::Value,
         stream_tx: Option<
-            tokio::sync::mpsc::Sender<(String, String, crate::tools::ToolStreamEvent)>,
+            tokio::sync::mpsc::Sender<crate::agent::react::run::pipeline::ToolPipelineEvent>,
         >,
-    ) -> futures::future::BoxFuture<'a, std::result::Result<String, ToolCallFailure>> {
+    ) -> futures::future::BoxFuture<'a, std::result::Result<ToolCallSuccess, ToolCallFailure>> {
         Box::pin(async move {
             // Use the unified pipeline for consistent behavior
             let pipeline = self
@@ -1334,6 +1265,8 @@ impl AgentRunSnapshot {
 
             let mut ctx = crate::agent::react::run::pipeline::ToolExecutionContext {
                 call_id,
+                requested_tool_name: tool_name.to_string(),
+                requested_input: input.clone(),
                 tool_name: tool_name.to_string(),
                 params: params.clone(),
                 input: input.clone(),
@@ -1347,6 +1280,8 @@ impl AgentRunSnapshot {
                 plan_mode: self.config.plan_mode,
                 permission_decision: None,
                 permission_mode_override: None,
+                rewrites: Vec::new(),
+                invocation_emitted: false,
                 stream_tx,
             };
 
@@ -1377,39 +1312,57 @@ impl AgentRunSnapshot {
                         let failure = ctx.block_failure.unwrap_or_else(|| {
                             ToolFailure::new(crate::tools::ToolFailureCategory::Permanent)
                         });
+                        let result = ToolResult::failure(failure.category, reason.clone())
+                            .with_failure(failure);
                         return Err(ToolCallFailure {
+                            name: ctx.tool_name.clone(),
                             error: crate::error::ToolError::ExecutionFailed {
-                                tool: tool_name.to_string(),
+                                tool: ctx.tool_name.clone(),
                                 message: reason,
                             }
                             .into(),
-                            failure,
+                            result,
                         });
                     }
 
-                    // Return the final output (after guard + truncation)
-                    if let Some(result) = ctx.result {
+                    // Return the complete result after guard and output budgeting.
+                    if let Some(mut result) = ctx.result {
                         if result.success {
-                            return Ok(ctx.output.unwrap_or(result.output));
+                            if let Some(output) = ctx.output {
+                                result.output = output;
+                            }
+                            return Ok(ToolCallSuccess {
+                                name: ctx.tool_name,
+                                result,
+                            });
                         }
-                        let message = result.error.unwrap_or_else(|| result.output.clone());
-                        let failure = result.failure.unwrap_or_else(|| {
+                        let message = result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| result.output.clone());
+                        let failure = result.failure.clone().unwrap_or_else(|| {
                             ToolFailure::new(crate::tools::ToolFailureCategory::Permanent)
                         });
+                        result.error = Some(message.clone());
+                        result.failure = Some(failure);
                         return Err(ToolCallFailure {
+                            name: ctx.tool_name.clone(),
                             error: crate::error::ToolError::ExecutionFailed {
-                                tool: tool_name.to_string(),
+                                tool: ctx.tool_name.clone(),
                                 message,
                             }
                             .into(),
-                            failure,
+                            result,
                         });
                     }
+                    let message = "Pipeline completed without result".to_string();
                     Err(ToolCallFailure {
-                        error: crate::error::ReactError::Other(
-                            "Pipeline completed without result".into(),
+                        name: ctx.tool_name,
+                        error: crate::error::ReactError::Other(message.clone()),
+                        result: ToolResult::failure(
+                            crate::tools::ToolFailureCategory::Permanent,
+                            message,
                         ),
-                        failure: ToolFailure::new(crate::tools::ToolFailureCategory::Permanent),
                     })
                 }
                 Err(error) => {
@@ -1420,8 +1373,12 @@ impl AgentRunSnapshot {
                         .is_none_or(|tool| {
                             tool.risk_level() != crate::tools::ToolRiskLevel::ReadOnly
                         });
+                    let failure = ToolFailure::from_error(&error, may_have_side_effects);
+                    let result = ToolResult::failure(failure.category, error.to_string())
+                        .with_failure(failure);
                     Err(ToolCallFailure {
-                        failure: ToolFailure::from_error(&error, may_have_side_effects),
+                        name: ctx.tool_name,
+                        result,
                         error,
                     })
                 }

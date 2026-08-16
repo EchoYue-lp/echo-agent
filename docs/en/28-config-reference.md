@@ -65,7 +65,6 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | `model_name` | `String` | *(required)* | LLM model identifier |
 | `agent_name` | `String` | *(required)* | Agent name for logging |
 | `system_prompt` | `String` | *(required)* | System prompt |
-| `role` | `AgentRole` | `Subagent` | `Orchestrator` or `Subagent` |
 | `max_iterations` | `usize` | `10` | Max reasoning steps per turn |
 | `temperature` | `Option<f32>` | `None` (model default) | LLM temperature (0.0–2.0) |
 | `max_tokens` | `Option<u32>` | `None` (model default) | Max generation tokens |
@@ -75,9 +74,8 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enable_tool` | `bool` | `false` | Enable calling registered tools |
-| `enable_task` | `bool` | `false` | Enable task planning tools |
 | `enable_human_in_loop` | `bool` | `false` | Enable human-in-the-loop approval |
-| `enable_subagent` | `bool` | `false` | Enable sub-agent dispatch |
+| `enable_subagent` | `bool` | `false` | Enable subagent dispatch |
 | `enable_memory` | `bool` | `false` | Enable long-term memory tools |
 | `enable_cot` | `bool` | `false` | Enable chain-of-thought prompting |
 
@@ -213,12 +211,15 @@ ReactAgentBuilder::new()
 ```rust
 ReactAgentBuilder::new()
     .enable_memory()                   // long-term memory
-    .enable_tasks()                    // Revisioned task graph tools
     .enable_human_in_loop()            // approval gate (requires "human-loop" feature)
-    .enable_subagent()                 // sub-agent dispatch (requires "subagent" feature)
+    .enable_subagent()                 // subagent dispatch (requires "subagent" feature)
     .enable_cot()                      // chain-of-thought
     .disable_cot()                     // disable CoT
 ```
+
+The revisioned `task_create`, `task_update`, and `task_list` tools are part of
+the default Agent tool surface. Use `.task_revision_service(...)` to replace
+the default in-memory store and policy.
 
 ### Structured Output
 
@@ -466,7 +467,7 @@ echo_agent = { version = "0.2", features = ["mcp", "web", "shell"] }
 
 | Feature | Description |
 |---------|-------------|
-| `subagent` | Sub-agent dispatch and TeamAgent |
+| `subagent` | Subagent dispatch and TeamSpec-to-DAG execution |
 | `mcp` | Model Context Protocol integration |
 | `tasks` | Task planning and DAG scheduling |
 | `self-reflection` | Self-reflection/evaluation loops |

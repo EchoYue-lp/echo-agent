@@ -1,4 +1,6 @@
 use super::AgentEvent;
+#[cfg(test)]
+use super::ToolInvocation;
 use crate::error::Result;
 use chrono::{DateTime, Utc};
 use futures::stream::{BoxStream, StreamExt};
@@ -8,7 +10,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// Current schema version for the framework event transport contract.
-pub const AGENT_EVENT_SCHEMA_VERSION: u16 = 3;
+pub const AGENT_EVENT_SCHEMA_VERSION: u16 = 4;
 
 macro_rules! identity_id {
     ($name:ident, $label:literal) => {
@@ -144,8 +146,8 @@ fn event_content_hash(parent_event_id: Option<&EventId>, payload: &AgentEvent) -
         }
         None => hasher.update([0]),
     }
-    let encoded = serde_json::to_vec(payload).map_err(|error| {
-        crate::error::ReactError::Other(format!("failed to hash Agent event payload: {error}"))
+    let encoded = crate::utils::canonical_json::canonical_json_bytes(payload).map_err(|error| {
+        crate::error::ReactError::Other(format!("failed to encode Agent event payload: {error}"))
     })?;
     hasher.update(encoded);
     Ok(format!("sha256:{:x}", hasher.finalize()))
@@ -339,14 +341,9 @@ pub fn envelope_event_stream_after<'a>(
             };
             let parent_event_id = match &payload {
                 AgentEvent::ToolResult { call_id, .. }
-                | AgentEvent::ToolError { call_id, .. }
                 | AgentEvent::ToolStream { call_id, .. } => tool_calls.get(call_id).cloned(),
                 _ => identity.parent_event_id.clone(),
             };
-            let is_tool_terminal = matches!(
-                &payload,
-                AgentEvent::ToolResult { .. } | AgentEvent::ToolError { .. }
-            );
             let is_terminal = payload.is_terminal();
             let envelope = match EventEnvelope::new(&identity, sequence, parent_event_id, payload) {
                 Ok(envelope) => envelope,
@@ -359,14 +356,8 @@ pub fn envelope_event_stream_after<'a>(
             if let Some(call_id) = tool_call_id {
                 tool_calls.insert(call_id, envelope.event_id.clone());
             }
-            if is_tool_terminal {
-                match &envelope.payload {
-                    AgentEvent::ToolResult { call_id, .. }
-                    | AgentEvent::ToolError { call_id, .. } => {
-                        tool_calls.remove(call_id);
-                    }
-                    _ => {}
-                }
+            if let AgentEvent::ToolResult { call_id, .. } = &envelope.payload {
+                tool_calls.remove(call_id);
             }
 
             yield Ok(envelope);
@@ -486,15 +477,13 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
                 violations.push(format!("duplicate in-flight tool call: {call_id}"));
             }
             AgentEvent::ToolCall { .. } => {}
-            AgentEvent::ToolResult { call_id, .. } | AgentEvent::ToolError { call_id, .. } => {
-                match tool_calls.remove(call_id) {
-                    Some(parent_id) if event.parent_event_id.as_ref() == Some(&parent_id) => {}
-                    Some(parent_id) => violations.push(format!(
-                        "tool completion {call_id} has wrong parent; expected {parent_id}"
-                    )),
-                    None => violations.push(format!("orphan tool completion: {call_id}")),
-                }
-            }
+            AgentEvent::ToolResult { call_id, .. } => match tool_calls.remove(call_id) {
+                Some(parent_id) if event.parent_event_id.as_ref() == Some(&parent_id) => {}
+                Some(parent_id) => violations.push(format!(
+                    "tool completion {call_id} has wrong parent; expected {parent_id}"
+                )),
+                None => violations.push(format!("orphan tool completion: {call_id}")),
+            },
             AgentEvent::ToolStream { call_id, .. } => {
                 if let Some(parent_id) = tool_calls.get(call_id) {
                     if event.parent_event_id.as_ref() != Some(parent_id) {
@@ -553,13 +542,18 @@ mod tests {
         let raw = stream::iter(vec![
             Ok(AgentEvent::ToolCall {
                 call_id: "call-1".to_string(),
-                name: "shell".to_string(),
-                args: serde_json::json!({}),
+                invocation: ToolInvocation {
+                    requested_name: "shell".to_string(),
+                    requested_args: serde_json::json!({}),
+                    name: "shell".to_string(),
+                    args: serde_json::json!({}),
+                    rewrites: Vec::new(),
+                },
             }),
             Ok(AgentEvent::ToolResult {
                 call_id: "call-1".to_string(),
                 name: "shell".to_string(),
-                output: "done".to_string(),
+                result: crate::tools::ToolResult::success("done"),
             }),
             Ok(AgentEvent::FinalAnswer("ok".to_string())),
         ]);
@@ -584,6 +578,92 @@ mod tests {
                 .is_some_and(|event| event.payload.is_terminal())
         );
         assert!(events.iter().all(|event| event.run_id.is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn content_hash_is_independent_of_tool_metadata_insertion_order() -> Result<()> {
+        let mut forward = crate::tools::ToolResult::success("done");
+        forward
+            .metadata
+            .insert("alpha".to_string(), "1".to_string());
+        forward
+            .metadata
+            .insert("omega".to_string(), "2".to_string());
+
+        let mut reverse = crate::tools::ToolResult::success("done");
+        reverse
+            .metadata
+            .insert("omega".to_string(), "2".to_string());
+        reverse
+            .metadata
+            .insert("alpha".to_string(), "1".to_string());
+
+        let forward = AgentEvent::ToolResult {
+            call_id: "call-1".to_string(),
+            name: "shell".to_string(),
+            result: forward,
+        };
+        let reverse = AgentEvent::ToolResult {
+            call_id: "call-1".to_string(),
+            name: "shell".to_string(),
+            result: reverse,
+        };
+
+        assert_eq!(
+            event_content_hash(None, &forward)?,
+            event_content_hash(None, &reverse)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialized_trajectory_recomputes_canonical_nested_metadata_hashes() -> Result<()> {
+        let tool_call = EventEnvelope::new(
+            &identity(),
+            1,
+            None,
+            AgentEvent::ToolCall {
+                call_id: "call-1".to_string(),
+                invocation: ToolInvocation {
+                    requested_name: "shell".to_string(),
+                    requested_args: serde_json::json!({"command": "true"}),
+                    name: "shell".to_string(),
+                    args: serde_json::json!({"command": "true"}),
+                    rewrites: Vec::new(),
+                },
+            },
+        )?;
+        let mut result = crate::tools::ToolResult::success("done");
+        result.metadata.insert("omega".to_string(), "2".to_string());
+        result.metadata.insert("alpha".to_string(), "1".to_string());
+        let tool_result = EventEnvelope::new(
+            &identity(),
+            2,
+            Some(tool_call.event_id.clone()),
+            AgentEvent::ToolResult {
+                call_id: "call-1".to_string(),
+                name: "shell".to_string(),
+                result,
+            },
+        )?;
+        let expected_result_hash = tool_result.content_hash.clone();
+        let terminal = EventEnvelope::new(
+            &identity(),
+            3,
+            None,
+            AgentEvent::FinalAnswer("done".to_string()),
+        )?;
+        let encoded = serde_json::to_vec(&vec![tool_call, tool_result, terminal])
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        let decoded: Vec<EventEnvelope> = serde_json::from_slice(&encoded)
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+
+        assert!(validate_event_trajectory(&decoded).is_empty());
+        assert_eq!(
+            decoded.get(1).map(|event| event.content_hash.as_str()),
+            Some(expected_result_hash.as_str())
+        );
         Ok(())
     }
 

@@ -21,8 +21,8 @@ pub struct PromptCacheFingerprint {
 ///
 /// 关键：必须跨进程可复现，所以：
 /// 1. 用 SHA-256 而非 `DefaultHasher`（后者跨进程/跨版本不稳）
-/// 2. tools schema 用 canonical JSON（`serde_json::to_string` 对 `Value::Object`
-///    内部使用 `BTreeMap`，默认 sorted keys），避免 key 顺序不确定
+/// 2. tools schema uses the shared recursive canonical JSON encoder, avoiding
+///    map-order differences across processes and feature combinations
 /// 3. 只 hash 稳定段（system + canonical + tools + history），不含 runtime_context
 pub fn stable_prefix_hash(
     system: &[Message],
@@ -115,16 +115,10 @@ fn hash_tool(hasher: &mut Sha256, t: &ToolDefinition) {
     hasher.update(b"TOOL:");
     hasher.update(t.function.name.as_bytes());
     hasher.update(b":");
-    // canonical JSON：sorted keys，确保跨进程一致
-    let canonical = canonical_json_string(&t.function.parameters);
-    hasher.update(canonical.as_bytes());
+    let canonical = crate::utils::canonical_json::canonical_json_bytes(&t.function.parameters)
+        .unwrap_or_default();
+    hasher.update(canonical);
     hasher.update(b"\n");
-}
-
-fn canonical_json_string(v: &serde_json::Value) -> String {
-    // `serde_json::to_string` 对 `Value::Object` 内部使用 `BTreeMap`
-    // （feature "preserve_order" 关闭时），已 sorted keys。
-    serde_json::to_string(v).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -176,11 +170,14 @@ mod tests {
     }
 
     #[test]
-    fn hash_ignores_order_in_tools_schema() {
+    fn hash_ignores_order_in_tools_schema() -> Result<(), serde_json::Error> {
         // 两个 key 顺序不同但内容相同的 JSON 应产生相同 hash
-        let v1: serde_json::Value = serde_json::from_str(r#"{"a":1,"b":2}"#).unwrap();
-        let v2: serde_json::Value = serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap();
-        // Value::Object 默认 BTreeMap，已排序
-        assert_eq!(canonical_json_string(&v1), canonical_json_string(&v2));
+        let v1: serde_json::Value = serde_json::from_str(r#"{"a":1,"b":2}"#)?;
+        let v2: serde_json::Value = serde_json::from_str(r#"{"b":2,"a":1}"#)?;
+        assert_eq!(
+            crate::utils::canonical_json::canonical_json_bytes(&v1)?,
+            crate::utils::canonical_json::canonical_json_bytes(&v2)?
+        );
+        Ok(())
     }
 }

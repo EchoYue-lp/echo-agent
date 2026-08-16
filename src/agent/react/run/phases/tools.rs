@@ -2,11 +2,13 @@
 //! message, split sequential/concurrent batches, execute, dispatch verifier
 //! handoff to `finalize_completed_run` when `final_answer` is accepted.
 
+use super::super::TOOL_CANCELLATION_GRACE_PERIOD;
 use super::super::processor::build_tool_calls_from_map;
 use super::super::stream_macros::{yield_event_or, yield_final_event_or};
 use super::verify::verify_answer;
 use super::{IterOutcome, LoopState, ThinkOutput, with_reasoning_content};
 use crate::agent::AgentEvent;
+use crate::agent::react::run::pipeline::ToolPipelineEvent;
 use crate::agent::react::{StepType, TOOL_FINAL_ANSWER};
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::{ReactError, Result};
@@ -19,12 +21,49 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{Instrument, info_span};
 
-const TOOL_CANCELLATION_GRACE_PERIOD: Duration = Duration::from_secs(5);
 type ToolCallSpec = (String, String, Value);
+
+async fn project_typed_tool_result(
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    result: &crate::tools::ToolResult,
+) {
+    if !result.success {
+        return;
+    }
+    if let echo_core::tools::ToolResultKind::SkillActivation { name } = &result.kind {
+        crate::agent::react::capabilities::project_skill_activation(
+            context,
+            name,
+            result.output.as_str(),
+        )
+        .await;
+    }
+}
 
 enum ToolExecutionWave {
     Concurrent(Vec<ToolCallSpec>),
     Sequential(ToolCallSpec),
+}
+
+fn agent_event(event: ToolPipelineEvent) -> AgentEvent {
+    match event {
+        ToolPipelineEvent::Invocation {
+            call_id,
+            invocation,
+        } => AgentEvent::ToolCall {
+            call_id,
+            invocation,
+        },
+        ToolPipelineEvent::Stream {
+            call_id,
+            name,
+            event,
+        } => AgentEvent::ToolStream {
+            call_id,
+            name,
+            event,
+        },
+    }
 }
 
 async fn close_cancelled_batch(
@@ -140,17 +179,6 @@ pub(crate) async fn run_tools(
         },
         IterOutcome::Abandoned
     );
-    for (id, name, args) in &steps {
-        yield_event_or!(
-            tx,
-            AgentEvent::ToolCall {
-                call_id: id.clone(),
-                name: name.clone(),
-                args: args.clone(),
-            },
-            IterOutcome::Abandoned
-        );
-    }
     {
         let ts: Vec<StepType> = steps
             .iter()
@@ -214,7 +242,10 @@ pub(crate) async fn run_tools(
                     String,
                     (
                         String,
-                        std::result::Result<String, crate::agent::snapshot::ToolCallFailure>,
+                        std::result::Result<
+                            crate::agent::snapshot::ToolCallSuccess,
+                            crate::agent::snapshot::ToolCallFailure,
+                        >,
                     ),
                 > = HashMap::new();
                 if conc.is_empty() {
@@ -327,10 +358,10 @@ pub(crate) async fn run_tools(
                             return Ok(IterOutcome::Abandoned);
                         }
                         Some((id, fname, result)) = futs.next(), if !futs.is_empty() => {
-                            while let Ok((call_id, name, event)) = stream_rx.try_recv() {
+                            while let Ok(event) = stream_rx.try_recv() {
                                 yield_final_event_or!(
                                     tx,
-                                    AgentEvent::ToolStream { call_id, name, event },
+                                    agent_event(event),
                                     IterOutcome::Abandoned
                                 );
                             }
@@ -338,10 +369,10 @@ pub(crate) async fn run_tools(
                         },
                         event = stream_rx.recv(), if stream_open => {
                             match event {
-                                Some((call_id, name, event)) => {
+                                Some(event) => {
                                     yield_final_event_or!(
                                         tx,
-                                        AgentEvent::ToolStream { call_id, name, event },
+                                        agent_event(event),
                                         IterOutcome::Abandoned
                                     );
                                 }
@@ -360,18 +391,22 @@ pub(crate) async fn run_tools(
                 // carries the tool calls in call order, and strict providers reject
                 // misordered tool results with HTTP 400 (F-RCT-04-P1-01).
                 for (id, _fname, _args) in &conc {
-                    let Some((fname, result)) = completed.remove(id) else {
+                    let Some((_requested_name, result)) = completed.remove(id) else {
                         continue;
                     };
                     match result {
-                        Ok(output) => {
+                        Ok(execution) => {
                             batch_success_count = batch_success_count.saturating_add(1);
+                            let fname = execution.name;
+                            let result = execution.result;
+                            let output = result.output.clone();
+                            project_typed_tool_result(context, &result).await;
                             yield_event_or!(
                                 tx,
                                 AgentEvent::ToolResult {
                                     call_id: id.clone(),
                                     name: fname.clone(),
-                                    output: output.clone(),
+                                    result,
                                 },
                                 IterOutcome::Abandoned
                             );
@@ -394,20 +429,25 @@ pub(crate) async fn run_tools(
                         }
                         Err(error) => {
                             batch_failure_count = batch_failure_count.saturating_add(1);
+                            let fname = error.name;
+                            let message = error
+                                .result
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| error.error.to_string());
                             yield_event_or!(
                                 tx,
-                                AgentEvent::ToolError {
+                                AgentEvent::ToolResult {
                                     call_id: id.clone(),
                                     name: fname.clone(),
-                                    error: error.error.to_string(),
-                                    failure: error.failure.clone(),
+                                    result: error.result,
                                 },
                                 IterOutcome::Abandoned
                             );
                             context.lock().await.push(Message::tool_result(
                                 id.clone(),
                                 fname.clone(),
-                                format!("[Error] {}", error.error),
+                                format!("[Error] {message}"),
                             ));
                         }
                     }
@@ -468,49 +508,45 @@ pub(crate) async fn run_tools(
                             );
                         },
                         result = &mut execution => break result,
-                        Some((call_id, name, event)) = stream_rx.recv() => {
+                        Some(event) = stream_rx.recv() => {
                             yield_final_event_or!(
                                 tx,
-                                AgentEvent::ToolStream { call_id, name, event },
+                                agent_event(event),
                                 IterOutcome::Abandoned
                             );
                         }
                     }
                 };
-                while let Ok((call_id, name, event)) = stream_rx.try_recv() {
-                    yield_final_event_or!(
-                        tx,
-                        AgentEvent::ToolStream {
-                            call_id,
-                            name,
-                            event
-                        },
-                        IterOutcome::Abandoned
-                    );
+                while let Ok(event) = stream_rx.try_recv() {
+                    yield_final_event_or!(tx, agent_event(event), IterOutcome::Abandoned);
                 }
                 match result {
-                    Ok(truncated) => {
+                    Ok(execution) => {
                         batch_success_count = batch_success_count.saturating_add(1);
+                        let fname = execution.name;
+                        let result = execution.result;
+                        let output = result.output.clone();
+                        project_typed_tool_result(context, &result).await;
                         yield_event_or!(
                             tx,
                             AgentEvent::ToolResult {
                                 call_id: id.clone(),
                                 name: fname.clone(),
-                                output: truncated.clone(),
+                                result,
                             },
                             IterOutcome::Abandoned
                         );
                         context.lock().await.push(Message::tool_result(
                             id,
                             fname.clone(),
-                            truncated.clone(),
+                            output.clone(),
                         ));
                         if fname == TOOL_FINAL_ANSWER {
                             // Verify answer before accepting
-                            if verify_answer(snap, context, &truncated, state.verifier_retry_count)
+                            if verify_answer(snap, context, &output, state.verifier_retry_count)
                                 .await
                             {
-                                finish_output = Some(truncated);
+                                finish_output = Some(output);
                             } else {
                                 // Verifier failed — continue loop for self-correction
                                 state.verifier_retry_count += 1;
@@ -519,20 +555,25 @@ pub(crate) async fn run_tools(
                     }
                     Err(error) => {
                         batch_failure_count = batch_failure_count.saturating_add(1);
+                        let fname = error.name;
+                        let message = error
+                            .result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| error.error.to_string());
                         yield_event_or!(
                             tx,
-                            AgentEvent::ToolError {
+                            AgentEvent::ToolResult {
                                 call_id: id.clone(),
                                 name: fname.clone(),
-                                error: error.error.to_string(),
-                                failure: error.failure.clone(),
+                                result: error.result,
                             },
                             IterOutcome::Abandoned
                         );
                         context.lock().await.push(Message::tool_result(
                             id,
                             fname.clone(),
-                            format!("[Error] {}", error.error),
+                            format!("[Error] {message}"),
                         ));
                     }
                 }

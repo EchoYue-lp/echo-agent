@@ -7,6 +7,8 @@
 //!
 //! | Feature   | Tools                                     |
 //! |-----------|-------------------------------------------|
+//! | `artifact`| Verified, paged reads of spilled tool output |
+//! | `files`   | Artifact reader and filesystem tools      |
 //! | `web`     | `web` (WebFetchTool, WebSearchTool, WebExtractTool, providers) |
 //! | `chart`   | `chart` (GenerateChartTool)               |
 //! | `data`    | `data` (11 data-analysis tools), `data_quality` (3 data-quality tools) |
@@ -22,8 +24,8 @@
 #[cfg(feature = "shell")]
 #[cfg_attr(docsrs, doc(cfg(feature = "shell")))]
 pub mod code;
-#[cfg(feature = "files")]
-#[cfg_attr(docsrs, doc(cfg(feature = "files")))]
+#[cfg(any(feature = "artifact", feature = "files"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "artifact", feature = "files"))))]
 pub mod files;
 pub mod git_checkpoint;
 #[cfg(any(feature = "web", feature = "media", feature = "research"))]

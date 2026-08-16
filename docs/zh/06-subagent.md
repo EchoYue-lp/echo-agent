@@ -1,8 +1,8 @@
-# 多 Agent 编排（SubAgent / Orchestration）
+# 多 Agent 编排（Subagent / Orchestration）
 
 ## 是什么
 
-多 Agent 编排允许一个主 Agent（Orchestrator）将任务分解后分派给多个专用 SubAgent 执行，最后汇总结果。每个 Agent 是独立的 `ReactAgent` 实例，有自己独立的上下文、工具集、记忆和系统提示词。
+多 Agent 编排允许一个主 Agent（Orchestrator）将任务分解后分派给多个专用 Subagent 执行，最后汇总结果。每个 Agent 是独立的 `ReactAgent` 实例，有自己独立的上下文、工具集、记忆和系统提示词。
 
 ---
 
@@ -18,19 +18,11 @@
 
 ---
 
-## 三种 Agent 角色
+## 能力组合
 
-```rust
-AgentConfig::new(...).role(AgentRole::Orchestrator) // 编排者
-AgentConfig::new(...).role(AgentRole::Subagent)        // 执行者（默认）
-AgentConfig::new(...).role(AgentRole::Planner)       // 任务规划者
-```
-
-| 角色 | 行为 |
-|------|------|
-| `Orchestrator` | 接收用户任务 → 拆解 → 通过 `agent_tool` 分派给 SubAgent → 汇总 |
-| `Subagent` | 接收具体任务 → 使用自己的工具集执行 → 返回结果 |
-| `Planner` | 接收复杂任务 → 先用 `plan` 工具生成 DAG 子任务 → 逐步执行 |
+框架只有一种 `ReactAgent` 运行时。承担编排职责的 Agent 启用 Subagent
+调度并注册专用 `ReactAgent` 或 `MockAgent`。任务规划是独立的版本化工具能力，
+不是 Agent 角色，也不会创建第二套执行器。
 
 ---
 
@@ -56,7 +48,7 @@ math_agent.execute("计算 7 * 8")
 | 隔离维度 | 保证方式 |
 |---------|---------|
 | 上下文（消息历史） | 每个 Agent 是独立的 `ReactAgent` Rust 对象，`ContextManager` 无共享引用 |
-| 工具集 | 每个 SubAgent 独立注册工具，Orchestrator 的工具对 SubAgent 不可见 |
+| 工具集 | 每个 Subagent 独立注册工具，Orchestrator 的工具对 Subagent 不可见 |
 | 长期记忆 | 每个 Agent 使用 `[agent_name, "memories"]` 作为独立 Store namespace |
 | 短期会话 | 每个 Agent 有独立 `conversation_id`，`RuntimeStateStore` 按 conversation 存储运行时状态 |
 
@@ -69,7 +61,7 @@ use echo_agent::prelude::*;
 use echo_agent::tools::others::math::{AddTool, MultiplyTool};
 use echo_agent::tools::others::weather::WeatherTool;
 
-// 1. 创建专用 SubAgent
+// 1. 创建专用 Subagent
 let math_agent = {
     let config = AgentConfig::new("qwen3-max", "math_agent", "你是数学计算专家")
         .enable_tool(true)
@@ -92,12 +84,11 @@ let weather_agent = {
 let main_config = AgentConfig::new(
     "qwen3-max",
     "orchestrator",
-    "你是主编排者，使用 agent_tool 将任务分派给专用 SubAgent：
+    "你是主编排者，使用 agent_tool 将任务分派给专用 Subagent：
      - math_agent: 负责数学计算
      - weather_agent: 负责天气查询
      不要自己直接计算或查询。",
 )
-.role(AgentRole::Orchestrator)
 .enable_subagent(true)
 .enable_tool(true);
 
@@ -113,7 +104,7 @@ println!("{}", result);
 
 ---
 
-## SubAgent 执行流程
+## Subagent 执行流程
 
 ```
 main_agent.execute("...")
@@ -123,7 +114,7 @@ main_agent.execute("...")
     │
     ├─ AgentDispatchTool::execute()
     │      ├─ 从 subagents HashMap 找到 "math_agent"
-    │      ├─ 锁定（AsyncMutex，串行化同名 SubAgent 的并发调用）
+    │      ├─ 锁定（AsyncMutex，串行化同名 Subagent 的并发调用）
     │      └─ math_agent.execute("计算 25 * 3")
     │              ├─ math_agent 用自己的上下文执行
     │              ├─ math_agent 使用自己的工具（add/multiply）
@@ -135,9 +126,9 @@ main_agent.execute("...")
 
 ---
 
-## SubAgent 并发调用
+## Subagent 并发调用
 
-当主 Agent 同时发起对多个 **不同** SubAgent 的调用时（同一次 LLM 响应返回多个 tool_calls），框架自动并行执行：
+当主 Agent 同时发起对多个 **不同** Subagent 的调用时（同一次 LLM 响应返回多个 tool_calls），框架自动并行执行：
 
 ```
 LLM 一次返回：
@@ -145,14 +136,14 @@ LLM 一次返回：
     agent_tool("weather_agent", "查询天气")  ┤ 并行执行（join_all）
 ```
 
-对**同一 SubAgent** 的并发调用通过 `AsyncMutex` 自动排队，保证状态一致性。
+对**同一 Subagent** 的并发调用通过 `AsyncMutex` 自动排队，保证状态一致性。
 
 ---
 
-## 配置 SubAgent 记忆隔离
+## 配置 Subagent 记忆隔离
 
 ```rust
-// SubAgent 启用自己的 session 和 memory，与主 Agent 完全隔离
+// Subagent 启用自己的 session 和 memory，与主 Agent 完全隔离
 let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
     .session_id("sub-a-session-001")
     .conversation_id("sub-a-conv-001")        // 独立 conversation_id（RuntimeStateStore 键）
@@ -164,9 +155,9 @@ let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
 
 ## 最佳实践
 
-1. **给 SubAgent 设置清晰的 `allowed_tools`**，防止越权
-2. **Orchestrator 系统提示词明确列出每个 SubAgent 的职责**，引导 LLM 正确分派
-3. **SubAgent 不要 `enable_subagent(true)`**（避免递归嵌套导致难以调试）
-4. **复杂任务用 Planner 角色配合 DAG 任务系统**，而不是依赖 Orchestrator 临时决策
+1. **给 Subagent 设置清晰的 `allowed_tools`**，防止越权
+2. **Orchestrator 系统提示词明确列出每个 Subagent 的职责**，引导 LLM 正确分派
+3. **Subagent 不要 `enable_subagent(true)`**（避免递归嵌套导致难以调试）
+4. **复杂任务使用版本化任务图工具**，避免在提示词中维护平行的隐式状态
 
-对应示例：`examples/demo04_subagent.rs`、`examples/demo14_memory_isolation.rs`
+对应示例：`examples/demo04_subagent.rs`

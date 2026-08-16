@@ -1,205 +1,79 @@
-# 多 Agent 编排 — SubAgent 与 TeamAgent
+# 多 Agent 编排
 
-## 概述
+echo-agent 只有一个 Subagent 调度入口和一个任务关系运行时。单个已注册
+Subagent 使用 `Sync`、`Fork` 或 `Teammate`；需要声明式协作时使用
+`Team`，框架会把协作意图编译成版本化任务 DAG。
 
-echo-agent 提供两种多 Agent 模式：
+## 单 Subagent 模式
 
-1. **SubAgent** — 父子委托，3 种执行模式（Sync、Fork、Teammate）
-2. **TeamAgent** — 对等协作，4 种策略（ManagerSubagent、Pipeline、Debate、Swarm）
+| 模式 | 父 Agent 行为 | 默认上下文 |
+|---|---|---|
+| `Sync` | 等待结果 | 全新、聚焦的上下文 |
+| `Fork` | 通过自有异步调度执行 | 显式过滤的历史 |
+| `Teammate` | 返回 join/cancel handle | 全新独立上下文 |
 
-两者都在 `subagent` feature flag 下。
+所有模式都通过 `SubagentRegistry` 解析目标并由 `SubagentExecutor` 执行。
+因此工具调用与程序化调度共享 hook、取消、prompt 编译、隔离和 typed event。
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                   多 Agent 模式                           │
-│                                                         │
-│  ┌─────────────────────┐  ┌──────────────────────────┐  │
-│  │      SubAgent        │  │       TeamAgent          │  │
-│  │  (父 → 子)           │  │  (对等 ↔ 对等)            │  │
-│  │                      │  │                          │  │
-│  │  • Sync（阻塞）       │  │  • ManagerSubagent         │  │
-│  │  • Fork（独立）       │  │  • Pipeline              │  │
-│  │  • Teammate（邮箱）   │  │  • Debate                │  │
-│  │                      │  │  • Swarm                 │  │
-│  └─────────────────────┘  └──────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
+## Team 意图
 
----
-
-## Feature 开关
-
-```toml
-[dependencies]
-echo_agent = { version = "0.2", features = ["subagent"] }
-```
-
----
-
-## SubAgent — 父子委托
-
-SubAgent 是较简单的模式：父 Agent 将任务委派给子 Agent。
-
-### 执行模式
-
-| 模式 | 上下文继承 | 通信方式 | 使用场景 |
-|------|-----------|---------|----------|
-| **Sync** | 无（通过 mutex 共享状态） | 返回值 | 简单委派，阻塞等待 |
-| **Fork** | 系统提示词 + 工具 + 近期历史 | 返回值 | 需要父上下文的独立子任务 |
-| **Teammate** | 无 | 邮箱（async mpsc） | 并行独立工作 |
-
-### 注册
+`TeamSpec` 只保存已注册 Subagent 的名称，不持有 Agent 实例、关系 store 或
+scheduler。
 
 ```rust
-use echo_agent::prelude::*;
-use echo_agent::agent::subagent::SubagentBuilder;
+use echo_agent::agent::subagent::{
+    SubagentBuilder, TeamConfig, TeamSpec, TeamStrategy,
+};
 
-let parent = ReactAgentBuilder::new()
-    .model("qwen3-max")
-    .system_prompt("你是协调者")
-    .enable_subagent()
-    .subagent(
-        SubagentBuilder::new("code-explorer")
-            .description("探索和读取代码文件")
-            .model("qwen3-max")
-            .system_prompt("你是代码探索专家")
-            .build()
-    )
-    .subagent(
-        SubagentBuilder::new("web-researcher")
-            .description("在网上搜索信息")
-            .model("qwen3-max")
-            .system_prompt("你是网络研究专家")
-            .build()
-    )
-    .build()?;
-```
-
-### 调度工具
-
-调用 `enable_subagent()` 后，父 Agent 自动获得 `agent_dispatch` 工具。LLM 可以调用它来委派任务：
-
-```
-用户: "读取 src/main.rs 并在网上查找相关文档"
-  → Agent 调用 agent_dispatch("code-explorer", "读取 src/main.rs")
-  → Agent 调用 agent_dispatch("web-researcher", "查找 src/main.rs 中模式的文档")
-  → Agent 综合结果
-```
-
----
-
-## TeamAgent — 对等协作
-
-TeamAgent 是高级模式：多个 Agent 作为对等节点在策略驱动下协作。
-
-### 团队角色
-
-| 角色 | 职责 |
-|------|------|
-| **Leader** | 分解任务、分配工作、综合结果 |
-| **Subagent** | 执行分配的子任务 |
-| **Reviewer** | 验证输出（可选） |
-
-### 四种协作策略
-
-#### 1. ManagerSubagent（默认）
-
-管理者分解任务，分发给工作者，综合结果。
-
-```rust
-use echo_agent::agent::subagent::team::{TeamAgent, TeamAgentBuilder, TeamStrategy};
-
-let team = TeamAgentBuilder::new()
-    .model("qwen3-max")
-    .strategy(TeamStrategy::ManagerSubagent)
-    .member("researcher", "搜索相关信息", TeamRole::Subagent)
-    .member("analyst", "分析发现", TeamRole::Subagent)
-    .member("writer", "撰写最终报告", TeamRole::Subagent)
-    .build()?;
-
-let result = team.execute("写一份关于 Rust 异步模式的报告").await?;
-```
-
-#### 2. Pipeline
-
-Agent 按顺序执行：每个 Agent 的输出成为下一个 Agent 的输入。
-
-```rust
-let team = TeamAgentBuilder::new()
-    .model("qwen3-max")
-    .strategy(TeamStrategy::Pipeline(vec![
-        "researcher".into(),
-        "analyst".into(),
-        "writer".into(),
-    ]))
-    .member("researcher", "研究主题", TeamRole::Subagent)
-    .member("analyst", "分析研究结果", TeamRole::Subagent)
-    .member("writer", "撰写最终输出", TeamRole::Subagent)
-    .build()?;
-```
-
-#### 3. Debate
-
-多个 Agent 独立提出方案，由评判者选择最佳方案。
-
-```rust
-let team = TeamAgentBuilder::new()
-    .model("qwen3-max")
-    .strategy(TeamStrategy::Debate {
-        judge: "judge".into(),
-        debaters: vec!["architect-a".into(), "architect-b".into()],
+let definition = SubagentBuilder::new("review-team")
+    .description("从独立视角审查改动")
+    .team(TeamSpec {
+        strategy: TeamStrategy::ManagerSubagent,
+        manager: "review-lead".to_string(),
+        subagents: vec!["correctness".to_string(), "tests".to_string()],
+        config: TeamConfig { max_concurrent: 2 },
     })
-    .member("judge", "评估方案并选择最佳", TeamRole::Reviewer)
-    .member("architect-a", "提出架构方案 A", TeamRole::Subagent)
-    .member("architect-b", "提出架构方案 B", TeamRole::Subagent)
-    .build()?;
+    .build();
+
+assert_eq!(definition.name, "review-team");
 ```
 
-#### 4. Swarm
+Team definition 与所有引用成员必须注册到同一 `SubagentRegistry`。可用
+`ExecutionMode::Team` 调度，也可调用 `agent_tool` 并传入 `mode: "team"`。
 
-工作按模块/文件分配给多个 Agent，由 reducer 合并发现。
+各策略只负责生成普通任务依赖：
 
-```rust
-let team = TeamAgentBuilder::new()
-    .model("qwen3-max")
-    .strategy(TeamStrategy::Swarm {
-        batch_size: 3,
-        reducer: "synthesizer".into(),
-    })
-    .member("subagent-1", "分析 src/agent/ 下的文件", TeamRole::Subagent)
-    .member("subagent-2", "分析 src/tools/ 下的文件", TeamRole::Subagent)
-    .member("subagent-3", "分析 src/memory/ 下的文件", TeamRole::Subagent)
-    .member("synthesizer", "合并所有发现为报告", TeamRole::Reviewer)
-    .build()?;
+| 策略 | canonical graph |
+|---|---|
+| `ManagerSubagent` | manager 规划 -> 成员任务 -> manager 汇总 |
+| `Pipeline(names)` | 按给定顺序形成依赖链 |
+| `Debate { judge, debaters }` | 并行方案 -> judge 汇总 |
+| `Swarm { reducer }` | 声明的成员分片 -> reducer 汇总 |
+
+已完成依赖的输出会追加到下游 Subagent 的任务 prompt。框架不会从模型自由文本
+中推断另一套状态；每个 claim 只由 canonical `SubagentResult.outcome.status`
+结算。
+
+## 运行时权威
+
+生产数据流为：
+
+```text
+TeamSpec
+  -> TaskRevisionService + InMemoryRevisionedTaskStore
+  -> RuntimeDagExecutor
+  -> SubagentExecutor
+  -> typed SubagentResult
+  -> 在同一 revisioned graph 中精确结算 claim
 ```
 
----
+`RuntimeDagExecutor` 唯一负责 ready frontier、依赖阻塞、并发 wave、取消和终态
+选择。Team 代码只编译意图并提供薄 dispatch adapter。ReAct checkpoint 不再
+重复保存 task node 或任务生命周期状态。
 
-## SubAgent vs TeamAgent
+## 如何选择
 
-| 维度 | SubAgent | TeamAgent |
-|------|----------|-----------|
-| 关系 | 父子 | 对等 |
-| 方向 | 单向调度 | 双向协作 |
-| 上下文 | 隔离（不共享） | 隔离（邮箱通信） |
-| 协调方式 | 父决定 | 策略驱动 |
-| 复杂度 | 简单 | 高级 |
-| 使用场景 | 工具式委派 | 复杂多步工作流 |
-| Feature flag | `subagent` | `subagent` |
-
-### 何时使用哪个
-
-- **SubAgent**：需要将特定任务委派给专业 Agent 时（类似调用工具）。父 Agent 清楚知道要问什么。
-- **TeamAgent**：需要 Agent 协作完成复杂任务时，涉及分解、并行执行或辩论。
-
----
-
-## 执行生命周期
-
-Teammate dispatch 返回拥有等待与取消能力的 handle。TeamAgent 成员执行复用
-同一套 Subagent dispatcher，因此事件、隔离、超时、取消、usage 与终态不由
-另一套团队协议重复实现。
-
----
-
-另见：[06 - SubAgent 编排](./06-subagent.md) 了解原始 SubAgent 文档。
+- 单次聚焦调用且立刻需要结果：`Sync`。
+- 单次隔离调用且显式传递上下文：`Fork`。
+- 调用方需要实时 join/cancel handle：`Teammate`。
+- 协作具有明确成员依赖和最终汇总步骤：`Team`。

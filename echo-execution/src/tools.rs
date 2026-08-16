@@ -23,6 +23,18 @@ fn cancelled_error(tool_name: &str) -> ReactError {
     ))))
 }
 
+fn reject_cancelled(ctx: &ToolContext, tool_name: &str) -> Result<()> {
+    if ctx
+        .cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.is_cancelled())
+    {
+        Err(cancelled_error(tool_name))
+    } else {
+        Ok(())
+    }
+}
+
 async fn acquire_permit(
     semaphore: &Arc<Semaphore>,
     ctx: &ToolContext,
@@ -64,7 +76,11 @@ async fn cancel_aware<T>(
     future: impl std::future::Future<Output = Result<T>>,
     ctx: &ToolContext,
     tool_name: &str,
+    drain_started: bool,
 ) -> Result<T> {
+    if drain_started {
+        return future.await;
+    }
     if let Some(cancel) = ctx.cancel.as_ref() {
         tokio::select! {
             _ = cancel.cancelled() => Err(cancelled_error(tool_name)),
@@ -749,7 +765,7 @@ impl ToolManager {
         tool_name: &str,
         parameters: ToolParameters,
     ) -> Result<ToolResult> {
-        self.execute_tool_inner(tool_name, parameters, &ToolContext::default())
+        self.execute_tool_inner(tool_name, parameters, &ToolContext::default(), false)
             .await
     }
 
@@ -765,7 +781,25 @@ impl ToolManager {
         parameters: ToolParameters,
         ctx: &ToolContext,
     ) -> Result<ToolResult> {
-        self.execute_tool_inner(tool_name, parameters, ctx).await
+        self.execute_tool_inner(tool_name, parameters, ctx, false)
+            .await
+    }
+
+    /// Execute while preserving a bounded caller-owned drain window after start.
+    ///
+    /// Cancellation still rejects a call while it waits for a concurrency
+    /// permit or retry delay. Once the tool future starts, this method does not
+    /// race-drop it. The tool continues to receive `ctx.cancel` for cooperative
+    /// shutdown, while the caller must bound the drain and drop this future
+    /// when its grace period expires.
+    pub async fn execute_tool_with_context_draining_started(
+        &self,
+        tool_name: &str,
+        parameters: ToolParameters,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult> {
+        self.execute_tool_inner(tool_name, parameters, ctx, true)
+            .await
     }
 
     /// Shared body of [`Self::execute_tool`] / [`Self::execute_tool_with_context`]:
@@ -776,12 +810,14 @@ impl ToolManager {
         tool_name: &str,
         parameters: ToolParameters,
         ctx: &ToolContext,
+        drain_started: bool,
     ) -> Result<ToolResult> {
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
         validate_parameters_against_schema(tool.as_ref(), &parameters)?;
         tool.validate_parameters(&parameters).await?;
+        reject_cancelled(ctx, tool_name)?;
 
         // 并发控制：获取信号量许可（读/写分离）
         let is_read = tool.risk_level() == ToolRiskLevel::ReadOnly;
@@ -811,6 +847,8 @@ impl ToolManager {
                 None
             }
         };
+
+        reject_cancelled(ctx, tool_name)?;
 
         let max_retries = if self.config.retry_on_fail {
             self.config.max_retries
@@ -846,7 +884,7 @@ impl ToolManager {
                     tool.execute_with_context(parameters.clone(), ctx).await
                 }
             };
-            let result = cancel_aware(execution, ctx, tool_name).await;
+            let result = cancel_aware(execution, ctx, tool_name, drain_started).await;
 
             match result {
                 Ok(result) if result.success => return Ok(result),
@@ -915,9 +953,35 @@ impl ToolManager {
         ctx: &ToolContext,
         event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
     ) -> Result<ToolResult> {
+        self.execute_tool_stream_with_context_inner(tool_name, parameters, ctx, event_tx, false)
+            .await
+    }
+
+    /// Streaming counterpart of
+    /// [`Self::execute_tool_with_context_draining_started`].
+    pub async fn execute_tool_stream_with_context_draining_started(
+        &self,
+        tool_name: &str,
+        parameters: ToolParameters,
+        ctx: &ToolContext,
+        event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
+    ) -> Result<ToolResult> {
+        self.execute_tool_stream_with_context_inner(tool_name, parameters, ctx, event_tx, true)
+            .await
+    }
+
+    async fn execute_tool_stream_with_context_inner(
+        &self,
+        tool_name: &str,
+        parameters: ToolParameters,
+        ctx: &ToolContext,
+        event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
+        drain_started: bool,
+    ) -> Result<ToolResult> {
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        reject_cancelled(ctx, tool_name)?;
 
         let is_read = tool.risk_level() == ToolRiskLevel::ReadOnly;
 
@@ -934,6 +998,8 @@ impl ToolManager {
                 None
             }
         };
+
+        reject_cancelled(ctx, tool_name)?;
 
         let max_retries = if self.config.retry_on_fail {
             self.config.max_retries
@@ -1008,7 +1074,7 @@ impl ToolManager {
                     consume_stream.await
                 }
             };
-            let result = cancel_aware(execution, ctx, tool_name).await;
+            let result = cancel_aware(execution, ctx, tool_name, drain_started).await;
 
             match result {
                 Ok(result) if result.success => return Ok(result),
@@ -1061,7 +1127,7 @@ mod execute_with_context_tests {
     use futures::Stream;
     use std::path::PathBuf;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
 
     /// Records the `ToolContext` it was called with, so we can verify
@@ -1081,6 +1147,50 @@ mod execute_with_context_tests {
     struct PendingTool {
         name: &'static str,
         started: Arc<tokio::sync::Notify>,
+    }
+
+    struct CompletingAfterCancellationTool {
+        started: Arc<tokio::sync::Notify>,
+        finished: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct TimedOutTool {
+        active: Arc<AtomicUsize>,
+    }
+
+    struct ActiveExecution(Arc<AtomicUsize>);
+
+    impl Drop for ActiveExecution {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    impl Tool for TimedOutTool {
+        fn name(&self) -> &str {
+            "timed_out"
+        }
+
+        fn description(&self) -> &str {
+            "remains pending until the manager deadline"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.active.fetch_add(1, AtomicOrdering::SeqCst);
+                let _active = ActiveExecution(Arc::clone(&self.active));
+                std::future::pending::<()>().await;
+                Ok(ToolResult::success("unreachable"))
+            })
+        }
     }
 
     impl Tool for PendingTool {
@@ -1104,6 +1214,33 @@ mod execute_with_context_tests {
                 self.started.notify_one();
                 std::future::pending::<()>().await;
                 Ok(ToolResult::success("unreachable"))
+            })
+        }
+    }
+
+    impl Tool for CompletingAfterCancellationTool {
+        fn name(&self) -> &str {
+            "completing_after_cancellation"
+        }
+
+        fn description(&self) -> &str {
+            "reaches a terminal safe point after cancellation"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                self.started.notify_one();
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                self.finished.store(true, AtomicOrdering::SeqCst);
+                Ok(ToolResult::success("completed"))
             })
         }
     }
@@ -1502,6 +1639,41 @@ mod execute_with_context_tests {
     }
 
     #[tokio::test]
+    async fn q_flt_v04_tool_timeout_has_one_typed_outcome_and_no_live_future()
+    -> echo_core::error::Result<()> {
+        let active = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 5,
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: None,
+            max_read_concurrency: None,
+        });
+        manager.register(Box::new(TimedOutTool {
+            active: Arc::clone(&active),
+        }));
+
+        let error = manager
+            .execute_tool("timed_out", ToolParameters::new())
+            .await
+            .err()
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other(
+                    "pending tool unexpectedly completed".to_string(),
+                )
+            })?;
+
+        assert!(matches!(
+            &error,
+            echo_core::error::ReactError::Tool(inner)
+                if matches!(inner.as_ref(), echo_core::error::ToolError::Timeout(name) if name == "timed_out")
+        ));
+        assert_eq!(active.load(AtomicOrdering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn internally_timed_tool_stream_bypasses_ordinary_execution_timeout()
     -> echo_core::error::Result<()> {
         let manager = ToolManager::new_with_config(ToolExecutionConfig {
@@ -1736,6 +1908,63 @@ mod execute_with_context_tests {
             ReactError::Other(format!("running tool task failed to join: {error}"))
         })?;
         assert!(first_result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draining_started_tool_reaches_terminal_safe_point() -> echo_core::error::Result<()> {
+        let manager = Arc::new(ToolManager::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        manager.try_register(Box::new(CompletingAfterCancellationTool {
+            started: Arc::clone(&started),
+            finished: Arc::clone(&finished),
+            calls: Arc::clone(&calls),
+        }))?;
+
+        let cancel = Arc::new(tokio_util::sync::CancellationToken::new());
+        let ctx = ToolContext {
+            cancel: Some(Arc::clone(&cancel)),
+            ..ToolContext::default()
+        };
+        let execution_manager = Arc::clone(&manager);
+        let execution = tokio::spawn(async move {
+            execution_manager
+                .execute_tool_with_context_draining_started(
+                    "completing_after_cancellation",
+                    ToolParameters::new(),
+                    &ctx,
+                )
+                .await
+        });
+
+        started.notified().await;
+        cancel.cancel();
+        let result = execution.await.map_err(|error| {
+            ReactError::Other(format!("draining tool task failed to join: {error}"))
+        })??;
+        assert!(result.success);
+        assert!(finished.load(AtomicOrdering::SeqCst));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+
+        let cancelled_before_start = Arc::new(tokio_util::sync::CancellationToken::new());
+        cancelled_before_start.cancel();
+        let cancelled_ctx = ToolContext {
+            cancel: Some(cancelled_before_start),
+            ..ToolContext::default()
+        };
+        assert!(
+            manager
+                .execute_tool_with_context_draining_started(
+                    "completing_after_cancellation",
+                    ToolParameters::new(),
+                    &cancelled_ctx,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         Ok(())
     }
 

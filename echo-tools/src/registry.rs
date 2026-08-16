@@ -21,10 +21,12 @@ use std::sync::Arc;
 /// of mutating state, not just prompt-constrained.
 #[allow(unused_variables)]
 pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
+    #[cfg(feature = "artifact")]
+    tool_manager.register(Box::new(crate::files::artifact::ReadArtifactTool));
+
     // ── files (read-only subset) ──────────────────────────────────────────
     #[cfg(feature = "files")]
     {
-        use crate::files::artifact::ReadArtifactTool;
         use crate::files::code_search::CodeSearchTool;
         use crate::files::diff::DiffTool;
         use crate::files::files::{ListDirTool, ReadFileTool};
@@ -33,7 +35,6 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
         use crate::files::repo_map::RepoMapTool;
 
         tool_manager.register(Box::new(ReadFileTool::new()));
-        tool_manager.register(Box::new(ReadArtifactTool));
         tool_manager.register(Box::new(ListDirTool::new()));
         tool_manager.register(Box::new(GrepTool::new()));
         tool_manager.register(Box::new(GlobTool::new()));
@@ -199,6 +200,9 @@ pub fn register_all_tools_with_cells(
     tool_manager: &mut dyn ToolRegistrar,
     cells: Option<Arc<dyn CommandCellRegistry>>,
 ) {
+    #[cfg(feature = "artifact")]
+    tool_manager.register(Box::new(crate::files::artifact::ReadArtifactTool));
+
     // ── shell ─────────────────────────────────────────────────────────────
     #[cfg(feature = "shell")]
     {
@@ -217,7 +221,6 @@ pub fn register_all_tools_with_cells(
     // ── files ─────────────────────────────────────────────────────────────
     #[cfg(feature = "files")]
     {
-        use crate::files::artifact::ReadArtifactTool;
         use crate::files::code_search::CodeSearchTool;
         use crate::files::diff::DiffTool;
         use crate::files::edit::EditFileTool;
@@ -230,7 +233,6 @@ pub fn register_all_tools_with_cells(
         use crate::files::repo_map::RepoMapTool;
 
         tool_manager.register(Box::new(ReadFileTool::new()));
-        tool_manager.register(Box::new(ReadArtifactTool));
         tool_manager.register(Box::new(WriteFileTool::new()));
         tool_manager.register(Box::new(AppendFileTool::new()));
         tool_manager.register(Box::new(ListDirTool::new()));

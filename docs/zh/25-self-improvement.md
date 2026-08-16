@@ -72,7 +72,7 @@
 | **SkillSimilarityDetector / SkillMerger** | 检测重叠技能并合并 | `evolution/` |
 | **SkillHealthMonitor** | 技能健康评分（驱动弃用） | `evolution/` |
 | **SkillPatcher** | 从失败遥测生成技能补丁 | `evolution/` |
-| **RulePromoter** | 高置信度记忆→AGENTS.md 规则 | `echo-agent-app-core` |
+| **RulePromoter** | 高置信度记忆→产品自有 learned rules | `echo-agent-app-core` |
 | **ReviewIntegration / Dashboard** | 产品层审查调度与状态仪表盘 | `echo-agent-app-core` |
 
 ---
@@ -223,7 +223,7 @@ use std::path::PathBuf;
 let mgr = MemoryLayerManager::new(
     PathBuf::from(".echo-agent"),
     arc_store,
-    Box::new(JsonlChangeLog::new(PathBuf::from(".echo-agent/evolution/change-log.jsonl"))),
+    Box::new(JsonlChangeLog::new(PathBuf::from(".echo-agent/evolution/change-log.jsonl"))?),
 );
 
 // 写入（自动扫描密钥/注入，并按置信度判断是否进热层）
@@ -319,14 +319,16 @@ let transitions = curator.apply_transitions()?; // 按闲置时间自动转换
    // report.new_candidates / report.reinforced
    ```
 
-2. **`SkillDraftGenerator`** 从候选用模板生成草稿 `SKILL.md`，保存到 `.echo-agent/skills/_drafts/<name>/SKILL.md`。
+2. **`SkillDraftGenerator`** 从候选用模板生成草稿 `SKILL.md`，保存到消费方传入的 evolution root 下 `skills/_drafts/<name>/SKILL.md`。
 
    ```rust
    use echo_agent::evolution::SkillDraftGenerator;
-   let gen = SkillDraftGenerator::new(".echo-agent".into(), &change_log);
+   let gen = SkillDraftGenerator::new(".eko".into(), &change_log);
    let result = gen.generate_from_candidate(&candidate).await?;
    // result.skill_md_path 指向生成的草稿
    ```
+
+   EKO 当前传入 `.eko`，因此草稿位于 `.eko/skills/_drafts/<name>/SKILL.md`。这一产品路径应以 [EKO app-core 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) 为准。
 
 3. 人工审查后通过 `/skill-promote <name>` 将 Draft 移至 Active，技能即出现在技能目录中。
 
@@ -354,7 +356,7 @@ for report in monitor.analyze_all_skills().await? {
 
 ### 规则晋升（产品层）
 
-`RulePromoter`（位于 `echo-agent-app-core`）扫描高置信度记忆（confidence≥0.95, stability≥0.9, revision_count==0），生成 `RuleProposal`，经 `/rule-promote` 人工批准后写入 `.echo-agent/AGENTS.md`，源记忆标记为 `Superseded`。
+`RulePromoter` 是 EKO 的产品策略，不是框架持久化契约。EKO 当前会先审查高置信度记忆提案，再把批准的规则写入 `.eko/learned-rules.md`；权威阈值与工作流应以 [EKO app-core 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) 为准。
 
 ### 安全加固 — `EvolutionSecurityGuard`
 

@@ -514,4 +514,42 @@ mod tests {
                 .is_some_and(|message| message.reasoning_blocks.is_none())
         );
     }
+
+    #[test]
+    fn literal_stream_chunks_preserve_tool_identity_and_terminal_usage()
+    -> std::result::Result<(), serde_json::Error> {
+        let tool: ChatCompletionChunk = serde_json::from_str(
+            r#"{"id":"chatcmpl-1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-7","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}"#,
+        )?;
+        let tool_call = tool
+            .choices
+            .first()
+            .and_then(|choice| choice.delta.tool_calls.as_ref())
+            .and_then(|calls| calls.first());
+        assert!(matches!(
+            tool_call,
+            Some(call)
+                if call.id.as_deref() == Some("call-7")
+                    && call.function.as_ref().and_then(|value| value.name.as_deref())
+                        == Some("read_file")
+                    && call.function.as_ref().and_then(|value| value.arguments.as_deref())
+                        == Some("{\"path\":")
+        ));
+
+        let terminal: ChatCompletionChunk = serde_json::from_str(
+            r#"{"id":"chatcmpl-1","choices":[{"index":0,"delta":null,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":5}}}"#,
+        )?;
+        assert!(terminal.choices.first().is_some_and(|choice| {
+            choice.delta.content.is_none() && choice.finish_reason.as_deref() == Some("tool_calls")
+        }));
+        assert!(terminal.usage.as_ref().is_some_and(|usage| {
+            usage.total_tokens == Some(14)
+                && usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.cached_tokens)
+                    == Some(5)
+        }));
+        Ok(())
+    }
 }

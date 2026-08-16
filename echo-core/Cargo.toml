@@ -49,3 +49,6 @@ regex = "1"
 globset = { version = "0.4", optional = true }
 libc = "0.2"
 fs2 = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

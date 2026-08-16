@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 
 use crate::skills::registry::SkillRegistry;
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult};
+use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult, ToolResultKind};
 
 fn activate_allowed_tools(ctx: &ToolContext, allowed_tools: &[String]) -> Vec<String> {
     let Some(visibility) = ctx.tool_visibility.as_ref() else {
@@ -147,19 +147,6 @@ impl Tool for ActivateSkillTool {
                 .map(|descriptor| descriptor.allowed_tools.clone())
                 .unwrap_or_default();
 
-            if registry.is_activated(&name) {
-                let activated_tools = activate_allowed_tools(ctx, &allowed_tools);
-                let mut result = ToolResult::success(format!(
-                    "Skill '{}' is already activated in this session. \
-                     Its instructions are already in context.",
-                    name
-                ));
-                result
-                    .metadata
-                    .insert("activated_tools".to_string(), activated_tools.join(","));
-                return Ok(result);
-            }
-
             match registry
                 .activate_with_args(
                     &name,
@@ -171,7 +158,10 @@ impl Tool for ActivateSkillTool {
                 Ok(content) => {
                     let block = content.to_prompt_block();
                     let activated_tools = activate_allowed_tools(ctx, &allowed_tools);
-                    let mut result = ToolResult::success(block);
+                    let mut result = ToolResult::success_with_kind(
+                        ToolResultKind::SkillActivation { name: name.clone() },
+                        block,
+                    );
                     result
                         .metadata
                         .insert("activated_tools".to_string(), activated_tools.join(","));
@@ -241,6 +231,12 @@ mod tests {
         assert_eq!(
             result.metadata.get("activated_tools").map(String::as_str),
             Some("git_status")
+        );
+        assert_eq!(
+            result.kind,
+            ToolResultKind::SkillActivation {
+                name: "git-skill".to_string()
+            }
         );
         std::fs::remove_dir_all(root)?;
         Ok(())

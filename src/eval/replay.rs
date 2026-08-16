@@ -108,7 +108,7 @@ impl TrajectoryReplay {
                     }
                     last_iteration = *iteration;
                 }
-                RunEvent::SubAgentRun { outcome, .. }
+                RunEvent::SubagentRun { outcome, .. }
                     if !matches!(outcome.as_str(), "completed" | "failed" | "cancelled") =>
                 {
                     violations.push(format!("invalid subagent outcome: {outcome}"));
@@ -501,7 +501,7 @@ mod tests {
                 output_handling: None,
                 artifact: None,
             },
-            RunEvent::SubAgentRun {
+            RunEvent::SubagentRun {
                 agent_name: "reviewer".into(),
                 task: "检查 UTF-8 🧪".into(),
                 outcome: "completed".into(),
@@ -541,7 +541,7 @@ mod tests {
                 risk: None,
                 duration_ms: 0,
             },
-            RunEvent::SubAgentRun {
+            RunEvent::SubagentRun {
                 agent_name: "reviewer".into(),
                 task: "review".into(),
                 outcome: "unknown".into(),

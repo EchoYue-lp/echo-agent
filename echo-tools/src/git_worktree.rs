@@ -1,6 +1,6 @@
-//! Git worktree management for parallel sub-agent isolation.
+//! Git worktree management for parallel subagent isolation.
 //!
-//! When multiple sub-agents work on the same repository, each gets its own
+//! When multiple subagents work on the same repository, each gets its own
 //! worktree to avoid file conflicts. Worktrees share the same .git object
 //! store, so they're lightweight.
 

@@ -1392,6 +1392,12 @@ mod tests {
         fn record(&self, _entry: ChangeEntry) -> Result<()> {
             Ok(())
         }
+        fn record_idempotent(
+            &self,
+            _entry: ChangeEntry,
+        ) -> Result<super::super::audit::ChangeRecordOutcome> {
+            Ok(super::super::audit::ChangeRecordOutcome::AlreadyRecorded)
+        }
         fn query(&self, _filter: &super::super::audit::ChangeFilter) -> Result<Vec<ChangeEntry>> {
             Ok(Vec::new())
         }

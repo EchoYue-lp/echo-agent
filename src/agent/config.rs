@@ -10,33 +10,6 @@ use std::sync::Arc;
 /// Conservative context limit used when no model profile or explicit limit is available.
 pub const DEFAULT_TOKEN_LIMIT: usize = 128_000;
 
-/// Agent role enum, determining its responsibility scope in a multi-agent system.
-///
-/// # Current usage
-///
-/// - `Orchestrator`: Used in `TaskExecutor::build_execute_fn` (`react/planning.rs`).
-///   The orchestrator prioritizes dispatching tasks to registered SubAgents
-///   rather than calling the LLM directly.
-///   Suitable for the "leader" role in multi-agent collaboration scenarios.
-///
-/// - `Subagent` (default): Executes tasks directly via LLM without dispatching to SubAgents.
-///   Suitable for agents that independently perform specific tasks.
-///
-/// # Note
-///
-/// This role field currently **only** affects behavior in the TaskExecutor's execution logic.
-/// It has no additional effect in other modules (ReactAgent, PlanExecute, etc.).
-#[derive(Default, Debug, Clone, PartialEq)]
-pub enum AgentRole {
-    /// Orchestrator: responsible for task planning, allocation, and coordinating sub-agents; does not hold business tools.
-    /// Prioritizes dispatching to SubAgents in TaskExecutor.
-    Orchestrator,
-    /// Subagent (default): focuses on specific task execution, only carries business tools,
-    /// does not hold task management/sub-agent scheduling capabilities. Executes tasks directly via LLM.
-    #[default]
-    Subagent,
-}
-
 /// Agent runtime configuration
 ///
 /// Configure parameters via builder chain calls, then pass to `ReactAgent::new`.
@@ -52,7 +25,6 @@ pub struct AgentConfig {
     pub(crate) model_profile: Option<echo_core::llm::capabilities::ModelProfile>,
     /// Tool allowlist (empty = no restriction, all registered tools can be called)
     pub(crate) allowed_tools: Vec<String>,
-    pub(crate) role: AgentRole,
     /// Whether to allow registering and calling business tools (e.g., math, weather, etc.)
     pub(crate) enable_tool: bool,
     /// When `enable_tool` is true, register only **read-only** tools (no shell,
@@ -90,13 +62,6 @@ pub struct AgentConfig {
     #[cfg(feature = "subagent")]
     pub(crate) subagent_data_workspace_factory:
         Option<std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>>,
-    /// Sprint 11: optional state store for team-mode checkpoint/resume. When
-    /// set, `dispatch_team` plumbs it into `TeamAgent` so `ManagerSubagentOrchestrator`
-    /// can read/write checkpoint nodes keyed by run_id. `None` (default) =
-    /// teams run in-memory (no persistence).
-    #[cfg(feature = "subagent")]
-    pub(crate) subagent_runtime_state_store:
-        Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
     /// Prompt compiler shared by direct tool dispatch and programmatic delegation.
     #[cfg(feature = "subagent")]
     pub(crate) subagent_prompt_compiler:
@@ -212,7 +177,6 @@ impl AgentConfig {
             run_budget: echo_core::agent::RunBudgetPolicy::default(),
             model_profile: None,
             allowed_tools: Vec::new(),
-            role: AgentRole::default(),
             enable_tool: false,
             readonly_tools: false,
             command_cells: None,
@@ -223,8 +187,6 @@ impl AgentConfig {
             subagent_worktree_factory: None,
             #[cfg(feature = "subagent")]
             subagent_data_workspace_factory: None,
-            #[cfg(feature = "subagent")]
-            subagent_runtime_state_store: None,
             #[cfg(feature = "subagent")]
             subagent_prompt_compiler: std::sync::Arc::new(
                 crate::agent::subagent::DefaultSubagentPromptCompiler,
@@ -316,19 +278,6 @@ impl AgentConfig {
 
     // ── Original Builder Methods ─────────────────────────────────────────────────────
 
-    /// Set Agent role
-    ///
-    /// # Parameters
-    /// * `role` - Agent role (`AgentRole::Orchestrator` or `AgentRole::Subagent`)
-    ///
-    /// # Description
-    /// - `Orchestrator`: orchestrator role, responsible for task planning, allocation, and coordinating sub-agents
-    /// - `Subagent`: subagent role, focused on specific task execution
-    pub fn role(mut self, role: AgentRole) -> Self {
-        self.role = role;
-        self
-    }
-
     /// Enable or disable tool calling
     ///
     /// # Parameters
@@ -389,7 +338,7 @@ impl AgentConfig {
     /// * `enabled` - `true` to enable subagent dispatch, `false` to disable
     ///
     /// # Description
-    /// When enabled, the Agent can use the `agent_tool` tool to dispatch other sub-agents for task execution
+    /// When enabled, the Agent can use the `agent_tool` tool to dispatch other subagents for task execution
     pub fn enable_subagent(mut self, enabled: bool) -> Self {
         self.enable_subagent = enabled;
         self
@@ -427,20 +376,6 @@ impl AgentConfig {
         factory: std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>,
     ) -> Self {
         self.subagent_data_workspace_factory = Some(factory);
-        self
-    }
-
-    /// Supply a `RuntimeStateStore` for team-mode checkpoint/resume (Sprint 11).
-    /// When set, `dispatch_team` plumbs it into `TeamAgent` so a timed-out team
-    /// run can resume by skipping already-completed plan/subagent/synthesis
-    /// phases (DAG skip-on-resume pattern). Default: `None` (teams in-memory).
-    /// The application supplies a `FileRuntimeStateStore` (or other impl).
-    #[cfg(feature = "subagent")]
-    pub fn subagent_runtime_state_store(
-        mut self,
-        store: std::sync::Arc<dyn crate::state::RuntimeStateStore>,
-    ) -> Self {
-        self.subagent_runtime_state_store = Some(store);
         self
     }
 
@@ -1129,13 +1064,6 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_config_role() {
-        let config = AgentConfig::new("model", "agent", "prompt").role(AgentRole::Orchestrator);
-
-        assert_eq!(config.role, AgentRole::Orchestrator);
-    }
-
-    #[test]
     fn test_agent_config_model_name_mutation() {
         let mut config = AgentConfig::new("model1", "agent", "prompt");
 
@@ -1166,10 +1094,5 @@ mod tests {
             AgentConfig::new("model", "agent", "prompt").memory_path("/custom/path/store.json");
 
         assert_eq!(config.get_memory_path(), "/custom/path/store.json");
-    }
-
-    #[test]
-    fn test_agent_role_default() {
-        assert_eq!(AgentRole::default(), AgentRole::Subagent);
     }
 }

@@ -112,31 +112,33 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 
 | Feature | In `full`? | Description |
 |---------|-----------|-------------|
-| `full` | — | Meta-feature: enables all flags listed below |
-| `web` | yes | Web search + page fetch (DuckDuckGo/Brave/Tavily) |
+| `full` | — | Meta-feature: enables every flag listed below |
+| `a2a` | yes | Agent-to-Agent protocol server and client |
 | `mcp` | yes | Model Context Protocol client |
-| `media` | yes | PDF/Excel/Word/image extraction |
-| `channels` | yes | QQ Bot + Feishu IM integrations |
+| `lsp` | yes | Language Server Protocol integration |
+| `sqlite` | yes | SQLite-backed persistent state |
+| `telemetry` | yes | OpenTelemetry tracing and metrics |
 | `human-loop` | yes | Human-in-the-loop approval (Console/Webhook/WebSocket) |
-| `plan-execute` | yes | Plan-then-execute agent pattern |
-| `self-reflection` | yes | LLM self-critique and refinement |
-| `subagent` | yes | Multi-agent orchestration |
-| `sqlite` | yes | SQLite-backed persistent memory |
-| `telemetry` | yes | OpenTelemetry tracing + metrics |
-| `a2a` | yes | Agent-to-Agent protocol (server + client) |
 | `topology` | yes | Multi-agent topology tracking |
 | `tasks` | yes | DAG task scheduling |
+| `subagent` | yes | Subagent orchestration |
+| `web` | yes | Web search and page fetch |
+| `media` | yes | PDF/Excel/Word/image extraction |
 | `data` | yes | Polars-powered data tools |
-| `rag` | yes | Retrieval-Augmented Generation |
-| `research` | no | ArXiv, Semantic Scholar, PDF fetch, BibTeX tools |
-| `chart` | yes | Chart generation tools |
+| `statistics` | yes | Statistical analysis tools |
+| `channels` | yes | QQ Bot and Feishu IM integrations |
 | `git` | yes | Git operations tools |
-| `shell` | yes | Restricted shell command execution |
-| `files` | yes | File system read/write tools |
-| `sandbox` | yes | Container/local sandbox execution |
-| `database` | no | SQL database tools (requires `sqlx`) |
-| `content-guard` | no | Content filtering guardrails |
-| `project-rules` | no | `.claude/rules` project rule parsing |
+| `database` | yes | SQL database tools |
+| `rag` | yes | Retrieval-Augmented Generation |
+| `chart` | yes | Chart generation tools |
+| `content-guard` | yes | Content filtering guardrails |
+| `project-rules` | yes | Project rule parsing |
+| `shell` | yes | Shell command execution tools |
+| `files` | yes | File system tools |
+| `research` | yes | ArXiv, Semantic Scholar, PDF fetch, and BibTeX tools |
+| `eval` | yes | Evaluation primitives |
+| `improve` | yes | Self-improvement primitives |
+| `testing` | yes | Public mocks and test helpers |
 
 ---
 
@@ -162,7 +164,7 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
                     │  └──────────┘  └──────────────┘  │
                     │                                  │
                     │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  Skills   │  │   SubAgent    │  │
+                    │  │  Skills   │  │   Subagent    │  │
                     │  │ Registry  │  │   Registry    │  │
                     │  └──────────┘  └──────────────┘  │
                     └────────────────┬────────────────┘
@@ -202,11 +204,11 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 
 | Feature | Description | API Preview |
 |---------|-------------|-------------|
-| **SubAgent** | Sync / Fork / Teammate execution modes | `agent.register_agent(sub)` |
-| **Task Graph** | Revisioned task CRUD on one dependency graph | `.enable_tasks()` |
+| **Subagent** | Sync / Fork / Teammate execution modes | `agent.register_agent(sub)` |
+| **Task Graph** | Revisioned task CRUD on one dependency graph | `task_create` / `task_update` / `task_list` |
 | **Self-Review** | LLM-based quality critique as a tool | `ReviewTool::new(critic)` |
 | **Graph Workflow** | Linear, conditional, loop, parallel fan-out/fan-in | `GraphBuilder::new("pipeline")` |
-| **DAG Tasks** | Dependency-aware task scheduling with hooks | `TaskManager::default()` |
+| **DAG Tasks** | Revisioned CRUD plus dependency-aware execution | `TaskRevisionService::new(...)` |
 | **Declarative Workflow** | Define graphs in YAML/JSON — no Rust code needed | `Graph::from_yaml("wf.yaml")?` |
 
 ### Integrations
@@ -230,48 +232,9 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 
 ## Feature Flags
 
-```toml
-# Minimal — just the ReAct engine
-echo-agent = { version = "0.2.0", default-features = false }
-
-# Full (default) — all features enabled
-echo-agent = "0.2.0"
-
-# Pick only what you need
-echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "web"] }
-```
-
-| Feature | Enables | Key Dependencies |
-|---------|---------|------------------|
-| `mcp` | MCP protocol client | `echo-mcp`, `tokio-tungstenite` |
-| `web` | Web search + fetch tools | `scraper`, `html2text` |
-| `media` | PDF, Excel, Word, Image tools | `lopdf`, `calamine`, `docx-rs` |
-| `data` | Polars data analysis | `polars` |
-| `sqlite` | SQLite memory persistence | `rusqlite` |
-| `channels` | QQ Bot + Feishu integrations | `echo-channels` |
-| `human-loop` | Human-in-the-loop approvals | `tokio-tungstenite` |
-| `tasks` | DAG task management | — |
-| `workflow` | Graph workflow engine | — |
-| `plan-execute` | Plan-and-Execute agent | — |
-| `self-reflection` | Self-critique agent | — |
-| `subagent` | Multi-agent orchestration | — |
-| `a2a` | Agent-to-Agent protocol | — |
-| `topology` | Agent topology visualization | — |
-| `telemetry` | OpenTelemetry tracing | `opentelemetry` |
-| `sandbox` | Code execution sandbox (Local/Docker/K8s) | — |
-| `semantic-memory` | Semantic memory | — |
-| `macros` | Procedural macros (#\[tool\] etc.) | `echo-macros` |
-| `provider-factory` | LLM provider factory | — |
-| `multimodal` | Multimodal input (images/files) | — |
-| `git` | Git operation tools | — |
-| `database` | Database query tools | `sqlx` |
-| `rag` | RAG retrieval tools | — |
-| `research` | ArXiv, Semantic Scholar, PDF fetch, BibTeX | `quick-xml` |
-| `chart` | Chart generation tools | — |
-| `content-guard` | Content safety guard | — |
-| `project-rules` | Project rule loading | — |
-| `shell` | Shell command execution | — |
-| `files` | File read/write tools | — |
+Default features are empty. Use `features = ["full"]` to opt in to every
+feature, or select individual flags from the authoritative table above. The
+`[features]` section in [`Cargo.toml`](Cargo.toml) is the source of truth.
 
 ---
 
@@ -285,13 +248,11 @@ echo-agent/
 ├── echo-state/          Memory, compression, and audit logging
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
-├── echo-agents/         Agent implementations: ReactAgent, PlanExecute, Subagent
 ├── echo-tools/          Domain tools: chart, data, database, git, media, web, rag
 ├── src/                 Agent engine, re-exports, and facade layer
-├── examples/            64 runnable demos
+├── examples/            66 runnable Rust examples
 ├── docs/                Bilingual documentation (en + zh)
-├── skills/              External skill packs (Markdown-based)
-└── echo-agent.yaml      Example configuration
+└── echo-agent.example.yaml  Example configuration
 ```
 
 > **Note:** `echo-agent` is a library framework. For a ready-to-use application with CLI, Web UI, and WebSocket, see [echo-agent-cli](https://github.com/EchoYue-lp/echo-agent-cli).
@@ -383,7 +344,7 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 ## Highlights
 
 - **67 registered tools** — ReAct loop, data analysis, research papers, web, media, RAG, database, and more
-- **66 runnable examples** — every feature has a demo you can `cargo run` immediately
+- **66 runnable examples** — acceptance, conditional, and teaching examples are classified explicitly
 - **Comprehensive unit tests** — full coverage across all modules
 - **8 crates, 1 facade** — use `echo_agent::prelude::*` for common types and `echo_agent::tools::<domain>` for concrete tools
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
@@ -547,7 +508,10 @@ async fn main() -> echo_agent::error::Result<()> {
         .max_delay(Duration::from_secs(30))
         .jitter(true);
     // Apply to any fallible async operation:
-    let _response = with_retry(&policy, || async { Ok::<_, &str>("done") }).await.unwrap();
+    let _response = with_retry(&policy, || async {
+        Ok::<_, echo_agent::error::ReactError>("done")
+    })
+    .await?;
     Ok(())
 }
 ```
@@ -631,7 +595,7 @@ async fn main() {
 }
 ```
 
-### 9. Multi-Agent Orchestration — Orchestrator + SubAgent teams
+### 9. Multi-Agent Orchestration — Orchestrator + Subagent teams
 
 Coordinate multiple specialized agents through the shared Subagent lifecycle.
 
@@ -708,9 +672,10 @@ async fn main() -> echo_agent::error::Result<()> {
 
 Supports three transports: **stdio**, **SSE**, **HTTP**.
 
-### 12. Task Planning — Built-in plan-execute-summarize workflow
+### 12. Task Planning — Revisioned task graph tools
 
-ReactAgent includes a three-phase planning workflow: Plan → Execute → Summarize. No separate agent type needed.
+ReactAgent exposes revisioned task-graph tools without a separate Agent type or
+parallel task state machine.
 
 > **Note**: Requires the `tasks` feature to be enabled.
 
@@ -723,7 +688,6 @@ async fn main() -> echo_agent::error::Result<()> {
         .model("qwen3.7-max")
         .system_prompt("You are a research assistant.")
         .enable_tools()
-        .enable_tasks()  // Enable revisioned task CRUD tools
         .build()?;
 
     // The model can create, update, and inspect the revisioned task graph.
@@ -1080,14 +1044,11 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 11 | [`demo11_callbacks`](examples/demo11_callbacks.rs) | Lifecycle callbacks |
 | 12 | [`demo12_resilience`](examples/demo12_resilience.rs) | Retry & fault tolerance |
 | 13 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | Tool execution config |
-| 14 | [`demo14_memory_isolation`](examples/demo14_memory_isolation.rs) | Memory isolation |
 | 15 | [`demo15_structured_output`](examples/demo15_structured_output.rs) | JSON Schema output |
-| 16 | [`demo16_testing`](examples/demo16_testing.rs) | Mock testing |
 | 17 | [`demo17_chat`](examples/demo17_chat.rs) | Interactive chat |
 | 18 | [`demo18_semantic_memory`](examples/demo18_semantic_memory.rs) | Semantic memory |
 | 19 | [`demo19_guard`](examples/demo19_guard.rs) | Guard system |
 | 20 | [`demo20_audit`](examples/demo20_audit.rs) | Audit logging |
-| 22 | [`demo22_plan_execute`](examples/demo22_plan_execute.rs) | Plan-and-Execute |
 | 23 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A protocol |
 | 24 | [`demo24_topology`](examples/demo24_topology.rs) | Topology visualization |
 | 25 | [`demo25_macros`](examples/demo25_macros.rs) | Macro system showcase |
@@ -1124,6 +1085,9 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 64 | [`demo64_tool_pipeline`](examples/demo64_tool_pipeline.rs) | Tool execution pipeline + approval stack |
 | 65 | [`demo65_context_assembler`](examples/demo65_context_assembler.rs) | ContextAssembler: budget-aware context assembly with priority ordering |
 | 66 | [`demo66_context_selector`](examples/demo66_context_selector.rs) | ContextSelector: score and select files by task relevance |
+| 67 | [`demo67_progress`](examples/demo67_progress.rs) | Progress reporting |
+| 68 | [`demo68_human_gate`](examples/demo68_human_gate.rs) | Human approval gate |
+| 70 | [`demo70_scheduler`](examples/demo70_scheduler.rs) | Task scheduling |
 
 Plus **6 comprehensive examples** demonstrating real-world use cases:
 
@@ -1170,10 +1134,8 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Structured Output | [EN](docs/en/11-structured-output.md) | [ZH](docs/zh/11-structured-output.md) |
 | Mock Testing | [EN](docs/en/12-mock.md) | [ZH](docs/zh/12-mock.md) |
 | IM Channels | [EN](docs/en/15-im-channels.md) | [ZH](docs/zh/15-im-channels.md) |
-| Plan-and-Execute | [EN](docs/en/16-plan-execute.md) | [ZH](docs/zh/16-plan-execute.md) |
 | Graph Workflow | [EN](docs/en/17-graph-workflow.md) | [ZH](docs/zh/17-graph-workflow.md) |
 | Guard System | [EN](docs/en/18-guard-system.md) | [ZH](docs/zh/18-guard-system.md) |
-| Self-Reflection | [EN](docs/en/19-self-reflection.md) | [ZH](docs/zh/19-self-reflection.md) |
 | Multi-Turn Chat | [EN](docs/en/13-chat.md) | [ZH](docs/zh/13-chat.md) |
 | Semantic Search | [EN](docs/en/14-semantic-search.md) | [ZH](docs/zh/14-semantic-search.md) |
 | Web Tools | [EN](docs/en/20-web-tools.md) | [ZH](docs/zh/20-web-tools.md) |
@@ -1208,15 +1170,8 @@ Contributions are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelin
 ```bash
 git clone https://github.com/EchoYue-lp/echo-agent
 cd echo-agent
-
-# Code formatting
-cargo fmt --check
-
-# Linting
-cargo clippy --workspace --all-targets
-
-# Tests
-cargo test --workspace
+cargo fmt --all
+./scripts/verify.sh
 ```
 
 ---

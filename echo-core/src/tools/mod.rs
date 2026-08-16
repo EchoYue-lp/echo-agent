@@ -285,6 +285,8 @@ pub enum ToolResultKind {
     FileReference { path: String },
     /// Command execution output with exit code.
     CommandOutput { exit_code: Option<i32> },
+    /// A skill prompt block that must become the canonical activation projection.
+    SkillActivation { name: String },
     /// A structured error with an error code.
     StructuredError { error_code: String },
 }

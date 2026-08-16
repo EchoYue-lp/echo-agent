@@ -63,7 +63,6 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | `model_name` | `String` | *（必填）* | LLM 模型标识符 |
 | `agent_name` | `String` | *（必填）* | Agent 名称 |
 | `system_prompt` | `String` | *（必填）* | 系统提示词 |
-| `role` | `AgentRole` | `Subagent` | `Orchestrator` 或 `Subagent` |
 | `max_iterations` | `usize` | `10` | 每轮最大推理步数 |
 | `temperature` | `Option<f32>` | `None`（模型默认） | LLM 温度（0.0–2.0） |
 | `max_tokens` | `Option<u32>` | `None`（模型默认） | 最大生成 Token 数 |
@@ -73,7 +72,6 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enable_tool` | `bool` | `false` | 启用工具调用 |
-| `enable_task` | `bool` | `false` | 启用任务规划工具 |
 | `enable_human_in_loop` | `bool` | `false` | 启用人工审批 |
 | `enable_subagent` | `bool` | `false` | 启用子 Agent 调度 |
 | `enable_memory` | `bool` | `false` | 启用长期记忆工具 |
@@ -209,12 +207,14 @@ ReactAgentBuilder::new()
 ```rust
 ReactAgentBuilder::new()
     .enable_memory()                   // 长期记忆
-    .enable_tasks()                    // 版本化任务图工具
     .enable_human_in_loop()            // 审批守卫（需要 "human-loop" feature）
     .enable_subagent()                 // 子 Agent 调度（需要 "subagent" feature）
     .enable_cot()                      // 链式思考
     .disable_cot()                     // 禁用 CoT
 ```
+
+版本化的 `task_create`、`task_update` 和 `task_list` 属于默认 Agent 工具表。
+需要替换默认内存 store 和 policy 时使用 `.task_revision_service(...)`。
 
 ### 结构化输出
 
@@ -462,7 +462,7 @@ echo_agent = { version = "0.2", features = ["mcp", "web", "shell"] }
 
 | Feature | 说明 |
 |---------|------|
-| `subagent` | 子 Agent 调度和 TeamAgent |
+| `subagent` | Subagent 调度与 TeamSpec-to-DAG 执行 |
 | `mcp` | Model Context Protocol 集成 |
 | `tasks` | 任务规划和 DAG 调度 |
 | `self-reflection` | 自我反思/评估循环 |

@@ -1,8 +1,7 @@
 //! Background task handle and spawner for long-running task support.
 //!
-//! This module provides a non-blocking task abstraction that bridges the gap
-//! between the DAG task executor (which blocks the caller) and the need for
-//! fire-and-forget, pollable, cancellable background work.
+//! This module provides a non-blocking, process-local abstraction for
+//! fire-and-forget, pollable, cancellable background futures.
 //!
 //! # Core Types
 //!
@@ -14,8 +13,9 @@
 //! - [`AnyBackgroundTask`] — Type-erased trait for storing heterogeneous task handles
 //!   in a single collection (e.g., a status dashboard).
 //!
-//! - [`TaskSpawner`] — System-level spawner that manages concurrency (via Semaphore),
-//!   tracks all spawned tasks, and supports cross-restart resumption via [`crate::tasks::TaskStore`].
+//! - [`TaskSpawner`] — Process-local spawner that manages concurrency (via
+//!   Semaphore) and tracks spawned futures. Durable task graphs are owned by
+//!   [`crate::tasks::TaskRevisionService`].
 //!
 //! # Example
 //!
@@ -57,26 +57,26 @@ use tracing::{debug, info};
 /// Lifecycle status of a background task.
 #[derive(Debug, Clone)]
 pub enum BackgroundTaskStatus {
-    /// ManagedTask is queued but not yet started.
+    /// The background future is queued but not yet started.
     Pending,
-    /// ManagedTask is currently executing.
+    /// The background future is currently executing.
     Running {
         /// When the task started executing.
         started_at: Instant,
     },
-    /// ManagedTask completed successfully.
+    /// The background future completed successfully.
     Completed {
         /// When the task finished.
         finished_at: Instant,
     },
-    /// ManagedTask failed with an error.
+    /// The background future failed with an error.
     Failed {
         /// Human-readable error description.
         error: String,
         /// When the failure occurred.
         at: Instant,
     },
-    /// ManagedTask was cancelled via its cancellation token.
+    /// The background future was cancelled via its cancellation token.
     Cancelled,
 }
 
@@ -110,7 +110,7 @@ impl BackgroundTaskStatus {
 /// The task runs asynchronously on the tokio runtime. The handle is cheap to
 /// clone (internally uses `Arc`), and multiple handles can exist for the same task.
 pub struct BackgroundTask<T: Send + 'static> {
-    /// Unique task ID, stable across restarts if persisted.
+    /// Unique process-local task ID.
     pub id: String,
     /// Human-readable name/description.
     pub name: String,
@@ -384,14 +384,12 @@ impl Default for TaskSpawnerConfig {
 
 /// System-level spawner that manages background tasks with concurrency control.
 ///
-/// All spawned tasks are tracked in a concurrent map and can be listed,
-/// cancelled, or inspected. Optionally backed by a [`crate::tasks::TaskStore`] for
-/// cross-restart resumption.
+/// All spawned futures are tracked in a concurrent map and can be listed,
+/// cancelled, or inspected. This process-local handle registry does not own
+/// durable task relationships or restart recovery.
 pub struct TaskSpawner {
     /// All tracked tasks (type-erased).
     tasks: Arc<DashMap<String, Arc<dyn AnyBackgroundTask>>>,
-    /// Optional persistent store for cross-restart resumption.
-    store: Option<Arc<dyn super::store::TaskStore>>,
     /// Concurrency limiter.
     semaphore: Arc<tokio::sync::Semaphore>,
     /// Configuration.
@@ -406,17 +404,10 @@ impl TaskSpawner {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
         Self {
             tasks: Arc::new(DashMap::new()),
-            store: None,
             semaphore,
             config,
             next_sequence: AtomicU64::new(0),
         }
-    }
-
-    /// Attach a persistent task store for cross-restart resumption.
-    pub fn with_store(mut self, store: Arc<dyn super::store::TaskStore>) -> Self {
-        self.store = Some(store);
-        self
     }
 
     /// Spawn a future as a background task, returning a handle immediately.
@@ -652,31 +643,6 @@ impl TaskSpawner {
     /// Number of currently tracked tasks.
     pub fn task_count(&self) -> usize {
         self.tasks.len()
-    }
-
-    /// Resume incomplete tasks from the persistent store after a restart.
-    ///
-    /// Tasks that were `InProgress` or `Pending` when the process died are
-    /// re-added to the task manager. The caller must provide the execute
-    /// functions separately (they are not serializable).
-    pub async fn resume_from_store(&self) -> Result<Vec<super::ManagedTask>> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| ReactError::Other("No task store configured on spawner".into()))?;
-
-        let all_tasks = store.load_all().await?;
-        let incomplete: Vec<super::ManagedTask> = all_tasks
-            .into_iter()
-            .filter(|t| !t.status.is_terminal())
-            .collect();
-
-        info!(
-            count = incomplete.len(),
-            "Resuming incomplete tasks from store"
-        );
-
-        Ok(incomplete)
     }
 }
 

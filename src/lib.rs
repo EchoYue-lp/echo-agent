@@ -122,8 +122,10 @@ pub mod workspace {
     pub use echo_core as core;
     pub use echo_execution as execution;
     pub use echo_integration as integration;
+    pub use echo_macros as macros;
     pub use echo_orchestration as orchestration;
     pub use echo_state as state;
+    pub use echo_tools as tools;
 }
 
 // ── Prelude ─────────────────────────────────────────────────────────────────
@@ -135,10 +137,10 @@ pub mod prelude {
     // Agent
     pub use crate::agent::{
         AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle,
-        AgentRole, CancellationToken, EventEnvelope, EventIdentity, InterventionCallback,
-        InterventionResult, PreparedAgentModelGeneration, PreparedCriticUpdate, PreparedTokenLimit,
-        ReactAgent, ReactAgentBuilder, StepType, StructuredAgent, envelope_event_stream,
-        envelope_event_stream_after, validate_event_trajectory,
+        CancellationToken, EventEnvelope, EventIdentity, InterventionCallback, InterventionResult,
+        PreparedAgentModelGeneration, PreparedCriticUpdate, PreparedTokenLimit, ReactAgent,
+        ReactAgentBuilder, StepType, StructuredAgent, ToolInvocation, ToolInvocationRewrite,
+        envelope_event_stream, envelope_event_stream_after, validate_event_trajectory,
     };
     // Prompt Template
     pub use echo_core::agent::{PromptTemplateManager, RunBudgetPolicy};
@@ -302,8 +304,8 @@ pub mod advanced {
     #[cfg_attr(docsrs, doc(cfg(feature = "a2a")))]
     pub use crate::a2a::{
         A2AClient, A2AServer, A2AStreamEvent, AgentCapabilities, AgentCard, AgentProvider,
-        AgentSkill, JwtClaims, JwtConfig, TaskState, get_claims, serve, serve_from_config,
-        serve_from_config_with_auth, serve_with_auth,
+        AgentSkill, JwtClaims, JwtConfig, JwtConfigError, TaskState, get_claims, serve,
+        serve_from_config, serve_from_config_with_auth, serve_with_auth,
     };
 
     #[cfg(feature = "topology")]
@@ -314,8 +316,8 @@ pub mod advanced {
     };
 
     pub use crate::tasks::{
-        ManagedTask, Task, TaskCreateTool, TaskExecution, TaskListTool, TaskManager,
-        TaskRevisionService, TaskSpec, TaskStatus, TaskUpdateTool,
+        ManagedTask, Task, TaskCreateTool, TaskExecution, TaskListTool, TaskRevisionService,
+        TaskSpec, TaskStatus, TaskUpdateTool,
     };
 
     // Critic module — evaluation and feedback tools for agent outputs

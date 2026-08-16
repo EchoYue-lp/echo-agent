@@ -15,15 +15,13 @@ cargo build --workspace
 Please ensure the following checks pass locally:
 
 ```bash
-# Code formatting
-cargo fmt --check --workspace
-
-# Linting
-cargo clippy --workspace --all-targets --all-features
-
-# Tests
-cargo test --workspace
+cargo fmt --all
+./scripts/verify.sh
 ```
+
+Changes to dependencies must also pass `cargo audit --deny warnings` and
+`cargo deny check`. CI runs both commands against the repository policies in
+`.cargo/audit.toml` and `deny.toml`.
 
 ## Commit Messages
 
@@ -54,7 +52,7 @@ When filing an issue, please include:
 
 - Follow the standard Rust naming conventions (<https://rust-lang.github.io/api-guidelines/naming.html>)
 - Add doc comments to all public items
-- Keep public API stable — deprecate rather than remove when possible
+- Remove obsolete APIs once callers, tests, and documentation have moved to the replacement
 - Write examples using `#![doc = include_str!("../README.md")]` conventions
 
 ## License

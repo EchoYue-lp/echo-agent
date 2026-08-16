@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use super::{
-    PlanValidator, RuntimePlanSnapshot, Task, TaskExecution, TaskId, TaskKind, TaskSpec, TaskStatus,
+    PlanValidator, RuntimePlanSnapshot, RuntimeTaskClaimOutcome, Task, TaskClaim, TaskExecution,
+    TaskId, TaskKind, TaskSpec, TaskStatus,
 };
 
 /// How a task graph should be driven by a product adapter.
@@ -278,12 +279,25 @@ pub trait TaskToolPolicy: Send + Sync {
 
     async fn resolve_scope(&self, context: &ToolContext) -> Result<String, TaskPolicyError>;
 
+    /// Prepare the product scope used by one graph creation attempt.
+    ///
+    /// An implementation that returns `Err` must first remove every
+    /// unpublished side effect it staged. [`Self::abort_scope_preparation`] is
+    /// called only after this method returns `Ok`.
     async fn ensure_scope(
         &self,
         scope_id: &str,
         input: &TaskCreateInput,
         context: &ToolContext,
     ) -> Result<(), TaskPolicyError>;
+
+    /// Roll back product resources staged by [`Self::ensure_scope`] when task
+    /// preparation, validation, or the graph commit fails.
+    ///
+    /// Implementations must be idempotent and must not remove an already
+    /// published scope. Every policy implements this explicitly so policies
+    /// with side effects cannot silently omit rollback handling.
+    async fn abort_scope_preparation(&self, scope_id: &str) -> Result<(), TaskPolicyError>;
 
     async fn prepare_task(
         &self,
@@ -356,6 +370,10 @@ impl TaskToolPolicy for DefaultTaskToolPolicy {
         Ok(())
     }
 
+    async fn abort_scope_preparation(&self, _scope_id: &str) -> Result<(), TaskPolicyError> {
+        Ok(())
+    }
+
     async fn prepare_task(
         &self,
         _scope_id: &str,
@@ -419,6 +437,110 @@ impl InMemoryRevisionedTaskStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Atomically claim a pending runtime task without changing the immutable
+    /// graph revision. Intended for [`RuntimeDagController`](super::RuntimeDagController)
+    /// adapters backed by this store.
+    pub async fn claim_runtime_task(
+        &self,
+        scope_id: &str,
+        task: &Task,
+        expected_revision: u64,
+    ) -> Result<RuntimeTaskClaimOutcome, RevisionedTaskStoreError> {
+        let mut graphs = self.graphs.write().await;
+        let Some(graph) = graphs.get_mut(scope_id) else {
+            return Err(RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        if graph.snapshot.revision != expected_revision {
+            return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
+        }
+        let Some(current) = graph
+            .snapshot
+            .tasks
+            .iter_mut()
+            .find(|current| current.spec.id == task.spec.id)
+        else {
+            return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
+        };
+        if current.spec != task.spec || current.execution.status != TaskStatus::Pending {
+            return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
+        }
+        let claim = TaskClaim::new(
+            expected_revision,
+            current.execution.retry_count.saturating_add(1),
+            current
+                .spec
+                .stable_hash()
+                .map_err(|message| RevisionedTaskStoreError::Rejected { message })?,
+        );
+        current.execution.status = TaskStatus::Running;
+        current.execution.claim = Some(claim.clone());
+        Ok(RuntimeTaskClaimOutcome::Claimed(claim))
+    }
+
+    /// Atomically settle the exact physical claim. `false` means the claim was
+    /// superseded and no state was changed.
+    pub async fn settle_runtime_claim(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        status: TaskStatus,
+    ) -> Result<bool, RevisionedTaskStoreError> {
+        let mut graphs = self.graphs.write().await;
+        let Some(graph) = graphs.get_mut(scope_id) else {
+            return Err(RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        let Some(task) = graph
+            .snapshot
+            .tasks
+            .iter_mut()
+            .find(|task| task.spec.id == task_id)
+        else {
+            return Ok(false);
+        };
+        if task.execution.claim.as_ref() != Some(claim) {
+            return Ok(false);
+        }
+        task.execution.status = task
+            .execution
+            .status
+            .transition_to(status)
+            .map_err(|message| RevisionedTaskStoreError::Rejected { message })?;
+        task.execution.claim = None;
+        Ok(true)
+    }
+
+    /// Block an unclaimed pending task in the authoritative runtime snapshot.
+    pub async fn block_runtime_task(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        reason: &str,
+    ) -> Result<(), RevisionedTaskStoreError> {
+        let mut graphs = self.graphs.write().await;
+        let Some(graph) = graphs.get_mut(scope_id) else {
+            return Err(RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        let Some(task) = graph
+            .snapshot
+            .tasks
+            .iter_mut()
+            .find(|task| task.spec.id == task_id)
+        else {
+            return Ok(());
+        };
+        if task.execution.status == TaskStatus::Pending && task.execution.claim.is_none() {
+            task.execution.status = TaskStatus::Blocked(reason.to_string());
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -442,6 +564,33 @@ impl RevisionedTaskStore for InMemoryRevisionedTaskStore {
                 expected: commit.expected_revision,
                 current,
             });
+        }
+        if let Some(current_graph) = graphs.get(scope_id) {
+            let intentionally_progressed = commit
+                .effects
+                .progressed_task_ids
+                .iter()
+                .chain(&commit.effects.skipped_task_ids)
+                .chain(&commit.effects.reset_task_ids)
+                .collect::<HashSet<_>>();
+            let execution_drifted = current_graph.snapshot.tasks.iter().any(|current_task| {
+                if intentionally_progressed.contains(&current_task.spec.id) {
+                    return false;
+                }
+                commit
+                    .next
+                    .snapshot
+                    .tasks
+                    .iter()
+                    .find(|next_task| next_task.spec.id == current_task.spec.id)
+                    .is_some_and(|next_task| next_task.execution != current_task.execution)
+            });
+            if execution_drifted {
+                return Err(RevisionedTaskStoreError::Conflict {
+                    expected: commit.expected_revision,
+                    current,
+                });
+            }
         }
         let expected_next = match commit.expected_revision {
             Some(revision) => revision.checked_add(1),
@@ -725,7 +874,25 @@ impl TaskRevisionService {
             .ensure_scope(&scope_id, &input, context)
             .await
             .map_err(TaskRevisionError::from)?;
-        let current = self.load(&scope_id).await?;
+        match self.create_after_scope_preparation(&scope_id, input).await {
+            Ok(outcome) => Ok(outcome),
+            Err(create_error) => match self.policy.abort_scope_preparation(&scope_id).await {
+                Ok(()) => Err(create_error),
+                Err(abort_error) => Err(TaskRevisionError::Backend {
+                    message: format!(
+                        "task creation failed: {create_error}; scope preparation rollback failed: {abort_error}"
+                    ),
+                }),
+            },
+        }
+    }
+
+    async fn create_after_scope_preparation(
+        &self,
+        scope_id: &str,
+        input: TaskCreateInput,
+    ) -> Result<TaskCreateOutcome, TaskRevisionError> {
+        let current = self.load(scope_id).await?;
         let start_position = current
             .as_ref()
             .map(|graph| graph.snapshot.tasks.len())
@@ -735,7 +902,7 @@ impl TaskRevisionService {
             let position = start_position.saturating_add(offset);
             let prepared = self
                 .policy
-                .prepare_task(&scope_id, draft, position)
+                .prepare_task(scope_id, draft, position)
                 .await
                 .map_err(TaskRevisionError::from)?;
             prepared_tasks.push(TaskSpec {
@@ -779,7 +946,7 @@ impl TaskRevisionService {
                 .collect();
             let graph = self
                 .apply_patch_to_loaded(
-                    &scope_id,
+                    scope_id,
                     graph,
                     TaskPlanPatch {
                         base_revision,
@@ -797,7 +964,7 @@ impl TaskRevisionService {
 
         let graph_context = self
             .policy
-            .prepare_initial_context(&scope_id, &input)
+            .prepare_initial_context(scope_id, &input)
             .await
             .map_err(TaskRevisionError::from)?;
         let tasks = prepared_tasks
@@ -809,7 +976,7 @@ impl TaskRevisionService {
             .collect();
         let graph = self
             .create_prepared(
-                &scope_id,
+                scope_id,
                 graph_context,
                 tasks,
                 "initial complete plan".to_string(),
@@ -1053,6 +1220,188 @@ mod tests {
         )
     }
 
+    struct PreparationTrackingPolicy {
+        delegate: DefaultTaskToolPolicy,
+        abort_count: Arc<std::sync::atomic::AtomicUsize>,
+        abort_error: Option<String>,
+        ensure_error: Option<String>,
+        scope_staged: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl TaskToolPolicy for PreparationTrackingPolicy {
+        async fn resolve_scope(&self, context: &ToolContext) -> Result<String, TaskPolicyError> {
+            self.delegate.resolve_scope(context).await
+        }
+
+        async fn ensure_scope(
+            &self,
+            scope_id: &str,
+            input: &TaskCreateInput,
+            context: &ToolContext,
+        ) -> Result<(), TaskPolicyError> {
+            if let Some(message) = &self.ensure_error {
+                self.scope_staged
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.scope_staged
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                return Err(TaskPolicyError::Rejected {
+                    message: message.clone(),
+                });
+            }
+            self.delegate.ensure_scope(scope_id, input, context).await
+        }
+
+        async fn abort_scope_preparation(&self, _scope_id: &str) -> Result<(), TaskPolicyError> {
+            self.abort_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.abort_error {
+                Some(message) => Err(TaskPolicyError::Backend {
+                    message: message.clone(),
+                }),
+                None => Ok(()),
+            }
+        }
+
+        async fn prepare_task(
+            &self,
+            scope_id: &str,
+            draft: &TaskDraft,
+            position: usize,
+        ) -> Result<PreparedTaskPolicy, TaskPolicyError> {
+            self.delegate.prepare_task(scope_id, draft, position).await
+        }
+
+        async fn prepare_initial_context(
+            &self,
+            scope_id: &str,
+            input: &TaskCreateInput,
+        ) -> Result<TaskGraphContext, TaskPolicyError> {
+            self.delegate.prepare_initial_context(scope_id, input).await
+        }
+
+        async fn finalize_task_metadata(
+            &self,
+            scope_id: &str,
+            task_id: &str,
+            position: usize,
+            metadata: serde_json::Value,
+        ) -> Result<serde_json::Value, TaskPolicyError> {
+            self.delegate
+                .finalize_task_metadata(scope_id, task_id, position, metadata)
+                .await
+        }
+
+        async fn validate_candidate(
+            &self,
+            scope_id: &str,
+            tasks: &[Task],
+        ) -> Result<(), TaskPolicyError> {
+            self.delegate.validate_candidate(scope_id, tasks).await
+        }
+    }
+
+    fn preparation_tracking_service(
+        ensure_error: Option<String>,
+        abort_error: Option<String>,
+    ) -> (
+        TaskRevisionService,
+        Arc<InMemoryRevisionedTaskStore>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let abort_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scope_staged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let policy = PreparationTrackingPolicy {
+            delegate: DefaultTaskToolPolicy::new("preparation-scope"),
+            abort_count: abort_count.clone(),
+            abort_error,
+            ensure_error,
+            scope_staged: scope_staged.clone(),
+        };
+        (
+            TaskRevisionService::new(store.clone(), Arc::new(policy)),
+            store,
+            abort_count,
+            scope_staged,
+        )
+    }
+
+    #[tokio::test]
+    async fn ensure_scope_failure_self_cleans_without_invoking_abort() -> Result<(), String> {
+        let (service, store, abort_count, scope_staged) =
+            preparation_tracking_service(Some("scope staging failed".to_string()), None);
+        let error = service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .err()
+            .ok_or_else(|| "scope preparation unexpectedly succeeded".to_string())?;
+        assert!(matches!(error, TaskRevisionError::PolicyRejected { .. }));
+        assert!(!scope_staged.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(abort_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(
+            store
+                .load("preparation-scope")
+                .await
+                .map_err(|load_error| load_error.to_string())?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_creation_aborts_scope_preparation_without_publishing_graph()
+    -> Result<(), String> {
+        let (service, store, abort_count, _scope_staged) = preparation_tracking_service(None, None);
+        let error = service
+            .create_from_tool(
+                create_input(vec![draft("a", &["missing"])]),
+                &ToolContext::default(),
+            )
+            .await
+            .err()
+            .ok_or_else(|| "invalid graph unexpectedly committed".to_string())?;
+        assert!(matches!(error, TaskRevisionError::InvalidPatch { .. }));
+        assert_eq!(abort_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            store
+                .load("preparation-scope")
+                .await
+                .map_err(|load_error| load_error.to_string())?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scope_preparation_rollback_failure_preserves_both_errors() -> Result<(), String> {
+        let (service, store, abort_count, _scope_staged) =
+            preparation_tracking_service(None, Some("staging cleanup refused".to_string()));
+        let error = service
+            .create_from_tool(
+                create_input(vec![draft("a", &["missing"])]),
+                &ToolContext::default(),
+            )
+            .await
+            .err()
+            .ok_or_else(|| "invalid graph unexpectedly committed".to_string())?;
+        let TaskRevisionError::Backend { message } = error else {
+            return Err("rollback failure did not surface as backend error".to_string());
+        };
+        assert!(message.contains("missing"));
+        assert!(message.contains("staging cleanup refused"));
+        assert_eq!(abort_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            store
+                .load("preparation-scope")
+                .await
+                .map_err(|load_error| load_error.to_string())?
+                .is_none()
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn creates_and_patches_one_canonical_graph() -> Result<(), String> {
         let service = service();
@@ -1150,6 +1499,102 @@ mod tests {
             .first()
             .ok_or_else(|| "completed graph lost its task".to_string())?;
         assert_eq!(task.execution.status, TaskStatus::Completed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_claims_are_parallel_aba_safe_and_relation_commits_detect_drift()
+    -> Result<(), String> {
+        let store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let service = TaskRevisionService::new(
+            store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new("runtime-scope")),
+        );
+        service
+            .create_from_tool(
+                create_input(vec![draft("a", &[]), draft("b", &[])]),
+                &ToolContext::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let stale = store
+            .load("runtime-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "runtime graph missing".to_string())?;
+        let task_a = stale
+            .snapshot
+            .tasks
+            .iter()
+            .find(|task| task.spec.id == "a")
+            .ok_or_else(|| "task a missing".to_string())?;
+        let task_b = stale
+            .snapshot
+            .tasks
+            .iter()
+            .find(|task| task.spec.id == "b")
+            .ok_or_else(|| "task b missing".to_string())?;
+        let claim_a = match store
+            .claim_runtime_task("runtime-scope", task_a, stale.snapshot.revision)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+            RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                return Err("first runtime claim requested reload".to_string());
+            }
+        };
+        assert!(matches!(
+            store
+                .claim_runtime_task("runtime-scope", task_b, stale.snapshot.revision)
+                .await
+                .map_err(|error| error.to_string())?,
+            RuntimeTaskClaimOutcome::Claimed(_)
+        ));
+        assert!(
+            store
+                .settle_runtime_claim("runtime-scope", "a", &claim_a, TaskStatus::Completed,)
+                .await
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            !store
+                .settle_runtime_claim(
+                    "runtime-scope",
+                    "a",
+                    &claim_a,
+                    TaskStatus::Failed("late result".to_string()),
+                )
+                .await
+                .map_err(|error| error.to_string())?
+        );
+
+        let mut stale_next = stale.clone();
+        stale_next.snapshot.revision = 2;
+        let stale_task = stale_next
+            .snapshot
+            .tasks
+            .iter_mut()
+            .find(|task| task.spec.id == "a")
+            .ok_or_else(|| "stale task a missing".to_string())?;
+        stale_task.spec.title = "stale title update".to_string();
+        let error = store
+            .compare_and_commit(
+                "runtime-scope",
+                TaskGraphCommit {
+                    expected_revision: Some(1),
+                    next: stale_next,
+                    reason: "stale relation edit".to_string(),
+                    effects: TaskPatchEffects {
+                        updated_task_ids: vec!["a".to_string()],
+                        ..TaskPatchEffects::default()
+                    },
+                },
+            )
+            .await
+            .err()
+            .ok_or_else(|| "stale relation commit overwrote runtime claim".to_string())?;
+        assert!(matches!(error, RevisionedTaskStoreError::Conflict { .. }));
         Ok(())
     }
 }

@@ -108,15 +108,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus_printer = tokio::spawn(async move {
         let mut count = 0u32;
         while let Ok(event) = bus_rx.recv().await {
-            if let TaskEvent::Progress { task_id, progress } = event.as_ref() {
-                if count.is_multiple_of(3) {
-                    println!(
-                        "  🔔 bus: {} @ {:.1}% ({})",
-                        task_id, progress.percentage, progress.current_phase
-                    );
-                }
-                count += 1;
+            let TaskEvent::Progress { task_id, progress } = event.as_ref();
+            if count.is_multiple_of(3) {
+                println!(
+                    "  🔔 bus: {} @ {:.1}% ({})",
+                    task_id, progress.percentage, progress.current_phase
+                );
             }
+            count += 1;
         }
     });
 

@@ -4,6 +4,7 @@
 //! pipeline of discrete internal stages coordinated by `ToolExecutionPipeline`.
 
 use super::context::HookMessageBatches;
+use crate::agent::{ToolInvocation, ToolInvocationRewrite};
 use crate::error::{ReactError, Result};
 use crate::tools::{ToolParameters, ToolResult, ToolStreamEvent, is_write_tool};
 use async_trait::async_trait;
@@ -12,12 +13,28 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::debug;
 
+pub(crate) enum ToolPipelineEvent {
+    Invocation {
+        call_id: String,
+        invocation: ToolInvocation,
+    },
+    Stream {
+        call_id: String,
+        name: String,
+        event: ToolStreamEvent,
+    },
+}
+
 // ── ToolExecutionContext ────────────────────────────────────────────
 
 /// Mutable context that flows through the pipeline stages.
 pub(crate) struct ToolExecutionContext {
-    /// Unique call ID (links ToolCall/ToolResult/ToolError).
+    /// Unique call ID linking the canonical ToolCall and typed ToolResult.
     pub call_id: String,
+    /// Original model-requested tool name.
+    pub requested_tool_name: String,
+    /// Original model-requested arguments.
+    pub requested_input: Value,
     /// Name of the tool being executed.
     pub tool_name: String,
     /// Parsed tool parameters.
@@ -44,8 +61,12 @@ pub(crate) struct ToolExecutionContext {
     pub permission_decision: Option<PermissionDecision>,
     /// Permission mode override returned by hooks for this call only.
     pub permission_mode_override: Option<PermissionMode>,
+    /// Ordered provenance for policy rewrites applied before execution.
+    pub rewrites: Vec<ToolInvocationRewrite>,
+    /// Whether the canonical invocation event has been emitted.
+    pub invocation_emitted: bool,
     /// Incremental tool events, tagged with their stable invocation identity.
-    pub stream_tx: Option<mpsc::Sender<(String, String, ToolStreamEvent)>>,
+    pub stream_tx: Option<mpsc::Sender<ToolPipelineEvent>>,
 }
 
 impl ToolExecutionContext {
@@ -54,6 +75,47 @@ impl ToolExecutionContext {
         self.block_reason = Some(reason.clone());
         self.block_failure = Some(crate::tools::ToolFailure::new(category));
         self.output = Some(reason);
+    }
+
+    fn replace_input(&mut self, input: Value, rewrite: ToolInvocationRewrite) -> Result<()> {
+        let Value::Object(map) = &input else {
+            return Err(ReactError::Other(format!(
+                "Tool '{}' rewrite returned non-object arguments",
+                self.tool_name
+            )));
+        };
+        if input != self.input {
+            self.rewrites.push(rewrite);
+        }
+        self.params = map
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        self.input = input;
+        Ok(())
+    }
+
+    async fn emit_invocation(&mut self) -> Result<()> {
+        if self.invocation_emitted {
+            return Ok(());
+        }
+        if let Some(stream_tx) = self.stream_tx.as_ref() {
+            stream_tx
+                .send(ToolPipelineEvent::Invocation {
+                    call_id: self.call_id.clone(),
+                    invocation: ToolInvocation {
+                        requested_name: self.requested_tool_name.clone(),
+                        requested_args: self.requested_input.clone(),
+                        name: self.tool_name.clone(),
+                        args: self.input.clone(),
+                        rewrites: self.rewrites.clone(),
+                    },
+                })
+                .await
+                .map_err(|_| ReactError::Other("Tool event receiver closed".to_string()))?;
+        }
+        self.invocation_emitted = true;
+        Ok(())
     }
 }
 
@@ -117,13 +179,14 @@ impl PipelineStage for InterventionStage {
                 return Ok(());
             }
             if let Some(redirect) = result.redirect_to {
+                if redirect != ctx.tool_name {
+                    ctx.rewrites
+                        .push(ToolInvocationRewrite::InterventionRedirect);
+                }
                 ctx.tool_name = redirect;
             }
             if let Some(modified) = result.modified_args {
-                ctx.input = modified;
-                if let serde_json::Value::Object(map) = &ctx.input {
-                    ctx.params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                }
+                ctx.replace_input(modified, ToolInvocationRewrite::InterventionArguments)?;
             }
             if let Some(injected) = result.injected_context {
                 ctx.hook_messages.pre.push(injected);
@@ -221,10 +284,7 @@ impl PipelineStage for PreToolUseHookStage {
         }
 
         if let Some(updated) = hook_result.updated_input {
-            ctx.input = updated.clone();
-            if let Value::Object(map) = &updated {
-                ctx.params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            }
+            ctx.replace_input(updated, ToolInvocationRewrite::PreToolUseHook)?;
         }
         Ok(())
     }
@@ -310,17 +370,7 @@ impl PipelineStage for PermissionStage {
             .map_err(|_| ReactError::Other("Permission check failed".into()))?;
 
         if let Some(modified) = approval_modified {
-            let Value::Object(map) = &modified else {
-                return Err(ReactError::Other(format!(
-                    "Permission handler returned non-object input for tool '{}'",
-                    ctx.tool_name
-                )));
-            };
-            ctx.params = map
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-            ctx.input = modified;
+            ctx.replace_input(modified, ToolInvocationRewrite::Approval)?;
         }
         Ok(())
     }
@@ -437,6 +487,24 @@ impl PipelineStage for AuditStage {
     }
 }
 
+/// Publishes the one canonical requested/effective invocation before execution.
+pub struct InvocationStage;
+
+#[async_trait]
+impl PipelineStage for InvocationStage {
+    fn name(&self) -> &str {
+        "invocation"
+    }
+
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        _snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
+        ctx.emit_invocation().await
+    }
+}
+
 /// Executes the tool via ToolManager.
 pub struct ExecuteStage;
 
@@ -499,7 +567,7 @@ impl PipelineStage for ExecuteStage {
                     snapshot
                         .tools
                         .tool_manager
-                        .execute_tool_stream_with_context(
+                        .execute_tool_stream_with_context_draining_started(
                             &ctx.tool_name,
                             ctx.params.clone(),
                             &tool_ctx,
@@ -513,10 +581,16 @@ impl PipelineStage for ExecuteStage {
                         event = event_rx.recv(), if stream_open => {
                             match event {
                                 Some(event) => {
-                                    stream_tx
-                                        .send((ctx.call_id.clone(), ctx.tool_name.clone(), event))
-                                        .await
-                                        .map_err(|_| ReactError::Other("Tool stream receiver closed".into()))?;
+                                    if !matches!(event, ToolStreamEvent::Complete(_)) {
+                                        stream_tx
+                                            .send(ToolPipelineEvent::Stream {
+                                                call_id: ctx.call_id.clone(),
+                                                name: ctx.tool_name.clone(),
+                                                event,
+                                            })
+                                            .await
+                                            .map_err(|_| ReactError::Other("Tool stream receiver closed".into()))?;
+                                    }
                                 }
                                 None => stream_open = false,
                             }
@@ -525,17 +599,23 @@ impl PipelineStage for ExecuteStage {
                     }
                 };
                 while let Some(event) = event_rx.recv().await {
-                    stream_tx
-                        .send((ctx.call_id.clone(), ctx.tool_name.clone(), event))
-                        .await
-                        .map_err(|_| ReactError::Other("Tool stream receiver closed".into()))?;
+                    if !matches!(event, ToolStreamEvent::Complete(_)) {
+                        stream_tx
+                            .send(ToolPipelineEvent::Stream {
+                                call_id: ctx.call_id.clone(),
+                                name: ctx.tool_name.clone(),
+                                event,
+                            })
+                            .await
+                            .map_err(|_| ReactError::Other("Tool stream receiver closed".into()))?;
+                    }
                 }
                 result
             } else {
                 snapshot
                     .tools
                     .tool_manager
-                    .execute_tool_stream_with_context(
+                    .execute_tool_stream_with_context_draining_started(
                         &ctx.tool_name,
                         ctx.params.clone(),
                         &tool_ctx,
@@ -547,7 +627,11 @@ impl PipelineStage for ExecuteStage {
             snapshot
                 .tools
                 .tool_manager
-                .execute_tool_with_context(&ctx.tool_name, ctx.params.clone(), &tool_ctx)
+                .execute_tool_with_context_draining_started(
+                    &ctx.tool_name,
+                    ctx.params.clone(),
+                    &tool_ctx,
+                )
                 .await
         };
 
@@ -923,6 +1007,7 @@ impl ToolExecutionPipeline {
                 Box::new(PermissionStage),
                 Box::new(ReadBeforeEditStage),
                 Box::new(SkillPermissionStage),
+                Box::new(InvocationStage),
                 Box::new(CallbackStage::START),
                 Box::new(AuditStage),
                 Box::new(ExecuteStage),
@@ -943,6 +1028,7 @@ impl ToolExecutionPipeline {
     ) -> Result<()> {
         for stage in &self.stages {
             if ctx.blocked {
+                ctx.emit_invocation().await?;
                 debug!(
                     agent = %snapshot.config.agent_name,
                     stage = stage.name(),
@@ -957,7 +1043,10 @@ impl ToolExecutionPipeline {
                 tool = %ctx.tool_name,
                 "Pipeline stage running"
             );
-            stage.run(ctx, snapshot).await?;
+            if let Err(error) = stage.run(ctx, snapshot).await {
+                ctx.emit_invocation().await?;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -1162,7 +1251,7 @@ mod tests {
         label: &str,
         initial_delay: u64,
         finish_delay: u64,
-        stream_tx: mpsc::Sender<(String, String, ToolStreamEvent)>,
+        stream_tx: mpsc::Sender<ToolPipelineEvent>,
     ) -> ToolExecutionContext {
         let input = serde_json::json!({
             "label": label,
@@ -1175,6 +1264,8 @@ mod tests {
         };
         ToolExecutionContext {
             call_id: call_id.to_string(),
+            requested_tool_name: "interleaving".to_string(),
+            requested_input: input.clone(),
             tool_name: "interleaving".to_string(),
             params,
             input,
@@ -1188,6 +1279,8 @@ mod tests {
             plan_mode: false,
             permission_decision: None,
             permission_mode_override: None,
+            rewrites: Vec::new(),
+            invocation_emitted: false,
             stream_tx: Some(stream_tx),
         }
     }
@@ -1195,6 +1288,8 @@ mod tests {
     fn completed_context(output: String) -> ToolExecutionContext {
         ToolExecutionContext {
             call_id: "call-output-budget".to_string(),
+            requested_tool_name: "shell".to_string(),
+            requested_input: serde_json::json!({}),
             tool_name: "shell".to_string(),
             params: ToolParameters::new(),
             input: serde_json::json!({}),
@@ -1208,6 +1303,8 @@ mod tests {
             plan_mode: false,
             permission_decision: None,
             permission_mode_override: None,
+            rewrites: Vec::new(),
+            invocation_emitted: false,
             stream_tx: None,
         }
     }
@@ -1606,8 +1703,8 @@ mod tests {
         };
 
         assert_eq!(
-            failure.failure.category,
-            crate::tools::ToolFailureCategory::InvalidArguments
+            failure.result.failure.map(|failure| failure.category),
+            Some(crate::tools::ToolFailureCategory::InvalidArguments)
         );
         Ok(())
     }
@@ -1620,13 +1717,13 @@ mod tests {
     /// `concurrent_batch_results_follow_call_order` in stream_channel.rs
     /// (F-RCT-04-P1-01).
     #[tokio::test]
-    async fn multiplexed_streams_preserve_identity_and_terminal_order() {
+    async fn multiplexed_streams_preserve_identity_and_terminal_order() -> crate::error::Result<()>
+    {
         let agent = crate::agent::ReactAgentBuilder::new()
             .model("test-model")
             .enable_tools()
             .tool(Box::new(InterleavingTool))
-            .build()
-            .expect("test agent should build");
+            .build()?;
         let snapshot = Arc::new(crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent));
         let (stream_tx, mut stream_rx) = mpsc::channel(64);
         let (completion_tx, mut completion_rx) = mpsc::channel(2);
@@ -1639,15 +1736,14 @@ mod tests {
             let completion_tx = completion_tx.clone();
             tokio::spawn(async move {
                 let result = ExecuteStage.run(&mut ctx, &snapshot).await;
-                completion_tx
+                let _ = completion_tx
                     .send((
                         ctx.call_id.clone(),
                         ctx.tool_name.clone(),
                         result,
                         ctx.result,
                     ))
-                    .await
-                    .expect("completion receiver should remain open");
+                    .await;
             });
         }
         drop(stream_tx);
@@ -1658,16 +1754,20 @@ mod tests {
         while terminal_count < 2 {
             tokio::select! {
                 biased;
-                Some((call_id, name, event)) = stream_rx.recv() => {
-                    events.push(AgentEvent::ToolStream { call_id, name, event });
+                Some(event) = stream_rx.recv() => {
+                    if let ToolPipelineEvent::Stream { call_id, name, event } = event {
+                        events.push(AgentEvent::ToolStream { call_id, name, event });
+                    }
                 }
                 Some((call_id, name, execution, result)) = completion_rx.recv() => {
-                    execution.expect("execute stage should succeed");
-                    let result = result.expect("execute stage should set a result");
+                    execution?;
+                    let result = result.ok_or_else(|| {
+                        ReactError::Other("execute stage did not set a result".to_string())
+                    })?;
                     events.push(AgentEvent::ToolResult {
                         call_id,
                         name,
-                        output: result.output,
+                        result,
                     });
                     terminal_count += 1;
                 }
@@ -1699,13 +1799,12 @@ mod tests {
         let terminal_ids: Vec<String> = events
             .iter()
             .filter_map(|event| match event {
-                AgentEvent::ToolResult { call_id, .. } | AgentEvent::ToolError { call_id, .. } => {
-                    Some(call_id.clone())
-                }
+                AgentEvent::ToolResult { call_id, .. } => Some(call_id.clone()),
                 _ => None,
             })
             .collect();
         assert_eq!(terminal_ids, vec!["call-b", "call-a"]);
         assert!(matches!(events.last(), Some(AgentEvent::ToolBatchEnd)));
+        Ok(())
     }
 }

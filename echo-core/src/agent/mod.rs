@@ -96,6 +96,27 @@ pub enum BudgetDecision {
     HardStop,
 }
 
+/// A policy stage that changed the model-requested tool invocation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolInvocationRewrite {
+    InterventionRedirect,
+    InterventionArguments,
+    PreToolUseHook,
+    Approval,
+}
+
+/// The requested and effective identity of one tool execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolInvocation {
+    pub requested_name: String,
+    pub requested_args: Value,
+    pub name: String,
+    pub args: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewrites: Vec<ToolInvocationRewrite>,
+}
+
 /// Value-scoped metadata for one streaming agent invocation.
 #[derive(Clone, Default)]
 pub struct AgentInvocationContext {
@@ -228,34 +249,21 @@ pub enum AgentEvent {
     },
 
     // ── Tool Invocation ──────────────────────────────────────────────────────────
-    /// Preparing to invoke a tool
+    /// Canonical invocation emitted after policy rewrites and before execution.
     ToolCall {
         /// Stable tool-call identity (model tool_call_id, or generated UUID).
         call_id: String,
-        /// Tool name
-        name: String,
-        /// Tool arguments (JSON format)
-        args: Value,
+        /// Requested/effective invocation and rewrite provenance.
+        invocation: ToolInvocation,
     },
-    /// Tool execution completed
+    /// Tool execution completed, successfully or unsuccessfully.
     ToolResult {
         /// Stable tool-call identity matching the preceding [`Self::ToolCall`].
         call_id: String,
-        /// Tool name
+        /// Effective tool name.
         name: String,
-        /// Tool execution result (string format)
-        output: String,
-    },
-    /// Tool execution error
-    ToolError {
-        /// Stable tool-call identity matching the preceding [`Self::ToolCall`].
-        call_id: String,
-        /// Tool name
-        name: String,
-        /// Error message
-        error: String,
-        /// Structured classification and recovery facts.
-        failure: crate::tools::ToolFailure,
+        /// Complete result, including typed failure, artifact metadata, and truncation.
+        result: crate::tools::ToolResult,
     },
     /// Streaming tool progress / output event (not a terminal lifecycle event).
     ToolStream {
@@ -264,7 +272,7 @@ pub enum AgentEvent {
         /// Tool name
         name: String,
         /// Stream event payload (`Progress` / `Output`; `Complete` is mapped to
-        /// [`Self::ToolResult`] / [`Self::ToolError`] by the ReAct runner).
+        /// [`Self::ToolResult`] by the ReAct runner).
         event: crate::tools::ToolStreamEvent,
     },
     /// Emitted before a batch of tools starts executing.
@@ -360,7 +368,7 @@ pub enum AgentEvent {
 pub enum AgentPhase {
     /// LLM reasoning in progress (Token → ThinkStart → ThinkEnd)
     Thinking,
-    /// Tool execution in progress (ToolCall → ToolResult / ToolError)
+    /// Tool execution in progress (ToolCall -> typed ToolResult)
     Acting,
     /// Final result produced or cancelled
     Terminal,
@@ -463,7 +471,6 @@ impl AgentEvent {
 
             AgentEvent::ToolCall { .. }
             | AgentEvent::ToolResult { .. }
-            | AgentEvent::ToolError { .. }
             | AgentEvent::ToolStream { .. }
             | AgentEvent::ToolBatchStart { .. }
             | AgentEvent::ToolBatchEnd
@@ -496,7 +503,6 @@ impl AgentEvent {
             self,
             AgentEvent::ThinkEnd { .. }
                 | AgentEvent::ToolResult { .. }
-                | AgentEvent::ToolError { .. }
                 | AgentEvent::ParameterError { .. }
                 | AgentEvent::ContextCompressed { .. }
                 | AgentEvent::FinalAnswer(_)
@@ -830,10 +836,10 @@ pub trait Agent: Send + Sync {
     /// and re-inject the prompt into the context.
     fn set_system_prompt(&self, _prompt: &str) {}
 
-    /// Delegate a task to a named sub-agent or team member.
+    /// Delegate a task to a named subagent or team member.
     ///
     /// Default: returns error ("delegation not supported").
-    /// ReactAgent overrides this when SubAgent feature is enabled.
+    /// ReactAgent overrides this when Subagent feature is enabled.
     fn delegate_to<'a>(
         &'a self,
         _target: &'a str,

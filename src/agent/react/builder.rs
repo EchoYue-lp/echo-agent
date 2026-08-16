@@ -2,7 +2,7 @@
 
 use crate::agent::config::DEFAULT_TOKEN_LIMIT;
 use crate::agent::react::run::pipeline::ToolExecutionPipeline;
-use crate::agent::{Agent, AgentCallback, AgentConfig, AgentRole, InterventionCallback};
+use crate::agent::{Agent, AgentCallback, AgentConfig, InterventionCallback};
 use crate::audit::AuditLogger;
 use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
@@ -26,7 +26,6 @@ pub struct ReactAgentBuilder {
     name: String,
     model: String,
     system_prompt: String,
-    role: AgentRole,
     llm_client: Option<Arc<dyn LlmClient>>,
     llm_config: Option<LlmConfig>,
     tools: Vec<Box<dyn Tool>>,
@@ -49,9 +48,6 @@ pub struct ReactAgentBuilder {
     #[cfg(feature = "subagent")]
     subagent_data_workspace_factory:
         Option<std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>>,
-    /// Sprint 11: optional RuntimeStateStore for team-mode checkpoint/resume.
-    #[cfg(feature = "subagent")]
-    subagent_runtime_state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
     #[cfg(feature = "subagent")]
     subagent_prompt_compiler:
         Option<std::sync::Arc<dyn crate::agent::subagent::SubagentPromptCompiler>>,
@@ -119,7 +115,6 @@ impl ReactAgentBuilder {
             name: "assistant".to_string(),
             model: String::new(),
             system_prompt: crate::config::DEFAULT_AGENT_SYSTEM_PROMPT.to_string(),
-            role: AgentRole::default(),
             llm_client: None,
             llm_config: None,
             tools: Vec::new(),
@@ -135,8 +130,6 @@ impl ReactAgentBuilder {
             subagent_worktree_factory: None,
             #[cfg(feature = "subagent")]
             subagent_data_workspace_factory: None,
-            #[cfg(feature = "subagent")]
-            subagent_runtime_state_store: None,
             #[cfg(feature = "subagent")]
             subagent_prompt_compiler: None,
             #[cfg(feature = "subagent")]
@@ -233,12 +226,6 @@ impl ReactAgentBuilder {
     /// Set system prompt
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
-        self
-    }
-
-    /// Set Agent role
-    pub fn role(mut self, role: AgentRole) -> Self {
-        self.role = role;
         self
     }
 
@@ -376,18 +363,6 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// Sprint 11: supply a `RuntimeStateStore` for team-mode checkpoint/resume.
-    /// Injected into `SubagentExecutorConfig.runtime_state_store`; `dispatch_team`
-    /// plumbs it into `TeamAgent`. Default: no store (teams run in-memory).
-    #[cfg(feature = "subagent")]
-    pub fn subagent_runtime_state_store(
-        mut self,
-        store: std::sync::Arc<dyn crate::state::RuntimeStateStore>,
-    ) -> Self {
-        self.subagent_runtime_state_store = Some(store);
-        self
-    }
-
     /// Supply the compiler used for every subagent invocation created by this agent.
     #[cfg(feature = "subagent")]
     pub fn subagent_prompt_compiler(
@@ -480,7 +455,10 @@ impl ReactAgentBuilder {
 
     // ── Execution Parameters ────────────────────────────────────────────────────
 
-    /// Set maximum iteration count
+    /// Set a non-zero maximum iteration count.
+    ///
+    /// [`Self::build`] rejects zero because an unbounded autonomous loop is not
+    /// a valid framework execution policy.
     pub fn max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max;
         self
@@ -834,17 +812,21 @@ impl ReactAgentBuilder {
             )
             .into());
         }
-        // max_iterations == 0 means unlimited (no iteration limit)
+        if self.max_iterations == 0 {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "max_iterations must be greater than zero".to_string(),
+            )
+            .into());
+        }
         if self.enable_subagent && !self.enable_builtin_tools {
             return Err(crate::error::ConfigError::ConfigFileError(
-                "Enabling sub-agent dispatch (enable_subagent) requires enabling tool calls (enable_builtin_tools)"
+                "Enabling subagent dispatch (enable_subagent) requires enabling tool calls (enable_builtin_tools)"
                     .to_string(),
             )
             .into());
         }
 
         let mut config = AgentConfig::new(&self.model, &self.name, &self.system_prompt)
-            .role(self.role)
             .enable_tool(self.enable_builtin_tools)
             .readonly_tools(self.readonly_tools)
             .enable_memory(self.enable_memory)
@@ -880,11 +862,6 @@ impl ReactAgentBuilder {
         #[cfg(feature = "subagent")]
         if let Some(factory) = self.subagent_data_workspace_factory.clone() {
             config = config.subagent_data_workspace_factory(factory);
-        }
-        // Sprint 11: propagate the RuntimeStateStore (team checkpoint/resume).
-        #[cfg(feature = "subagent")]
-        if let Some(store) = self.subagent_runtime_state_store.clone() {
-            config = config.subagent_runtime_state_store(store);
         }
         #[cfg(feature = "subagent")]
         if let Some(compiler) = self.subagent_prompt_compiler.clone() {
@@ -1131,6 +1108,15 @@ mod tests {
         assert!(builder.enable_builtin_tools);
         assert!(builder.enable_memory);
         assert_eq!(builder.max_iterations, 20);
+    }
+
+    #[test]
+    fn rejects_unbounded_zero_iteration_configuration() {
+        let result = ReactAgentBuilder::new()
+            .model("test-model")
+            .max_iterations(0)
+            .build();
+        assert!(matches!(result, Err(crate::error::ReactError::Config(_))));
     }
 
     #[test]

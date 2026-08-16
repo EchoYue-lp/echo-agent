@@ -160,11 +160,11 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 
 | 能力 | 描述 | API 预览 |
 |------|------|---------|
-| **SubAgent** | Sync / Fork / Teammate 三种模式 | `agent.register_agent(sub)` |
-| **任务图** | 单一依赖图上的版本化任务 CRUD | `.enable_tasks()` |
+| **Subagent** | Sync / Fork / Teammate 三种模式 | `agent.register_agent(sub)` |
+| **任务图** | 单一依赖图上的版本化任务 CRUD | `task_create` / `task_update` / `task_list` |
 | **自我审查** | LLM 质量评估作为工具 | `ReviewTool::new(critic)` |
 | **图工作流** | 线性、条件、循环、并行扇出/扇入 | `GraphBuilder::new("pipeline")` |
-| **DAG 任务** | 依赖感知的任务调度 | `TaskManager::default()` |
+| **DAG 任务** | 版本化 CRUD 与依赖感知执行 | `TaskRevisionService::new(...)` |
 | **声明式工作流** | YAML/JSON 定义图——无需 Rust 代码 | `Graph::from_yaml("wf.yaml")?` |
 
 ### 集成
@@ -193,38 +193,32 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 echo-agent = "0.2.0"
 
 # 显式禁用默认 feature（等价于默认安装）
-echo-agent = { version = "0.1.4", default-features = false }
+echo-agent = { version = "0.2.0", default-features = false }
 
 # 完整功能
-echo-agent = { version = "0.1.4", features = ["full"] }
+echo-agent = { version = "0.2.0", features = ["full"] }
 
 # 按需选择
-echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "web"] }
+echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "web"] }
 ```
 
 | Feature | 启用 | 关键依赖 |
 |---------|------|---------|
-| `mcp` | MCP 协议客户端 | `echo-mcp`, `tokio-tungstenite` |
+| `full` | 启用下列全部 feature | — |
+| `a2a` | Agent-to-Agent 协议 | `axum`, `jsonwebtoken` |
+| `mcp` | MCP 协议客户端 | — |
+| `lsp` | Language Server Protocol 集成 | — |
+| `sqlite` | SQLite 持久化状态 | `rusqlite` |
+| `telemetry` | OpenTelemetry 追踪与指标 | `opentelemetry` |
+| `human-loop` | 人工审批 | `tokio-tungstenite` |
+| `topology` | Agent 拓扑 | — |
+| `tasks` | DAG 任务管理 | — |
+| `subagent` | Subagent 编排 | — |
 | `web` | Web 搜索 + 获取工具 | `scraper`, `html2text` |
 | `media` | PDF、Excel、Word、图片工具 | `lopdf`, `calamine`, `docx-rs` |
 | `data` | Polars 数据分析 | `polars` |
-| `sqlite` | SQLite 记忆持久化 | `rusqlite` |
+| `statistics` | 统计分析工具 | — |
 | `channels` | QQ Bot + 飞书集成 | `echo-channels` |
-| `human-loop` | 人工审批 | `tokio-tungstenite` |
-| `tasks` | DAG 任务管理 | — |
-| `workflow` | 图工作流引擎 | — |
-| `plan-execute` | Plan-and-Execute | — |
-| `self-reflection` | 自反思 Agent | — |
-| `subagent` | 多 Agent 编排 | — |
-| `a2a` | Agent-to-Agent 协议 | — |
-| `topology` | Agent 拓扑可视化 | — |
-| `telemetry` | OpenTelemetry 追踪 | `opentelemetry` |
-| `sandbox` | 代码执行沙箱（Local/Docker/K8s） | — |
-| `semantic-memory` | 语义记忆 | — |
-| `macros` | 过程宏（#[tool] 等） | `echo-macros` |
-| `provider-factory` | LLM 提供方工厂 | — |
-| `workflow` | 图工作流引擎 | — |
-| `multimodal` | 多模态输入（图片/文件） | — |
 | `git` | Git 操作工具 | — |
 | `database` | 数据库查询工具 | `sqlx` |
 | `rag` | RAG 检索工具 | — |
@@ -234,6 +228,9 @@ echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "
 | `project-rules` | 项目规则加载 | — |
 | `shell` | Shell 命令执行工具 | — |
 | `files` | 文件读写工具 | — |
+| `eval` | 评估原语 | — |
+| `improve` | 自改进原语 | — |
+| `testing` | Mock 与测试辅助 | — |
 
 ---
 
@@ -247,13 +244,11 @@ echo-agent/
 ├── echo-state/          记忆、压缩和审计日志
 ├── echo-orchestration/  工作流、人工审批和 DAG 任务
 ├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
-├── echo-agents/         Agent 实现：ReactAgent、PlanExecute、Subagent
 ├── echo-tools/          领域工具：chart、data、database、git、media、web、rag
 ├── src/                 Agent 引擎、重导出和门面层
-├── examples/            66 个可运行示例
+├── examples/            66 个可运行 Rust 示例
 ├── docs/                双语文档（en + zh）
-├── skills/              外部技能包（Markdown 格式）
-└── echo-agent.yaml      示例配置
+└── echo-agent.example.yaml  示例配置
 ```
 
 > **注意：** `echo-agent` 是纯库框架。开箱即用的应用（含 CLI、Web UI、WebSocket）请参见 [echo-agent-cli](https://github.com/EchoYue-lp/echo-agent-cli)。
@@ -347,7 +342,7 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 ## 亮点
 
 - **67 个注册工具** — ReAct 循环、数据分析、论文检索、Web、媒体、RAG、数据库等
-- **33 个可运行示例** — 每个功能都有 `cargo run` 即可运行的 Demo
+- **66 个可运行示例** — 验收、条件验收与教学示例均有明确分类
 - **全模块单元测试** — 覆盖核心路径的测试
 - **8 个 crate，1 个 facade** — 通用类型使用 `echo_agent::prelude::*`，具体工具使用 `echo_agent::tools::<domain>`
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
@@ -490,7 +485,7 @@ Bypass → Plan → Rules(deny-first) → ProtectedPaths → Cache(TTL) → Deni
 - **DenialTracker**：连续拒绝后自动降级
 - **PermissionMode**：Default/Plan/Auto/AcceptEdits/BypassPermissions/DontAsk/Bubble
 
-### 9. 多 Agent 编排 — Orchestrator + SubAgent 团队
+### 9. 多 Agent 编排 — Orchestrator + Subagent 团队
 
 协调多个专业 Agent，支持上下文隔离和切换协议。
 
@@ -538,7 +533,7 @@ ReactAgent 提供 `task_create`、`task_update`、`task_list`，共同操作一�
 ```rust,ignore
 let agent = ReactAgentBuilder::new()
     .model("qwen3.7-max")
-    .enable_tasks()  // 启用版本化任务图 CRUD 工具
+    .enable_tools()
     .build()?;
 
 let result = agent.execute("为量子计算趋势研究创建任务图").await?;
@@ -784,14 +779,11 @@ agent.set_circuit_breaker(cb_config);
 | 11 | [`demo11_callbacks`](examples/demo11_callbacks.rs) | 生命周期回调 |
 | 12 | [`demo12_resilience`](examples/demo12_resilience.rs) | 重试与容错 |
 | 13 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | 工具执行配置 |
-| 14 | [`demo14_memory_isolation`](examples/demo14_memory_isolation.rs) | 记忆隔离 |
 | 15 | [`demo15_structured_output`](examples/demo15_structured_output.rs) | JSON Schema 输出 |
-| 16 | [`demo16_testing`](examples/demo16_testing.rs) | Mock 测试 |
 | 17 | [`demo17_chat`](examples/demo17_chat.rs) | 交互式对话 |
 | 18 | [`demo18_semantic_memory`](examples/demo18_semantic_memory.rs) | 语义记忆 |
 | 19 | [`demo19_guard`](examples/demo19_guard.rs) | 护栏系统 |
 | 20 | [`demo20_audit`](examples/demo20_audit.rs) | 审计日志 |
-| 22 | [`demo22_plan_execute`](examples/demo22_plan_execute.rs) | Plan-and-Execute |
 | 23 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A 协议 |
 | 24 | [`demo24_topology`](examples/demo24_topology.rs) | 拓扑可视化 |
 | 25 | [`demo25_macros`](examples/demo25_macros.rs) | 宏系统展示 |
@@ -813,6 +805,9 @@ agent.set_circuit_breaker(cb_config);
 | 41 | [`demo41_web_tools`](examples/demo41_web_tools.rs) | Web 搜索 + 获取 |
 | 42 | [`demo42_playwright_mcp`](examples/demo42_playwright_mcp.rs) | Playwright MCP 浏览器自动化 |
 | 43 | [`demo43_data_tools`](examples/demo43_data_tools.rs) | Excel / CSV / Word / Text 数据处理 |
+| 67 | [`demo67_progress`](examples/demo67_progress.rs) | 进度事件 |
+| 68 | [`demo68_human_gate`](examples/demo68_human_gate.rs) | 人工审批门禁 |
+| 70 | [`demo70_scheduler`](examples/demo70_scheduler.rs) | 任务调度 |
 
 另有 **6 个综合示例** 展示真实场景应用：
 
@@ -859,10 +854,8 @@ agent.set_circuit_breaker(cb_config);
 | 结构化输出 | [EN](docs/en/11-structured-output.md) | [ZH](docs/zh/11-structured-output.md) |
 | Mock 测试 | [EN](docs/en/12-mock.md) | [ZH](docs/zh/12-mock.md) |
 | IM 通道 | [EN](docs/en/15-im-channels.md) | [ZH](docs/zh/15-im-channels.md) |
-| Plan-and-Execute | [EN](docs/en/16-plan-execute.md) | [ZH](docs/zh/16-plan-execute.md) |
 | 图工作流 | [EN](docs/en/17-graph-workflow.md) | [ZH](docs/zh/17-graph-workflow.md) |
 | 护栏系统 | [EN](docs/en/18-guard-system.md) | [ZH](docs/zh/18-guard-system.md) |
-| 自反思 Agent | [EN](docs/en/19-self-reflection.md) | [ZH](docs/zh/19-self-reflection.md) |
 | Web 工具 | [EN](docs/en/20-web-tools.md) | [ZH](docs/zh/20-web-tools.md) |
 | 常用工具 | [EN](docs/en/21-common-tools.md) | [ZH](docs/zh/21-common-tools.md) |
 | 论文检索 | [EN](docs/en/22-research-tools.md) | [ZH](docs/zh/22-research-tools.md) |
@@ -884,9 +877,8 @@ agent.set_circuit_breaker(cb_config);
 ```bash
 git clone https://github.com/EchoYue-lp/echo-agent
 cd echo-agent
-cargo build
-cargo test --lib
-cargo clippy
+cargo fmt --all
+./scripts/verify.sh
 ```
 
 ---

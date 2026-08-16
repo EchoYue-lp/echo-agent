@@ -17,7 +17,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [03 - Memory System](./03-memory.md) | Memory | Store (long-term), RuntimeStateStore (runtime checkpoint), ConversationStore (transcript) |
 | [04 - Context Compression](./04-compression.md) | Compression | SlidingWindow, Summary, Hybrid pipeline, ContextManager |
 | [05 - Human-in-the-Loop](./05-human-loop.md) | HIL | Approval gate, Console/Webhook/WebSocket providers |
-| [06 - Multi-Agent Orchestration](./06-subagent.md) | SubAgent | Orchestrator/Subagent/Planner, context isolation |
+| [06 - Multi-Agent Orchestration](./06-subagent.md) | Subagent | Orchestrator/Subagent/Planner, context isolation |
 | [07 - Skill System](./07-skills.md) | Skills | Capability packs, prompt injection, external SKILL.md loading |
 | [08 - MCP Integration](./08-mcp.md) | MCP | stdio/HTTP transport, tool adaptation, multi-server management |
 | [09 - Task Planning](./09-tasks.md) | Tasks / DAG | DAG, topological sort, cycle detection, Mermaid visualization |
@@ -40,7 +40,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [23 - Hooks System](./23-hooks.md) | Hooks | Skills hooks (31 events, 7 actions), Task hooks, Subagent hooks |
 | [24 - Eval System](./24-eval-system.md) | Eval | EvalCase, SuccessCriteria, LlmGrader, A/B comparison, regression, HTML reports |
 | [25 - Self-Evolution](./25-self-improvement.md) | Improve / Evolution | Analyzer, ImprovementLoop, EvalDrivenImprovement, tiered memory, skill auto-creation, merge/health/patch, rule promotion, change audit |
-| [26 - Multi-Agent Patterns](./26-multi-agent.md) | SubAgent / TeamAgent | Parent-child delegation (Sync/Fork/Teammate), peer collaboration (ManagerSubagent/Pipeline/Debate/Swarm) |
+| [26 - Multi-Agent Patterns](./26-multi-agent.md) | Subagent / Team intent | Single dispatch modes and TeamSpec-to-runtime-DAG collaboration |
 | [27 - Tracing System](./27-tracing.md) | Trace | Run, RunEvent (11 types), RunStore, JsonlRunStore, lifecycle, secret redaction |
 | [28 - Config Reference](./28-config-reference.md) | Config | AgentConfig, ReactAgentBuilder, ToolExecutionConfig, TokenBudgetConfig, YAML config, feature flags |
 | [29 - Runtime & Task System](./29-long-running-tasks.md) | Runtime & Tasks | Unified runtime, execution serialization, DAG orchestration, ProgressBridge, background tasks, scheduling |
@@ -53,7 +53,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [31 - LSP Integration](./31-lsp-integration.md) | LSP | Language Server Protocol, code navigation, diagnostics, rust-analyzer |
 | [32 - Plugin System](./32-plugin-system.md) | Plugin | PluginManifest, PluginRegistry, PluginScope, lifecycle management |
 | [33 - Headless Mode](./33-headless-mode.md) | Headless | Non-interactive execution, CI/CD integration, JSON output, exit_code |
-| [34 - Git Isolation](./34-git-isolation.md) | Git Worktree / Checkpoint | Parallel sub-agent isolation, worktree management, file operation rollback |
+| [34 - Git Isolation](./34-git-isolation.md) | Git Worktree / Checkpoint | Parallel subagent isolation, worktree management, file operation rollback |
 | [35 - Pipelines](./35-pipelines.md) | Data Pipeline / Writing Pipeline | Reproducible code-first analysis, writing quality loop |
 | [36 - Data Quality & Statistics](./36-data-quality-statistics.md) | Data Quality / Statistics | Data profiling, anomaly detection, descriptive stats, correlation analysis |
 | [37 - Code Search](./37-code-search.md) | Code Search | Ripgrep, structured output, glob/type filtering, 50KB cap |
@@ -72,15 +72,14 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | Doc | Module | Key Concepts |
 |-----|--------|--------------|
 | [Security Guide](./security.md) | Security | Security model, sandbox config, secret management, MCP trust boundaries |
-| [Tool Permissions](./tool-permissions.md) | Tool Permissions | ToolPermission, PermissionMode, RuleRegistry, deny-first, ToolRiskClassifier |
 
 ### Knowledge Base
 
-See [Knowledge Base](../knowledge/zh/README.md) for in-depth concept explanations:
-- [Agent Patterns](../knowledge/zh/agent-patterns.md) — ReAct, Plan-and-Execute, Self-Reflection, Graph Workflow
-- [MCP Protocol](../knowledge/zh/mcp-protocol.md) — Model Context Protocol specification
-- [Skill System Design](../knowledge/zh/skill-system.md) — agentskills.io specification alignment
-- [A2A Protocol](../knowledge/zh/a2a-protocol.md) — Agent-to-Agent communication
+See [Knowledge Base](../knowledge/en/README.md) for in-depth concept explanations:
+- [Agent Patterns](../knowledge/en/agent-patterns.md) — ReAct, Plan-and-Execute, Self-Reflection, Graph Workflow
+- [MCP Protocol](../knowledge/en/mcp-protocol.md) — Model Context Protocol specification
+- [Skill System Design](../knowledge/en/skill-system.md) — agentskills.io specification alignment
+- [A2A Protocol](../knowledge/en/a2a-protocol.md) — Agent-to-Agent communication
 
 ---
 
@@ -149,7 +148,7 @@ async fn main() -> Result<()> {
 │  └──────────────┘  └────────────┘  └─────────────────┘  │
 │                                                         │
 │  ┌──────────────────────────────────────────────────┐   │
-│  │            SubAgent Registry                      │   │
+│  │            Subagent Registry                      │   │
 │  │  { "math_agent": Arc<AsyncMutex<Box<dyn Agent>>> │   │
 │  │    "writer_agent": ... }                          │   │
 │  └──────────────────────────────────────────────────┘   │
@@ -174,8 +173,8 @@ by their URL, with an explicit `api_protocol` override when required.
 | Single-task execution | `execute()` / `execute_stream()` | — |
 | **Multi-turn chat** | **`chat()` / `chat_stream()`** | — |
 | Tool calling | `enable_tool` | `true` |
-| DAG task planning | `enable_task` | `false` |
-| SubAgent orchestration | `enable_subagent` | `false` |
+| Revisioned task graph | `task_create` / `task_update` / `task_list` | registered |
+| Subagent orchestration | `enable_subagent` | `false` |
 | Long-term memory (Store) | `enable_memory` | `false` |
 | Human-in-the-loop | `enable_human_in_loop` | `false` |
 | Chain-of-Thought prompt | `enable_cot` | `true` |
@@ -195,7 +194,7 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo01_tools.rs` | Basic tool registration and invocation |
 | `examples/demo02_tasks.rs` | DAG task planning |
 | `examples/demo03_approval.rs` | Human-in-the-loop approval |
-| `examples/demo04_subagent.rs` | SubAgent orchestration |
+| `examples/demo04_subagent.rs` | Subagent orchestration |
 | `examples/demo05_compressor.rs` | Context compression |
 | `examples/demo06_mcp.rs` | MCP protocol integration |
 | `examples/demo07_skills.rs` | Skill system |
@@ -205,14 +204,11 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo11_callbacks.rs` | Lifecycle callbacks |
 | `examples/demo12_resilience.rs` | Fault tolerance and retries |
 | `examples/demo13_tool_execution.rs` | Tool execution configuration |
-| `examples/demo14_memory_isolation.rs` | Memory and context isolation |
 | `examples/demo15_structured_output.rs` | Structured output (extract / JSON Schema) |
-| `examples/demo16_testing.rs` | Mock testing infrastructure (zero real LLM calls) |
 | `examples/demo17_chat.rs` | Multi-turn chat (chat / chat_stream / reset) |
 | `examples/demo18_semantic_memory.rs` | Store semantic search (EmbeddingStore / vector retrieval) |
 | `examples/demo19_guard.rs` | Guard system (rule / LLM content filtering) |
 | `examples/demo20_audit.rs` | Audit logging |
-| `examples/demo22_plan_execute.rs` | Plan-and-Execute |
 | `examples/demo23_a2a.rs` | A2A protocol |
 | `examples/demo24_topology.rs` | Multi-agent topology visualization |
 | `examples/demo25_macros.rs` | Macro system showcase |

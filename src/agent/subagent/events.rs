@@ -1,6 +1,8 @@
 //! Subagent event system — lifecycle notifications for subagent operations
 
-use serde::Serialize;
+use echo_core::agent::ToolInvocation;
+use echo_core::tools::ToolResult;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::info;
@@ -10,7 +12,7 @@ use super::types::{ExecutionMode, ObservedIsolation, SubagentOutcome, SubagentSt
 const DEFAULT_CHANNEL_CAPACITY: usize = 128;
 
 /// Lifecycle events emitted by the subagent system.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SubagentEvent {
     /// A subagent was registered.
     Registered {
@@ -199,10 +201,8 @@ pub enum SubagentEvent {
         agent: String,
         /// Stable tool-call identity emitted by the model.
         call_id: String,
-        /// Tool name.
-        name: String,
-        /// Tool arguments.
-        args: serde_json::Value,
+        /// Canonical requested/effective invocation after all runtime rewrites.
+        invocation: ToolInvocation,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).
@@ -216,34 +216,14 @@ pub enum SubagentEvent {
         agent: String,
         /// Stable tool-call identity matching [`Self::DispatchToolStarted`].
         call_id: String,
-        /// Tool name.
+        /// Effective tool name matching the invocation event.
         name: String,
-        /// Tool result or error text.
-        result: String,
-        /// Whether the tool call succeeded.
-        success: bool,
-        /// Structured failure facts when `success` is false.
-        failure: Option<crate::tools::ToolFailure>,
-        /// Tool-result metadata, including an optional durable artifact reference.
-        metadata: std::collections::HashMap<String, String>,
-        /// Whether the result returned to the agent was truncated.
-        truncated: bool,
+        /// Canonical rich terminal result emitted by the ReAct runner.
+        result: ToolResult,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).
         run_id: Option<String>,
-    },
-    /// A team was created.
-    TeamCreated {
-        /// Unique identifier for the team.
-        team_id: String,
-        /// Names of subagents assigned to the team.
-        members: Vec<String>,
-    },
-    /// A team was dissolved.
-    TeamDissolved {
-        /// Unique identifier for the team that was dissolved.
-        team_id: String,
     },
 }
 
@@ -319,13 +299,6 @@ impl SubagentEventListener for LoggingSubagentListener {
                     "subagent_dispatch_failed"
                 );
             }
-            SubagentEvent::TeamCreated { team_id, members } => {
-                info!(
-                    team_id = %team_id,
-                    members = ?members,
-                    "team_created"
-                );
-            }
             _ => {}
         }
     }
@@ -399,38 +372,91 @@ impl Default for SubagentEventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::agent::ToolInvocationRewrite;
+    use echo_core::tools::{ToolFailure, ToolFailureCategory, ToolResultKind};
     use std::collections::HashMap;
 
     #[test]
-    fn completed_tool_event_serializes_artifact_metadata() -> Result<(), serde_json::Error> {
-        let event = SubagentEvent::DispatchToolCompleted {
+    fn tool_events_round_trip_without_losing_invocation_or_result_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let invocation = ToolInvocation {
+            requested_name: "requested_shell".to_string(),
+            requested_args: serde_json::json!({"command": "echo requested"}),
+            name: "shell".to_string(),
+            args: serde_json::json!({"command": "echo effective"}),
+            rewrites: vec![ToolInvocationRewrite::Approval],
+        };
+        let started = SubagentEvent::DispatchToolStarted {
+            parent: "root".to_string(),
+            agent: "explorer".to_string(),
+            call_id: "call-1".to_string(),
+            invocation: invocation.clone(),
+            execution_id: Some("task-1:1".to_string()),
+            run_id: Some("run-1".to_string()),
+        };
+        let started = serde_json::from_value::<SubagentEvent>(serde_json::to_value(started)?)?;
+        let SubagentEvent::DispatchToolStarted {
+            invocation: decoded_invocation,
+            ..
+        } = started
+        else {
+            return Err(std::io::Error::other("tool-start event changed variant").into());
+        };
+        assert_eq!(decoded_invocation, invocation);
+
+        let result = ToolResult {
+            kind: ToolResultKind::Json,
+            success: false,
+            output: "preview".to_string(),
+            error: Some("partial failure".to_string()),
+            failure: Some(ToolFailure::new(ToolFailureCategory::PartialSideEffect)),
+            data: Some(serde_json::json!({"partial": true})),
+            truncated: true,
+            mime_type: Some("application/json".to_string()),
+            metadata: HashMap::from([("artifact_path".to_string(), "/tmp/tool.log".to_string())]),
+        };
+        let completed = SubagentEvent::DispatchToolCompleted {
             parent: "root".to_string(),
             agent: "explorer".to_string(),
             call_id: "call-1".to_string(),
             name: "shell".to_string(),
-            result: "preview".to_string(),
-            success: true,
-            failure: None,
-            metadata: HashMap::from([("artifact_path".to_string(), "/tmp/tool.log".to_string())]),
-            truncated: true,
+            result,
             execution_id: Some("task-1:1".to_string()),
             run_id: Some("run-1".to_string()),
         };
-
-        let value = serde_json::to_value(event)?;
-        let completed = value.get("DispatchToolCompleted");
+        let completed = serde_json::from_value::<SubagentEvent>(serde_json::to_value(completed)?)?;
+        let SubagentEvent::DispatchToolCompleted {
+            name,
+            result: decoded_result,
+            ..
+        } = completed
+        else {
+            return Err(std::io::Error::other("tool-result event changed variant").into());
+        };
+        assert_eq!(name, "shell");
+        assert_eq!(decoded_result.kind, ToolResultKind::Json);
+        assert!(!decoded_result.success);
+        assert_eq!(decoded_result.output, "preview");
+        assert_eq!(decoded_result.error.as_deref(), Some("partial failure"));
         assert_eq!(
-            completed
-                .and_then(|payload| payload.get("truncated"))
-                .and_then(serde_json::Value::as_bool),
-            Some(true)
+            decoded_result.data,
+            Some(serde_json::json!({"partial": true}))
         );
         assert_eq!(
-            completed
-                .and_then(|payload| payload.get("metadata"))
-                .and_then(|metadata| metadata.get("artifact_path"))
-                .and_then(serde_json::Value::as_str),
+            decoded_result.mime_type.as_deref(),
+            Some("application/json")
+        );
+        assert!(decoded_result.truncated);
+        assert_eq!(
+            decoded_result
+                .metadata
+                .get("artifact_path")
+                .map(String::as_str),
             Some("/tmp/tool.log")
+        );
+        assert_eq!(
+            decoded_result.failure.map(|failure| failure.category),
+            Some(ToolFailureCategory::PartialSideEffect)
         );
         Ok(())
     }
@@ -444,7 +470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_event_bus_subscribe() {
+    async fn test_event_bus_subscribe() -> Result<(), Box<dyn std::error::Error>> {
         let bus = SubagentEventBus::new();
         let mut rx = bus.subscribe();
 
@@ -452,10 +478,12 @@ mod tests {
             name: "test".into(),
         });
 
-        let event = rx.try_recv().unwrap();
-        match event.as_ref() {
-            SubagentEvent::Registered { name } => assert_eq!(name, "test"),
-            _ => panic!("Wrong event type"),
+        let event = rx.try_recv()?;
+        if let SubagentEvent::Registered { name } = event.as_ref() {
+            assert_eq!(name, "test");
+            Ok(())
+        } else {
+            Err(std::io::Error::other("wrong event type").into())
         }
     }
 

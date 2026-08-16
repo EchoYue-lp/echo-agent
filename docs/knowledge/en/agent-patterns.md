@@ -1,7 +1,7 @@
 # Core AI Agent Patterns
 
 > **Important Note**: Planning is a versioned artifact projected onto the single TaskRun graph, not a separate runtime or agent type:
-> - **Task Planning**: enable the `task_create`, `task_update`, and `task_list` tools with `.enable_tasks()`
+> - **Task Planning**: use the default `task_create`, `task_update`, and `task_list` tools, optionally injecting a durable `TaskRevisionService`
 > - **Self-Review**: Use the `ReviewTool` tool
 > 
 > This aligns with industry best practices (Hermes, Claude Code, LangGraph), where reflection and planning are composable tool capabilities rather than separate Agent types.
@@ -126,7 +126,7 @@ Plan-and-Execute was proposed by Wei et al. [2], decomposing complex tasks into 
 │   │              │              │                               │   │
 │   │              └──▶ step_3 ──┘                               │   │
 │   │                                                              │   │
-│   │  [TaskManager] Schedules in topological order,              │   │
+│   │  [RuntimeDagExecutor] Drives the committed task revision,   │   │
 │   │  independent steps execute in parallel                       │   │
 │   └─────────────────────────────────────────────────────────────┘   │
 │                                                                      │

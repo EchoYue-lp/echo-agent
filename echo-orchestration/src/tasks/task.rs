@@ -21,7 +21,7 @@ pub enum TaskType {
     Verification,
     /// Background: long-running background task
     Background,
-    /// Delegation: delegate to sub-agent
+    /// Delegation: delegate to subagent
     Delegation,
 }
 
@@ -288,6 +288,13 @@ pub struct TaskState {
     pub checkpoint_at: u64,
 }
 
+/// Rich serialization and presentation record for one task.
+///
+/// This type is a projection DTO, not a graph authority. Mutating a cloned
+/// value does not commit task state or dependency changes. Use
+/// [`TaskRevisionService`](super::TaskRevisionService) for authoritative CRUD
+/// and revisions, then project the committed [`Task`] when this richer record
+/// is needed by a consumer.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ManagedTask {
     /// ManagedTask ID
@@ -319,13 +326,6 @@ pub struct ManagedTask {
     pub max_retries: u32,
     /// Current retry count
     pub retry_count: u32,
-    /// Optional per-task execution function.
-    ///
-    /// When set, this overrides the executor's global `execute_fn` for this task.
-    /// Not serialized — callers must re-register after deserialization.
-    #[serde(skip)]
-    pub execute_fn: Option<super::executor::TaskExecuteFn>,
-
     /// Serializable typed metadata (survives persistence/serialization).
     ///
     /// Application layers can store domain-specific data (e.g., task kind,
@@ -463,10 +463,6 @@ impl std::fmt::Debug for ManagedTask {
             .field("timeout_secs", &self.timeout_secs)
             .field("max_retries", &self.max_retries)
             .field("retry_count", &self.retry_count)
-            .field(
-                "execute_fn",
-                &self.execute_fn.as_ref().map(|_| "Some(<fn>)"),
-            )
             .field("metadata_json", &self.metadata_json)
             .field("task_type", &self.task_type)
             .field("acceptance_criteria", &self.acceptance_criteria)
@@ -532,7 +528,7 @@ impl PartialEq for ManagedTask {
             && self.kind == other.kind
             && self.files == other.files
             && self.summary == other.summary
-        // execute_fn, metadata_json, metadata intentionally excluded — not comparable
+        // metadata_json and typed metadata are intentionally excluded.
     }
 }
 
@@ -556,7 +552,6 @@ impl ManagedTask {
             timeout_secs: 0,
             max_retries: 0,
             retry_count: 0,
-            execute_fn: None,
             metadata_json: None,
             metadata: None,
             // Enhanced fields (Step 1) - all with sensible defaults
@@ -594,19 +589,10 @@ impl ManagedTask {
         }
     }
 
-    pub fn with_dependencies(mut self, deps: Vec<String>) -> Self {
-        self.dependencies = deps;
-        self
-    }
-
-    pub fn add_dependency(&mut self, dep: String) {
-        self.dependencies.push(dep);
-    }
-
     /// Project this rich task record into the canonical immutable runtime spec.
     ///
-    /// TaskExecutor-specific attempt, hook, verifier, and persistence details
-    /// stay on `ManagedTask`; DAG scheduling consumes only this product-neutral view.
+    /// Projection-only evidence and display details stay on `ManagedTask`; DAG
+    /// scheduling consumes only this product-neutral view.
     pub fn task_spec(&self) -> TaskSpec {
         let fallback_kind = match self.task_type {
             TaskType::Discovery => TaskKind::Investigation,
@@ -686,7 +672,9 @@ impl ManagedTask {
         }
     }
 
-    /// Canonical task node used by the framework DAG executor.
+    /// Project this record into a task node for framework DAG consumers.
+    ///
+    /// This conversion does not commit the node to a task graph.
     pub fn to_task(&self) -> Task {
         Task {
             spec: self.task_spec(),
@@ -729,12 +717,6 @@ impl ManagedTask {
     /// Add a single tag
     pub fn add_tag(&mut self, tag: impl Into<String>) {
         self.tags.push(tag.into());
-    }
-
-    /// Set a per-task execution function that overrides the executor's global execute_fn.
-    pub fn with_execute_fn(mut self, f: super::executor::TaskExecuteFn) -> Self {
-        self.execute_fn = Some(f);
-        self
     }
 
     /// Set typed metadata.
@@ -856,68 +838,6 @@ impl ManagedTask {
     pub fn with_checkpoint_policy(mut self, policy: CheckpointPolicy) -> Self {
         self.checkpoint_policy = policy;
         self
-    }
-
-    /// Record task start
-    pub fn mark_started(&mut self) {
-        self.started_at = Some(super::time::now_secs());
-        self.status = TaskStatus::Running;
-        self.updated_at = super::time::now_secs();
-    }
-
-    /// Record task completion
-    pub fn mark_completed(&mut self, result: Option<String>) {
-        self.completed_at = Some(super::time::now_secs());
-        self.status = TaskStatus::Completed;
-        self.result = result;
-        self.updated_at = super::time::now_secs();
-    }
-
-    /// Record an execution attempt
-    pub fn record_attempt(&mut self, attempt: TaskAttempt) {
-        self.attempts.push(attempt);
-        self.retry_count = self.attempts.len() as u32;
-        self.updated_at = super::time::now_secs();
-    }
-
-    /// Whether already cancelled
-    pub fn is_cancelled(&self) -> bool {
-        self.status == TaskStatus::Cancelled
-    }
-
-    /// Cancel the task (using state machine validation)
-    ///
-    /// Succeeds only when the current state allows transition to `Cancelled`.
-    /// Returns `true` if cancellation succeeded, `false` if current state does not allow cancellation.
-    pub fn cancel(&mut self) -> bool {
-        match self.status.transition_to(TaskStatus::Cancelled) {
-            Ok(new_status) => {
-                self.status = new_status;
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// Record an execution result
-    pub fn record_execution(
-        &mut self,
-        attempt: u32,
-        error: Option<String>,
-        duration_secs: Option<u64>,
-        result: Option<String>,
-    ) {
-        self.retry_count = attempt.saturating_sub(1);
-        self.updated_at = super::time::now_secs();
-        if let Some(r) = result {
-            self.result = Some(r);
-        }
-        if let Some(dur) = duration_secs {
-            let _ = dur; // Record execution duration (usable for future statistics)
-        }
-        if let Some(err) = error {
-            self.reasoning = Some(format!("Attempt {} failed: {}", attempt, err));
-        }
     }
 }
 

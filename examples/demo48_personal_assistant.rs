@@ -9,7 +9,7 @@
 //! | 长期记忆 | `SqliteStore` 持久化用户偏好和对话历史 |
 //! | 多模态支持 | `chat_with_image_url()` / `execute_with_image_url()` 处理图片输入 |
 //! | Agent 编排 | 主协调 Agent + 专业化子 Agent |
-//! | 任务管理 | `TaskManager` 创建和追踪任务 |
+//! | 任务管理 | `TaskRevisionService` 原子维护版本化任务图 |
 //! | 流式输出 | `chat_stream()` 实时对话体验 |
 //!
 //! ## 运行方式
@@ -21,7 +21,12 @@
 
 use echo_agent::memory::SqliteStore;
 use echo_agent::prelude::*;
-use echo_agent::tasks::{ManagedTask, TaskManager, TaskStatus};
+use echo_agent::tasks::{
+    DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, TaskCreateInput, TaskDraft,
+    TaskGraphExecutionMode, TaskKind, TaskPlanPatchInputOp, TaskRevisionService, TaskStatus,
+    TaskUpdateInput,
+};
+use echo_agent::tools::ToolContext;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -210,7 +215,6 @@ async fn demo_agent_orchestration() -> Result<()> {
 
 请根据任务需求合理分配工作。",
         )
-        .role(echo_agent::agent::AgentRole::Orchestrator)
         .enable_subagent()
         .tool_execution(ToolExecutionConfig {
             timeout_ms: SUBAGENT_TOOL_TIMEOUT_MS,
@@ -265,33 +269,46 @@ async fn demo_task_management() -> Result<()> {
     println!("Part 3: 任务管理系统");
     println!("═══════════════════════════════════════════════════════\n");
 
-    let manager = TaskManager::new();
-
-    // 创建任务
-    let tasks = vec![
-        ManagedTask::new("task-001", "学习 Rust 基础语法"),
-        ManagedTask::new("task-002", "完成第一个 Rust 项目"),
-        ManagedTask::new("task-003", "阅读 Rust 官方文档"),
+    let service = TaskRevisionService::new(
+        Arc::new(InMemoryRevisionedTaskStore::new()),
+        Arc::new(DefaultTaskToolPolicy::new("personal-assistant-demo")),
+    );
+    let context = ToolContext {
+        run_id: Some("personal-assistant-demo".to_string()),
+        ..ToolContext::default()
+    };
+    let drafts = vec![
+        task_draft("task-001", "学习 Rust 基础语法"),
+        task_draft("task-002", "完成第一个 Rust 项目"),
+        task_draft("task-003", "阅读 Rust 官方文档"),
     ];
+    let created = service
+        .create_from_tool(
+            TaskCreateInput {
+                tasks: drafts,
+                base_revision: None,
+                reason: Some("创建学习计划".to_string()),
+                assumptions: Vec::new(),
+                risks: Vec::new(),
+                execution_mode: TaskGraphExecutionMode::Sequential,
+            },
+            &context,
+        )
+        .await
+        .map_err(|error| echo_agent::error::ReactError::Other(error.to_string()))?;
 
-    for task in &tasks {
-        manager.add_task(task.clone());
-    }
-
-    println!("  ✓ 已创建 {} 个任务\n", tasks.len());
-
-    // 列出所有任务
-    let all_tasks = manager.get_all_tasks();
-    if all_tasks.len() != tasks.len() {
+    let expected_count = 3;
+    println!("  ✓ 已创建 {} 个任务\n", created.created_count);
+    if created.graph.snapshot.tasks.len() != expected_count {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：任务数不匹配，预期 {} 实际 {}",
-            tasks.len(),
-            all_tasks.len()
+            expected_count,
+            created.graph.snapshot.tasks.len()
         )));
     }
     println!("  任务列表:\n");
-    for task in &all_tasks {
-        let status_icon = match &task.status {
+    for task in &created.graph.snapshot.tasks {
+        let status_icon = match &task.execution.status {
             TaskStatus::Pending => "⏳",
             TaskStatus::Running => "🔄",
             TaskStatus::Completed => "✅",
@@ -303,33 +320,72 @@ async fn demo_task_management() -> Result<()> {
             TaskStatus::Skipped => "⏭️",
             TaskStatus::Paused(_) => "⏸️",
         };
-        println!("    {} {} - {}", status_icon, task.id, task.description);
+        println!(
+            "    {} {} - {}",
+            status_icon, task.spec.id, task.spec.description
+        );
     }
     println!();
 
-    // 更新任务状态
-    manager
-        .update_task_status("task-001", TaskStatus::Running)
-        .map_err(echo_agent::error::ReactError::Other)?;
-    manager
-        .update_task_status("task-001", TaskStatus::Completed)
-        .map_err(echo_agent::error::ReactError::Other)?;
-    manager
-        .update_task_status("task-002", TaskStatus::Running)
-        .map_err(echo_agent::error::ReactError::Other)?;
+    let running = service
+        .update_from_tool(
+            TaskUpdateInput {
+                base_revision: created.graph.snapshot.revision,
+                reason: "开始第一个任务".to_string(),
+                operations: vec![TaskPlanPatchInputOp::SetStatus {
+                    task_id: "task-001".to_string(),
+                    status: TaskStatus::Running,
+                }],
+            },
+            &context,
+        )
+        .await
+        .map_err(|error| echo_agent::error::ReactError::Other(error.to_string()))?;
+    let updated = service
+        .update_from_tool(
+            TaskUpdateInput {
+                base_revision: running.snapshot.revision,
+                reason: "推进学习计划".to_string(),
+                operations: vec![
+                    TaskPlanPatchInputOp::SetStatus {
+                        task_id: "task-001".to_string(),
+                        status: TaskStatus::Completed,
+                    },
+                    TaskPlanPatchInputOp::SetStatus {
+                        task_id: "task-002".to_string(),
+                        status: TaskStatus::Running,
+                    },
+                ],
+            },
+            &context,
+        )
+        .await
+        .map_err(|error| echo_agent::error::ReactError::Other(error.to_string()))?;
 
     println!("  ✓ 更新了任务状态\n");
 
-    // 获取特定任务
-    let Some(task) = manager.get_task("task-002") else {
+    let Some(task) = updated
+        .snapshot
+        .tasks
+        .iter()
+        .find(|task| task.spec.id == "task-002")
+    else {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：无法读取 task-002".to_string(),
         ));
     };
-    println!("  当前进行中: {} ({})\n", task.description, task.id);
+    println!(
+        "  当前进行中: {} ({})\n",
+        task.spec.description, task.spec.id
+    );
 
-    // 进度统计
-    let (completed, total) = manager.get_progress();
+    let completed = updated
+        .snapshot
+        .tasks
+        .iter()
+        .filter(|task| task.execution.status == TaskStatus::Completed)
+        .count();
+    let total = updated.snapshot.tasks.len();
     if completed != 1 || total != 3 {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：任务进度不符合预期（completed={completed}, total={total}）"
@@ -338,6 +394,24 @@ async fn demo_task_management() -> Result<()> {
     println!("  进度: {}/{} 任务已完成\n", completed, total);
 
     Ok(())
+}
+
+fn task_draft(id: &str, description: &str) -> TaskDraft {
+    TaskDraft {
+        id: id.to_string(),
+        title: description.to_string(),
+        description: description.to_string(),
+        kind: TaskKind::Implementation,
+        subagent: None,
+        depends_on: Vec::new(),
+        files: Vec::new(),
+        allowed_tools: Vec::new(),
+        required_artifacts: Vec::new(),
+        execution_checks: Vec::new(),
+        acceptance_criteria: Vec::new(),
+        max_retries: 0,
+        extensions: serde_json::Value::Null,
+    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -1,5 +1,4 @@
-//! Pre-iteration setup: audit user input, run `UserPromptSubmit` hook,
-//! create the execution `TaskNode`. See `phases/mod.rs` for the wider flow.
+//! Pre-iteration setup: audit user input and run `UserPromptSubmit` hooks.
 
 use super::super::stream_macros::{yield_event_or, yield_final_event_or};
 use super::super::types::StreamMode;
@@ -12,8 +11,7 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::info;
 
 /// One-shot pre-loop preparation: emit `MemoryRecalled`, audit the user
-/// input, run the `UserPromptSubmit` lifecycle hook, create the execution
-/// `TaskNode`.
+/// input, and run the `UserPromptSubmit` lifecycle hook.
 ///
 /// On a closed receiver mid-prepare, returns `Ok(PrepareOutcome::Abandoned)`
 /// so the loop driver simply returns `Ok(())`.
@@ -89,9 +87,7 @@ pub(crate) async fn prepare_turn(
         }
     }
 
-    // Create TaskNode for this execution turn (DAG tracking)
-    let task_node_id = snap.create_execution_node(text).await;
-    Ok(PrepareOutcome::Continue { task_node_id })
+    Ok(PrepareOutcome::Continue)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -104,10 +100,8 @@ mod tests {
     use crate::audit::{AuditFilter, AuditLogger, InMemoryAuditLogger};
     use crate::skills::hooks::{HookAction, HookEvent, HookRegistry, HookRule, HooksDefinition};
 
-    /// No hook registered + no recall → `prepare_turn` returns `Continue`,
-    /// `task_node_id` is `None` (no state store), no events were yielded
-    /// (recalled = 0 means we skip the `MemoryRecalled` event), and the
-    /// audit logger captured the user input.
+    /// No hook registered + no recall returns `Continue`, emits no event, and
+    /// records the user input in the audit log.
     #[tokio::test]
     async fn prepare_turn_continue_audits_user_input() {
         let audit = Arc::new(InMemoryAuditLogger::new());
@@ -129,15 +123,7 @@ mod tests {
         .await
         .expect("prepare_turn must succeed");
 
-        match outcome {
-            PrepareOutcome::Continue { task_node_id } => {
-                assert!(
-                    task_node_id.is_none(),
-                    "no state_store configured → no TaskNode id",
-                );
-            }
-            other => panic!("expected Continue, got {:?}", phase_outcome_label(&other)),
-        }
+        assert!(matches!(outcome, PrepareOutcome::Continue));
 
         // recalled = 0 → no MemoryRecalled event; no other event either.
         assert!(
@@ -324,7 +310,7 @@ mod tests {
 
     fn phase_outcome_label(o: &PrepareOutcome) -> &'static str {
         match o {
-            PrepareOutcome::Continue { .. } => "Continue",
+            PrepareOutcome::Continue => "Continue",
             PrepareOutcome::BlockedAndDone => "BlockedAndDone",
             PrepareOutcome::Abandoned => "Abandoned",
         }

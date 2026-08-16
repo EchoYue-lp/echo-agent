@@ -51,7 +51,7 @@ impl std::fmt::Display for ToolPermission {
 /// - AcceptEdits: automatically accept edits
 /// - BypassPermissions: bypass all checks (can be disabled by bypass_disabled)
 /// - Auto: AI classifier auto-decides
-/// - Bubble: sub-agent permissions bubble up
+/// - Bubble: subagent permissions bubble up
 /// - DontAsk: silently reject tools not matching an allow rule (no user prompt)
 /// - StrictConfirm: ask before write/execute/network/sensitive operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

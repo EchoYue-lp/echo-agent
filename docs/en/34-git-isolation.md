@@ -4,7 +4,7 @@
 
 echo-agent uses git primitives to provide two layers of safety for file operations:
 
-1. **Git Worktree Isolation** — parallel sub-agents work on isolated copies of the repository, avoiding file conflicts
+1. **Git Worktree Isolation** — parallel subagents work on isolated copies of the repository, avoiding file conflicts
 2. **Git Checkpoint** — lightweight tags are automatically created before file mutations, enabling instant rollback
 
 Both features are built on standard `git` commands, requiring no additional dependencies. They share a common goal: agents should be able to mutate files aggressively without risking irreversible damage.
@@ -22,13 +22,13 @@ echo_tools = { version = "0.2", features = ["git"] }
 
 ### Purpose
 
-When multiple sub-agents need to work on the same repository simultaneously, they compete for the same files. Worktrees solve this by giving each sub-agent its own working directory — while sharing the same `.git` object store. This makes them lightweight compared to full clones.
+When multiple subagents need to work on the same repository simultaneously, they compete for the same files. Worktrees solve this by giving each subagent its own working directory — while sharing the same `.git` object store. This makes them lightweight compared to full clones.
 
 ```
 Main repo (branch: main)
 ├── .worktrees/
-│   ├── feature-auth/     ← sub-agent A's isolated workspace
-│   └── fix-typo/         ← sub-agent B's isolated workspace
+│   ├── feature-auth/     ← subagent A's isolated workspace
+│   └── fix-typo/         ← subagent B's isolated workspace
 ├── src/
 ├── Cargo.toml
 └── .git/                 ← shared object store
@@ -107,7 +107,7 @@ Creates a new git worktree for isolated parallel work.
 | `path_suffix` | No | Custom directory name under `.worktrees/` |
 | `repo_path` | No | Repository path (defaults to current working directory) |
 
-Returns the worktree path and branch name. The caller should use this directory as the working root for the sub-agent.
+Returns the worktree path and branch name. The caller should use this directory as the working root for the subagent.
 
 ```
 Agent: I'll create an isolated workspace for the auth refactor.
@@ -352,7 +352,7 @@ All checkpoint functions handle non-git environments silently:
 
 The two systems compose naturally. A typical multi-agent workflow:
 
-1. **Enter worktree** — sub-agent creates an isolated workspace via `enter_worktree`
+1. **Enter worktree** — subagent creates an isolated workspace via `enter_worktree`
 2. **Work with checkpoint safety** — inside the worktree, every `write_file` / `delete_file` call automatically creates checkpoints
 3. **Rollback if needed** — if a file edit goes wrong, use `rollback_to_checkpoint()` to restore state within the worktree
 4. **Exit and merge** — when done, `exit_worktree(merge_to="main")` merges the branch and cleans up

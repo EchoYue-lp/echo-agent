@@ -8,7 +8,7 @@ on:
   pull_request:
 
 jobs:
-  lint:
+  verify:
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: "1"
@@ -22,55 +22,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: "false"
-      - name: Check formatting and lints
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-          cargo clippy --workspace --lib --bins --all-features --locked -- \
-            -D clippy::unwrap_used \
-            -D clippy::expect_used \
-            -D clippy::panic \
-            -D clippy::unreachable
+      - name: Run the repository verification gate
+        run: ./scripts/verify.sh
 
-  test:
-    name: test (${{ matrix.package }})
-    runs-on: ubuntu-latest
+  platform-check:
+    name: platform check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        package:
-          - echo_agent
-          - echo_core
-          - echo_execution
-          - echo_integration
-          - echo_macros
-          - echo_orchestration
-          - echo_state
-          - echo_tools
+        os: [macos-15, windows-latest]
     env:
       CARGO_BUILD_JOBS: "1"
       CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: "false"
-      - name: Test workspace
-        # The lint job already compiles examples and benches with --all-targets.
-        run: cargo test -p "${{ matrix.package }}" --lib --tests --all-features --locked
+      - name: Compile framework libraries for the host platform
+        run: cargo check --workspace --lib --all-features --locked
+      - name: Exercise Windows atomic file replacement
+        if: runner.os == 'Windows'
+        run: cargo test -p echo_core --lib --all-features --locked utils::fs::tests
 
-  minimal:
+  dependency-policy:
     runs-on: ubuntu-latest
-    env:
-      CARGO_BUILD_JOBS: "1"
-      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Audit vulnerabilities and maintenance warnings
+        run: cargo audit --deny warnings
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          cache-targets: "false"
-      - name: Check without default features
-        run: cargo check --workspace --lib --no-default-features --locked
+          arguments: --workspace --all-features --locked

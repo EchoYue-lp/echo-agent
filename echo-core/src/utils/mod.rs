@@ -1,5 +1,6 @@
 //! Common utility modules
 
+pub mod canonical_json;
 pub mod fs;
 pub mod hash;
 pub mod json_parse;

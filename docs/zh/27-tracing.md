@@ -114,7 +114,7 @@ pub enum RunEvent {
     FileEdit { tool, path },
     TestRun { command, passed, failure_count },
     PhaseTransition { phase, iteration },
-    SubAgentRun { agent_name, task, outcome },
+    SubagentRun { agent_name, task, outcome },
 }
 ```
 
@@ -132,7 +132,7 @@ pub enum RunEvent {
 | `FileEdit` | 执行 | 写工具编辑文件后 |
 | `TestRun` | 执行 | 测试命令运行后 |
 | `PhaseTransition` | 循环 | 每个 ReAct 阶段："recall"、"think"、"act"、"finalize" |
-| `SubAgentRun` | 调度 | 子 Agent 完成时——"completed"、"failed"、"cancelled" |
+| `SubagentRun` | 调度 | 子 Agent 完成时——"completed"、"failed"、"cancelled" |
 
 ### 密钥脱敏
 

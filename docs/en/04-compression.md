@@ -211,7 +211,7 @@ let result = compressor.compress_in_place(&mut messages, current_tokens, target_
 println!("Levels applied: {:?}", result.levels_applied);
 ```
 
-See [demo53_adaptive_compression.rs](../examples/demo53_adaptive_compression.rs).
+See [demo53_adaptive_compression.rs](../../examples/demo53_adaptive_compression.rs).
 
 ---
 

@@ -40,14 +40,42 @@ use syn::{
     DeriveInput, FnArg, ImplItem, ItemFn, ItemImpl, LitStr, Pat, ReturnType, parse_macro_input,
 };
 
-fn echo_agent_crate_path() -> syn::Result<syn::Path> {
-    match crate_name("echo_agent").map_err(|e| syn::Error::new(Span::call_site(), e.to_string()))? {
-        FoundCrate::Itself => Ok(syn::parse_quote!(::echo_agent)),
-        FoundCrate::Name(name) => {
-            let ident = syn::Ident::new(&name, Span::call_site());
-            Ok(syn::parse_quote!(::#ident))
+#[derive(Clone, Copy)]
+enum MacroCrate {
+    Core,
+    Orchestration,
+}
+
+fn resolve_echo_crate_path(target: MacroCrate) -> syn::Result<syn::Path> {
+    const CORE_CANDIDATES: &[&str] = &["echo_core", "echo_agent"];
+    const ORCHESTRATION_CANDIDATES: &[&str] = &["echo_orchestration", "echo_agent"];
+    let candidates = match target {
+        MacroCrate::Core => CORE_CANDIDATES,
+        MacroCrate::Orchestration => ORCHESTRATION_CANDIDATES,
+    };
+    for candidate in candidates {
+        match crate_name(candidate) {
+            Ok(FoundCrate::Itself) => return Ok(syn::parse_quote!(crate)),
+            Ok(FoundCrate::Name(name)) => {
+                let ident = syn::Ident::new(&name, Span::call_site());
+                return Ok(syn::parse_quote!(::#ident));
+            }
+            Err(_) => {}
         }
     }
+    let names = candidates.join(" or ");
+    Err(syn::Error::new(
+        Span::call_site(),
+        format!("Cannot find {names} in dependencies"),
+    ))
+}
+
+fn macro_support_crate_path(echo_crate: &syn::Path, crate_name: &str) -> LitStr {
+    let path = quote!(#echo_crate).to_string().replace(' ', "");
+    LitStr::new(
+        &format!("{path}::__macro_support::{crate_name}"),
+        Span::call_site(),
+    )
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -201,7 +229,9 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
-    let echo_agent = echo_agent_crate_path()?;
+    let echo_agent = resolve_echo_crate_path(MacroCrate::Core)?;
+    let serde_crate = macro_support_crate_path(&echo_agent, "serde");
+    let schemars_crate = macro_support_crate_path(&echo_agent, "schemars");
     let tool_name = &attrs.name;
     let tool_desc = &attrs.description;
     let fn_name = &func.sig.ident;
@@ -241,6 +271,8 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
 
     let expanded = quote! {
         #[derive(#echo_agent::__macro_support::serde::Deserialize, #echo_agent::__macro_support::schemars::JsonSchema)]
+        #[serde(crate = #serde_crate)]
+        #[schemars(crate = #schemars_crate)]
         pub struct #params_name {
             #(#param_fields),*
         }
@@ -335,7 +367,7 @@ pub fn callback(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn callback_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
-    let echo_agent = echo_agent_crate_path()?;
+    let echo_agent = resolve_echo_crate_path(MacroCrate::Core)?;
     reject_generic_impl(&input, "#[callback]")?;
     let self_ty = &input.self_ty;
     let method_impls = impl_block_to_boxfuture_methods(&echo_agent, &input)?;
@@ -403,7 +435,7 @@ pub fn guard(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn guard_impl(attrs: NameAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
-    let echo_agent = echo_agent_crate_path()?;
+    let echo_agent = resolve_echo_crate_path(MacroCrate::Core)?;
     let guard_name = &attrs.name;
     let struct_name = generated_ident(
         &format!("{}Guard", to_pascal_case(&guard_name.replace('-', "_"))),
@@ -466,13 +498,14 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn handler_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
-    let echo_agent = echo_agent_crate_path()?;
+    let orchestration = resolve_echo_crate_path(MacroCrate::Orchestration)?;
+    let macro_support = resolve_echo_crate_path(MacroCrate::Core)?;
     reject_generic_impl(&input, "#[handler]")?;
     let self_ty = &input.self_ty;
-    let method_impls = extract_boxfuture_methods_with_return(&echo_agent, &input)?;
+    let method_impls = extract_boxfuture_methods_with_return(&macro_support, &input)?;
 
     Ok(quote! {
-        impl #echo_agent::human_loop::HumanLoopHandler for #self_ty {
+        impl #orchestration::human_loop::HumanLoopHandler for #self_ty {
             #(#method_impls)*
         }
     })
@@ -506,7 +539,7 @@ pub fn compressor(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn compressor_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
-    let echo_agent = echo_agent_crate_path()?;
+    let echo_agent = resolve_echo_crate_path(MacroCrate::Core)?;
     let fn_name = &func.sig.ident;
     let struct_name = format_ident!("{}Compressor", to_pascal_case(&fn_name.to_string()));
     require_return_type(&func)?;
@@ -551,7 +584,7 @@ pub fn permission_policy(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn permission_policy_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
-    let echo_agent = echo_agent_crate_path()?;
+    let echo_agent = resolve_echo_crate_path(MacroCrate::Core)?;
     let fn_name = &func.sig.ident;
     let struct_name = format_ident!("{}Policy", to_pascal_case(&fn_name.to_string()));
     require_return_type(&func)?;
@@ -609,7 +642,7 @@ pub fn audit_logger(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn audit_logger_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
-    let echo_agent = echo_agent_crate_path()?;
+    let echo_agent = resolve_echo_crate_path(MacroCrate::Core)?;
     reject_generic_impl(&input, "#[audit_logger]")?;
     let self_ty = &input.self_ty;
     let method_impls = extract_boxfuture_methods_with_return(&echo_agent, &input)?;

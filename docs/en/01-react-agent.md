@@ -10,7 +10,7 @@ Thought (reasoning) → Action (tool call) → Observation (result)
 
 This loop repeats until the LLM determines the task is complete and calls the `final_answer` tool.
 
-`ReactAgent` is the core implementation in echo-agent. It integrates tool management, memory, context compression, human-in-the-loop, SubAgent orchestration, and streaming output into a single cohesive structure.
+`ReactAgent` is the core implementation in echo-agent. It integrates tool management, memory, context compression, human-in-the-loop, Subagent orchestration, and streaming output into a single cohesive structure.
 
 ---
 
@@ -58,16 +58,12 @@ execute(task)
 
 ---
 
-## Agent Roles
+## Composable Capabilities
 
-`AgentRole` controls the execution mode:
-
-| Role | Description |
-|------|-------------|
-| `Subagent` (default) | Directly executes tasks using its tools |
-| `Orchestrator` | Delegates sub-tasks to SubAgents via `agent_tool` |
-
-> **Note:** Task planning is enabled via `.enable_task(true)` (registers `plan`/`create_task`/`update_task` tools). No separate `Planner` role needed.
+Agents do not use a separate role state machine. A regular `ReactAgent` becomes
+an orchestrator by enabling Subagent dispatch and registering Subagents. The
+revisioned `task_create`, `task_update`, and `task_list` tools provide planning
+without changing the Agent's runtime role.
 
 ---
 
@@ -76,8 +72,7 @@ execute(task)
 ```rust
 AgentConfig::new("qwen3-max", "my_agent", "You are a helpful assistant")
     .enable_tool(true)          // enable tool calling (default: true)
-    .enable_task(true)          // enable DAG task planning
-    .enable_subagent(true)      // enable SubAgent dispatch (Orchestrator mode)
+    .enable_subagent(true)      // enable Subagent dispatch (Orchestrator mode)
     .enable_memory(true)        // enable long-term memory (Store + remember/recall/forget tools)
     .enable_human_in_loop(true) // enable human approval gate
     .enable_cot(true)           // enable Chain-of-Thought prompt injection (Builder default: true)

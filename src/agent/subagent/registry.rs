@@ -1,9 +1,9 @@
 //! Subagent registry — discovery, registration, and lifecycle management
 //!
-//! Wraps the existing `SubAgentMap` with declarative definitions, factory support,
+//! Wraps the existing `SubagentMap` with declarative definitions, factory support,
 //! and lifecycle events. Backward compatible — `register_agent()` still works.
 
-use crate::agent::SubAgentMap;
+use crate::agent::SubagentMap;
 use crate::error::Result;
 use echo_core::agent::Agent;
 use futures::future::BoxFuture;
@@ -84,7 +84,7 @@ where
 
 /// Registry for subagent definitions and instances.
 ///
-/// Wraps the existing `SubAgentMap` and adds:
+/// Wraps the existing `SubagentMap` and adds:
 /// - Definition-based lookup
 /// - Factory support for lazy instantiation
 /// - Lifecycle events
@@ -126,10 +126,10 @@ impl SubagentRegistry {
         }
     }
 
-    /// Migrate from an existing `SubAgentMap` (backward compatible).
+    /// Migrate from an existing `SubagentMap` (backward compatible).
     ///
     /// Each agent gets a default Sync-mode `BuiltIn` definition.
-    pub fn from_subagent_map(map: SubAgentMap) -> Self {
+    pub fn from_subagent_map(map: SubagentMap) -> Self {
         let registry = Self::new();
         if let Ok(agents) = map.read() {
             let Ok(mut state) = registry.state.try_write() else {
@@ -765,9 +765,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_from_subagent_map() {
-        use crate::agent::SubAgentMap;
+        use crate::agent::SubagentMap;
 
-        let map: SubAgentMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let map: SubagentMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
         {
             let mut m = map.write().unwrap_or_else(|e| e.into_inner());
             m.insert(

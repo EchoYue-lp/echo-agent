@@ -39,8 +39,8 @@ pub mod security;
 pub mod triggers;
 
 pub use audit::{
-    ChangeEntry, ChangeEntryBuilder, ChangeFilter, ChangeLog, ChangeType, EntityType,
-    JsonlChangeLog,
+    ChangeEntry, ChangeEntryBuilder, ChangeFilter, ChangeLog, ChangeRecordOutcome, ChangeType,
+    EntityType, JsonlChangeLog,
 };
 pub use auto_memory::{
     AutoMemoryConfig, Observation, ObservationCategory, extract_observations,

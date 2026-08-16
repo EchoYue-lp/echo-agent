@@ -137,29 +137,33 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
                     prompt_tokens, completion_tokens
                 );
             }
-            AgentEvent::ToolCall { name, args, .. } => {
+            AgentEvent::ToolCall { invocation, .. } => {
+                let name = invocation.name;
+                let args = invocation.args;
                 tool_calls += 1;
                 println!("\n🔧 调用工具: {}", name);
                 let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
                 // 只显示前 200 字符的参数
                 let preview: String = args_str.chars().take(800).collect();
                 println!("   参数: {}", preview);
-                if args_str.len() > 200 {
+                if args_str.chars().count() > 200 {
                     println!("   ... (参数过长，已截断)");
                 }
             }
-            AgentEvent::ToolResult { name, output, .. } => {
-                let preview: String = output.chars().take(800).collect();
-                println!("\n✅ 工具返回: {}", name);
-                println!("   结果: {}", preview);
-                if output.len() > 400 {
-                    println!("   ... (共 {} 字符)", output.len());
+            AgentEvent::ToolResult { name, result, .. } => {
+                if result.success {
+                    let preview: String = result.output.chars().take(800).collect();
+                    println!("\n✅ 工具返回: {}", name);
+                    println!("   结果: {}", preview);
+                    let output_chars = result.output.chars().count();
+                    if output_chars > 400 {
+                        println!("   ... (共 {} 字符)", output_chars);
+                    }
+                } else {
+                    tool_errors += 1;
+                    println!("\n❌ 工具错误: {}", name);
+                    println!("   错误: {}", result.error.unwrap_or(result.output));
                 }
-            }
-            AgentEvent::ToolError { name, error, .. } => {
-                tool_errors += 1;
-                println!("\n❌ 工具错误: {}", name);
-                println!("   错误: {}", error);
             }
             AgentEvent::FinalAnswer(answer) => {
                 final_answer = answer.clone();

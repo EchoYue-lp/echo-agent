@@ -4,7 +4,7 @@
 //!
 //! | Module | Subsystem | Responsibility |
 //! |--------|-----------|----------------|
-//! | `tool_exec` | `ToolExecutionSubsystem` | Tool registration/execution, Skill, Hook, MCP, SubAgent, Sandbox |
+//! | `tool_exec` | `ToolExecutionSubsystem` | Tool registration/execution, Skill, Hook, MCP, Subagent, Sandbox |
 //! | `guard` | `GuardSubsystem` | Guardrails, permission policies, audit logs, circuit breaker |
 //! | `memory` | `MemorySubsystem` | Context management, long-term memory, snapshots, Checkpoint, conversation persistence |
 //! | `approval` | `ApprovalSubsystem` | Human-in-the-loop approval |

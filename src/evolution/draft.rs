@@ -1,7 +1,7 @@
 //! Skill draft generation — creates SKILL.md files from detected candidates.
 //!
 //! Takes a [`SkillCandidate`] (produced by [`super::candidate::SkillCandidateDetector`]) and
-//! generates a draft SKILL.md file at `.echo-agent/skills/_drafts/<name>/SKILL.md`.
+//! generates a draft SKILL.md file at `<consumer-root>/skills/_drafts/<name>/SKILL.md`.
 //! The draft is a *proposal* — a human reviews it before promoting to Active.
 //!
 //! # Template-based generation
@@ -22,7 +22,7 @@ use echo_core::error::ReactError;
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-/// Where draft SKILL.md files are saved, relative to echo_agent_dir.
+/// Where draft SKILL.md files are saved, relative to the consumer root.
 const DRAFTS_DIR: &str = "skills/_drafts";
 
 // ── DraftResult ────────────────────────────────────────────────────────
@@ -46,8 +46,8 @@ pub struct DraftResult {
 /// directory and promotes the candidate to `Draft` lifecycle state via
 /// the [`Curator`].
 pub struct SkillDraftGenerator<'a> {
-    /// Path to the `.echo-agent/` directory.
-    echo_agent_dir: PathBuf,
+    /// Consumer-supplied evolution storage root.
+    storage_root: PathBuf,
     /// ChangeLog for recording mutations.
     change_log: &'a dyn ChangeLog,
     curator: Curator,
@@ -56,13 +56,13 @@ pub struct SkillDraftGenerator<'a> {
 
 impl<'a> SkillDraftGenerator<'a> {
     /// Create a new generator.
-    pub fn new(echo_agent_dir: PathBuf, change_log: &'a dyn ChangeLog) -> Self {
+    pub fn new(storage_root: PathBuf, change_log: &'a dyn ChangeLog) -> Self {
         let curator = Curator::new(
             CuratorConfig::default(),
-            echo_agent_dir.join("curator_state.json"),
+            storage_root.join("curator_state.json"),
         );
         Self {
-            echo_agent_dir,
+            storage_root,
             change_log,
             curator,
             require_curator_transition: false,
@@ -103,7 +103,7 @@ impl<'a> SkillDraftGenerator<'a> {
     /// Generate a draft SKILL.md directly from a [`SkillCandidate`] struct.
     pub async fn generate_from_candidate(&self, candidate: &SkillCandidate) -> Result<DraftResult> {
         let name = &candidate.name;
-        let drafts_root = self.echo_agent_dir.join(DRAFTS_DIR);
+        let drafts_root = self.storage_root.join(DRAFTS_DIR);
         let dir = echo_core::utils::fs::join_path_segment(&drafts_root, name).map_err(|error| {
             ReactError::Other(format!("Unsafe skill candidate name {name:?}: {error}"))
         })?;
@@ -316,6 +316,12 @@ mod tests {
     impl ChangeLog for NullChangeLog {
         fn record(&self, _entry: super::super::audit::ChangeEntry) -> Result<()> {
             Ok(())
+        }
+        fn record_idempotent(
+            &self,
+            _entry: super::super::audit::ChangeEntry,
+        ) -> Result<super::super::audit::ChangeRecordOutcome> {
+            Ok(super::super::audit::ChangeRecordOutcome::AlreadyRecorded)
         }
         fn query(
             &self,

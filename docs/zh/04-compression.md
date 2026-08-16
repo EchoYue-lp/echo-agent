@@ -210,7 +210,7 @@ let result = compressor.compress_in_place(&mut messages, current_tokens, target_
 println!("应用的级别: {:?}", result.levels_applied);
 ```
 
-详见 [demo53_adaptive_compression.rs](../examples/demo53_adaptive_compression.rs)。
+详见 [demo53_adaptive_compression.rs](../../examples/demo53_adaptive_compression.rs)。
 
 ---
 

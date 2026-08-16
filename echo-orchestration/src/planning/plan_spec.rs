@@ -420,7 +420,9 @@ impl PlanSpec {
                     .get(spec.id.as_str())
                     .map(|items| items.to_vec())
                     .unwrap_or_default();
-                spec.to_managed_task().with_dependencies(task_dependencies)
+                let mut projection = spec.to_managed_task();
+                projection.dependencies = task_dependencies;
+                projection
             })
             .collect())
     }
