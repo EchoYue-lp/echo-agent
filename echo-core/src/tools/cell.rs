@@ -21,6 +21,10 @@
 //! [`CommandCellSnapshot::total_output_bytes`] is a monotonically increasing
 //! byte offset into the full (logical) output stream; callers treat the
 //! returned [`CommandCellDelta::next_cursor`] as opaque and re-pass it.
+//!
+//! Cells are process-scoped runtime objects. A product may persist lifecycle
+//! events and mark an orphaned cell interrupted after restart, but this trait
+//! does not claim cross-process process reattachment or wait continuity.
 
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -87,6 +91,67 @@ pub enum CommandCellPhase {
     LaunchFailed,
 }
 
+/// Typed reason why a command cell reached its terminal phase.
+///
+/// [`CommandCellPhase`] remains the coarse renderer state. This value keeps
+/// timeout, cancellation, process exit, and runtime failures distinguishable
+/// without asking consumers to classify error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandCellTerminalCause {
+    /// The process or sandbox returned an exit status.
+    Exited,
+    /// The cell's launch-time wall-clock deadline elapsed.
+    TimedOut,
+    /// Explicit cell or owner cancellation won the terminal race.
+    Cancelled,
+    /// The process/sandbox could not be launched or admitted.
+    LaunchFailed,
+    /// Waiting for the process terminal status failed.
+    WaitFailed,
+    /// A stdout/stderr reader or sandbox stream failed before a clean drain.
+    OutputDrainFailed,
+}
+
+impl CommandCellTerminalCause {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exited => "exited",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+            Self::LaunchFailed => "launch_failed",
+            Self::WaitFailed => "wait_failed",
+            Self::OutputDrainFailed => "output_drain_failed",
+        }
+    }
+}
+
+/// State of the optional complete-output artifact writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandCellArtifactStatus {
+    /// No artifact policy/identity was supplied for this cell.
+    NotRequested,
+    /// Output is still being accumulated or written.
+    Writing,
+    /// The writer completed below its configured spill threshold.
+    BelowThreshold,
+    /// A durable artifact is available through `output_artifact`.
+    Available,
+    /// Writing or finalizing the artifact failed.
+    Failed,
+}
+
+impl CommandCellArtifactStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::Writing => "writing",
+            Self::BelowThreshold => "below_threshold",
+            Self::Available => "available",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 impl CommandCellPhase {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -111,6 +176,11 @@ pub struct CommandCellSnapshot {
     /// UTF-8 safe preview of the command (first N chars).
     pub name: String,
     pub phase: CommandCellPhase,
+    /// Typed terminal category. `None` while the cell is running.
+    pub terminal_cause: Option<CommandCellTerminalCause>,
+    /// Optional diagnostic for launch/wait/drain failures. Consumers must use
+    /// `terminal_cause` for control flow rather than parsing this text.
+    pub terminal_message: Option<String>,
     /// Exit code, available once the phase is terminal (e.g. `None` for
     /// timeouts and launch failures).
     pub exit_code: Option<i32>,
@@ -120,6 +190,11 @@ pub struct CommandCellSnapshot {
     /// Whether the in-memory retention buffer is capped (only the tail is
     /// retained; earlier output bytes were discarded).
     pub output_truncated: bool,
+    /// Typed state of the optional complete-output artifact writer.
+    pub artifact_status: CommandCellArtifactStatus,
+    /// Optional artifact failure diagnostic. Consumers must use
+    /// `artifact_status` for control flow rather than parsing this text.
+    pub artifact_message: Option<String>,
     /// Complete output artifact once the cell has finished and crossed the
     /// configured spill threshold.
     pub output_artifact: Option<ToolOutputArtifactRef>,
@@ -152,8 +227,10 @@ pub trait CommandCellRegistry: Send + Sync {
 
     /// Long-poll a cell: return when it is terminal, when new output appears
     /// after `cursor`, or when `yield_ms` elapses (whichever comes first).
-    /// Retry-safe: calling again with the returned `next_cursor` is always
-    /// valid, and terminal states stay readable forever (within retention).
+    /// Retry-safe: calling again with the returned `next_cursor` is valid while
+    /// the cell remains within configured process-local retention. An active
+    /// wait lease protects the cell from retention pruning until this round
+    /// returns its delta.
     /// `yield_ms = 0` is a non-blocking poll.
     fn wait(
         &self,
@@ -187,5 +264,20 @@ mod tests {
         assert!(CommandCellPhase::Failed.is_terminal());
         assert!(CommandCellPhase::Cancelled.is_terminal());
         assert!(CommandCellPhase::LaunchFailed.is_terminal());
+    }
+
+    #[test]
+    fn terminal_cause_and_artifact_status_have_stable_names() {
+        assert_eq!(CommandCellTerminalCause::Exited.as_str(), "exited");
+        assert_eq!(CommandCellTerminalCause::TimedOut.as_str(), "timed_out");
+        assert_eq!(
+            CommandCellTerminalCause::OutputDrainFailed.as_str(),
+            "output_drain_failed"
+        );
+        assert_eq!(
+            CommandCellArtifactStatus::BelowThreshold.as_str(),
+            "below_threshold"
+        );
+        assert_eq!(CommandCellArtifactStatus::Failed.as_str(), "failed");
     }
 }

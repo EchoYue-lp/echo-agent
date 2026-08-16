@@ -21,9 +21,10 @@ use echo_core::sandbox::{
 use echo_core::tools::ToolOutputChannel;
 use echo_core::tools::artifact::{ToolOutputArtifactRef, ToolOutputArtifactWriter};
 use echo_core::tools::cell::{
-    CommandCellDelta, CommandCellPhase, CommandCellRegistry, CommandCellRequest,
-    CommandCellSnapshot,
+    CommandCellArtifactStatus, CommandCellDelta, CommandCellPhase, CommandCellRegistry,
+    CommandCellRequest, CommandCellSnapshot, CommandCellTerminalCause,
 };
+use echo_core::utils::utf8::IncrementalUtf8Decoder;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use std::future::Future;
@@ -34,6 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Notify, RwLock, Semaphore};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// UTF-8 safe preview length for a cell's display name (chars).
@@ -76,6 +78,16 @@ impl Default for BackgroundCommandManagerConfig {
     }
 }
 
+impl BackgroundCommandManagerConfig {
+    /// Reject configurations that cannot ever admit a command cell.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.max_concurrent == 0 {
+            return Err("background command max_concurrent must be greater than zero".to_string());
+        }
+        Ok(())
+    }
+}
+
 // ── Output buffer ───────────────────────────────────────────────────
 
 /// Tail-retained output buffer.
@@ -109,11 +121,22 @@ impl OutputBuffer {
 
 // ── Cell handle ─────────────────────────────────────────────────────
 
-/// Phase + exit code, atomically updated together.
-#[derive(Debug, Clone, Copy)]
+/// Terminal process state, atomically updated together.
+#[derive(Debug, Clone)]
 struct CellState {
     phase: CommandCellPhase,
     exit_code: Option<i32>,
+    terminal_cause: Option<CommandCellTerminalCause>,
+    terminal_message: Option<String>,
+}
+
+struct CellArtifactState {
+    writer: Option<ToolOutputArtifactWriter>,
+    stdout_decoder: IncrementalUtf8Decoder,
+    stderr_decoder: IncrementalUtf8Decoder,
+    reference: Option<ToolOutputArtifactRef>,
+    status: CommandCellArtifactStatus,
+    message: Option<String>,
 }
 
 /// Shared state of one command cell.
@@ -124,16 +147,17 @@ pub struct CommandCellHandle {
     state: RwLock<CellState>,
     /// Tail-retained output; std Mutex (short critical sections, no await).
     output: Mutex<OutputBuffer>,
-    /// Complete-output spill writer. The lock is held only for one chunk.
-    artifact_writer: Mutex<Option<ToolOutputArtifactWriter>>,
-    /// Final artifact reference, repeatedly readable with terminal snapshots.
-    output_artifact: Mutex<Option<ToolOutputArtifactRef>>,
+    /// Complete-output spill state. The lock is held only for one chunk or
+    /// finalization and keeps status/reference changes atomic.
+    artifact: Mutex<CellArtifactState>,
     /// Fan-out wakeup for waiters (output appended / phase finalized).
     notify: Notify,
     /// Kill switch for the child process.
     cancel: CancellationToken,
     /// Sync-readable terminal marker for history pruning.
     terminal_flag: AtomicBool,
+    /// Active wait calls currently draining or snapshotting this cell.
+    waiter_leases: AtomicU64,
     /// Monotonic registration order for bounded terminal retention.
     sequence: u64,
 }
@@ -144,9 +168,9 @@ impl CommandCellHandle {
         self.terminal_flag.load(Ordering::Acquire)
     }
 
-    /// Current state (phase + exit code), cheap to copy.
+    /// Current state (phase + terminal cause), cheap to clone.
     async fn current_state(&self) -> CellState {
-        *self.state.read().await
+        self.state.read().await.clone()
     }
 
     /// Non-blocking snapshot (state + output counters).
@@ -157,11 +181,10 @@ impl CommandCellHandle {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let artifact = self
-            .output_artifact
+            .artifact
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        build_snapshot(&self.cell_id, &self.name, state, &output, artifact)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        build_snapshot(&self.cell_id, &self.name, state, &output, &artifact)
     }
 }
 
@@ -170,16 +193,20 @@ fn build_snapshot(
     name: &str,
     state: CellState,
     output: &OutputBuffer,
-    output_artifact: Option<ToolOutputArtifactRef>,
+    artifact: &CellArtifactState,
 ) -> CommandCellSnapshot {
     CommandCellSnapshot {
         cell_id: cell_id.to_string(),
         name: name.to_string(),
         phase: state.phase,
         exit_code: state.exit_code,
+        terminal_cause: state.terminal_cause,
+        terminal_message: state.terminal_message,
         total_output_bytes: output.total_bytes,
         output_truncated: output.truncated,
-        output_artifact,
+        artifact_status: artifact.status.clone(),
+        artifact_message: artifact.message.clone(),
+        output_artifact: artifact.reference.clone(),
     }
 }
 
@@ -195,17 +222,16 @@ async fn snapshot_delta(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let artifact = handle
-        .output_artifact
+        .artifact
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     build_delta(
         &handle.cell_id,
         &handle.name,
         cursor,
         state,
         &output,
-        artifact,
+        &artifact,
     )
 }
 
@@ -220,7 +246,7 @@ fn build_delta(
     cursor: u64,
     state: CellState,
     output: &OutputBuffer,
-    output_artifact: Option<ToolOutputArtifactRef>,
+    artifact: &CellArtifactState,
 ) -> CommandCellDelta {
     let total = output.total_bytes;
     // 非法(超前)cursor 一律收敛为 total, 返回空增量而不是报错。
@@ -258,7 +284,7 @@ fn build_delta(
     let next_cursor = output_start.saturating_add(consumed_u64).min(total);
 
     CommandCellDelta {
-        snapshot: build_snapshot(cell_id, name, state, output, output_artifact),
+        snapshot: build_snapshot(cell_id, name, state, output, artifact),
         new_output: format!("{prefix}{text}"),
         next_cursor,
         output_elided,
@@ -285,7 +311,7 @@ fn capped_delta_len(bytes: &[u8]) -> usize {
 /// task). All methods are non-blocking except `wait`, which returns within
 /// the caller's yield budget.
 pub struct BackgroundCommandManager {
-    cells: DashMap<String, Arc<CommandCellHandle>>,
+    cells: Arc<DashMap<String, Arc<CommandCellHandle>>>,
     semaphore: Arc<Semaphore>,
     config: BackgroundCommandManagerConfig,
     /// Optional executor used for launches that must preserve foreground
@@ -297,18 +323,26 @@ pub struct BackgroundCommandManager {
 
 impl Default for BackgroundCommandManager {
     fn default() -> Self {
-        Self::new(BackgroundCommandManagerConfig::default())
+        Self::from_validated_config(BackgroundCommandManagerConfig::default(), None)
     }
 }
 
 impl BackgroundCommandManager {
-    pub fn new(config: BackgroundCommandManagerConfig) -> Self {
+    pub fn new(config: BackgroundCommandManagerConfig) -> std::result::Result<Self, String> {
+        config.validate()?;
+        Ok(Self::from_validated_config(config, None))
+    }
+
+    fn from_validated_config(
+        config: BackgroundCommandManagerConfig,
+        sandbox: Option<Arc<dyn SandboxExecutor>>,
+    ) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
         Self {
-            cells: DashMap::new(),
+            cells: Arc::new(DashMap::new()),
             semaphore,
             config,
-            sandbox: None,
+            sandbox,
             next_sequence: AtomicU64::new(0),
         }
     }
@@ -317,30 +351,68 @@ impl BackgroundCommandManager {
     pub fn new_with_sandbox(
         config: BackgroundCommandManagerConfig,
         sandbox: Arc<dyn SandboxExecutor>,
-    ) -> Self {
-        let mut manager = Self::new(config);
-        manager.sandbox = Some(sandbox);
-        manager
+    ) -> std::result::Result<Self, String> {
+        config.validate()?;
+        Ok(Self::from_validated_config(config, Some(sandbox)))
     }
 
     /// Retain at most `max_terminal_history` terminal cells (oldest first).
     /// Running cells are never selected. Mirrors `TaskSpawner::prune_terminal_history`.
     fn prune_terminal_history(&self) {
-        let max_terminal_history = self.config.max_terminal_history;
-        let mut terminal = self
+        prune_terminal_history(&self.cells, self.config.max_terminal_history);
+    }
+
+    fn acquire_waiter_lease(
+        &self,
+        cell_id: &str,
+    ) -> std::result::Result<(Arc<CommandCellHandle>, CellWaiterLease), String> {
+        let entry = self
             .cells
-            .iter()
-            .filter(|entry| entry.value().is_terminal())
-            .map(|entry| (entry.value().sequence, entry.key().clone()))
-            .collect::<Vec<_>>();
-        let remove_count = terminal.len().saturating_sub(max_terminal_history);
-        if remove_count == 0 {
-            return;
-        }
-        terminal.sort_by_key(|(sequence, _)| *sequence);
-        for (_, id) in terminal.into_iter().take(remove_count) {
-            self.cells.remove(&id);
-        }
+            .get(cell_id)
+            .ok_or_else(|| format!("cell '{cell_id}' not found"))?;
+        let handle = entry.value().clone();
+        handle.waiter_leases.fetch_add(1, Ordering::AcqRel);
+        drop(entry);
+        let lease = CellWaiterLease {
+            handle: handle.clone(),
+            cells: self.cells.clone(),
+            max_terminal_history: self.config.max_terminal_history,
+        };
+        Ok((handle, lease))
+    }
+}
+
+struct CellWaiterLease {
+    handle: Arc<CommandCellHandle>,
+    cells: Arc<DashMap<String, Arc<CommandCellHandle>>>,
+    max_terminal_history: usize,
+}
+
+impl Drop for CellWaiterLease {
+    fn drop(&mut self) {
+        self.handle.waiter_leases.fetch_sub(1, Ordering::AcqRel);
+        prune_terminal_history(&self.cells, self.max_terminal_history);
+    }
+}
+
+fn prune_terminal_history(
+    cells: &DashMap<String, Arc<CommandCellHandle>>,
+    max_terminal_history: usize,
+) {
+    let mut terminal = cells
+        .iter()
+        .filter(|entry| {
+            entry.value().is_terminal() && entry.value().waiter_leases.load(Ordering::Acquire) == 0
+        })
+        .map(|entry| (entry.value().sequence, entry.key().clone()))
+        .collect::<Vec<_>>();
+    let remove_count = terminal.len().saturating_sub(max_terminal_history);
+    if remove_count == 0 {
+        return;
+    }
+    terminal.sort_by_key(|(sequence, _)| *sequence);
+    for (_, id) in terminal.into_iter().take(remove_count) {
+        cells.remove(&id);
     }
 }
 
@@ -355,6 +427,12 @@ impl CommandCellRegistry for BackgroundCommandManager {
                     .to_string(),
             );
         }
+        if request.output_artifacts.is_some() != request.artifact_identity.is_some() {
+            return Err(
+                "background command artifact config and identity must be supplied together"
+                    .to_string(),
+            );
+        }
         self.prune_terminal_history();
 
         let cell_id = uuid::Uuid::new_v4().to_string();
@@ -365,19 +443,37 @@ impl CommandCellRegistry for BackgroundCommandManager {
             state: RwLock::new(CellState {
                 phase: CommandCellPhase::Running,
                 exit_code: None,
+                terminal_cause: None,
+                terminal_message: None,
             }),
             output: Mutex::new(OutputBuffer::default()),
-            artifact_writer: Mutex::new(
-                request
-                    .output_artifacts
-                    .clone()
-                    .zip(request.artifact_identity.clone())
-                    .map(|(config, identity)| ToolOutputArtifactWriter::new(config, identity)),
+            artifact: Mutex::new(
+                match (
+                    request.output_artifacts.clone(),
+                    request.artifact_identity.clone(),
+                ) {
+                    (Some(config), Some(identity)) => CellArtifactState {
+                        writer: Some(ToolOutputArtifactWriter::new(config, identity)),
+                        stdout_decoder: IncrementalUtf8Decoder::default(),
+                        stderr_decoder: IncrementalUtf8Decoder::default(),
+                        reference: None,
+                        status: CommandCellArtifactStatus::Writing,
+                        message: None,
+                    },
+                    _ => CellArtifactState {
+                        writer: None,
+                        stdout_decoder: IncrementalUtf8Decoder::default(),
+                        stderr_decoder: IncrementalUtf8Decoder::default(),
+                        reference: None,
+                        status: CommandCellArtifactStatus::NotRequested,
+                        message: None,
+                    },
+                },
             ),
-            output_artifact: Mutex::new(None),
             notify: Notify::new(),
             cancel: CancellationToken::new(),
             terminal_flag: AtomicBool::new(false),
+            waiter_leases: AtomicU64::new(0),
             sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
         });
 
@@ -391,30 +487,47 @@ impl CommandCellRegistry for BackgroundCommandManager {
         } else {
             Some(Duration::from_secs(timeout_secs))
         };
+        let deadline = match timeout {
+            Some(duration) => Some(
+                Instant::now()
+                    .checked_add(duration)
+                    .ok_or_else(|| "background command deadline overflow".to_string())?,
+            ),
+            None => None,
+        };
         let working_dir = request.working_dir.map(PathBuf::from);
         let semaphore = self.semaphore.clone();
+        let cells = self.cells.clone();
+        let max_terminal_history = self.config.max_terminal_history;
         let sandbox = self.sandbox.clone();
         let max_retained = self.config.max_retained_output_bytes;
         let runner = handle.clone();
         let run_spec = CellRunSpec {
             command: request.command,
             working_dir,
-            timeout,
+            deadline,
             sandbox,
             owner_cancel: request.cancel,
             max_retained,
         };
 
         tokio::spawn(async move {
-            let (phase, exit_code) = run_cell(runner.clone(), semaphore, run_spec).await;
+            let outcome = run_cell(runner.clone(), semaphore, run_spec).await;
             finish_output_artifact(&runner);
-            *runner.state.write().await = CellState { phase, exit_code };
+            *runner.state.write().await = CellState {
+                phase: outcome.phase,
+                exit_code: outcome.exit_code,
+                terminal_cause: Some(outcome.cause),
+                terminal_message: outcome.message,
+            };
             runner.terminal_flag.store(true, Ordering::Release);
             // 唤醒所有等待者(多等待者语义, 终态可被重复读取)。
             runner.notify.notify_waiters();
+            prune_terminal_history(&cells, max_terminal_history);
             tracing::info!(
                 cell_id = %runner.cell_id,
-                phase = phase.as_str(),
+                phase = outcome.phase.as_str(),
+                cause = outcome.cause.as_str(),
                 "command cell finished"
             );
         });
@@ -431,11 +544,10 @@ impl CommandCellRegistry for BackgroundCommandManager {
     ) -> BoxFuture<'_, std::result::Result<CommandCellDelta, String>> {
         let cell_id = cell_id.to_string();
         Box::pin(async move {
-            let handle = self
-                .cells
-                .get(&cell_id)
-                .map(|entry| entry.value().clone())
-                .ok_or_else(|| format!("cell '{cell_id}' not found"))?;
+            // Holding the DashMap entry while incrementing the lease closes
+            // the lookup/prune race. Dropping `_lease` acknowledges this wait
+            // round and immediately re-runs bounded terminal retention.
+            let (handle, _lease) = self.acquire_waiter_lease(&cell_id)?;
 
             loop {
                 // 先注册 waiter 再快照: 否则 snapshot 与 await 之间的
@@ -509,21 +621,78 @@ impl CommandCellRegistry for BackgroundCommandManager {
 struct CellRunSpec {
     command: String,
     working_dir: Option<PathBuf>,
-    timeout: Option<Duration>,
+    /// Absolute wall-clock deadline computed when `launch` accepts the cell.
+    /// Semaphore admission and execution consume the same budget.
+    deadline: Option<Instant>,
     sandbox: Option<Arc<dyn SandboxExecutor>>,
     owner_cancel: Option<Arc<CancellationToken>>,
     max_retained: usize,
+}
+
+#[derive(Debug)]
+struct CellOutcome {
+    phase: CommandCellPhase,
+    exit_code: Option<i32>,
+    cause: CommandCellTerminalCause,
+    message: Option<String>,
+}
+
+impl CellOutcome {
+    fn exited(exit_code: Option<i32>, success: bool) -> Self {
+        Self {
+            phase: if success {
+                CommandCellPhase::Succeeded
+            } else {
+                CommandCellPhase::Failed
+            },
+            exit_code,
+            cause: CommandCellTerminalCause::Exited,
+            message: None,
+        }
+    }
+
+    fn timed_out() -> Self {
+        Self {
+            phase: CommandCellPhase::Failed,
+            exit_code: None,
+            cause: CommandCellTerminalCause::TimedOut,
+            message: None,
+        }
+    }
+
+    fn cancelled() -> Self {
+        Self {
+            phase: CommandCellPhase::Cancelled,
+            exit_code: None,
+            cause: CommandCellTerminalCause::Cancelled,
+            message: None,
+        }
+    }
+
+    fn runtime_failure(cause: CommandCellTerminalCause, message: String) -> Self {
+        let phase = if cause == CommandCellTerminalCause::LaunchFailed {
+            CommandCellPhase::LaunchFailed
+        } else {
+            CommandCellPhase::Failed
+        };
+        Self {
+            phase,
+            exit_code: None,
+            cause,
+            message: Some(message),
+        }
+    }
 }
 
 async fn run_cell(
     handle: Arc<CommandCellHandle>,
     semaphore: Arc<Semaphore>,
     spec: CellRunSpec,
-) -> (CommandCellPhase, Option<i32>) {
+) -> CellOutcome {
     let CellRunSpec {
         command,
         working_dir,
-        timeout,
+        deadline,
         sandbox,
         owner_cancel,
         max_retained,
@@ -533,15 +702,22 @@ async fn run_cell(
     let acquire = semaphore.acquire_owned();
     tokio::pin!(acquire);
     let _permit = match tokio::select! {
+        biased;
         _ = cancellation_requested(&handle.cancel, owner_cancel.as_ref()) => {
-            return (CommandCellPhase::Cancelled, None);
+            return CellOutcome::cancelled();
+        }
+        _ = wait_for_deadline(deadline) => {
+            return CellOutcome::timed_out();
         }
         result = &mut acquire => result,
     } {
         Ok(permit) => permit,
         Err(_) => {
             tracing::warn!(cell_id = %handle.cell_id, "cell semaphore closed");
-            return (CommandCellPhase::LaunchFailed, None);
+            return CellOutcome::runtime_failure(
+                CommandCellTerminalCause::LaunchFailed,
+                "background command semaphore closed".to_string(),
+            );
         }
     };
 
@@ -550,7 +726,10 @@ async fn run_cell(
             .as_ref()
             .is_some_and(|cancel| cancel.is_cancelled())
     {
-        return (CommandCellPhase::Cancelled, None);
+        return CellOutcome::cancelled();
+    }
+    if deadline.is_some_and(|value| value <= Instant::now()) {
+        return CellOutcome::timed_out();
     }
 
     if let Some(sandbox) = sandbox {
@@ -558,7 +737,7 @@ async fn run_cell(
             handle,
             command,
             working_dir,
-            timeout,
+            deadline,
             sandbox,
             owner_cancel,
             max_retained,
@@ -589,7 +768,10 @@ async fn run_cell(
         Ok(child) => child,
         Err(error) => {
             tracing::warn!(cell_id = %handle.cell_id, error = %error, "cell spawn failed");
-            return (CommandCellPhase::LaunchFailed, None);
+            return CellOutcome::runtime_failure(
+                CommandCellTerminalCause::LaunchFailed,
+                format!("cell spawn failed: {error}"),
+            );
         }
     };
 
@@ -608,78 +790,70 @@ async fn run_cell(
         })
     });
 
-    let (phase, exit_code) = tokio::select! {
+    let mut outcome = tokio::select! {
+        biased;
         _ = cancellation_requested(&handle.cancel, owner_cancel.as_ref()) => {
             kill_process_group(&mut child).await;
-            (CommandCellPhase::Cancelled, None)
+            CellOutcome::cancelled()
         }
-        _ = async {
-            match timeout {
-                Some(duration) => tokio::time::sleep(duration).await,
-                None => std::future::pending().await,
-            }
-        } => {
-            // 超时视为失败(exit_code = None)。
+        _ = wait_for_deadline(deadline) => {
             kill_process_group(&mut child).await;
-            (CommandCellPhase::Failed, None)
+            CellOutcome::timed_out()
         }
         status = child.wait() => match status {
-            Ok(status) => {
-                let phase = if status.success() {
-                    CommandCellPhase::Succeeded
-                } else {
-                    CommandCellPhase::Failed
-                };
-                (phase, status.code())
-            }
-            Err(_) => (CommandCellPhase::Failed, None),
+            Ok(status) => CellOutcome::exited(status.code(), status.success()),
+            Err(error) => CellOutcome::runtime_failure(
+                CommandCellTerminalCause::WaitFailed,
+                format!("waiting for command process failed: {error}"),
+            ),
         },
     };
 
     // 收尾: 等 reader 把管道剩余数据全部入账, 保证终态可见的输出是完整的。
-    if let Some(join) = stdout_join {
-        let _ = join.await;
-    }
-    if let Some(join) = stderr_join {
-        let _ = join.await;
+    let stdout_failure = finish_pipe_reader("stdout", stdout_join).await;
+    let stderr_failure = finish_pipe_reader("stderr", stderr_join).await;
+    if outcome.cause == CommandCellTerminalCause::Exited {
+        let failure = stdout_failure.or(stderr_failure);
+        if let Some(message) = failure {
+            outcome =
+                CellOutcome::runtime_failure(CommandCellTerminalCause::OutputDrainFailed, message);
+        }
     }
 
-    (phase, exit_code)
+    outcome
 }
 
 async fn run_sandbox_cell(
     handle: Arc<CommandCellHandle>,
     command: String,
     working_dir: Option<PathBuf>,
-    timeout: Option<Duration>,
+    deadline: Option<Instant>,
     sandbox: Arc<dyn SandboxExecutor>,
     owner_cancel: Option<Arc<CancellationToken>>,
     max_retained: usize,
-) -> (CommandCellPhase, Option<i32>) {
+) -> CellOutcome {
     // SandboxCommand currently has a concrete timeout. The outer deadline is
     // authoritative; a None cell timeout maps to a practically unbounded
     // backend deadline while remaining cancellable through the stream drop.
-    let backend_timeout = timeout.unwrap_or_else(|| Duration::from_secs(100 * 365 * 24 * 60 * 60));
+    let backend_timeout = deadline
+        .map(|value| value.saturating_duration_since(Instant::now()))
+        .unwrap_or_else(|| Duration::from_secs(100 * 365 * 24 * 60 * 60));
+    if deadline.is_some() && backend_timeout.is_zero() {
+        return CellOutcome::timed_out();
+    }
     let mut sandbox_command = SandboxCommand::shell(command);
     sandbox_command.timeout = backend_timeout;
     if let Some(dir) = &working_dir {
         sandbox_command = sandbox_command.with_working_dir(dir);
     }
 
-    let deadline = async {
-        match timeout {
-            Some(duration) => tokio::time::sleep(duration).await,
-            None => std::future::pending().await,
-        }
-    };
-    tokio::pin!(deadline);
-
     let stream = tokio::select! {
+        biased;
         _ = cancellation_requested(&handle.cancel, owner_cancel.as_ref()) => {
-            return (CommandCellPhase::Cancelled, None);
+            return CellOutcome::cancelled();
         }
-        _ = &mut deadline => {
-            return (CommandCellPhase::Failed, None);
+        _ = wait_for_deadline(deadline) => {
+            return CellOutcome::timed_out();
         }
         result = sandbox.execute_stream(sandbox_command) => result,
     };
@@ -693,23 +867,30 @@ async fn run_sandbox_cell(
                 max_retained,
                 ToolOutputChannel::Stderr,
             );
-            return (CommandCellPhase::LaunchFailed, None);
+            return CellOutcome::runtime_failure(
+                CommandCellTerminalCause::LaunchFailed,
+                format!("sandbox execution failed: {error}"),
+            );
         }
     };
     let mut saw_stream_output = false;
 
     loop {
         let event = tokio::select! {
+            biased;
             _ = cancellation_requested(&handle.cancel, owner_cancel.as_ref()) => {
-                return (CommandCellPhase::Cancelled, None);
+                return CellOutcome::cancelled();
             }
-            _ = &mut deadline => {
-                return (CommandCellPhase::Failed, None);
+            _ = wait_for_deadline(deadline) => {
+                return CellOutcome::timed_out();
             }
             event = stream.next() => event,
         };
         let Some(event) = event else {
-            return (CommandCellPhase::Failed, None);
+            return CellOutcome::runtime_failure(
+                CommandCellTerminalCause::OutputDrainFailed,
+                "sandbox output stream ended without a completion event".to_string(),
+            );
         };
         match event {
             SandboxStreamEvent::Output { channel, chunk } => {
@@ -749,19 +930,21 @@ async fn run_sandbox_cell(
                     output.truncated = true;
                 }
                 if result.cancelled {
-                    return (CommandCellPhase::Cancelled, None);
+                    return CellOutcome::cancelled();
                 }
                 if result.timed_out {
-                    return (CommandCellPhase::Failed, None);
+                    return CellOutcome::timed_out();
                 }
-                let phase = if result.success() {
-                    CommandCellPhase::Succeeded
-                } else {
-                    CommandCellPhase::Failed
-                };
-                return (phase, Some(result.exit_code));
+                return CellOutcome::exited(Some(result.exit_code), result.success());
             }
         }
+    }
+}
+
+async fn wait_for_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(value) => tokio::time::sleep_until(value).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -772,16 +955,29 @@ async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(
     handle: Arc<CommandCellHandle>,
     max_retained: usize,
     channel: ToolOutputChannel,
-) {
+) -> std::result::Result<(), String> {
     let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
     loop {
         match pipe.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => return Ok(()),
+            Err(error) => return Err(error.to_string()),
             Ok(count) => {
                 let bytes = buffer.get(..count).unwrap_or_default();
                 append_output(&handle, bytes, max_retained, channel);
             }
         }
+    }
+}
+
+async fn finish_pipe_reader(
+    channel: &str,
+    join: Option<tokio::task::JoinHandle<std::result::Result<(), String>>>,
+) -> Option<String> {
+    let join = join?;
+    match join.await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("{channel} drain failed: {error}")),
+        Err(error) => Some(format!("{channel} reader task failed: {error}")),
     }
 }
 
@@ -813,42 +1009,87 @@ fn append_output(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         output.push(bytes, max_retained);
     }
-    let text = String::from_utf8_lossy(bytes);
-    let mut writer = handle
-        .artifact_writer
+    let mut artifact = handle
+        .artifact
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(active) = writer.as_mut()
-        && let Err(error) = active.push_channel(channel, &text)
-    {
-        tracing::warn!(cell_id = %handle.cell_id, %error, "cell output artifact write failed");
-        *writer = None;
+    if artifact.writer.is_some() {
+        let chunks = match channel {
+            ToolOutputChannel::Stdout => artifact.stdout_decoder.push(bytes),
+            ToolOutputChannel::Stderr | ToolOutputChannel::Log => {
+                artifact.stderr_decoder.push(bytes)
+            }
+        };
+        for text in chunks {
+            if !push_artifact_text(&mut artifact, channel, &text, &handle.cell_id) {
+                break;
+            }
+        }
     }
-    drop(writer);
+    drop(artifact);
     handle.notify.notify_waiters();
 }
 
 fn finish_output_artifact(handle: &CommandCellHandle) {
-    let writer = handle
-        .artifact_writer
+    let mut artifact = handle
+        .artifact
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(text) = artifact.stdout_decoder.finish() {
+        push_artifact_text(
+            &mut artifact,
+            ToolOutputChannel::Stdout,
+            &text,
+            &handle.cell_id,
+        );
+    }
+    if let Some(text) = artifact.stderr_decoder.finish() {
+        push_artifact_text(
+            &mut artifact,
+            ToolOutputChannel::Stderr,
+            &text,
+            &handle.cell_id,
+        );
+    }
+    let writer = artifact.writer.take();
     let Some(writer) = writer else {
         return;
     };
     match writer.finish() {
-        Ok(Some(artifact)) => {
-            *handle
-                .output_artifact
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(artifact);
+        Ok(Some(reference)) => {
+            artifact.reference = Some(reference);
+            artifact.status = CommandCellArtifactStatus::Available;
+            artifact.message = None;
         }
-        Ok(None) => {}
+        Ok(None) => {
+            artifact.status = CommandCellArtifactStatus::BelowThreshold;
+            artifact.message = None;
+        }
         Err(error) => {
             tracing::warn!(cell_id = %handle.cell_id, %error, "cell output artifact finalize failed");
+            artifact.status = CommandCellArtifactStatus::Failed;
+            artifact.message = Some(error.to_string());
         }
     }
+}
+
+fn push_artifact_text(
+    artifact: &mut CellArtifactState,
+    channel: ToolOutputChannel,
+    text: &str,
+    cell_id: &str,
+) -> bool {
+    let Some(writer) = artifact.writer.as_mut() else {
+        return false;
+    };
+    if let Err(error) = writer.push_channel(channel, text) {
+        tracing::warn!(cell_id, %error, "cell output artifact write failed");
+        artifact.writer = None;
+        artifact.status = CommandCellArtifactStatus::Failed;
+        artifact.message = Some(error.to_string());
+        return false;
+    }
+    true
 }
 
 /// Kill the child's whole process group, then reap the child. Best-effort:
@@ -914,7 +1155,38 @@ mod tests {
     }
 
     fn manager() -> BackgroundCommandManager {
-        BackgroundCommandManager::new(BackgroundCommandManagerConfig::default())
+        BackgroundCommandManager::default()
+    }
+
+    fn test_handle(cell_id: &str) -> Arc<CommandCellHandle> {
+        test_handle_with_sequence(cell_id, 0)
+    }
+
+    fn test_handle_with_sequence(cell_id: &str, sequence: u64) -> Arc<CommandCellHandle> {
+        Arc::new(CommandCellHandle {
+            cell_id: cell_id.to_string(),
+            name: cell_id.to_string(),
+            state: RwLock::new(CellState {
+                phase: CommandCellPhase::Running,
+                exit_code: None,
+                terminal_cause: None,
+                terminal_message: None,
+            }),
+            output: Mutex::new(OutputBuffer::default()),
+            artifact: Mutex::new(CellArtifactState {
+                writer: None,
+                stdout_decoder: IncrementalUtf8Decoder::default(),
+                stderr_decoder: IncrementalUtf8Decoder::default(),
+                reference: None,
+                status: CommandCellArtifactStatus::NotRequested,
+                message: None,
+            }),
+            notify: Notify::new(),
+            cancel: CancellationToken::new(),
+            terminal_flag: AtomicBool::new(false),
+            waiter_leases: AtomicU64::new(0),
+            sequence,
+        })
     }
 
     fn request(command: &str) -> CommandCellRequest {
@@ -957,6 +1229,14 @@ mod tests {
         let (combined, delta) = drain_to_terminal(&manager, &cell_id).await;
         assert_eq!(delta.snapshot.phase, CommandCellPhase::Succeeded);
         assert_eq!(delta.snapshot.exit_code, Some(0));
+        assert_eq!(
+            delta.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::Exited)
+        );
+        assert_eq!(
+            delta.snapshot.artifact_status,
+            CommandCellArtifactStatus::NotRequested
+        );
         assert!(combined.contains("hello-cell"), "got: {combined}");
         assert!(delta.next_cursor > 0);
     }
@@ -1025,6 +1305,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cancelled.snapshot.phase, CommandCellPhase::Cancelled);
+        assert_eq!(
+            cancelled.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::Cancelled)
+        );
 
         // 未知 cell → false。
         assert!(!manager.stop("no-such-cell"));
@@ -1083,11 +1367,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_cell_cancellation_does_not_wait_for_a_permit() {
+    async fn queued_cell_cancellation_does_not_wait_for_a_permit() -> std::result::Result<(), String>
+    {
         let manager = BackgroundCommandManager::new(BackgroundCommandManagerConfig {
             max_concurrent: 1,
             ..Default::default()
-        });
+        })?;
         let occupying = manager.launch(request("sleep 30")).unwrap();
         let first = manager.wait(&occupying, 0, 200).await.unwrap();
         assert_eq!(first.snapshot.phase, CommandCellPhase::Running);
@@ -1101,6 +1386,7 @@ mod tests {
         assert_eq!(occupying_state.snapshot.phase, CommandCellPhase::Running);
         manager.stop(&occupying);
         let _ = manager.wait(&occupying, 0, 10_000).await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -1116,6 +1402,10 @@ mod tests {
         cancel.cancel();
         let terminal = manager.wait(&cell_id, 0, 10_000).await.unwrap();
         assert_eq!(terminal.snapshot.phase, CommandCellPhase::Cancelled);
+        assert_eq!(
+            terminal.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::Cancelled)
+        );
     }
 
     #[tokio::test]
@@ -1143,17 +1433,22 @@ mod tests {
         assert!(artifact.path.exists());
         let persisted = std::fs::read_to_string(&artifact.path).unwrap();
         assert!(persisted.contains("artifact-output-abcdefghijklmnopqrstuvwxyz"));
+        assert_eq!(
+            terminal.snapshot.artifact_status,
+            CommandCellArtifactStatus::Available
+        );
     }
 
     #[tokio::test]
-    async fn sandbox_required_launch_uses_the_configured_executor() {
+    async fn sandbox_required_launch_uses_the_configured_executor()
+    -> std::result::Result<(), String> {
         let sandbox = Arc::new(TestSandbox {
             executions: AtomicU64::new(0),
         });
         let manager = BackgroundCommandManager::new_with_sandbox(
             BackgroundCommandManagerConfig::default(),
             sandbox.clone(),
-        );
+        )?;
         let mut launch = request("echo ignored-by-test-executor");
         launch.require_sandbox = true;
         let cell_id = manager.launch(launch).unwrap();
@@ -1161,6 +1456,7 @@ mod tests {
         assert_eq!(terminal.snapshot.phase, CommandCellPhase::Succeeded);
         assert!(output.contains("sandbox-cell-ok"));
         assert_eq!(sandbox.executions.load(Ordering::Relaxed), 1);
+        Ok(())
     }
 
     #[test]
@@ -1172,11 +1468,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retained_buffer_tail_only_marks_truncation() {
+    async fn retained_buffer_tail_only_marks_truncation() -> std::result::Result<(), String> {
         let manager = BackgroundCommandManager::new(BackgroundCommandManagerConfig {
             max_retained_output_bytes: 1024,
             ..Default::default()
-        });
+        })?;
         // ~7 bytes × 400 行 ≈ 2.8 KB > 1 KB retention。
         let cell_id = manager.launch(request("seq 1 400")).unwrap();
         let delta = manager.wait(&cell_id, 0, 20_000).await.unwrap();
@@ -1189,18 +1485,24 @@ mod tests {
 
         let (_, last) = drain_to_terminal(&manager, &cell_id).await;
         assert_eq!(last.snapshot.phase, CommandCellPhase::Succeeded);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn timeout_marks_cell_failed() {
+    async fn timeout_marks_cell_failed() -> std::result::Result<(), String> {
         let manager = BackgroundCommandManager::new(BackgroundCommandManagerConfig {
             default_timeout_secs: 1,
             ..Default::default()
-        });
+        })?;
         let cell_id = manager.launch(request("sleep 30")).unwrap();
         let delta = manager.wait(&cell_id, 0, 10_000).await.unwrap();
         assert_eq!(delta.snapshot.phase, CommandCellPhase::Failed);
         assert_eq!(delta.snapshot.exit_code, None);
+        assert_eq!(
+            delta.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::TimedOut)
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1216,6 +1518,218 @@ mod tests {
             .unwrap();
         let delta = manager.wait(&cell_id, 0, 10_000).await.unwrap();
         assert_eq!(delta.snapshot.phase, CommandCellPhase::LaunchFailed);
+        assert_eq!(
+            delta.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::LaunchFailed)
+        );
+        assert!(delta.snapshot.terminal_message.is_some());
+    }
+
+    #[test]
+    fn zero_concurrency_configuration_is_rejected() {
+        let result = BackgroundCommandManager::new(BackgroundCommandManagerConfig {
+            max_concurrent: 0,
+            ..Default::default()
+        });
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn queued_cell_timeout_uses_the_launch_time_deadline() -> std::result::Result<(), String>
+    {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| error.to_string())?;
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(25))
+            .ok_or_else(|| "test deadline overflow".to_string())?;
+        let outcome = run_cell(
+            test_handle("queued-timeout"),
+            semaphore,
+            CellRunSpec {
+                command: "echo must-not-run".to_string(),
+                working_dir: None,
+                deadline: Some(deadline),
+                sandbox: None,
+                owner_cancel: None,
+                max_retained: 1024,
+            },
+        )
+        .await;
+        drop(permit);
+
+        assert_eq!(outcome.phase, CommandCellPhase::Failed);
+        assert_eq!(outcome.cause, CommandCellTerminalCause::TimedOut);
+        assert_eq!(outcome.exit_code, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_below_threshold_has_typed_status() -> std::result::Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let manager = manager();
+        let mut launch = request("printf tiny");
+        launch.output_artifacts = Some(
+            echo_core::tools::artifact::ToolOutputArtifactConfig::new(root.path(), "test")
+                .threshold_bytes(1024),
+        );
+        launch.artifact_identity = Some(echo_core::tools::artifact::ToolOutputArtifactIdentity {
+            conversation_id: Some("conversation".to_string()),
+            run_id: Some("run".to_string()),
+            call_id: "below-threshold".to_string(),
+            tool_name: "shell".to_string(),
+        });
+        let cell_id = manager.launch(launch)?;
+        let (_, terminal) = drain_to_terminal(&manager, &cell_id).await;
+        assert_eq!(
+            terminal.snapshot.artifact_status,
+            CommandCellArtifactStatus::BelowThreshold
+        );
+        assert!(terminal.snapshot.output_artifact.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_write_failure_has_typed_status() -> std::result::Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let blocked_root = root.path().join("not-a-directory");
+        std::fs::write(&blocked_root, b"file").map_err(|error| error.to_string())?;
+        let manager = manager();
+        let mut launch = request("printf artifact-write-failure");
+        launch.output_artifacts = Some(
+            echo_core::tools::artifact::ToolOutputArtifactConfig::new(&blocked_root, "test")
+                .threshold_bytes(1),
+        );
+        launch.artifact_identity = Some(echo_core::tools::artifact::ToolOutputArtifactIdentity {
+            conversation_id: Some("conversation".to_string()),
+            run_id: Some("run".to_string()),
+            call_id: "write-failure".to_string(),
+            tool_name: "shell".to_string(),
+        });
+        let cell_id = manager.launch(launch)?;
+        let (_, terminal) = drain_to_terminal(&manager, &cell_id).await;
+        assert_eq!(terminal.snapshot.phase, CommandCellPhase::Succeeded);
+        assert_eq!(
+            terminal.snapshot.artifact_status,
+            CommandCellArtifactStatus::Failed
+        );
+        assert!(terminal.snapshot.artifact_message.is_some());
+        assert!(terminal.snapshot.output_artifact.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_config_and_identity_must_be_paired() {
+        let manager = manager();
+        let mut launch = request("echo invalid-artifact-request");
+        launch.output_artifacts =
+            Some(echo_core::tools::artifact::ToolOutputArtifactConfig::default());
+        assert!(manager.launch(launch).is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_retention_converges_on_settlement_without_another_launch()
+    -> std::result::Result<(), String> {
+        let manager = BackgroundCommandManager::new(BackgroundCommandManagerConfig {
+            max_terminal_history: 1,
+            ..Default::default()
+        })?;
+        for sequence in 0_u64..3 {
+            let cell_id = format!("terminal-{sequence}");
+            let handle = test_handle_with_sequence(&cell_id, sequence);
+            *handle.state.write().await = CellState {
+                phase: CommandCellPhase::Succeeded,
+                exit_code: Some(0),
+                terminal_cause: Some(CommandCellTerminalCause::Exited),
+                terminal_message: None,
+            };
+            handle.terminal_flag.store(true, Ordering::Release);
+            manager.cells.insert(cell_id, handle);
+            manager.prune_terminal_history();
+        }
+
+        let snapshots = manager.list().await;
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots.first().map(|snapshot| snapshot.cell_id.as_str()),
+            Some("terminal-2")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waiter_lease_protects_terminal_until_the_wait_round_is_acknowledged()
+    -> std::result::Result<(), String> {
+        let manager = BackgroundCommandManager::new(BackgroundCommandManagerConfig {
+            max_terminal_history: 0,
+            ..Default::default()
+        })?;
+        let handle = test_handle("leased-terminal");
+        manager
+            .cells
+            .insert("leased-terminal".to_string(), handle.clone());
+        let (_, lease) = manager.acquire_waiter_lease("leased-terminal")?;
+
+        *handle.state.write().await = CellState {
+            phase: CommandCellPhase::Succeeded,
+            exit_code: Some(0),
+            terminal_cause: Some(CommandCellTerminalCause::Exited),
+            terminal_message: None,
+        };
+        handle.terminal_flag.store(true, Ordering::Release);
+        manager.prune_terminal_history();
+        assert!(manager.cells.contains_key("leased-terminal"));
+
+        drop(lease);
+        assert!(!manager.cells.contains_key("leased-terminal"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_decoder_preserves_utf8_split_across_pipe_reads()
+    -> std::result::Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let handle = test_handle("split-utf8-artifact");
+        {
+            let mut artifact = handle
+                .artifact
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *artifact = CellArtifactState {
+                writer: Some(ToolOutputArtifactWriter::new(
+                    echo_core::tools::artifact::ToolOutputArtifactConfig::new(root.path(), "test")
+                        .threshold_bytes(1),
+                    echo_core::tools::artifact::ToolOutputArtifactIdentity {
+                        conversation_id: Some("conversation".to_string()),
+                        run_id: Some("run".to_string()),
+                        call_id: "split-utf8".to_string(),
+                        tool_name: "shell".to_string(),
+                    },
+                )),
+                stdout_decoder: IncrementalUtf8Decoder::default(),
+                stderr_decoder: IncrementalUtf8Decoder::default(),
+                reference: None,
+                status: CommandCellArtifactStatus::Writing,
+                message: None,
+            };
+        }
+
+        append_output(&handle, &[0xe4, 0xb8], 1024, ToolOutputChannel::Stdout);
+        append_output(&handle, &[0xad], 1024, ToolOutputChannel::Stdout);
+        finish_output_artifact(&handle);
+        let snapshot = handle.snapshot().await;
+        let artifact = snapshot
+            .output_artifact
+            .ok_or_else(|| "split UTF-8 output did not create an artifact".to_string())?;
+        let persisted =
+            std::fs::read_to_string(&artifact.path).map_err(|error| error.to_string())?;
+        assert!(persisted.contains('中'));
+        assert!(!persisted.contains('\u{fffd}'));
+        assert_eq!(snapshot.total_output_bytes, 3);
+        Ok(())
     }
 
     #[tokio::test]

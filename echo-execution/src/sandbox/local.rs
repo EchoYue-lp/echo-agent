@@ -15,6 +15,7 @@ use super::{
 };
 use echo_core::error::Result;
 use echo_core::error::SandboxError;
+use echo_core::utils::utf8::{IncrementalUtf8Decoder, split_utf8_chunks};
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -766,32 +767,12 @@ async fn send_sandbox_output(
     channel: SandboxOutputChannel,
     text: String,
 ) -> std::result::Result<(), ()> {
-    for chunk in split_stream_chunks(text) {
+    for chunk in split_utf8_chunks(text, STREAM_CHUNK_BYTES) {
         tx.send(SandboxStreamEvent::Output { channel, chunk })
             .await
             .map_err(|_| ())?;
     }
     Ok(())
-}
-
-fn split_stream_chunks(text: String) -> Vec<String> {
-    if text.len() <= STREAM_CHUNK_BYTES {
-        return vec![text];
-    }
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for character in text.chars() {
-        if current.len().saturating_add(character.len_utf8()) > STREAM_CHUNK_BYTES
-            && !current.is_empty()
-        {
-            chunks.push(std::mem::take(&mut current));
-        }
-        current.push(character);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
 }
 
 struct RetainedPipeOutput {
@@ -822,60 +803,6 @@ impl RetainedPipeOutput {
 
     fn text(&self) -> String {
         String::from_utf8_lossy(&self.bytes).to_string()
-    }
-}
-
-#[derive(Default)]
-struct IncrementalUtf8Decoder {
-    pending: Vec<u8>,
-}
-
-impl IncrementalUtf8Decoder {
-    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
-        self.pending.extend_from_slice(bytes);
-        let mut output = String::new();
-        loop {
-            match std::str::from_utf8(&self.pending) {
-                Ok(valid) => {
-                    output.push_str(valid);
-                    self.pending.clear();
-                    break;
-                }
-                Err(error) => {
-                    let valid_len = error.valid_up_to();
-                    if let Some(valid_bytes) = self.pending.get(..valid_len)
-                        && let Ok(valid) = std::str::from_utf8(valid_bytes)
-                    {
-                        output.push_str(valid);
-                    }
-                    match error.error_len() {
-                        Some(invalid_len) => {
-                            output.push('\u{FFFD}');
-                            let consumed = valid_len.saturating_add(invalid_len);
-                            self.pending.drain(..consumed.min(self.pending.len()));
-                        }
-                        None => {
-                            self.pending.drain(..valid_len.min(self.pending.len()));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if output.is_empty() {
-            Vec::new()
-        } else {
-            split_stream_chunks(output)
-        }
-    }
-
-    fn finish(&mut self) -> Option<String> {
-        if self.pending.is_empty() {
-            return None;
-        }
-        let output = String::from_utf8_lossy(&self.pending).to_string();
-        self.pending.clear();
-        Some(output)
     }
 }
 
