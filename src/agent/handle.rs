@@ -74,6 +74,18 @@ impl Agent for RwLockAgentWrapper {
         &self.system_prompt
     }
 
+    fn steer_input(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<String, echo_core::agent::AgentSteerError> {
+        let guard = self
+            .inner
+            .try_read()
+            .map_err(|_| echo_core::agent::AgentSteerError::StateUnavailable)?;
+        guard.steer_input(expected_turn_id, message)
+    }
+
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         let inner = self.inner.clone();
         let task = task.to_string();

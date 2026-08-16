@@ -33,6 +33,13 @@ impl Agent for ArcAgentBox {
     fn token_usage_summary(&self) -> echo_core::tokenizer::UsageSummary {
         self.0.token_usage_summary()
     }
+    fn steer_input(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: echo_core::llm::types::Message,
+    ) -> std::result::Result<String, echo_core::agent::AgentSteerError> {
+        self.0.steer_input(expected_turn_id, message)
+    }
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         self.0.execute(task)
     }

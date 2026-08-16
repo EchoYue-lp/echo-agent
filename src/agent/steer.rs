@@ -2,36 +2,9 @@
 
 use crate::llm::types::Message;
 use std::collections::VecDeque;
-use std::fmt;
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TurnSteerError {
-    NoActiveTurn,
-    TurnMismatch { expected: String, actual: String },
-    NotSteerable { turn_id: String },
-    EmptyInput,
-    StateUnavailable,
-}
-
-impl fmt::Display for TurnSteerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoActiveTurn => f.write_str("no active turn to steer"),
-            Self::TurnMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "active turn mismatch: expected {expected}, actual {actual}"
-                )
-            }
-            Self::NotSteerable { turn_id } => write!(f, "turn {turn_id} is not steerable"),
-            Self::EmptyInput => f.write_str("steer input is empty"),
-            Self::StateUnavailable => f.write_str("turn steer state is unavailable"),
-        }
-    }
-}
-
-impl std::error::Error for TurnSteerError {}
+pub type TurnSteerError = echo_core::agent::AgentSteerError;
 
 #[derive(Default)]
 struct ActiveTurn {

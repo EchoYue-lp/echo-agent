@@ -1512,6 +1512,12 @@ impl ReactAgent {
         &self.tools.subagent_registry
     }
 
+    /// Shared Subagent executor and its process-scoped attempt control plane.
+    #[cfg(feature = "subagent")]
+    pub fn subagent_executor(&self) -> &Arc<crate::agent::subagent::SubagentExecutor> {
+        &self.tools.subagent_executor
+    }
+
     /// Replace the hook registry with a shared instance (for AgentPool).
     pub fn set_hook_registry(
         &mut self,
@@ -2349,6 +2355,63 @@ impl ReactAgent {
         allowed_tools: Option<Vec<String>>,
         prompt_payload: Option<serde_json::Value>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_prompt_payload_inner(
+            target,
+            task,
+            parent_label,
+            cancel,
+            depth,
+            runtime_context,
+            allowed_tools,
+            prompt_payload,
+            None,
+        )
+        .await
+    }
+
+    /// Attempt-scoped form of [`Self::delegate_to_agent_with_prompt_payload`].
+    #[cfg(feature = "subagent")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delegate_to_agent_attempt_with_prompt_payload(
+        &self,
+        target: &str,
+        task: &str,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+        allowed_tools: Option<Vec<String>>,
+        prompt_payload: Option<serde_json::Value>,
+        identity: crate::agent::subagent::SubagentAttemptIdentity,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_prompt_payload_inner(
+            target,
+            task,
+            parent_label,
+            cancel,
+            depth,
+            runtime_context,
+            allowed_tools,
+            prompt_payload,
+            Some(identity),
+        )
+        .await
+    }
+
+    #[cfg(feature = "subagent")]
+    #[allow(clippy::too_many_arguments)]
+    async fn delegate_to_agent_with_prompt_payload_inner(
+        &self,
+        target: &str,
+        task: &str,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+        allowed_tools: Option<Vec<String>>,
+        prompt_payload: Option<serde_json::Value>,
+        identity: Option<crate::agent::subagent::SubagentAttemptIdentity>,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -2390,7 +2453,14 @@ impl ReactAgent {
             background: false,
         };
 
-        let result = self.tools.subagent_executor.dispatch(req).await?;
+        let result = if let Some(identity) = identity {
+            self.tools
+                .subagent_executor
+                .dispatch_attempt(req, identity)
+                .await?
+        } else {
+            self.tools.subagent_executor.dispatch(req).await?
+        };
         Ok(result)
     }
 
@@ -2493,6 +2563,67 @@ impl ReactAgent {
         allowed_tools: Option<Vec<String>>,
         prompt_payload: Option<serde_json::Value>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_message_and_prompt_payload_inner(
+            target,
+            task,
+            message,
+            parent_label,
+            cancel,
+            depth,
+            runtime_context,
+            allowed_tools,
+            prompt_payload,
+            None,
+        )
+        .await
+    }
+
+    /// Multimodal attempt-scoped delegation with structured prompt payload.
+    #[cfg(feature = "subagent")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delegate_to_agent_attempt_with_message_and_prompt_payload(
+        &self,
+        target: &str,
+        task: &str,
+        message: crate::llm::types::Message,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+        allowed_tools: Option<Vec<String>>,
+        prompt_payload: Option<serde_json::Value>,
+        identity: crate::agent::subagent::SubagentAttemptIdentity,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_message_and_prompt_payload_inner(
+            target,
+            task,
+            message,
+            parent_label,
+            cancel,
+            depth,
+            runtime_context,
+            allowed_tools,
+            prompt_payload,
+            Some(identity),
+        )
+        .await
+    }
+
+    #[cfg(feature = "subagent")]
+    #[allow(clippy::too_many_arguments)]
+    async fn delegate_to_agent_with_message_and_prompt_payload_inner(
+        &self,
+        target: &str,
+        task: &str,
+        message: crate::llm::types::Message,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+        allowed_tools: Option<Vec<String>>,
+        prompt_payload: Option<serde_json::Value>,
+        identity: Option<crate::agent::subagent::SubagentAttemptIdentity>,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -2532,7 +2663,14 @@ impl ReactAgent {
             background: false,
         };
 
-        let result = self.tools.subagent_executor.dispatch(req).await?;
+        let result = if let Some(identity) = identity {
+            self.tools
+                .subagent_executor
+                .dispatch_attempt(req, identity)
+                .await?
+        } else {
+            self.tools.subagent_executor.dispatch(req).await?
+        };
         Ok(result)
     }
 
@@ -2658,6 +2796,14 @@ impl Agent for ReactAgent {
 
     fn token_usage_summary(&self) -> echo_core::tokenizer::UsageSummary {
         ReactAgent::token_usage_summary(self)
+    }
+
+    fn steer_input(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<String, echo_core::agent::AgentSteerError> {
+        ReactAgent::steer_input(self, expected_turn_id, message)
     }
 
     fn current_run_id(&self) -> Option<String> {

@@ -149,7 +149,7 @@ required-features = ["sqlite"]
 
 [[example]]
 name = "demo45_customer_service"
-required-features = ["sqlite", "human-loop"]
+required-features = ["sqlite", "human-loop", "content-guard"]
 
 [[example]]
 name = "demo48_personal_assistant"
@@ -161,6 +161,11 @@ required-features = ["sqlite"]
 
 [[example]]
 name = "demo44_code_laboratory"
+required-features = ["content-guard"]
+
+[[example]]
+name = "demo07_skills"
+required-features = ["files"]
 
 [[example]]
 name = "demo06_mcp"
@@ -260,7 +265,11 @@ required-features = ["human-loop"]
 
 [[example]]
 name = "demo49_research_agent"
-required-features = ["sqlite", "web"]
+required-features = ["sqlite", "web", "files"]
+
+[[example]]
+name = "demo09_file_shell"
+required-features = ["files", "shell"]
 
 [[example]]
 name = "demo08_external_skills"

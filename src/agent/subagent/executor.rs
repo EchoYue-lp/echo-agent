@@ -16,6 +16,10 @@ use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use super::context::SubagentContext;
+use super::control::{
+    SubagentAttemptBinding, SubagentAttemptIdentity, SubagentControlError, SubagentControlRegistry,
+    SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageDelivery,
+};
 use super::events::SubagentEvent;
 use super::hooks::{SubagentHookContext, SubagentHookRegistry};
 use super::prompt::{
@@ -396,6 +400,7 @@ pub struct SubagentExecutor {
     hooks: Arc<SubagentHookRegistry>,
     config: SubagentExecutorConfig,
     semaphore: Arc<Semaphore>,
+    control_registry: Arc<SubagentControlRegistry>,
 }
 
 impl SubagentExecutor {
@@ -407,6 +412,7 @@ impl SubagentExecutor {
             hooks: Arc::new(SubagentHookRegistry::new()),
             config,
             semaphore,
+            control_registry: Arc::new(SubagentControlRegistry::default()),
         }
     }
 
@@ -422,6 +428,7 @@ impl SubagentExecutor {
             hooks: Arc::new(hooks),
             config,
             semaphore,
+            control_registry: Arc::new(SubagentControlRegistry::default()),
         }
     }
 
@@ -439,7 +446,91 @@ impl SubagentExecutor {
     ///
     /// Routes to the appropriate mode based on the definition or override.
     /// Uses a loop for retry/delegation instead of recursion to prevent stack overflow.
-    pub async fn dispatch(&self, mut req: DispatchRequest) -> Result<SubagentResult> {
+    pub async fn dispatch(&self, req: DispatchRequest) -> Result<SubagentResult> {
+        self.dispatch_inner(req, None).await
+    }
+
+    /// Dispatch one explicitly identified task attempt under live control.
+    ///
+    /// The identity is process-scoped. Durable run/revision/command validation
+    /// remains the responsibility of the framework consumer.
+    pub async fn dispatch_attempt(
+        &self,
+        req: DispatchRequest,
+        identity: SubagentAttemptIdentity,
+    ) -> Result<SubagentResult> {
+        let (req, admission) = self.admit_attempt(req, identity)?;
+        self.dispatch_admitted_attempt(req, admission).await
+    }
+
+    fn admit_attempt(
+        &self,
+        mut req: DispatchRequest,
+        identity: SubagentAttemptIdentity,
+    ) -> Result<(DispatchRequest, super::control::SubagentAttemptAdmission)> {
+        Self::bind_attempt_runtime_identity(&mut req, &identity)?;
+        let admission = self
+            .control_registry
+            .admit(identity, req.cancel.clone())
+            .map_err(Self::control_react_error)?;
+        Self::append_queued_guidance(&mut req.task, &admission.guidance);
+        Ok((req, admission))
+    }
+
+    async fn dispatch_admitted_attempt(
+        &self,
+        req: DispatchRequest,
+        admission: super::control::SubagentAttemptAdmission,
+    ) -> Result<SubagentResult> {
+        let binding = admission.binding.clone();
+        let result = self.dispatch_inner(req, Some(binding)).await;
+        let status = match &result {
+            Ok(result) => result.outcome.status,
+            Err(error) => subagent_status_from_error(error),
+        };
+        admission.settle(status);
+        result
+    }
+
+    /// Deliver a live instruction to one exact active attempt.
+    pub async fn send_message(
+        &self,
+        execution_id: &str,
+        expected_attempt: u32,
+        instruction: impl Into<String>,
+    ) -> std::result::Result<SubagentMessageDelivery, SubagentControlError> {
+        self.control_registry
+            .send_message(execution_id, expected_attempt, instruction)
+            .await
+    }
+
+    /// Queue guidance for one exact future attempt. Admission claims it once.
+    pub fn queue_guidance(
+        &self,
+        task_id: &str,
+        expected_next_attempt: u32,
+        instruction: impl Into<String>,
+    ) -> std::result::Result<SubagentGuidanceQueueReceipt, SubagentControlError> {
+        self.control_registry
+            .queue_guidance(task_id, expected_next_attempt, instruction)
+    }
+
+    /// Cancel one exact attempt and wait until its dispatch has settled.
+    pub async fn interrupt_subagent(
+        &self,
+        execution_id: &str,
+        expected_attempt: u32,
+    ) -> std::result::Result<SubagentInterruptOutcome, SubagentControlError> {
+        self.control_registry
+            .interrupt(execution_id, expected_attempt)
+            .await
+    }
+
+    async fn dispatch_inner(
+        &self,
+        mut req: DispatchRequest,
+        control: Option<SubagentAttemptBinding>,
+    ) -> Result<SubagentResult> {
         let mut retry_count: u32 = 0;
         let max_retries: u32 = 3; // Prevent infinite retry loops
         // Save parent cancel token so retry/delegate paths propagate cancellation
@@ -585,11 +676,14 @@ impl SubagentExecutor {
             // Dispatch based on mode
             let start = Instant::now();
             let result = match mode {
-                ExecutionMode::Sync => self.dispatch_sync(&req).await,
-                ExecutionMode::Fork => self.dispatch_fork(&req).await,
+                ExecutionMode::Sync => self.dispatch_sync(&req, control.clone()).await,
+                ExecutionMode::Fork => self.dispatch_fork(&req, control.clone()).await,
                 ExecutionMode::Teammate => {
                     // Teammate mode: spawn independently, then await result
-                    match self.dispatch_teammate(req.clone()).await {
+                    match self
+                        .dispatch_teammate_with_control(req.clone(), control.clone())
+                        .await
+                    {
                         Ok(handle) => handle.join().await,
                         Err(e) => Err(e),
                     }
@@ -838,7 +932,58 @@ impl SubagentExecutor {
                 prompt_compiler: self.config.prompt_compiler.clone(),
             },
             semaphore: self.semaphore.clone(),
+            control_registry: self.control_registry.clone(),
         }
+    }
+
+    fn bind_attempt_runtime_identity(
+        req: &mut DispatchRequest,
+        identity: &SubagentAttemptIdentity,
+    ) -> Result<()> {
+        let context =
+            req.runtime_context
+                .get_or_insert_with(|| echo_core::tools::ExternalRunContext {
+                    conversation_id: None,
+                    run_id: None,
+                    turn_id: Some(identity.execution_id.clone()),
+                    execution_id: Some(identity.execution_id.clone()),
+                    isolation_id: None,
+                    message_id: None,
+                    cancel: None,
+                    trace_sink: None,
+                    delegation_policy: None,
+                });
+        if let Some(existing) = context.execution_id.as_deref()
+            && existing != identity.execution_id.as_str()
+        {
+            return Err(Self::control_react_error(
+                SubagentControlError::ExecutionIdentityMismatch {
+                    expected: identity.execution_id.clone(),
+                    actual: existing.to_string(),
+                },
+            ));
+        }
+        context.execution_id = Some(identity.execution_id.clone());
+        if context.turn_id.is_none() && context.run_id.is_none() {
+            context.turn_id = Some(identity.execution_id.clone());
+        }
+        Ok(())
+    }
+
+    fn append_queued_guidance(task: &mut String, guidance: &[String]) {
+        if guidance.is_empty() {
+            return;
+        }
+        task.push_str("\n\n[queued_guidance]");
+        for instruction in guidance {
+            task.push_str("\n- ");
+            task.push_str(instruction);
+        }
+        task.push_str("\n[/queued_guidance]");
+    }
+
+    fn control_react_error(error: SubagentControlError) -> ReactError {
+        ReactError::Other(format!("Subagent control rejected: {error}"))
     }
 
     /// Ensure `runtime_context.execution_id` is set (generate `agent_tool-{uuid}` if missing).
@@ -910,8 +1055,52 @@ impl SubagentExecutor {
         })
     }
 
+    /// Non-blocking variant of [`Self::dispatch_attempt`].
+    pub async fn dispatch_background_attempt(
+        &self,
+        req: DispatchRequest,
+        identity: SubagentAttemptIdentity,
+    ) -> Result<BackgroundSubagentHandle> {
+        if self.registry.get(&req.agent_name).await.is_none() {
+            return Err(ReactError::Other(format!(
+                "Subagent '{}' not found",
+                req.agent_name
+            )));
+        }
+        let (mut req, admission) = self.admit_attempt(req, identity)?;
+        req.background = true;
+        let execution_id = admission.binding.identity().execution_id.clone();
+        let agent_name = req.agent_name.clone();
+        let agent_name_for_handle = agent_name.clone();
+        let cancel = req.cancel.clone();
+        let spawned = self.clone_for_spawn();
+
+        let join_handle = tokio::spawn(async move {
+            let result = spawned.dispatch_admitted_attempt(req, admission).await;
+            if let Err(error) = &result {
+                warn!(agent = %agent_name, error = %error, "controlled background subagent dispatch failed");
+            }
+            result
+        });
+
+        Ok(BackgroundSubagentHandle {
+            execution_id,
+            agent_name: agent_name_for_handle,
+            cancel,
+            join_handle: Arc::new(Mutex::new(Some(join_handle))),
+        })
+    }
+
     /// Dispatch a teammate, returning a handle for async polling.
     pub async fn dispatch_teammate(&self, req: DispatchRequest) -> Result<TeammateHandle> {
+        self.dispatch_teammate_with_control(req, None).await
+    }
+
+    async fn dispatch_teammate_with_control(
+        &self,
+        req: DispatchRequest,
+        control: Option<SubagentAttemptBinding>,
+    ) -> Result<TeammateHandle> {
         let registered =
             self.registry.get(&req.agent_name).await.ok_or_else(|| {
                 ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
@@ -958,8 +1147,6 @@ impl SubagentExecutor {
             let _permit = child_token.clone();
             let start = Instant::now();
 
-            let agent = agent_arc.as_ref();
-
             if timeout_secs > 0 {
                 // Race between timeout, cancellation, and execution
                 tokio::select! {
@@ -976,7 +1163,7 @@ impl SubagentExecutor {
                     }
                     r = Self::execute_agent_streaming(
                         registry,
-                        agent,
+                        agent_arc.clone(),
                         &task,
                         message.clone(),
                         child_token.clone(),
@@ -987,6 +1174,7 @@ impl SubagentExecutor {
                         start,
                         event_execution_id.clone(),
                         event_run_id.clone(),
+                        control.clone(),
                     ) => r,
                 }
             } else {
@@ -998,7 +1186,7 @@ impl SubagentExecutor {
                     }
                     r = Self::execute_agent_streaming(
                         registry,
-                        agent,
+                        agent_arc.clone(),
                         &task,
                         message.clone(),
                         child_token.clone(),
@@ -1009,6 +1197,7 @@ impl SubagentExecutor {
                         start,
                         event_execution_id.clone(),
                         event_run_id.clone(),
+                        control.clone(),
                     ) => r,
                 }
             }
@@ -1248,7 +1437,7 @@ impl SubagentExecutor {
     #[allow(clippy::too_many_arguments)]
     async fn execute_agent_streaming(
         registry: Arc<SubagentRegistry>,
-        agent: &(dyn Agent + Send + Sync),
+        agent: Arc<dyn Agent>,
         task: &str,
         message: Option<Message>,
         cancel: CancellationToken,
@@ -1259,11 +1448,19 @@ impl SubagentExecutor {
         start: Instant,
         execution_id: Option<String>,
         run_id: Option<String>,
+        control: Option<SubagentAttemptBinding>,
     ) -> Result<SubagentResult> {
         let artifact_base_dir = invocation
             .working_dir
             .clone()
             .or_else(|| std::env::current_dir().ok());
+        let control_turn_id = control.as_ref().map(|binding| {
+            invocation
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.turn_id.clone().or_else(|| runtime.run_id.clone()))
+                .unwrap_or_else(|| binding.identity().execution_id.clone())
+        });
         // Multimodal path: when a Message is supplied, run it so the subagent
         // sees images/files. Falls back to the text task otherwise.
         let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
@@ -1279,6 +1476,17 @@ impl SubagentExecutor {
             agent
                 .execute_stream_with_invocation_context(task, cancel, invocation)
                 .await?
+        };
+        let _steering_lease = if let Some(binding) = control {
+            let turn_id = control_turn_id
+                .ok_or_else(|| ReactError::Other("Subagent control turn id missing".to_string()))?;
+            Some(
+                binding
+                    .attach(agent.clone(), turn_id)
+                    .map_err(Self::control_react_error)?,
+            )
+        } else {
+            None
         };
         let mut stream = echo_core::agent::envelope_event_stream(raw_stream, event_identity);
         let mut output = String::new();
@@ -1573,7 +1781,11 @@ impl SubagentExecutor {
     }
 
     /// Sync mode: execute one isolated invocation and return its result.
-    async fn dispatch_sync(&self, req: &DispatchRequest) -> Result<SubagentResult> {
+    async fn dispatch_sync(
+        &self,
+        req: &DispatchRequest,
+        control: Option<SubagentAttemptBinding>,
+    ) -> Result<SubagentResult> {
         let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
 
         // Per-subagent override (0 = executor default). Sync now enforces a
@@ -1615,7 +1827,7 @@ impl SubagentExecutor {
                     Duration::from_secs(timeout_secs),
                     Self::execute_agent_streaming(
                         self.registry.clone(),
-                        agent_arc.as_ref(),
+                        agent_arc.clone(),
                         &compiled.task_input,
                         req.message.clone(),
                         execution_cancel.clone(),
@@ -1626,6 +1838,7 @@ impl SubagentExecutor {
                         start,
                         event_execution_id.clone(),
                         event_run_id.clone(),
+                        control.clone(),
                     )
                 ) => match r {
                     Ok(r) => r,
@@ -1641,7 +1854,7 @@ impl SubagentExecutor {
         } else {
             Self::execute_agent_streaming(
                 self.registry.clone(),
-                agent_arc.as_ref(),
+                agent_arc,
                 &compiled.task_input,
                 req.message.clone(),
                 execution_cancel,
@@ -1652,13 +1865,18 @@ impl SubagentExecutor {
                 start,
                 event_execution_id,
                 event_run_id,
+                control,
             )
             .await
         }
     }
 
     /// Fork mode: acquire semaphore, spawn task, await with timeout.
-    async fn dispatch_fork(&self, req: &DispatchRequest) -> Result<SubagentResult> {
+    async fn dispatch_fork(
+        &self,
+        req: &DispatchRequest,
+        control: Option<SubagentAttemptBinding>,
+    ) -> Result<SubagentResult> {
         let registered =
             self.registry.get(&req.agent_name).await.ok_or_else(|| {
                 ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
@@ -1834,8 +2052,6 @@ impl SubagentExecutor {
                 return Ok(result);
             }
 
-            let agent = agent_arc.as_ref();
-
             // Sprint 8: if isolation was requested and a factory is available,
             // create a worktree and bind it as the subagent's working_dir BEFORE
             // execution. Creation failure is a hard error — never silently run
@@ -1884,8 +2100,10 @@ impl SubagentExecutor {
             } else {
                 ObservedIsolation::Context
             };
-            let disabled_tools =
-                invocation_disabled_tools(agent.tool_names(), invocation_allowed_tools.as_deref());
+            let disabled_tools = invocation_disabled_tools(
+                agent_arc.tool_names(),
+                invocation_allowed_tools.as_deref(),
+            );
             let invocation = AgentInvocationContext {
                 runtime: runtime_context.clone(),
                 working_dir: worktree_handle
@@ -1922,7 +2140,7 @@ impl SubagentExecutor {
                         deadline,
                         Self::execute_agent_streaming(
                             registry,
-                            agent,
+                            agent_arc.clone(),
                             &enhanced_task,
                             message.clone(),
                             execution_cancel.clone(),
@@ -1933,6 +2151,7 @@ impl SubagentExecutor {
                             start,
                             event_execution_id.clone(),
                             event_run_id.clone(),
+                            control.clone(),
                         )
                     ) => {
                         match r {
@@ -1955,7 +2174,7 @@ impl SubagentExecutor {
                     ))),
                     r = Self::execute_agent_streaming(
                         registry,
-                        agent,
+                        agent_arc.clone(),
                         &enhanced_task,
                         message.clone(),
                         execution_cancel.clone(),
@@ -1966,6 +2185,7 @@ impl SubagentExecutor {
                         start,
                         event_execution_id.clone(),
                         event_run_id.clone(),
+                        control.clone(),
                     ) => r,
                 }
             };
@@ -2454,6 +2674,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controlled_dispatch_claims_guidance_once_for_exact_attempt() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let agent = MockAgent::new("guided").with_response("done");
+        registry
+            .register(
+                SubagentDefinition::new("guided", "Guided subagent"),
+                Box::new(agent.clone()),
+            )
+            .await;
+        executor
+            .queue_guidance("task-guided", 1, "inspect the latest revision")
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let request = DispatchRequest {
+            agent_name: "guided".to_string(),
+            task: "perform task".to_string(),
+            mode_override: Some(ExecutionMode::Sync),
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            prompt_payload: None,
+            constraints: Vec::new(),
+            background: false,
+        };
+        let identity = SubagentAttemptIdentity::new("task-guided", "execution-guided-1", 1)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        executor.dispatch_attempt(request, identity).await?;
+
+        let observed = agent.last_task().unwrap_or_default();
+        assert!(observed.contains("perform task"));
+        assert!(observed.contains("[queued_guidance]"));
+        assert!(observed.contains("inspect the latest revision"));
+        assert!(matches!(
+            executor.queue_guidance("task-guided", 1, "late"),
+            Err(SubagentControlError::AttemptAlreadyStarted { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn background_handle_cancels_dispatch() -> Result<()> {
         let (registry, executor) = make_executor().await;
         registry
@@ -2481,6 +2743,53 @@ mod tests {
         handle.cancel();
         let result = handle.join().await?;
         assert_eq!(result.outcome.status, SubagentStatus::Cancelled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn controlled_background_interrupt_is_registered_before_handle_returns() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                SubagentDefinition::new("controlled", "Controlled subagent"),
+                Box::new(MockAgent::new("controlled").with_response("must not escape")),
+            )
+            .await;
+        let request = DispatchRequest {
+            agent_name: "controlled".to_string(),
+            task: "wait".to_string(),
+            mode_override: Some(ExecutionMode::Sync),
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            prompt_payload: None,
+            constraints: Vec::new(),
+            background: false,
+        };
+        let identity = SubagentAttemptIdentity::new("task-controlled", "execution-controlled", 1)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let handle = executor
+            .dispatch_background_attempt(request, identity)
+            .await?;
+
+        let interrupted = executor
+            .interrupt_subagent("execution-controlled", 1)
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(interrupted.requested);
+        assert!(interrupted.settled);
+        assert_eq!(interrupted.terminal_status, Some(SubagentStatus::Cancelled));
+        let result = handle.join().await?;
+        assert_eq!(result.outcome.status, SubagentStatus::Cancelled);
+        assert!(matches!(
+            executor
+                .send_message("execution-controlled", 1, "late")
+                .await,
+            Err(SubagentControlError::AttemptSettled { .. })
+        ));
         Ok(())
     }
 

@@ -7,6 +7,7 @@
 
 pub mod builder;
 pub mod context;
+pub mod control;
 pub mod events;
 pub mod executor;
 pub mod hooks;
@@ -21,6 +22,10 @@ pub mod worktree;
 // Re-export the most commonly used types
 pub use builder::SubagentBuilder;
 pub use context::{ContextInheritance, SubagentContext};
+pub use control::{
+    SubagentAttemptIdentity, SubagentControlError, SubagentControlPhase,
+    SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageDelivery,
+};
 pub use events::{SubagentEvent, SubagentEventBus};
 pub use executor::{
     BackgroundSubagentHandle, DispatchRequest, SubagentExecutor, SubagentExecutorConfig,

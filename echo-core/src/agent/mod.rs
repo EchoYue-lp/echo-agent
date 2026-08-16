@@ -32,6 +32,43 @@ use std::future::Future;
 use std::pin::Pin;
 pub use tokio_util::sync::CancellationToken;
 
+/// Typed failure returned when a caller tries to steer an active agent turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentSteerError {
+    /// This agent implementation does not expose live steering.
+    Unsupported,
+    /// No turn is currently active.
+    NoActiveTurn,
+    /// The active turn does not match the caller's exact expected identity.
+    TurnMismatch { expected: String, actual: String },
+    /// The turn exists but has not reached a safe injection point.
+    NotSteerable { turn_id: String },
+    /// Empty instructions are never admitted.
+    EmptyInput,
+    /// The steering state could not be accessed.
+    StateUnavailable,
+}
+
+impl std::fmt::Display for AgentSteerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported => f.write_str("live steering is not supported by this agent"),
+            Self::NoActiveTurn => f.write_str("no active turn to steer"),
+            Self::TurnMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "active turn mismatch: expected {expected}, actual {actual}"
+                )
+            }
+            Self::NotSteerable { turn_id } => write!(f, "turn {turn_id} is not steerable"),
+            Self::EmptyInput => f.write_str("steer input is empty"),
+            Self::StateUnavailable => f.write_str("turn steer state is unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for AgentSteerError {}
+
 /// Optional soft budgets applied to one ReAct invocation.
 ///
 /// `None` fields preserve the existing behavior. The hard iteration limit
@@ -726,6 +763,16 @@ pub trait Agent: Send + Sync {
         crate::tokenizer::UsageSummary::default()
     }
 
+    /// Inject a message into the current turn at the implementation's existing
+    /// safe point. Implementations without live steering keep the typed default.
+    fn steer_input(
+        &self,
+        _expected_turn_id: Option<&str>,
+        _message: Message,
+    ) -> std::result::Result<String, AgentSteerError> {
+        Err(AgentSteerError::Unsupported)
+    }
+
     // ── External run context (跨 spawn 安全的值传递, 见 ExternalRunContext) ──
 
     /// Legacy agent-wide run context setter.
@@ -830,6 +877,13 @@ impl Agent for Box<dyn Agent> {
     }
     fn token_usage_summary(&self) -> crate::tokenizer::UsageSummary {
         self.as_ref().token_usage_summary()
+    }
+    fn steer_input(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: Message,
+    ) -> std::result::Result<String, AgentSteerError> {
+        self.as_ref().steer_input(expected_turn_id, message)
     }
     fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
         self.as_ref().close()
