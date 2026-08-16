@@ -75,6 +75,10 @@ pub mod risk {
 pub mod artifact {
     pub use echo_core::tools::artifact::*;
 }
+/// Long-running command-cell lifecycle contract (re-export from echo_core).
+pub mod cell {
+    pub use echo_core::tools::cell::*;
+}
 /// Cursor pagination contract for collection-returning tools.
 pub mod pagination {
     pub use echo_core::tools::pagination::*;

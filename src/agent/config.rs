@@ -59,8 +59,13 @@ pub struct AgentConfig {
     /// no file writes, no git mutations). Used by read-only subagents so
     /// that "readonly" is physically enforced at the tool level, not just prompt.
     pub(crate) readonly_tools: bool,
-    /// Whether to enable task planning capability (plan/create_task/update_task tools)
-    pub(crate) enable_task: bool,
+    /// Shared background-command cell registry. When set, `ShellTool` gains
+    /// `background=true` support and the wait/stop_cell/list_cells tools are
+    /// registered. Applications inject ONE registry here so the main agent
+    /// and its subagents observe the same cells; `None` (default) = cells
+    /// unavailable.
+    pub(crate) command_cells:
+        Option<std::sync::Arc<dyn echo_core::tools::cell::CommandCellRegistry>>,
     /// Whether to enable human-in-loop tool
     pub(crate) enable_human_in_loop: bool,
     /// Whether to enable subagent dispatch tool (agent_tool)
@@ -210,7 +215,7 @@ impl AgentConfig {
             role: AgentRole::default(),
             enable_tool: false,
             readonly_tools: false,
-            enable_task: false,
+            command_cells: None,
             enable_human_in_loop: false,
             enable_subagent: false,
             subagent_timeout_secs: 600,
@@ -291,15 +296,13 @@ impl AgentConfig {
         Self::new(model_name, agent_name, system_prompt)
             .enable_tool(true)
             .enable_memory(true)
-            .enable_task(true)
             .enable_cot(true)
     }
 
-    /// Enable all features (tools, memory, planning) - Builder chain call version
+    /// Enable all features (tools, memory) - Builder chain call version
     pub fn with_full_features(mut self) -> Self {
         self.enable_tool = true;
         self.enable_memory = true;
-        self.enable_task = true;
         self.enable_cot = true;
         self
     }
@@ -354,15 +357,17 @@ impl AgentConfig {
         self.readonly_tools
     }
 
-    /// Enable or disable task planning capability
+    /// Inject a shared background-command cell registry.
     ///
-    /// # Parameters
-    /// * `enabled` - `true` to enable task planning, `false` to disable
-    ///
-    /// # Description
-    /// When enabled, the Agent can use task management tools such as `plan`, `create_task`, `update_task`
-    pub fn enable_task(mut self, enabled: bool) -> Self {
-        self.enable_task = enabled;
+    /// When set, `ShellTool` supports `background=true` (returning a `cell_id`
+    /// immediately) and the `wait` / `stop_cell` / `list_cells` tools are
+    /// registered. Share one registry across a parent agent and its subagents
+    /// so they all observe the same cells.
+    pub fn command_cells(
+        mut self,
+        cells: std::sync::Arc<dyn echo_core::tools::cell::CommandCellRegistry>,
+    ) -> Self {
+        self.command_cells = Some(cells);
         self
     }
 
@@ -487,14 +492,6 @@ impl AgentConfig {
     /// `true` if tool calling is enabled, `false` if disabled
     pub fn is_tool_enabled(&self) -> bool {
         self.enable_tool
-    }
-
-    /// Check if task planning is enabled
-    ///
-    /// # Returns
-    /// `true` if task planning is enabled, `false` if disabled
-    pub fn is_task_enabled(&self) -> bool {
-        self.enable_task
     }
 
     /// Check if Human-in-the-Loop is enabled
@@ -1042,7 +1039,6 @@ mod tests {
         assert_eq!(config.get_max_iterations(), 100);
         assert_eq!(config.get_token_limit(), DEFAULT_TOKEN_LIMIT);
         assert!(!config.is_tool_enabled());
-        assert!(!config.is_task_enabled());
         assert!(!config.is_human_in_loop_enabled());
         assert!(!config.is_subagent_enabled());
     }
@@ -1071,7 +1067,6 @@ mod tests {
 
         assert!(config.is_tool_enabled());
         assert!(config.is_memory_enabled());
-        assert!(config.is_task_enabled());
         assert!(config.is_cot_enabled());
     }
 
@@ -1081,7 +1076,6 @@ mod tests {
             .max_iterations(20)
             .token_limit(DEFAULT_TOKEN_LIMIT)
             .enable_tool(true)
-            .enable_task(true)
             .enable_human_in_loop(true)
             .enable_subagent(true)
             .enable_memory(true)
@@ -1093,7 +1087,6 @@ mod tests {
         assert_eq!(config.get_max_iterations(), 20);
         assert_eq!(config.get_token_limit(), DEFAULT_TOKEN_LIMIT);
         assert!(config.is_tool_enabled());
-        assert!(config.is_task_enabled());
         assert!(config.is_human_in_loop_enabled());
         assert!(config.is_subagent_enabled());
         assert!(config.is_memory_enabled());
@@ -1156,7 +1149,6 @@ mod tests {
 
         assert!(config.is_tool_enabled());
         assert!(config.is_memory_enabled());
-        assert!(config.is_task_enabled());
         assert!(config.is_cot_enabled());
     }
 

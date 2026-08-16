@@ -6,6 +6,8 @@
 //! file writes) — used by read-only Subagents.
 
 use echo_core::tools::ToolRegistrar;
+use echo_core::tools::cell::CommandCellRegistry;
+use std::sync::Arc;
 
 /// Register only **read-only** tools into the given registrar.
 ///
@@ -186,11 +188,26 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
 /// Register all feature-gated domain tools into the given registrar.
 #[allow(unused_variables)]
 pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
+    register_all_tools_with_cells(tool_manager, None);
+}
+
+/// Like [`register_all_tools`], but `ShellTool` receives the command cell
+/// registry so `background=true` launches a background command cell (returning
+/// a `cell_id` immediately) instead of reporting the mode unavailable.
+#[allow(unused_variables)]
+pub fn register_all_tools_with_cells(
+    tool_manager: &mut dyn ToolRegistrar,
+    cells: Option<Arc<dyn CommandCellRegistry>>,
+) {
     // ── shell ─────────────────────────────────────────────────────────────
     #[cfg(feature = "shell")]
     {
         use crate::shell::ShellTool;
-        tool_manager.register(Box::new(ShellTool::new()));
+        let shell = match cells {
+            Some(cells) => ShellTool::new().with_cell_launcher(cells),
+            None => ShellTool::new(),
+        };
+        tool_manager.register(Box::new(shell));
         // Sprint 10b: inline code execution (Python/R/JS/...). Same shell
         // feature gate; writer toolset only (readonly subset excludes it —
         // readonly Subagents shouldn't run arbitrary code).

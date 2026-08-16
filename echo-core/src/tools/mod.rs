@@ -1,6 +1,7 @@
 //! Tool system core trait and types
 
 pub mod artifact;
+pub mod cell;
 pub mod pagination;
 pub mod permission;
 pub mod skill;

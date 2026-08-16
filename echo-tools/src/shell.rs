@@ -9,6 +9,7 @@ use echo_core::sandbox::{
 use echo_core::tools::artifact::{
     ToolOutputArtifactIdentity, ToolOutputArtifactRef, ToolOutputArtifactWriter,
 };
+use echo_core::tools::cell::{CommandCellOwner, CommandCellRegistry, CommandCellRequest};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
     Tool, ToolContext, ToolFailure, ToolFailureCategory, ToolOutputChannel, ToolParameters,
@@ -144,12 +145,19 @@ pub fn validate_command_safety(command: &str) -> CommandSafety {
 ///
 /// Optional sandbox executor integration: when `sandbox` is set, all commands execute through the sandbox,
 /// providing additional isolation and resource limits.
+///
+/// Optional background mode: when a [`CommandCellRegistry`] is configured via
+/// [`ShellTool::with_cell_launcher`], `background=true` launches the command
+/// as a cell and returns a `cell_id` immediately.
 pub struct ShellTool {
     /// Whether strict mode is enabled (default true)
     strict_mode: bool,
     /// Optional sandbox executor (interior-mutable so `Tool::set_sandbox`
     /// can inject it post-construction via `ToolManager::apply_sandbox`).
     sandbox: Mutex<Option<Arc<dyn SandboxExecutor>>>,
+    /// Optional command cell registry for `background=true` launches.
+    /// `None` (default) = background mode unavailable.
+    cell_launcher: Option<Arc<dyn CommandCellRegistry>>,
     /// Command timeout in seconds (default 60 seconds)
     timeout_secs: u64,
 }
@@ -166,6 +174,7 @@ impl ShellTool {
         Self {
             strict_mode: true,
             sandbox: Mutex::new(None),
+            cell_launcher: None,
             timeout_secs: 60,
         }
     }
@@ -175,6 +184,7 @@ impl ShellTool {
         Self {
             strict_mode: false,
             sandbox: Mutex::new(None),
+            cell_launcher: None,
             timeout_secs: 60,
         }
     }
@@ -185,6 +195,15 @@ impl ShellTool {
             .sandbox
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sandbox);
+        self
+    }
+
+    /// Set the command cell registry used by `background=true` launches.
+    /// (Plain field assignment — the registry is injected once at setup time,
+    /// unlike the interior-mutable `sandbox` Mutex which `Tool::set_sandbox`
+    /// fills in later.)
+    pub fn with_cell_launcher(mut self, cells: Arc<dyn CommandCellRegistry>) -> Self {
+        self.cell_launcher = Some(cells);
         self
     }
 
@@ -201,6 +220,89 @@ impl ShellTool {
     /// This prevents injection attacks like `ls; rm -rf /` or `echo $(id)`.
     fn has_shell_metacharacters(&self, cmd: &str) -> bool {
         cmd.contains(SHELL_METACHARACTERS)
+    }
+
+    /// Launch the command as a background cell (Codex-style `background=true`).
+    ///
+    /// Order of gates (mirrors the foreground policy):
+    /// 1. no cell registry → refuse;
+    /// 2. the SAME `check_command_safety` classifier as the foreground path
+    ///    (Safe proceeds; RequiresApproval/Dangerous return the same errors);
+    /// 3. launch through the registry and return the `cell_id` immediately.
+    ///
+    /// `require_sandbox` is carried in the request. A registry without the
+    /// matching executor must reject rather than silently downgrade.
+    fn launch_background_cell(
+        &self,
+        command: &str,
+        ctx: &ToolContext,
+        timeout_secs: Option<u64>,
+        has_sandbox: bool,
+    ) -> ToolResult {
+        let Some(launcher) = self.cell_launcher.clone() else {
+            return ToolResult::error("background mode requires a command cell registry");
+        };
+        // 与前台完全相同的安全校验路径。
+        match self.check_command_safety(command) {
+            CommandSafety::Safe => {}
+            CommandSafety::RequiresApproval(reason) => {
+                return ToolResult::failure(
+                    ToolFailureCategory::Permanent,
+                    format!(
+                        "⚠️  Manual confirmation required: {}\nCommand: {}\n\nPlease use the human_loop module to confirm before executing.",
+                        reason, command
+                    ),
+                );
+            }
+            CommandSafety::Dangerous(reason) => {
+                return ToolResult::failure(
+                    ToolFailureCategory::Permanent,
+                    format!(
+                        "🚫 Safety rejection: {}\nCommand: {}\n\nTo perform this operation, please execute it manually in the terminal.",
+                        reason, command
+                    ),
+                );
+            }
+        }
+
+        let request = CommandCellRequest {
+            command: command.to_string(),
+            working_dir: ctx
+                .working_dir
+                .as_ref()
+                .map(|dir| dir.display().to_string()),
+            timeout_secs,
+            require_sandbox: has_sandbox,
+            // Background cells outlive the foreground Turn. Product runtimes
+            // that distinguish pause from cancel stop owned cells explicitly
+            // by run identity instead of inheriting the Turn token here.
+            cancel: None,
+            owner: CommandCellOwner {
+                run_id: ctx.run_id.clone(),
+                turn_id: ctx.turn_id.clone(),
+                execution_id: ctx.execution_id.clone(),
+                call_id: ctx.call_id.clone(),
+            },
+            output_artifacts: ctx.output_artifacts.clone(),
+            artifact_identity: ctx
+                .output_artifacts
+                .as_ref()
+                .map(|_| ToolOutputArtifactIdentity::from_context(ctx, self.name())),
+        };
+        match launcher.launch(request) {
+            Ok(cell_id) => {
+                let payload = serde_json::json!({
+                    "cell_id": cell_id,
+                    "status": "running",
+                    "hint": "call wait(cell_id, cursor=0, yield_time_ms=30000) to await output; re-pass the returned next_cursor"
+                });
+                ToolResult::success_json(payload)
+            }
+            Err(error) => ToolResult::failure(
+                ToolFailureCategory::Permanent,
+                format!("Failed to launch background cell: {error}"),
+            ),
+        }
     }
 
     /// Check whether a command is safe
@@ -403,7 +505,11 @@ impl Tool for ShellTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Command timeout in seconds (default: 60, max: 300)"
+                    "description": "Command timeout in seconds (foreground default: 60, max: 300; background uses the cell runtime limit)"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run in background and return a cell_id immediately. Use wait(cell_id, yield_time_ms) to long-poll for output/exit status."
                 }
             },
             "required": ["command"]
@@ -446,12 +552,37 @@ impl Tool for ShellTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("command".to_string()))?;
 
-            // Extract timeout parameter (default 60s, max 300s)
-            let timeout_secs = parameters
+            // Extract timeout parameter (default 60s). The background path maps
+            // an explicit timeout onto the cell lifetime WITHOUT the 300s
+            // foreground cap (hour-scale builds are the whole point of cells).
+            let has_timeout_param = parameters.contains_key("timeout");
+            let timeout_secs_raw = parameters
                 .get("timeout")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(self.timeout_secs)
-                .min(300); // Cap at 300 seconds
+                .unwrap_or(self.timeout_secs);
+
+            // ── Background mode: launch a cell, return immediately ──
+            let background = parameters
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if background {
+                let result = self.launch_background_cell(
+                    command,
+                    &ctx,
+                    if has_timeout_param {
+                        Some(timeout_secs_raw)
+                    } else {
+                        None
+                    },
+                    sandbox.is_some(),
+                );
+                return Ok(single_complete_stream(result));
+            }
+
+            // ── Foreground path (unchanged) ─────────────────────────
+            // Cap at 300 seconds
+            let timeout_secs = timeout_secs_raw.min(300);
 
             match self.check_command_safety(command) {
                 CommandSafety::Safe => {}
@@ -1152,9 +1283,95 @@ fn combined_process_output(stdout: &str, stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::sandbox::{ExecutionResult, IsolationLevel};
+    use echo_core::tools::cell::{CommandCellDelta, CommandCellPhase, CommandCellSnapshot};
     use echo_core::tools::{ToolContext, ToolOutputChannel, ToolStreamEvent};
     use futures::StreamExt;
     use std::collections::HashMap;
+
+    struct TestSandbox;
+
+    impl SandboxExecutor for TestSandbox {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn isolation_level(&self) -> IsolationLevel {
+            IsolationLevel::Process
+        }
+
+        fn is_available(&self) -> BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+
+        fn execute(
+            &self,
+            _command: SandboxCommand,
+        ) -> BoxFuture<'_, echo_core::error::Result<ExecutionResult>> {
+            Box::pin(async {
+                Ok(ExecutionResult {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration: Duration::ZERO,
+                    sandbox_type: "test".to_string(),
+                    timed_out: false,
+                    cancelled: false,
+                    output_truncated: false,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                })
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingCellRegistry {
+        request: Mutex<Option<CommandCellRequest>>,
+    }
+
+    impl CommandCellRegistry for CapturingCellRegistry {
+        fn launch(&self, request: CommandCellRequest) -> std::result::Result<String, String> {
+            *self
+                .request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request);
+            Ok("captured-cell".to_string())
+        }
+
+        fn wait(
+            &self,
+            cell_id: &str,
+            cursor: u64,
+            _yield_ms: u64,
+        ) -> BoxFuture<'_, std::result::Result<CommandCellDelta, String>> {
+            let cell_id = cell_id.to_string();
+            Box::pin(async move {
+                Ok(CommandCellDelta {
+                    snapshot: CommandCellSnapshot {
+                        cell_id,
+                        name: "captured".to_string(),
+                        phase: CommandCellPhase::Running,
+                        exit_code: None,
+                        total_output_bytes: cursor,
+                        output_truncated: false,
+                        output_artifact: None,
+                    },
+                    new_output: String::new(),
+                    next_cursor: cursor,
+                    output_elided: false,
+                })
+            })
+        }
+
+        fn stop(&self, _cell_id: &str) -> bool {
+            true
+        }
+
+        fn list(&self) -> BoxFuture<'_, Vec<CommandCellSnapshot>> {
+            Box::pin(async { Vec::new() })
+        }
+    }
 
     #[test]
     fn test_safe_commands() {
@@ -1172,6 +1389,39 @@ mod tests {
             tool.check_command_safety("cargo check"),
             CommandSafety::Safe
         );
+    }
+
+    #[tokio::test]
+    async fn background_launch_preserves_sandbox_requirement_instead_of_rejecting()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let registry = Arc::new(CapturingCellRegistry::default());
+        let tool = ShellTool::new()
+            .with_cell_launcher(registry.clone())
+            .with_sandbox(Arc::new(TestSandbox));
+        let context = ToolContext {
+            run_id: Some("run-that-may-be-paused".to_string()),
+            cancel: Some(Arc::new(echo_core::agent::CancellationToken::new())),
+            ..Default::default()
+        };
+        let result = tool
+            .execute_with_context(
+                HashMap::from([
+                    ("command".to_string(), serde_json::json!("echo sandboxed")),
+                    ("background".to_string(), serde_json::json!(true)),
+                ]),
+                &context,
+            )
+            .await?;
+        assert!(result.success, "background launch failed: {result:?}");
+        let request = registry
+            .request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| "cell registry did not receive the launch".to_string())?;
+        assert!(request.require_sandbox);
+        assert!(request.cancel.is_none());
+        Ok(())
     }
 
     #[test]

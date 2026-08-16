@@ -28,21 +28,16 @@ use crate::memory::store::{FileStore, Store};
 use crate::sandbox::SandboxManager;
 use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
-#[cfg(feature = "tasks")]
-use crate::tasks::TaskSpawner;
 #[cfg(feature = "subagent")]
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
 use crate::tools::builtin::answer::FinalAnswerTool;
-#[cfg(feature = "tasks")]
-use crate::tools::builtin::check_task::{CheckTaskStatusTool, ListBackgroundTasksTool};
+use crate::tools::builtin::cell_tools::{ListCellsTool, StopCellTool, WaitCellTool};
 #[cfg(feature = "human-loop")]
 use crate::tools::builtin::human_in_loop::HumanInLoop;
 use crate::tools::builtin::memory::{
     ForgetTool, LayeredForgetTool, LayeredRecallTool, LayeredRememberTool, LayeredSearchMemoryTool,
     LegacyStoreRememberTool, RecallTool, SearchMemoryTool,
 };
-#[cfg(feature = "tasks")]
-use crate::tools::builtin::spawn_task::SpawnBackgroundTaskTool;
 use crate::tools::{ToolManager, ToolSearchTool};
 use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use futures::future::BoxFuture;
@@ -401,8 +396,6 @@ impl ReactAgent {
         ));
 
         // ── Subsystem initialization ──────────────────────────────
-        #[cfg(feature = "tasks")]
-        let task_spawner = Arc::new(TaskSpawner::new(crate::tasks::TaskSpawnerConfig::default()));
         #[cfg(feature = "subagent")]
         let subagent_registry =
             provided_subagent_registry.unwrap_or_else(|| Arc::new(SubagentRegistry::new()));
@@ -445,12 +438,13 @@ impl ReactAgent {
             tool_manager.register(Box::new(HumanInLoop::new(approval_provider.clone())));
         }
 
-        #[cfg(feature = "tasks")]
-        if config.enable_task {
-            // Background task tools (long-running task support)
-            tool_manager.register(Box::new(SpawnBackgroundTaskTool::new(task_spawner.clone())));
-            tool_manager.register(Box::new(CheckTaskStatusTool::new(task_spawner.clone())));
-            tool_manager.register(Box::new(ListBackgroundTasksTool::new(task_spawner.clone())));
+        // Background command cells (shell background=true + wait/stop/list).
+        // Registered whenever a shared registry is injected — one process-wide
+        // registry lets the main agent and its subagents observe the same cells.
+        if let Some(cells) = config.command_cells.clone() {
+            tool_manager.register(Box::new(WaitCellTool::new(cells.clone())));
+            tool_manager.register(Box::new(StopCellTool::new(cells.clone())));
+            tool_manager.register(Box::new(ListCellsTool::new(cells)));
         }
         Self::register_feature_gated_tools(&config, &mut tool_manager);
 
@@ -734,7 +728,12 @@ impl ReactAgent {
             if config.readonly_tools {
                 echo_tools::register_readonly_tools(tool_manager);
             } else {
-                echo_tools::register_all_tools(tool_manager);
+                // The injected cell registry (if any) enables ShellTool's
+                // background=true mode alongside the regular tool surface.
+                echo_tools::register_all_tools_with_cells(
+                    tool_manager,
+                    config.command_cells.clone(),
+                );
             }
         }
     }

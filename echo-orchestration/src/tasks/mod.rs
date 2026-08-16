@@ -20,6 +20,7 @@ mod time;
 pub mod verifier;
 
 pub mod background_task;
+pub mod command_cell;
 pub mod composite;
 pub mod progress;
 
@@ -29,6 +30,7 @@ pub use background_task::{
     AnyBackgroundTask, BackgroundTask, BackgroundTaskStatus, TaskSpawner, TaskSpawnerConfig,
     TaskSummary,
 };
+pub use command_cell::{BackgroundCommandManager, BackgroundCommandManagerConfig};
 pub use composite::{CompositePlan, CompositeStep, CompositeStrategy, execute_composite};
 pub use events::{
     AsyncTaskEventListener, LoggingListener, TaskEvent, TaskEventBus, TaskEventListener,

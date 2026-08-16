@@ -90,4 +90,4 @@ pub mod word;
 pub mod worktree_tool;
 
 mod registry;
-pub use registry::{register_all_tools, register_readonly_tools};
+pub use registry::{register_all_tools, register_all_tools_with_cells, register_readonly_tools};

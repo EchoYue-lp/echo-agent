@@ -39,6 +39,7 @@ impl SubagentBuilder {
                 kind: SubagentKind::BuiltIn,
                 execution_mode: ExecutionMode::Sync,
                 model: None,
+                thinking: None,
                 system_prompt: None,
                 tool_filter: None,
                 max_iterations: None,
@@ -112,6 +113,14 @@ impl SubagentBuilder {
     /// Override the model for this subagent.
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.definition.model = Some(model.into());
+        self
+    }
+
+    /// Override the reasoning depth for this subagent (spec string in
+    /// `ThinkingConfig::parse_spec` syntax, e.g. `"low"`). `None` (unset)
+    /// inherits the parent generation's thinking.
+    pub fn thinking(mut self, spec: impl Into<String>) -> Self {
+        self.definition.thinking = Some(spec.into());
         self
     }
 

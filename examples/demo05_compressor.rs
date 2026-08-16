@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
         .name("expense_agent")
         .system_prompt(system_prompt)
         .enable_tools()
-        .enable_tasks()
+        .enable_tools()
         .enable_human_in_loop()
         .token_limit(3000)
         .max_iterations(40)

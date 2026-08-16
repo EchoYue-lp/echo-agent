@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         .name("planning_agent")
         .system_prompt(system_prompt)
         .enable_tools()
-        .enable_tasks()
+        .enable_tools()
         .max_iterations(30)
         .build()?;
 

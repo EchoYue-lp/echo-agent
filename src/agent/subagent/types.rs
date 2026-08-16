@@ -134,6 +134,12 @@ pub struct SubagentDefinition {
     pub execution_mode: ExecutionMode,
     /// Model override (None = inherit from parent).
     pub model: Option<String>,
+    /// Reasoning-depth override for this subagent, in
+    /// `echo_core::llm::ThinkingConfig::parse_spec` syntax (`low`/`medium`/
+    /// `high`/`disabled`/budget number; `auto`/empty = model default).
+    /// `None` = inherit the parent generation's thinking. Used by cheap
+    /// long-running roles such as a cell-waiting awaiter (`thinking: low`).
+    pub thinking: Option<String>,
     /// System prompt override (None = inherit or auto-generate).
     pub system_prompt: Option<String>,
     /// Restrict available tools by name (None = inherit all from parent).
@@ -205,6 +211,7 @@ impl SubagentDefinition {
             kind: SubagentKind::BuiltIn,
             execution_mode: ExecutionMode::Sync,
             model: None,
+            thinking: None,
             system_prompt: None,
             tool_filter: None,
             max_iterations: None,

@@ -593,14 +593,34 @@ fn react_agent_builder_with_memory() {
 }
 
 #[test]
-fn react_agent_builder_with_planning() {
+fn react_agent_builder_registers_cell_tools_with_injected_registry() {
+    use echo_core::tools::cell::CommandCellRegistry;
+    use echo_orchestration::tasks::BackgroundCommandManager;
+
+    let registry: std::sync::Arc<dyn CommandCellRegistry> =
+        std::sync::Arc::new(BackgroundCommandManager::default());
     let agent = crate::agent::ReactAgentBuilder::new()
         .model("qwen3-max")
-        .enable_tasks()
+        .enable_tools()
+        .command_cells(registry)
         .build()
         .unwrap();
 
-    assert!(agent.config().is_task_enabled());
+    let tool_names = agent.tool_names();
+    assert!(tool_names.contains(&String::from("wait")));
+    assert!(tool_names.contains(&String::from("stop_cell")));
+    assert!(tool_names.contains(&String::from("list_cells")));
+
+    // 未注入 registry 的 agent 不注册 cell 工具。
+    let plain = crate::agent::ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .enable_tools()
+        .build()
+        .unwrap();
+    let plain_names = plain.tool_names();
+    assert!(!plain_names.contains(&String::from("wait")));
+    assert!(!plain_names.contains(&String::from("stop_cell")));
+    assert!(!plain_names.contains(&String::from("list_cells")));
 }
 
 #[test]
@@ -877,7 +897,6 @@ fn react_agent_builder_full_featured() {
 
     assert!(agent.config().is_tool_enabled());
     assert!(agent.config().is_memory_enabled());
-    assert!(agent.config().is_task_enabled());
     assert!(agent.config().is_cot_enabled());
 }
 
@@ -1732,27 +1751,29 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
 #[test]
 #[cfg(feature = "tasks")]
 fn react_agent_planning_tools_registration() {
-    let config = AgentConfig::minimal("model", "agent").enable_task(true);
+    let config = AgentConfig::minimal("model", "agent").enable_tool(true);
     let agent = ReactAgent::new(config);
 
-    // The background-task tools are registered when `enable_task` is set.
-    // (Tool names track the current SpawnBackgroundTaskTool / CheckTaskStatusTool
-    // / ListBackgroundTasksTool implementations — older names like create_task
-    // / update_task / list_tasks were renamed long ago.)
+    // The revisioned task-relation tools are always part of the default tool
+    // surface (the old enable_task-gated background-task trio was replaced by
+    // the injected command-cell tools; see
+    // react_agent_builder_registers_cell_tools_with_injected_registry).
     let tool_names = agent.tool_names();
-    assert!(tool_names.contains(&String::from("spawn_background_task")));
-    assert!(tool_names.contains(&String::from("check_task_status")));
-    assert!(tool_names.contains(&String::from("list_background_tasks")));
+    assert!(tool_names.contains(&String::from("task_create")));
+    assert!(tool_names.contains(&String::from("task_update")));
+    assert!(tool_names.contains(&String::from("task_list")));
 }
 
 #[test]
 fn react_agent_no_planning_tools_without_flag() {
-    let config = AgentConfig::minimal("model", "agent").enable_task(false);
+    let config = AgentConfig::minimal("model", "agent");
     let agent = ReactAgent::new(config);
 
     let tool_names = agent.tool_names();
-    // When task planning is not enabled, related tools should not be available
-    assert!(!tool_names.contains(&String::from("create_task")));
+    // The revisioned task-relation tools are part of the default surface
+    // (registered unconditionally; no enable flag since the old background
+    // trio was replaced by the injected command-cell tools).
+    assert!(tool_names.contains(&String::from("task_create")));
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

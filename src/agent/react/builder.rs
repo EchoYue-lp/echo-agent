@@ -34,7 +34,7 @@ pub struct ReactAgentBuilder {
     enable_builtin_tools: bool,
     readonly_tools: bool,
     enable_memory: bool,
-    enable_task: bool,
+    command_cells: Option<Arc<dyn echo_core::tools::cell::CommandCellRegistry>>,
     enable_human_in_loop: bool,
     enable_subagent: bool,
     register_agent_dispatch_tool: bool,
@@ -127,7 +127,7 @@ impl ReactAgentBuilder {
             enable_builtin_tools: false,
             readonly_tools: false,
             enable_memory: false,
-            enable_task: false,
+            command_cells: None,
             enable_human_in_loop: false,
             enable_subagent: false,
             register_agent_dispatch_tool: false,
@@ -214,7 +214,6 @@ impl ReactAgentBuilder {
             .system_prompt(system_prompt)
             .enable_tools()
             .enable_memory()
-            .enable_tasks()
             .build()
     }
     // ── Basic Configuration ─────────────────────────────────────────────────────
@@ -328,9 +327,15 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// Enable revisioned task CRUD tools.
-    pub fn enable_tasks(mut self) -> Self {
-        self.enable_task = true;
+    /// Share a background-command cell registry (enables `shell
+    /// background=true` plus the wait/stop_cell/list_cells tools). Inject ONE
+    /// registry into the main agent and its subagents so they all observe the
+    /// same cells.
+    pub fn command_cells(
+        mut self,
+        cells: Arc<dyn echo_core::tools::cell::CommandCellRegistry>,
+    ) -> Self {
+        self.command_cells = Some(cells);
         self
     }
 
@@ -843,7 +848,6 @@ impl ReactAgentBuilder {
             .enable_tool(self.enable_builtin_tools)
             .readonly_tools(self.readonly_tools)
             .enable_memory(self.enable_memory)
-            .enable_task(self.enable_task)
             .enable_human_in_loop(self.enable_human_in_loop)
             .enable_subagent(self.enable_subagent)
             .register_agent_dispatch_tool(self.register_agent_dispatch_tool)
@@ -854,6 +858,9 @@ impl ReactAgentBuilder {
             .run_budget(self.run_budget)
             .max_tokens(self.max_tokens)
             .temperature(self.temperature);
+        if let Some(cells) = self.command_cells.clone() {
+            config = config.command_cells(cells);
+        }
         if self.token_limit_explicit {
             config = config.token_limit(self.token_limit);
         }
