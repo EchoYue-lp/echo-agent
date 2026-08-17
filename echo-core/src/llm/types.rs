@@ -628,10 +628,12 @@ pub struct ChatCompletionRequest {
     /// `enable_thinking` for Qwen3 models that accept an explicit budget.
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinking_budget")]
     pub thinking_budget: Option<u32>,
-    /// GLM-4.5/4.6 `thinking:{type:"enabled"|"disabled"}` block. Only emitted
-    /// for models that speak `ThinkingProtocol::GlmThinkingType`.
+    /// Generic `thinking:{type:"enabled"|"disabled"}` block.
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinking")]
-    pub glm_thinking: Option<GlmThinkingBlock>,
+    pub thinking_type: Option<ThinkingTypeBlock>,
+    /// Ollama's native `think` extension: a boolean or an effort-level string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub think: Option<serde_json::Value>,
     /// User identifier for KVCache isolation (DeepSeek, etc.).
     /// When set, the provider uses this to partition prompt cache entries.
     /// Without it, every request may be treated as from a different user,
@@ -640,9 +642,9 @@ pub struct ChatCompletionRequest {
     pub user_id: Option<String>,
 }
 
-/// GLM `thinking:{type:"enabled"|"disabled"}` wire block.
+/// `thinking:{type:"enabled"|"disabled"}` wire block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlmThinkingBlock {
+pub struct ThinkingTypeBlock {
     #[serde(rename = "type")]
     pub block_type: String,
 }

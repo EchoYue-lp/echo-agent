@@ -38,8 +38,8 @@
 use crate::agent::AgentConfig;
 use crate::skills::hooks::HooksDefinition;
 use echo_core::budget::TokenBudgetConfig;
-use echo_core::llm::LlmApiProtocol;
 use echo_core::llm::capabilities::infer_context_window;
+use echo_core::llm::{LlmApiProtocol, ModelInputModality};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -73,9 +73,9 @@ Response style:
 pub struct AppConfig {
     /// Model configuration (name, temperature, max_tokens).
     pub model: ModelConfig,
-    /// Provider-level credentials and endpoint overrides configured from GUI.
+    /// User-defined provider connections keyed by stable provider id.
     pub model_providers: BTreeMap<String, ModelProviderConfig>,
-    /// User-configured models shown in GUI model switchers.
+    /// User-configured models linked to entries in [`Self::model_providers`].
     pub configured_models: Vec<ConfiguredModel>,
     /// Agent behaviour configuration (system prompt, iterations, feature toggles).
     pub agent: AgentYamlConfig,
@@ -105,6 +105,101 @@ fn resolve_context_window(explicit: Option<u32>, provider: &str, model_name: &st
 }
 
 impl AppConfig {
+    /// Resolve one enabled user-configured model into an injectable LLM config.
+    pub fn resolve_llm_config(
+        &self,
+        selector: Option<&str>,
+    ) -> echo_core::error::Result<echo_integration::providers::LlmConfig> {
+        let selected = match selector.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(selector) => {
+                let mut matches = self.configured_models.iter().filter(|model| {
+                    model.enabled && (model.id == selector || model.model == selector)
+                });
+                let selected = matches.next().ok_or_else(|| {
+                    echo_core::error::ConfigError::NotFindModelError(selector.to_string())
+                })?;
+                if matches.next().is_some() && selected.id != selector {
+                    return Err(echo_core::error::ConfigError::ConfigFileError(format!(
+                        "model name '{selector}' is ambiguous; use a configured model id"
+                    ))
+                    .into());
+                }
+                selected
+            }
+            None => self
+                .model
+                .default_model_id
+                .as_deref()
+                .and_then(|id| {
+                    self.configured_models
+                        .iter()
+                        .find(|model| model.enabled && model.id == id)
+                })
+                .or_else(|| self.configured_models.iter().find(|model| model.enabled))
+                .ok_or_else(|| {
+                    echo_core::error::ConfigError::NotFindModelError(
+                        "no enabled configured model".to_string(),
+                    )
+                })?,
+        };
+        let provider = self
+            .model_providers
+            .get(&selected.provider)
+            .ok_or_else(|| {
+                echo_core::error::ConfigError::ConfigFileError(format!(
+                    "model '{}' references missing provider '{}'",
+                    selected.id, selected.provider
+                ))
+            })?;
+        let base_url = provider
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                echo_core::error::ConfigError::MissingConfig(
+                    selected.provider.clone(),
+                    "base_url".to_string(),
+                )
+            })?;
+        let api_key = provider
+            .auth_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                provider
+                    .api_key_env
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .and_then(|name| std::env::var(name).ok())
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_default();
+        if provider.requires_api_key && api_key.is_empty() {
+            return Err(echo_core::error::ConfigError::MissingConfig(
+                selected.provider.clone(),
+                provider
+                    .api_key_env
+                    .clone()
+                    .unwrap_or_else(|| "auth_token".to_string()),
+            )
+            .into());
+        }
+
+        Ok(echo_integration::providers::LlmConfig::for_provider(
+            &selected.provider,
+            base_url,
+            api_key,
+            &selected.model,
+            selected.api_protocol,
+        )?
+        .with_input_modalities(selected.input_modalities.clone()))
+    }
+
     /// Convert to the library's `AgentConfig` (builder style).
     ///
     /// Note: compressor is NOT set here because `set_compressor` is async.
@@ -317,14 +412,6 @@ pub struct ModelConfig {
     /// Optional model context window size in tokens.
     /// When None, falls back to name-based inference.
     pub context_window: Option<u32>,
-    /// 思考深度 / reasoning-depth 控制(可选)。
-    ///
-    /// 用户可设置:`"auto"`/`""`(默认)、`"disabled"`、`"minimal"`/`"low"`/
-    /// `"medium"`/`"high"`、或裸数字(精确 token 预算,主要给 Claude)。
-    /// 运行时翻译成 `ThinkingConfig` 注入到 agent 的每个 ChatRequest。
-    /// 不支持的模型静默忽略(见 `ModelProfile.thinking_protocol`)。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
 }
 
 impl Default for ModelConfig {
@@ -339,7 +426,6 @@ impl Default for ModelConfig {
             max_tokens: None,
             temperature: None,
             context_window: None,
-            thinking: None,
         }
     }
 }
@@ -366,17 +452,26 @@ impl ModelConfig {
     }
 }
 
-/// Provider-level credentials configured through GUI.
+/// A user-defined LLM provider connection.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelProviderConfig {
+    /// Human-friendly provider name.
+    pub name: String,
     /// API authentication token for this provider.
     pub auth_token: Option<String>,
-    /// Base URL override for this provider.
+    /// Optional environment variable used when `auth_token` is absent.
+    pub api_key_env: Option<String>,
+    /// Provider API root. Protocol adapters append their standard endpoint path.
     pub base_url: Option<String>,
+    /// Optional protocol preselected when adding a model. Models persist their
+    /// own explicit protocol and do not depend on this value at runtime.
+    pub default_api_protocol: Option<LlmApiProtocol>,
+    /// Whether this connection requires a non-empty API key.
+    pub requires_api_key: bool,
 }
 
-/// A user-configured model entry available in GUI/TUI switchers.
+/// A user-configured model linked to one provider connection.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ConfiguredModel {
@@ -388,8 +483,10 @@ pub struct ConfiguredModel {
     pub provider: String,
     /// Provider model name.
     pub model: String,
-    /// Optional per-model HTTP wire protocol override.
-    pub api_protocol: Option<LlmApiProtocol>,
+    /// HTTP wire protocol used by this model.
+    pub api_protocol: LlmApiProtocol,
+    /// Input modalities accepted by this model.
+    pub input_modalities: Vec<ModelInputModality>,
     /// Whether this model should be shown in quick switchers.
     pub enabled: bool,
     /// Optional model-specific maximum output tokens.
@@ -401,11 +498,6 @@ pub struct ConfiguredModel {
     /// TokenBudget allocation, and adaptive compression tuning.
     /// When None, falls back to name-based inference.
     pub context_window: Option<u32>,
-    /// Optional thinking-depth / reasoning control for this model.
-    /// See [`ModelConfig::thinking`] for accepted values. Forwarded to the
-    /// agent at runtime via `agent.set_thinking()`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
 }
 
 impl Default for ConfiguredModel {
@@ -415,12 +507,12 @@ impl Default for ConfiguredModel {
             display_name: String::new(),
             provider: String::new(),
             model: String::new(),
-            api_protocol: None,
+            api_protocol: LlmApiProtocol::ChatCompletions,
+            input_modalities: ModelInputModality::text_only(),
             enabled: true,
             max_tokens: None,
             temperature: None,
             context_window: None,
-            thinking: None,
         }
     }
 }

@@ -7,26 +7,15 @@ echo-agent 提供两种配置方式：
 1. **Rust API** — `AgentConfig` + `ReactAgentBuilder`，编程式配置
 2. **YAML 文件** — `echo-agent.yaml`，声明式配置
 
-## 内置 Provider 的 Wire Protocol
+## 动态 Provider 与模型
 
-`ProviderMetadata` 是内置 Provider endpoint、环境变量别名和默认 wire protocol
-的唯一权威注册表。
+Provider 是用户定义的连接，只保存名称、Base URL、认证来源和可选的默认 API
+协议。模型作为独立条目关联 Provider；每个模型明确选择 Chat Completions、
+Responses 或 Anthropic Messages，并声明文本、图片、音频、视频输入能力。文本始终启用。
 
-| Provider（别名） | 默认 wire protocol |
-|------------------|--------------------|
-| `openai` | OpenAI Responses |
-| `anthropic` | Anthropic Messages |
-| `deepseek` | OpenAI Chat Completions |
-| `dashscope`（`qwen`、`aliyun`） | OpenAI Chat Completions |
-| `moonshot`（`kimi`） | OpenAI Chat Completions |
-| `zhipu`（`glm`） | OpenAI Chat Completions |
-
-协议选择遵循同一优先级：显式 `api_protocol` 优先；否则先根据完整自定义
-`base_url` 的 `/responses`、`/messages` 或 `/chat/completions` 后缀推断；仍无法
-识别时才使用 provider metadata 默认值。`https://api.example.com/v1` 这类 provider
-根地址不足以推断协议。同时提供 `provider` 和可识别的完整 `base_url` 时，除非另有
-显式 `api_protocol`，否则以完整 URL 推断结果为准。无法识别的根地址会回退到
-provider metadata 默认值；provider 也未知时则回退到 Chat Completions。
+思考 wire 字段不属于用户配置。框架根据 Provider、模型 ID、协议和 endpoint 解析内部
+`ThinkingProfile`；已知模型只暴露其官方 API 明确支持的等级。未知模型仍可正常调用，
+但采用模型自动决策，不发送思考字段。
 
 ---
 
@@ -180,17 +169,20 @@ let agent = ReactAgentBuilder::new()
 ### LLM 配置
 
 ```rust
-// 选项 1：从模型名自动创建
-ReactAgentBuilder::new()
-    .model("qwen3-max")
-
-// 选项 2：显式 LLM 客户端
+// 选项 1：显式 LLM 客户端
 ReactAgentBuilder::new()
     .llm_client(my_client)
 
-// 选项 3：带配置
+// 选项 2：显式 Provider/模型契约
+let llm_config = LlmConfig::for_provider(
+    "dashscope",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    api_key,
+    "qwen3-max",
+    LlmApiProtocol::ChatCompletions,
+)?;
 ReactAgentBuilder::new()
-    .llm_config(LlmConfig { base_url, api_key, model })
+    .llm_config(llm_config)
 ```
 
 ### 工具配置
@@ -428,6 +420,8 @@ logging:
 | 段落 | 结构体 | 说明 |
 |------|--------|------|
 | `model` | `ModelConfig` | LLM 模型名称、温度、最大 Token 数 |
+| `model_providers` | `ModelProviderConfig` 映射 | 用户定义的端点和认证连接 |
+| `configured_models` | `ConfiguredModel` 列表 | 每个模型明确选择 Provider、API 协议及文本/图片/音频/视频能力 |
 | `agent` | `AgentYamlConfig` | Agent 行为开关和路径 |
 | `mcp` | `McpYamlConfig` | MCP 配置文件路径 |
 | `channels` | `ChannelsConfig` | IM 渠道集成（QQ、飞书） |

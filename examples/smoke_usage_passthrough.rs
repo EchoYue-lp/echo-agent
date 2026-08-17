@@ -8,7 +8,7 @@
 //! 5. `usage.usage_reported == true`（provider 真实上报）
 //!
 //! 运行：`cargo run --example smoke_usage_passthrough --features "subagent,tasks" --release`
-//! 依赖 `~/.echo-agent/config.yaml` 里配置了 deepseek provider。
+//! 依赖 `~/.echo-agent/config.yaml` 里配置了默认 provider/model。
 
 use std::sync::Arc;
 
@@ -22,33 +22,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     println!("🧪 阶段 A 端到端冒烟：真实 usage 透传\n");
 
-    // 从 ~/.echo-agent/config.yaml 读取 auth_token，避免依赖环境变量。
-    // 这是 echo-agent-cli GUI 应用的注入方式（见 infra.rs:188 build_llm_config）。
-    let config_path = {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(home)
-            .join(".echo-agent")
-            .join("config.yaml")
-    };
-    let config_text = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("读取 {} 失败: {e}", config_path.display()))?;
-    let config_yaml: serde_yaml_ng::Value = serde_yaml_ng::from_str(&config_text)?;
-    let auth_token = config_yaml["model"]["auth_token"]
-        .as_str()
-        .ok_or("config.yaml 缺少 model.auth_token")?;
-    let model_name = config_yaml["model"]["name"]
-        .as_str()
-        .unwrap_or("deepseek-v4-flash");
-    println!("→ 已从 config.yaml 加载 auth_token (model={model_name})");
-
-    // 用 LlmConfig::deepseek 直接构造 client（绕过 from_env 的环境变量依赖）
-    let llm_config =
-        echo_integration::providers::config::LlmConfig::deepseek(auth_token, model_name);
-    let subagent_llm = Arc::new(echo_integration::providers::OpenAiClient::new(llm_config)?);
+    let app_config = echo_agent::config::load_config(None);
+    let llm_config = app_config.resolve_llm_config(None)?;
+    let model_name = llm_config.model.clone();
+    println!("→ 已从 config.yaml 加载显式 provider/model (model={model_name})");
+    let subagent_llm: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
 
     let subagent = ReactAgentBuilder::new()
         .name("smoke-subagent")
-        .model(model_name)
+        .model(&model_name)
         .system_prompt("You are a minimal echo subagent. Reply with exactly one short sentence.")
         .llm_client(subagent_llm)
         .max_iterations(1)
@@ -56,7 +38,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let mut main_agent = ReactAgentBuilder::new()
         .name("smoke-main")
-        .model(model_name)
+        .model(&model_name)
         .system_prompt("You are a smoke test orchestrator.")
         .enable_tools()
         .enable_subagent()

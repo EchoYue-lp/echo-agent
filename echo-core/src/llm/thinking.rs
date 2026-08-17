@@ -6,26 +6,12 @@
 //!
 //! | Family | Models | Wire field | Values |
 //! |--------|--------|-----------|--------|
-//! | OpenAI reasoning | GPT-5 / 5-mini (not 5-nano), o3 / o4-mini, **DeepSeek-V3.2+/R1** | `reasoning_effort` | `none`(5.1+)`/`minimal`/`low`/`medium`/`high`/`xhigh` |
+//! | OpenAI reasoning | GPT-5.6 | `reasoning_effort` | `none`/`low`/`medium`/`high`/`xhigh`/`max` |
 //! | Anthropic effort | Claude 4.6 (Opus/Sonnet) | `effort` + `thinking:{type:"adaptive"}` | `low`/`medium`/`high`/`xhigh`/`max` |
-//! | Anthropic budget | Claude 3.7 – 4.5 | `thinking:{type:"enabled",budget_tokens:N}` (+ effort on 4.5) | integer `< max_tokens` |
-//! | Anthropic adaptive-only | Claude Opus 4.7+ | (none — budget_tokens returns 400) | model decides |
+//! | Anthropic adaptive-only | Claude 4.7+ | no request field | model decides |
 //! | Qwen3 | Qwen3-* | `enable_thinking:bool` + `thinking_budget:int` | bool / int |
-//! | GLM toggle | GLM-4.5 / 4.6 | `thinking:{type:"enabled"\|"disabled"}` (on/off ONLY, no depth) | enum |
-//! | GLM effort | GLM-5.x (5.2 confirmed) | `reasoning_effort` (+ `thinking.type`) | `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` |
-//! | Kimi | kimi-k2.7-* | `thinking:{type:"enabled"}` (always on for k2.7-code; NO depth knob) | on/off |
-//!
-//! IMPORTANT depth-knob reality: GLM-4.5/4.6 and Kimi expose only an on/off
-//! toggle — a user selecting "high" thinking has no effect beyond "enabled".
-//! Only OpenAI/DeepSeek/Claude-4.6+/GLM-5.x/Qwen3-with-budget offer true depth
-//! control. We still let users pick a level everywhere (harmless when ignored),
-//! but translate faithfully per protocol.
-//!
-//! "最低"档(Minimal)的语义:**关闭思考,极速响应,最省成本**——而非"最轻量
-//! 推理"。对 Qwen3/GLM 映射为 `enable_thinking:false` / `thinking.type:
-//! disabled`;对 Claude 映射为不发 thinking 字段(=关闭);对 OpenAI 仍可发
-//! `minimal`(GPT-5.1+ 支持);对 DeepSeek 收敛为 `low`(DeepSeek 不支持
-//! `minimal`)。
+//! | GLM effort | GLM-5.2+ | `reasoning_effort` (+ `thinking.type`) | effective `none`/`high`/`max` |
+//! | Kimi | K3 / K2.7 / K2.6 | effort / model-managed / `thinking.type` | model-specific |
 //!
 //! Rather than leak vendor dialects through the framework, we expose ONE
 //! semantic knob ([`ThinkingConfig`]) and translate per-provider in the LLM
@@ -70,7 +56,7 @@ impl ThinkingConfig {
     /// Accepts:
     /// - `"auto"` / `""` → returns `None` (use model default)
     /// - `"disabled"` / `"off"` / `"none"` → [`ThinkingConfig::Disabled`]
-    /// - `"minimal"` / `"low"` / `"medium"` / `"high"` / `"xhigh"` → [`ThinkingConfig::Level`]
+    /// - `"minimal"` / `"low"` / `"medium"` / `"high"` / `"xhigh"` / `"max"` → [`ThinkingConfig::Level`]
     /// - A bare integer string (`"4000"`) → [`ThinkingConfig::BudgetTokens`]
     ///
     /// Returns `Ok(None)` for `"auto"`/empty, `Err` for unrecognized strings
@@ -105,16 +91,19 @@ impl ThinkingConfig {
             Self::Level(ThinkingLevel::Medium) => Some("medium"),
             Self::Level(ThinkingLevel::High) => Some("high"),
             Self::Level(ThinkingLevel::Xhigh) => Some("xhigh"),
+            Self::Level(ThinkingLevel::Max) => Some("max"),
             // A raw budget maps to the nearest effort level: <4k ≈ low,
-            // <12k ≈ medium, <24k ≈ high, otherwise xhigh.
+            // <12k ≈ medium, <24k ≈ high, <48k ≈ xhigh, otherwise max.
             Self::BudgetTokens(n) => Some(if *n < 4_000 {
                 "low"
             } else if *n < 12_000 {
                 "medium"
             } else if *n < 24_000 {
                 "high"
-            } else {
+            } else if *n < 48_000 {
                 "xhigh"
+            } else {
+                "max"
             }),
         }
     }
@@ -135,14 +124,17 @@ impl ThinkingConfig {
             Self::Level(ThinkingLevel::Medium) => Some("medium"),
             Self::Level(ThinkingLevel::High) => Some("high"),
             Self::Level(ThinkingLevel::Xhigh) => Some("xhigh"),
+            Self::Level(ThinkingLevel::Max) => Some("max"),
             Self::BudgetTokens(n) => Some(if *n < 4_000 {
                 "low"
             } else if *n < 12_000 {
                 "medium"
             } else if *n < 24_000 {
                 "high"
-            } else {
+            } else if *n < 48_000 {
                 "xhigh"
+            } else {
+                "max"
             }),
         }
     }
@@ -164,6 +156,7 @@ impl ThinkingConfig {
                     ThinkingLevel::Medium => 0.5,
                     ThinkingLevel::High => 0.8,
                     ThinkingLevel::Xhigh => 0.95,
+                    ThinkingLevel::Max => 0.98,
                     // None / Minimal unreachable (returned above)
                     ThinkingLevel::None | ThinkingLevel::Minimal => return None,
                 };
@@ -215,6 +208,7 @@ impl ThinkingConfig {
             Self::Level(ThinkingLevel::Medium) => Some("medium"),
             Self::Level(ThinkingLevel::High) => Some("high"),
             Self::Level(ThinkingLevel::Xhigh) => Some("xhigh"),
+            Self::Level(ThinkingLevel::Max) => Some("max"),
             Self::BudgetTokens(n) => Some(if *n < 4_000 {
                 "low"
             } else if *n < 12_000 {
@@ -241,8 +235,11 @@ pub enum ThinkingLevel {
     Low,
     Medium,
     High,
-    /// Maximum reasoning effort (OpenAI `xhigh`, Claude `xhigh`/`max`).
+    /// Extended-high reasoning effort.
     Xhigh,
+    /// Maximum reasoning effort. This is distinct from `xhigh` for models such
+    /// as GPT-5.6 and Claude 4.6.
+    Max,
 }
 
 impl ThinkingLevel {
@@ -255,7 +252,8 @@ impl ThinkingLevel {
             "low" => Some(Self::Low),
             "medium" | "med" | "normal" => Some(Self::Medium),
             "high" => Some(Self::High),
-            "xhigh" | "max" | "ultra" => Some(Self::Xhigh),
+            "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }
@@ -264,16 +262,24 @@ impl ThinkingLevel {
 /// Which thinking wire-protocol a model speaks, if any.
 ///
 /// Used to decide (a) whether to emit a thinking field at all, and (b) which
-/// translation to apply. Resolved from the model name in
-/// [`ModelProfile`][crate::llm::capabilities::ModelProfile].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// translation to apply. It is resolved centrally from the provider endpoint,
+/// API protocol, and model id rather than persisted in user configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThinkingProtocol {
     /// Model does not support a thinking control. Any `ThinkingConfig` on the
     /// request is silently dropped (with a `warn!`).
+    #[default]
     None,
+    /// The model reasons automatically and exposes no request-side control.
+    ModelManaged,
     /// OpenAI `reasoning_effort` (GPT-5 family, o-series, **DeepSeek-V3.2+**).
     /// o-series forbids `temperature`/`top_p`.
     OpenaiReasoningEffort,
+    /// DeepSeek `reasoning_effort` plus `thinking:{type}`. Its accepted effort
+    /// values and disable semantics differ from OpenAI even though both use an
+    /// OpenAI-compatible transport.
+    DeepseekReasoningEffort,
     /// Anthropic `effort` + `thinking:{type:"adaptive"}` (Claude 4.6 Sonnet/Opus).
     /// On Opus 4.7+ the `thinking` block is dropped entirely (adaptive-only).
     AnthropicEffort,
@@ -285,14 +291,15 @@ pub enum ThinkingProtocol {
     AnthropicAdaptive,
     /// Qwen3 `enable_thinking` boolean + optional `thinking_budget` integer.
     EnableThinkingFlag,
-    /// GLM-4.5/4.6 `thinking:{type:"enabled"|"disabled"}`. Only an on/off
-    /// toggle — these models have NO depth knob (the `reasoning_effort` field
-    /// is GLM-5.x-only). Level/Budget configs collapse to enabled/disabled.
-    GlmThinkingType,
-    /// GLM-5.x `reasoning_effort` (GLM-5.2 confirmed in the official OpenAPI).
+    /// Generic `thinking:{type:"enabled"|"disabled"}` toggle used by Kimi 2.6
+    /// and compatible chat endpoints.
+    ThinkingType,
+    /// GLM-5.2+ `reasoning_effort`.
     /// Accepts `max`/`xhigh`/`high`/`medium`/`low`/`minimal`/`none`; `low`/
     /// `medium` are server-mapped to `high`, so we still send them faithfully.
     GlmReasoningEffort,
+    /// Ollama `think` boolean or level string.
+    OllamaThink,
 }
 
 impl ThinkingProtocol {
@@ -302,11 +309,13 @@ impl ThinkingProtocol {
         matches!(
             self,
             Self::OpenaiReasoningEffort
+                | Self::DeepseekReasoningEffort
                 | Self::AnthropicEffort
                 | Self::AnthropicThinkingBudget
                 | Self::EnableThinkingFlag
-                | Self::GlmThinkingType
+                | Self::ThinkingType
                 | Self::GlmReasoningEffort
+                | Self::OllamaThink
         )
     }
 }
@@ -319,7 +328,8 @@ mod tests {
     fn test_level_parse() {
         assert_eq!(ThinkingLevel::parse("high"), Some(ThinkingLevel::High));
         assert_eq!(ThinkingLevel::parse("XHIGH"), Some(ThinkingLevel::Xhigh));
-        assert_eq!(ThinkingLevel::parse("max"), Some(ThinkingLevel::Xhigh));
+        assert_eq!(ThinkingLevel::parse("max"), Some(ThinkingLevel::Max));
+        assert_eq!(ThinkingLevel::parse("ultra"), None);
         assert_eq!(ThinkingLevel::parse("none"), Some(ThinkingLevel::None));
         assert_eq!(ThinkingLevel::parse("MIN"), Some(ThinkingLevel::Minimal));
         assert_eq!(ThinkingLevel::parse("medium"), Some(ThinkingLevel::Medium));
@@ -338,6 +348,10 @@ mod tests {
             Some("xhigh")
         );
         assert_eq!(
+            ThinkingConfig::Level(ThinkingLevel::Max).to_reasoning_effort(),
+            Some("max")
+        );
+        assert_eq!(
             ThinkingConfig::Disabled.to_reasoning_effort(),
             Some("minimal")
         );
@@ -347,7 +361,7 @@ mod tests {
         );
         assert_eq!(
             ThinkingConfig::BudgetTokens(50_000).to_reasoning_effort(),
-            Some("xhigh")
+            Some("max")
         );
     }
 
@@ -360,6 +374,10 @@ mod tests {
         assert_eq!(
             ThinkingConfig::Level(ThinkingLevel::Xhigh).to_anthropic_effort(),
             Some("xhigh")
+        );
+        assert_eq!(
+            ThinkingConfig::Level(ThinkingLevel::Max).to_anthropic_effort(),
+            Some("max")
         );
         // Disabled → None (4.6+ models treat absence as model-decided).
         assert_eq!(ThinkingConfig::Disabled.to_anthropic_effort(), None);
@@ -406,13 +424,16 @@ mod tests {
     #[test]
     fn test_emits_field() {
         assert!(!ThinkingProtocol::None.emits_field());
+        assert!(!ThinkingProtocol::ModelManaged.emits_field());
         assert!(!ThinkingProtocol::AnthropicAdaptive.emits_field());
         assert!(ThinkingProtocol::OpenaiReasoningEffort.emits_field());
+        assert!(ThinkingProtocol::DeepseekReasoningEffort.emits_field());
         assert!(ThinkingProtocol::AnthropicEffort.emits_field());
         assert!(ThinkingProtocol::AnthropicThinkingBudget.emits_field());
         assert!(ThinkingProtocol::EnableThinkingFlag.emits_field());
-        assert!(ThinkingProtocol::GlmThinkingType.emits_field());
+        assert!(ThinkingProtocol::ThinkingType.emits_field());
         assert!(ThinkingProtocol::GlmReasoningEffort.emits_field());
+        assert!(ThinkingProtocol::OllamaThink.emits_field());
     }
 
     #[test]
@@ -433,19 +454,23 @@ mod tests {
 
     #[test]
     fn test_parse_spec() {
-        assert_eq!(ThinkingConfig::parse_spec("auto").unwrap(), None);
-        assert_eq!(ThinkingConfig::parse_spec("").unwrap(), None);
+        assert_eq!(ThinkingConfig::parse_spec("auto"), Ok(None));
+        assert_eq!(ThinkingConfig::parse_spec(""), Ok(None));
         assert_eq!(
-            ThinkingConfig::parse_spec("disabled").unwrap(),
-            Some(ThinkingConfig::Disabled)
+            ThinkingConfig::parse_spec("disabled"),
+            Ok(Some(ThinkingConfig::Disabled))
         );
         assert_eq!(
-            ThinkingConfig::parse_spec("xhigh").unwrap(),
-            Some(ThinkingConfig::Level(ThinkingLevel::Xhigh))
+            ThinkingConfig::parse_spec("xhigh"),
+            Ok(Some(ThinkingConfig::Level(ThinkingLevel::Xhigh)))
         );
         assert_eq!(
-            ThinkingConfig::parse_spec("4000").unwrap(),
-            Some(ThinkingConfig::BudgetTokens(4000))
+            ThinkingConfig::parse_spec("max"),
+            Ok(Some(ThinkingConfig::Level(ThinkingLevel::Max)))
+        );
+        assert_eq!(
+            ThinkingConfig::parse_spec("4000"),
+            Ok(Some(ThinkingConfig::BudgetTokens(4000)))
         );
         assert!(ThinkingConfig::parse_spec("bogus").is_err());
     }

@@ -261,9 +261,28 @@ echo-agent/
 
 ```yaml
 model:
-  name: qwen3.6-plus
+  default_model_id: openai:gpt-5.6-sol
+  provider: openai
+  name: gpt-5.6-sol
   max_tokens: 4096
   temperature: 0.7
+
+model_providers:
+  openai:
+    name: OpenAI
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    default_api_protocol: responses
+    requires_api_key: true
+
+configured_models:
+  - id: openai:gpt-5.6-sol
+    display_name: GPT-5.6 Sol
+    provider: openai
+    model: gpt-5.6-sol
+    api_protocol: responses
+    input_modalities: [text, image]
+    enabled: true
 
 agent:
   name: my-assistant
@@ -298,31 +317,10 @@ logging:
   level: info
 ```
 
-如需注册模型别名或自定义 provider endpoint，创建模型配置 `echo-agent-models.yaml`：
-
-```yaml
-models:
-  qwen3.7-max:
-    provider: dashscope
-    api_key: ${DASHSCOPE_API_KEY}
-
-  deepseek-v4-flash:
-    provider: deepseek
-    api_key: ${DEEPSEEK_API_KEY}
-
-embedding:
-  base_url: https://api.openai.com
-  api_key: ${OPENAI_API_KEY}
-  model: text-embedding-3-small
-  timeout_secs: 30
-```
-
 说明：
 
-- `echo-agent.yaml` 中的 `model:` / `agent:` / `channels:` / `mcp:` / `server:` / `logging:` 是 `echo_agent::config` 加载的应用运行时配置。
-- `echo-agent-models.yaml` 中的 `models:` 用于 `ProviderFactory`、`LlmConfig::from_model()` 以及基于配置的 LLM 客户端。
-- `embedding:` 用于语义记忆 / 向量检索相关示例。
-- 内置 provider/model 规则可直接使用 `qwen3.6-plus`、`openai:gpt-5.5` 等，不一定需要 `models:` 文件。
+- `model_providers:` 保存连接和认证；`configured_models:` 保存每个模型明确选择的协议以及文本/图片/音频/视频输入能力。
+- 思考控制由框架根据 Provider endpoint、API 协议和模型名集中解析，不需要用户配置厂商原始字段。
 
 通过环境变量设置密钥：
 

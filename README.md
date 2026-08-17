@@ -264,26 +264,30 @@ echo-agent/
 Create `echo-agent.yaml` in your project root:
 
 ```yaml
-# Provider / model registry (used by ProviderFactory and config-backed clients)
-models:
-  qwen3.7-max:
-    provider: dashscope
-    api_key: ${DASHSCOPE_API_KEY}
+# Provider connections are application-defined; no provider catalog is built in.
+model_providers:
+  openai:
+    name: OpenAI
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    default_api_protocol: responses
+    requires_api_key: true
 
-  deepseek-v4-flash:
-    provider: deepseek
-    api_key: ${DEEPSEEK_API_KEY}
-
-# Embedding config (used by semantic memory / vector search demos)
-embedding:
-  base_url: https://api.openai.com
-  api_key: ${OPENAI_API_KEY}
-  model: text-embedding-3-small
-  timeout_secs: 30
+# Each model explicitly selects its provider, wire protocol, and input capabilities.
+configured_models:
+  - id: openai:gpt-5.6-sol
+    display_name: GPT-5.6 Sol
+    provider: openai
+    model: gpt-5.6-sol
+    api_protocol: responses
+    input_modalities: [text, image]
+    enabled: true
 
 # Runtime app config (used by examples such as IM channels)
 model:
-  name: qwen3.7-max
+  default_model_id: openai:gpt-5.6-sol
+  provider: openai
+  name: gpt-5.6-sol
   max_tokens: 4096
   temperature: 0.7
 
@@ -322,8 +326,9 @@ logging:
 
 Notes:
 
-- `models:` is the registry used by `ProviderFactory`, `LlmConfig::from_model()`, and config-backed LLM clients.
-- `embedding:` is used by semantic memory / vector search examples.
+- `model_providers:` owns connection and authentication settings.
+- `configured_models:` owns explicit model protocol and text/image/audio/video capabilities.
+- Thinking controls are resolved centrally from the provider endpoint, API protocol, and model id; they are not user-configured wire fields.
 - `model:` / `agent:` / `channels:` / `mcp:` / `server:` / `logging:` are the framework runtime settings loaded by `echo_agent::config`.
 
 Set secrets via environment variables:

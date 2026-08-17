@@ -15,11 +15,18 @@ echo_integration = "0.2"
 ```
 
 ```rust,no_run
-use echo_integration::providers::{LlmConfig, ProviderFactory};
+use echo_core::llm::LlmApiProtocol;
+use echo_integration::providers::LlmConfig;
 
 # fn build() -> echo_core::error::Result<()> {
-let config = LlmConfig::openai(std::env::var("OPENAI_API_KEY")?, "gpt-5.5");
-let _provider = ProviderFactory::from_config(&config)?;
+let config = LlmConfig::for_provider(
+    "openai",
+    "https://api.openai.com/v1",
+    std::env::var("OPENAI_API_KEY")?,
+    "gpt-5.6-sol",
+    LlmApiProtocol::Responses,
+)?;
+let _client = config.build_client()?;
 # Ok(())
 # }
 ```

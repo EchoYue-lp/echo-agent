@@ -4,17 +4,21 @@
 //! System messages are sent as a top-level `system` field (not in the messages array).
 
 use echo_core::error::{LlmError, Result};
-use echo_core::llm::capabilities::{ModelProfile, ProviderCapabilities};
+use echo_core::llm::capabilities::resolve_thinking_profile;
 use echo_core::llm::types::{
     ChatCompletionResponse, ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
     FunctionCall, Message, MessageContent, ReasoningBlock, Role, ToolCall, Usage,
 };
-use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
+use echo_core::llm::{
+    ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, ModelInputModality,
+    ThinkingProtocol,
+};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 
 use super::anthropic_cache::AnthropicCachePlan;
 use super::client::{SseDecoder, parse_sse_data};
+use super::config::validate_model_input_modalities;
 use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -26,10 +30,12 @@ pub struct AnthropicClient {
     api_key: String,
     model: String,
     base_url: String,
+    input_modalities: Vec<ModelInputModality>,
+    thinking_protocol: ThinkingProtocol,
 }
 
 impl AnthropicClient {
-    fn validate_request_features(request: &ChatRequest) -> Result<()> {
+    fn validate_request_features(&self, request: &ChatRequest) -> Result<()> {
         if request.tool_choice.is_some() {
             return Err(LlmError::InvalidResponse(
                 "Anthropic tool_choice translation is not implemented; refusing to silently ignore it"
@@ -44,15 +50,27 @@ impl AnthropicClient {
             )
             .into());
         }
+        validate_model_input_modalities(&self.model, &self.input_modalities, &request.messages)?;
         Ok(())
     }
 
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        let model = model.into();
+        let base_url = "https://api.anthropic.com/v1/messages".to_string();
+        let thinking_protocol = resolve_thinking_profile(
+            "anthropic",
+            &model,
+            LlmApiProtocol::Anthropic,
+            Some(&base_url),
+        )
+        .protocol;
         Self {
             client: Arc::new(Self::build_http_client()),
             api_key: api_key.into(),
-            model: model.into(),
-            base_url: "https://api.anthropic.com/v1/messages".to_string(),
+            model,
+            base_url,
+            input_modalities: ModelInputModality::all_supported(),
+            thinking_protocol,
         }
     }
 
@@ -61,12 +79,32 @@ impl AnthropicClient {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
+        let base_url = base_url.into();
+        let model = model.into();
+        let thinking_protocol = resolve_thinking_profile(
+            "anthropic",
+            &model,
+            LlmApiProtocol::Anthropic,
+            Some(&base_url),
+        )
+        .protocol;
         Self {
             client: Arc::new(Self::build_http_client()),
             api_key: api_key.into(),
-            model: model.into(),
-            base_url: base_url.into(),
+            model,
+            base_url,
+            input_modalities: ModelInputModality::all_supported(),
+            thinking_protocol,
         }
+    }
+
+    pub fn with_input_modalities(mut self, input_modalities: Vec<ModelInputModality>) -> Self {
+        self.input_modalities = if input_modalities.is_empty() {
+            ModelInputModality::text_only()
+        } else {
+            input_modalities
+        };
+        self
     }
 
     fn build_http_client() -> Client {
@@ -301,11 +339,15 @@ impl AnthropicClient {
         }
 
         // Translate thinking config. Claude 3.7–4.5 accept the budget block;
-        // 4.6+/4.7+ use adaptive thinking and reject it — resolve the protocol
-        // from the model name so we never send a block the API will 400 on.
+        // 4.6+/4.7+ use adaptive thinking and reject the older budget block.
+        // The configured model contract is authoritative for the wire dialect.
         let max_tokens = request.max_tokens.unwrap_or(4096);
-        let (thinking, effort) =
-            build_anthropic_thinking(&self.model, &request.thinking, max_tokens);
+        let (thinking, effort) = build_anthropic_thinking(
+            &self.model,
+            self.thinking_protocol,
+            &request.thinking,
+            max_tokens,
+        );
 
         AnthropicRequest {
             model: self.model.clone(),
@@ -419,7 +461,7 @@ impl LlmClient for AnthropicClient {
         let model = self.model.clone();
         Box::pin(
             async move {
-                Self::validate_request_features(&request)?;
+                self.validate_request_features(&request)?;
                 let body = self.convert_request(&request);
 
                 let request_future = async {
@@ -469,7 +511,7 @@ impl LlmClient for AnthropicClient {
         let model = self.model.clone();
         Box::pin(
             async move {
-            Self::validate_request_features(&request)?;
+            self.validate_request_features(&request)?;
             let mut body = self.convert_request(&request);
             body.stream = Some(true);
 
@@ -852,6 +894,7 @@ struct AnthropicThinking {
 /// - Other protocols / `None`: no fields.
 fn build_anthropic_thinking(
     model: &str,
+    thinking_protocol: ThinkingProtocol,
     thinking: &Option<echo_core::llm::ThinkingConfig>,
     max_tokens: u32,
 ) -> (Option<AnthropicThinking>, Option<String>) {
@@ -859,8 +902,7 @@ fn build_anthropic_thinking(
     let Some(cfg) = thinking.as_ref() else {
         return (None, None);
     };
-    let profile = ModelProfile::new(model, "anthropic", ProviderCapabilities::anthropic());
-    match profile.thinking_protocol {
+    match thinking_protocol {
         T::AnthropicThinkingBudget => {
             // 3.7–4.5: budget_tokens (effort is also accepted on 4.5).
             let block = cfg
@@ -1328,6 +1370,20 @@ mod tests {
     }
 
     #[test]
+    fn claude_46_max_effort_remains_max() {
+        let (thinking, effort) = build_anthropic_thinking(
+            "claude-opus-4-6",
+            ThinkingProtocol::AnthropicEffort,
+            &Some(echo_core::llm::ThinkingConfig::Level(
+                echo_core::llm::ThinkingLevel::Max,
+            )),
+            8_192,
+        );
+        assert_eq!(effort.as_deref(), Some("max"));
+        assert_eq!(thinking.map(|block| block.block_type), Some("adaptive"));
+    }
+
+    #[test]
     fn metadata_user_id_present_when_set() {
         let client = AnthropicClient::new("ds-xxx".to_string(), "deepseek-chat".to_string());
         let body =
@@ -1449,9 +1505,11 @@ mod tests {
 
     #[test]
     fn unsupported_request_features_fail_instead_of_being_dropped() {
+        let client = AnthropicClient::new("test-key", "test-model");
         let mut request = ChatRequest::new(vec![Message::user("hello".to_string())]);
         request.tool_choice = Some("none".to_string());
-        let tool_error = AnthropicClient::validate_request_features(&request)
+        let tool_error = client
+            .validate_request_features(&request)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
@@ -1459,7 +1517,8 @@ mod tests {
 
         request.tool_choice = None;
         request.response_format = Some(echo_core::llm::types::ResponseFormat::JsonObject);
-        let format_error = AnthropicClient::validate_request_features(&request)
+        let format_error = client
+            .validate_request_features(&request)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();

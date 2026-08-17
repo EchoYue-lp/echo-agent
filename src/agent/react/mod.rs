@@ -126,12 +126,11 @@ pub struct ReactAgent {
     pub(crate) approval: ApprovalSubsystem,
     client: Arc<Client>,
     llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
-    /// LLM configuration (optional; falls back to environment variables when not set)
+    /// Application-injected LLM configuration.
     llm_config: Option<LlmConfig>,
     /// Per-agent thinking-depth / reasoning config, applied to every chat
     /// request issued by this agent (think phase, react loop). `None` means
-    /// "use the model's default" — no thinking field is sent. Set from config
-    /// (`ModelConfig.thinking`) at agent construction.
+    /// "use the model's default" — no thinking field is sent.
     thinking: Option<crate::llm::ThinkingConfig>,
     /// Cancellation token for the current streaming request, set in
     /// `chat_stream_with_cancel` / `execute_stream_with_cancel`.
@@ -890,11 +889,13 @@ impl ReactAgent {
     /// use echo_agent::llm::LlmConfig;
     /// use echo_agent::prelude::*;
     ///
-    /// let llm_config = LlmConfig::new(
-    ///     "https://api.openai.com/v1/chat/completions",
+    /// let llm_config = LlmConfig::for_provider(
+    ///     "my-provider",
+    ///     "https://api.example.com/v1",
     ///     "sk-...",
     ///     "qwen3-max",
-    /// );
+    ///     LlmApiProtocol::ChatCompletions,
+    /// )?;
     ///
     /// let agent = ReactAgent::new(
     ///     AgentConfig::standard("qwen3-max", "assistant", "You are a helpful assistant")
@@ -915,14 +916,9 @@ impl ReactAgent {
     /// Set the LLM configuration.
     ///
     /// Builds an LLM client from the config and sets it so that subsequent API
-    /// calls use the provided credentials instead of falling back to environment
-    /// variables or YAML model configuration files.
+    /// calls use the provided credentials and explicit protocol.
     pub fn set_llm_config(&mut self, config: LlmConfig) {
         self.config.model_name = config.model.clone();
-        // Try to build a client from the config. If it succeeds, set it so the
-        // runtime uses these credentials. If it fails (e.g. invalid API key),
-        // leave llm_client as None so the runtime falls back to env vars /
-        // echo-agent-models.yaml.
         match config.build_client() {
             Ok(client) => {
                 tracing::info!(
@@ -935,7 +931,7 @@ impl ReactAgent {
                 tracing::warn!(
                     model = %config.model,
                     error = %e,
-                    "Failed to build LLM client from LlmConfig, will fall back to env vars / models.yaml"
+                    "Failed to build LLM client from explicit LlmConfig"
                 );
             }
         }
@@ -1011,8 +1007,8 @@ impl ReactAgent {
     }
 
     /// Set the agent's thinking-depth config. Applied to every chat request
-    /// issued by this agent. Set from `ModelConfig.thinking` at construction
-    /// or when the user changes the model's reasoning depth at runtime.
+    /// issued by this agent. Applications set it at runtime after resolving the
+    /// active model's [`crate::llm::core::capabilities::ThinkingProfile`].
     pub fn set_thinking(&mut self, thinking: Option<crate::llm::ThinkingConfig>) {
         self.thinking = thinking;
     }

@@ -14,7 +14,7 @@
 //! Combines provider capabilities with model-specific knowledge (context window,
 //! reasoning support, multimodal support, etc.).
 
-use crate::llm::thinking::ThinkingProtocol;
+use crate::llm::{LlmApiProtocol, ThinkingLevel, ThinkingProtocol};
 use std::collections::{HashMap, HashSet};
 
 // ── ProviderCapabilities ─────────────────────────────────────────────
@@ -136,6 +136,76 @@ impl ProviderCapabilities {
     }
 }
 
+// ── ThinkingProfile ──────────────────────────────────────────────────
+
+const GPT_56_LEVELS: &[ThinkingLevel] = &[
+    ThinkingLevel::None,
+    ThinkingLevel::Low,
+    ThinkingLevel::Medium,
+    ThinkingLevel::High,
+    ThinkingLevel::Xhigh,
+    ThinkingLevel::Max,
+];
+const CLAUDE_46_LEVELS: &[ThinkingLevel] = &[
+    ThinkingLevel::Low,
+    ThinkingLevel::Medium,
+    ThinkingLevel::High,
+    ThinkingLevel::Xhigh,
+    ThinkingLevel::Max,
+];
+const DEEPSEEK_V4_LEVELS: &[ThinkingLevel] = &[
+    ThinkingLevel::None,
+    ThinkingLevel::Low,
+    ThinkingLevel::High,
+    ThinkingLevel::Max,
+];
+const GLM_52_LEVELS: &[ThinkingLevel] =
+    &[ThinkingLevel::None, ThinkingLevel::High, ThinkingLevel::Max];
+const KIMI_K3_LEVELS: &[ThinkingLevel] =
+    &[ThinkingLevel::Low, ThinkingLevel::High, ThinkingLevel::Max];
+const GEMINI_3_LEVELS: &[ThinkingLevel] = &[
+    ThinkingLevel::Minimal,
+    ThinkingLevel::Low,
+    ThinkingLevel::Medium,
+    ThinkingLevel::High,
+];
+const GEMINI_25_LEVELS: &[ThinkingLevel] = &[
+    ThinkingLevel::None,
+    ThinkingLevel::Low,
+    ThinkingLevel::Medium,
+    ThinkingLevel::High,
+];
+const TOGGLE_LEVELS: &[ThinkingLevel] = &[ThinkingLevel::None, ThinkingLevel::High];
+const OLLAMA_GPT_OSS_LEVELS: &[ThinkingLevel] = &[
+    ThinkingLevel::Low,
+    ThinkingLevel::Medium,
+    ThinkingLevel::High,
+];
+
+/// Centrally resolved request-side thinking capabilities for one concrete
+/// provider endpoint, API protocol, and model id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThinkingProfile {
+    pub protocol: ThinkingProtocol,
+    /// Effective choices only. The application adds `auto` separately; an
+    /// empty slice means the model decides or no verified control is known.
+    pub levels: &'static [ThinkingLevel],
+}
+
+impl ThinkingProfile {
+    pub const fn new(protocol: ThinkingProtocol, levels: &'static [ThinkingLevel]) -> Self {
+        Self { protocol, levels }
+    }
+
+    pub const fn unknown() -> Self {
+        Self::new(ThinkingProtocol::None, &[])
+    }
+
+    pub fn supports_manual_control(self) -> bool {
+        self.protocol.emits_field() && !self.levels.is_empty()
+    }
+}
+
 // ── ModelProfile ─────────────────────────────────────────────────────
 
 /// Higher-level model information combining provider capabilities with
@@ -159,6 +229,9 @@ pub struct ModelProfile {
     /// and prevents sending a thinking field to a model that would reject it
     /// with a 400 (e.g. GPT-5-nano, Claude Opus 4.7+).
     pub thinking_protocol: crate::llm::thinking::ThinkingProtocol,
+
+    /// Verified effective levels for the resolved thinking protocol.
+    pub thinking_levels: &'static [ThinkingLevel],
 
     /// Whether this model is multimodal-capable (accepts images).
     pub supports_images: bool,
@@ -226,7 +299,9 @@ impl ModelProfile {
     /// Model-specific overrides are applied based on known model name patterns.
     pub fn new(model_name: &str, provider: &str, capabilities: ProviderCapabilities) -> Self {
         let lower = model_name.to_ascii_lowercase();
-        let thinking_protocol = resolve_thinking_protocol(&lower, provider);
+        let thinking_profile =
+            resolve_thinking_profile(provider, model_name, LlmApiProtocol::ChatCompletions, None);
+        let thinking_protocol = thinking_profile.protocol;
 
         // Model-specific reasoning detection: a model "supports reasoning" if it
         // both speaks a thinking protocol AND its provider emits reasoning_content
@@ -267,6 +342,7 @@ impl ModelProfile {
             capabilities,
             supports_reasoning,
             thinking_protocol,
+            thinking_levels: thinking_profile.levels,
             supports_images,
             supports_tools: capabilities.tool_support,
             max_output_tokens,
@@ -389,107 +465,132 @@ fn selector_key(provider: &str, model: &str) -> String {
     )
 }
 
-/// Resolve the thinking wire-protocol from a (lowercased) model name and
-/// provider. Pure function so it can be unit-tested without a runtime.
+/// Resolve the single authoritative thinking profile for a runtime model.
 ///
-/// Verified against each vendor's official API docs (mid-2026):
-/// - **OpenAI** GPT-5 / 5-mini (NOT 5-nano), o3 / o4-mini → `reasoning_effort`
-/// - **DeepSeek** V3.2+ / R1 → `reasoning_effort` (OpenAI-compatible, NOT enable_thinking)
-/// - **Claude 4.6** Sonnet/Opus → `effort` + `thinking:{type:"adaptive"}`
-/// - **Claude 3.7 / 4 / 4.5** → `thinking:{type:"enabled",budget_tokens}` (+ effort on 4.5)
-/// - **Claude Opus 4.7+** → adaptive-only (budget_tokens returns 400)
-/// - **Qwen3** → `enable_thinking` + `thinking_budget`
-/// - **GLM-4.5/4.6** → `thinking:{type:"enabled"|"disabled"}` (on/off ONLY, no depth)
-/// - **GLM-5.x** → `reasoning_effort` (5.2 confirmed in official OpenAPI; max/xhigh/high/...)
-/// - **Kimi** kimi-k2.7-* → thinking always on for k2.7-code; NO request-side
-///   depth knob → `None` (depth is chosen by model selection, not a parameter)
-fn resolve_thinking_protocol(lower_model: &str, provider: &str) -> ThinkingProtocol {
+/// The endpoint/provider dialect is evaluated before the model family because
+/// gateways can expose the same model through different wire fields. Unknown
+/// models remain fully usable and simply receive no manual thinking control.
+pub fn resolve_thinking_profile(
+    provider: &str,
+    model: &str,
+    api_protocol: LlmApiProtocol,
+    endpoint: Option<&str>,
+) -> ThinkingProfile {
     use ThinkingProtocol as T;
-    let provider_lower = provider.to_ascii_lowercase();
 
-    // ── Alibaba Cloud Model Studio (Bailian / DashScope) ──
-    // IMPORTANT: on Bailian, ALL thinking-capable models (Qwen3+, AND DeepSeek
-    // hosted on Bailian) use `enable_thinking` + `thinking_budget` — regardless
-    // of the model family. This is the OpenAI-compatible Chat Completions entry.
-    // DeepSeek hosted on api.deepseek.com (the `deepseek` provider) is the ONLY
-    // path that uses `reasoning_effort`. So provider takes precedence over model
-    // name here.
-    // Verified: https://help.aliyun.com/zh/model-studio/deep-thinking
-    if matches!(
-        provider_lower.as_str(),
+    let provider = provider.trim().to_ascii_lowercase();
+    let model = model.trim().to_ascii_lowercase();
+    let endpoint = endpoint.unwrap_or_default().to_ascii_lowercase();
+    let is_dashscope = matches!(
+        provider.as_str(),
         "dashscope" | "qwen" | "aliyun" | "alibaba" | "modelstudio" | "bailian"
-    ) {
-        return T::EnableThinkingFlag;
-    }
+    ) || endpoint.contains("dashscope.aliyuncs.com");
+    let is_ollama = provider == "ollama"
+        || endpoint.contains("localhost:11434")
+        || endpoint.contains("127.0.0.1:11434");
 
-    // ── Anthropic family ──
-    if provider_lower == "anthropic" || lower_model.starts_with("claude-") {
-        // Claude names put the version in varied positions
-        // (`claude-4.5-sonnet`, `claude-opus-4.7`, `claude-5-sonnet`). Scan
-        // every dash-segment for the first one that parses as a version.
-        if let Some(rest) = lower_model.strip_prefix("claude-") {
-            for seg in rest.split('-') {
-                // Try X.Y form first (e.g. "4.7").
-                if let Some((maj_s, min_s)) = seg.split_once('.')
-                    && let (Ok(maj), Ok(min)) = (maj_s.parse::<u32>(), min_s.parse::<u32>())
-                {
-                    if maj > 4 || (maj == 4 && min >= 7) {
-                        return T::AnthropicAdaptive;
-                    }
-                    if maj == 4 && min == 6 {
-                        return T::AnthropicEffort;
-                    }
-                    break;
-                }
-                // Bare integer major (e.g. "5" in `claude-5-sonnet`).
-                if let Ok(maj) = seg.parse::<u32>() {
-                    if maj > 4 {
-                        return T::AnthropicAdaptive;
-                    }
-                    if maj == 4 {
-                        // `claude-4-sonnet` (no minor) → treat as 4.0 (budget).
-                        break;
-                    }
-                }
-            }
+    if model.starts_with("claude-") {
+        let Some((major, minor)) = model_family_version(&model, "claude-") else {
+            return ThinkingProfile::unknown();
+        };
+        if major < 4 || (major == 4 && minor < 6) {
+            return ThinkingProfile::unknown();
         }
-        return T::AnthropicThinkingBudget;
+        if major == 4 && minor == 6 {
+            return if api_protocol == LlmApiProtocol::Anthropic {
+                ThinkingProfile::new(T::AnthropicEffort, CLAUDE_46_LEVELS)
+            } else {
+                ThinkingProfile::new(T::OpenaiReasoningEffort, CLAUDE_46_LEVELS)
+            };
+        }
+        return ThinkingProfile::new(T::AnthropicAdaptive, &[]);
     }
 
-    // ── DeepSeek (OpenAI-compatible reasoning_effort, NOT enable_thinking) ──
-    // DeepSeek-V3.2+ and deepseek-reasoner expose `reasoning_effort`.
-    if lower_model.starts_with("deepseek-") {
-        return T::OpenaiReasoningEffort;
+    if api_protocol == LlmApiProtocol::Anthropic {
+        return ThinkingProfile::unknown();
     }
 
-    // ── OpenAI reasoning family (GPT-5, o-series) ──
-    if lower_model.starts_with("gpt-5")
-        || lower_model.starts_with("o3")
-        || lower_model.starts_with("o4")
+    if is_ollama && api_protocol == LlmApiProtocol::ChatCompletions {
+        if model.starts_with("gpt-oss") {
+            return ThinkingProfile::new(T::OllamaThink, OLLAMA_GPT_OSS_LEVELS);
+        }
+        if model.starts_with("qwen3")
+            || model.starts_with("deepseek-r1")
+            || model.starts_with("deepseek-v3")
+            || model.starts_with("deepseek-v4")
+            || model.starts_with("magistral")
+        {
+            return ThinkingProfile::new(T::OllamaThink, TOGGLE_LEVELS);
+        }
+        return ThinkingProfile::unknown();
+    }
+
+    if model.starts_with("gpt-5.6") || model.starts_with("gpt-5-6") {
+        return ThinkingProfile::new(T::OpenaiReasoningEffort, GPT_56_LEVELS);
+    }
+
+    if model.starts_with("deepseek-v4") {
+        if is_dashscope && api_protocol == LlmApiProtocol::ChatCompletions {
+            return ThinkingProfile::new(T::EnableThinkingFlag, TOGGLE_LEVELS);
+        }
+        return ThinkingProfile::new(T::DeepseekReasoningEffort, DEEPSEEK_V4_LEVELS);
+    }
+
+    if let Some((major, minor)) = model_family_version(&model, "glm-")
+        && (major > 5 || (major == 5 && minor >= 2))
+        && api_protocol == LlmApiProtocol::ChatCompletions
     {
-        return T::OpenaiReasoningEffort;
+        return ThinkingProfile::new(T::GlmReasoningEffort, GLM_52_LEVELS);
     }
 
-    // ── GLM family ──
-    // GLM-5.x (5.2 confirmed in the official OpenAPI) exposes
-    // `reasoning_effort` (values include `max`, server maps low/medium→high).
-    // GLM-4.5/4.6 only have an on/off `thinking:{type}` toggle — NO depth knob.
-    if lower_model.starts_with("glm-5") || lower_model.starts_with("glm-5.") {
-        return T::GlmReasoningEffort;
+    if model.starts_with("kimi-k3") && api_protocol == LlmApiProtocol::ChatCompletions {
+        return ThinkingProfile::new(T::OpenaiReasoningEffort, KIMI_K3_LEVELS);
     }
-    if lower_model.starts_with("glm-4.")
-        || lower_model.starts_with("glm-4-")
-        || lower_model == "glm-4"
+    if model.starts_with("kimi-k2.7") {
+        return ThinkingProfile::new(T::ModelManaged, &[]);
+    }
+    if model.starts_with("kimi-k2.6") && api_protocol == LlmApiProtocol::ChatCompletions {
+        return ThinkingProfile::new(T::ThinkingType, TOGGLE_LEVELS);
+    }
+
+    if model.starts_with("qwen3") && api_protocol == LlmApiProtocol::ChatCompletions {
+        return ThinkingProfile::new(T::EnableThinkingFlag, TOGGLE_LEVELS);
+    }
+
+    if (model.starts_with("gemini-3") || model.starts_with("gemini-3."))
+        && api_protocol == LlmApiProtocol::ChatCompletions
     {
-        return T::GlmThinkingType;
+        return ThinkingProfile::new(T::OpenaiReasoningEffort, GEMINI_3_LEVELS);
+    }
+    if model.starts_with("gemini-2.5") && api_protocol == LlmApiProtocol::ChatCompletions {
+        return ThinkingProfile::new(T::OpenaiReasoningEffort, GEMINI_25_LEVELS);
     }
 
-    // ── Qwen3 (enable_thinking + thinking_budget) ──
-    if lower_model.starts_with("qwen3-") || lower_model.starts_with("qwen-") {
-        return T::EnableThinkingFlag;
-    }
+    ThinkingProfile::unknown()
+}
 
-    T::None
+fn model_family_version(model: &str, prefix: &str) -> Option<(u32, u32)> {
+    let rest = model.strip_prefix(prefix)?;
+    let mut segments = rest.split('-').peekable();
+    while let Some(segment) = segments.next() {
+        if let Some((major, minor)) = segment.split_once('.')
+            && let (Ok(major), Ok(minor)) = (major.parse::<u32>(), minor.parse::<u32>())
+            && (3..=9).contains(&major)
+        {
+            return Some((major, minor));
+        }
+        if let Ok(major) = segment.parse::<u32>()
+            && (3..=9).contains(&major)
+        {
+            let minor = segments
+                .peek()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|value| *value <= 9)
+                .unwrap_or(0);
+            return Some((major, minor));
+        }
+    }
+    None
 }
 
 // ── Cache Policy ──────────────────────────────────────────────────────
@@ -580,28 +681,17 @@ mod tests {
     use super::*;
     use ThinkingProtocol as T;
 
+    fn chat_profile(provider: &str, model: &str) -> ThinkingProfile {
+        resolve_thinking_profile(provider, model, LlmApiProtocol::ChatCompletions, None)
+    }
+
     #[test]
-    fn test_openai_reasoning_models() {
-        assert_eq!(
-            resolve_thinking_protocol("gpt-5", "openai"),
-            T::OpenaiReasoningEffort
-        );
-        assert_eq!(
-            resolve_thinking_protocol("gpt-5-mini", "openai"),
-            T::OpenaiReasoningEffort
-        );
-        assert_eq!(
-            resolve_thinking_protocol("gpt-5-nano", "openai"),
-            T::OpenaiReasoningEffort
-        );
-        assert_eq!(
-            resolve_thinking_protocol("o3-mini", "openai"),
-            T::OpenaiReasoningEffort
-        );
-        assert_eq!(
-            resolve_thinking_protocol("o4-mini", "openai"),
-            T::OpenaiReasoningEffort
-        );
+    fn gpt_56_has_six_distinct_levels() {
+        let profile = chat_profile("openai", "gpt-5.6-sol");
+        assert_eq!(profile.protocol, T::OpenaiReasoningEffort);
+        assert_eq!(profile.levels, GPT_56_LEVELS);
+        assert_eq!(profile.levels.len(), 6);
+        assert!(!profile.levels.contains(&ThinkingLevel::Minimal));
     }
 
     #[test]
@@ -645,86 +735,102 @@ mod tests {
     }
 
     #[test]
-    fn test_anthropic_thinking_budget_vs_adaptive() {
-        // Claude 3.7 / 4 / 4.5 → legacy budget block (+ effort on 4.5).
+    fn claude_support_starts_at_46() {
         assert_eq!(
-            resolve_thinking_protocol("claude-3.7-sonnet", "anthropic"),
-            T::AnthropicThinkingBudget
-        );
-        assert_eq!(
-            resolve_thinking_protocol("claude-4-sonnet", "anthropic"),
-            T::AnthropicThinkingBudget
-        );
-        assert_eq!(
-            resolve_thinking_protocol("claude-4.5-sonnet", "anthropic"),
-            T::AnthropicThinkingBudget
-        );
-        // Claude 4.6 → effort + adaptive thinking block.
-        assert_eq!(
-            resolve_thinking_protocol("claude-4.6-sonnet", "anthropic"),
-            T::AnthropicEffort
-        );
-        assert_eq!(
-            resolve_thinking_protocol("claude-opus-4.6", "anthropic"),
-            T::AnthropicEffort
-        );
-        // Claude 4.7+ → adaptive-only (budget_tokens 400s).
-        assert_eq!(
-            resolve_thinking_protocol("claude-opus-4.7", "anthropic"),
-            T::AnthropicAdaptive
-        );
-        assert_eq!(
-            resolve_thinking_protocol("claude-5-sonnet", "anthropic"),
-            T::AnthropicAdaptive
-        );
-    }
-
-    #[test]
-    fn test_cn_reasoning_models() {
-        // Qwen3 → enable_thinking + thinking_budget.
-        assert_eq!(
-            resolve_thinking_protocol("qwen3-235b-a22b", "dashscope"),
-            T::EnableThinkingFlag
-        );
-        assert_eq!(
-            resolve_thinking_protocol("qwen3-max", "dashscope"),
-            T::EnableThinkingFlag
-        );
-        // GLM-4.5/4.6 → thinking:{type:enabled|disabled} (on/off ONLY, no depth).
-        assert_eq!(
-            resolve_thinking_protocol("glm-4.6", "zhipu"),
-            T::GlmThinkingType
-        );
-        assert_eq!(
-            resolve_thinking_protocol("glm-4.5", "zhipu"),
-            T::GlmThinkingType
-        );
-        // GLM-5.x → reasoning_effort (depth knob; 5.2 confirmed in OpenAPI).
-        assert_eq!(
-            resolve_thinking_protocol("glm-5.2", "zhipu"),
-            T::GlmReasoningEffort
-        );
-        // DeepSeek → OpenAI-compatible reasoning_effort (NOT enable_thinking!).
-        assert_eq!(
-            resolve_thinking_protocol("deepseek-r1", "deepseek"),
-            T::OpenaiReasoningEffort
-        );
-        assert_eq!(
-            resolve_thinking_protocol("deepseek-v3.2", "deepseek"),
-            T::OpenaiReasoningEffort
-        );
-    }
-
-    #[test]
-    fn test_non_reasoning_models() {
-        assert_eq!(resolve_thinking_protocol("gpt-4o", "openai"), T::None);
-        assert_eq!(resolve_thinking_protocol("gpt-4-turbo", "openai"), T::None);
-        assert_eq!(resolve_thinking_protocol("llama-3", "ollama"), T::None);
-        // Kimi K2 Thinking has no request-side depth knob (always on).
-        assert_eq!(
-            resolve_thinking_protocol("kimi-k2-thinking", "moonshot"),
+            chat_profile("anthropic", "claude-4.5-sonnet").protocol,
             T::None
         );
+        let direct = resolve_thinking_profile(
+            "anthropic",
+            "claude-opus-4-6",
+            LlmApiProtocol::Anthropic,
+            Some("https://api.anthropic.com/v1/messages"),
+        );
+        assert_eq!(direct.protocol, T::AnthropicEffort);
+        assert_eq!(direct.levels, CLAUDE_46_LEVELS);
+        assert_eq!(
+            chat_profile("gateway", "claude-opus-4.6").protocol,
+            T::OpenaiReasoningEffort
+        );
+        assert_eq!(
+            resolve_thinking_profile(
+                "anthropic",
+                "claude-opus-4.7",
+                LlmApiProtocol::Anthropic,
+                None,
+            )
+            .protocol,
+            T::AnthropicAdaptive
+        );
+    }
+
+    #[test]
+    fn glm_support_starts_at_52() {
+        assert_eq!(chat_profile("zhipu", "glm-5.1").protocol, T::None);
+        assert_eq!(chat_profile("zhipu", "glm-4.6").protocol, T::None);
+        let profile = chat_profile("zhipu", "glm-5.2");
+        assert_eq!(profile.protocol, T::GlmReasoningEffort);
+        assert_eq!(profile.levels, GLM_52_LEVELS);
+    }
+
+    #[test]
+    fn common_model_profiles_are_explicit() {
+        assert_eq!(
+            chat_profile("deepseek", "deepseek-v4").protocol,
+            T::DeepseekReasoningEffort
+        );
+        assert_eq!(chat_profile("moonshot", "kimi-k3").levels, KIMI_K3_LEVELS);
+        assert_eq!(
+            chat_profile("moonshot", "kimi-k2.7-code").protocol,
+            T::ModelManaged
+        );
+        assert_eq!(
+            chat_profile("moonshot", "kimi-k2.6").protocol,
+            T::ThinkingType
+        );
+        assert_eq!(
+            chat_profile("dashscope", "qwen3-max").protocol,
+            T::EnableThinkingFlag
+        );
+        assert_eq!(
+            chat_profile("google", "gemini-3-pro").levels,
+            GEMINI_3_LEVELS
+        );
+        assert_eq!(
+            chat_profile("google", "gemini-2.5-pro").levels,
+            GEMINI_25_LEVELS
+        );
+        assert_eq!(
+            chat_profile("ollama", "gpt-oss:20b").levels,
+            OLLAMA_GPT_OSS_LEVELS
+        );
+        assert_eq!(chat_profile("ollama", "qwen3:32b").protocol, T::OllamaThink);
+        assert_eq!(chat_profile("ollama", "llama3.1").protocol, T::None);
+    }
+
+    #[test]
+    fn provider_dialect_precedes_model_family() {
+        assert_eq!(
+            resolve_thinking_profile(
+                "custom",
+                "deepseek-v4",
+                LlmApiProtocol::ChatCompletions,
+                Some("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"),
+            )
+            .protocol,
+            T::EnableThinkingFlag
+        );
+        assert_eq!(
+            chat_profile("deepseek", "deepseek-v4").protocol,
+            T::DeepseekReasoningEffort
+        );
+    }
+
+    #[test]
+    fn unknown_models_remain_uncontrolled() {
+        let profile = chat_profile("custom", "future-model");
+        assert_eq!(profile, ThinkingProfile::unknown());
+        assert!(!profile.supports_manual_control());
     }
 
     #[test]

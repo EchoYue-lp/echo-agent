@@ -17,7 +17,6 @@ use echo_agent::prelude::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -373,7 +372,8 @@ async fn demo_semantic_search(db_path: &Path) -> echo_agent::error::Result<()> {
 // ── Part 5: Agent 集成 ──────────────────────────────────────────────────────
 
 async fn demo_agent_integration(db_path: &Path) -> echo_agent::error::Result<()> {
-    let model_name = require_configured_model(None)?;
+    let llm_config = require_configured_model(None)?;
+    let model_name = llm_config.model.clone();
     println!("  使用模型: {model_name}\n");
 
     let store: Arc<dyn Store> = Arc::new(SqliteStore::new(db_path)?);
@@ -396,7 +396,6 @@ async fn demo_agent_integration(db_path: &Path) -> echo_agent::error::Result<()>
         .await?;
     println!("  📚 预填充 2 条长期记忆\n");
 
-    let llm_config = LlmConfig::from_model(&model_name)?;
     let mut agent = ReactAgentBuilder::new()
         .llm_config(llm_config)
         .name("agent_demo")
@@ -499,12 +498,7 @@ fn separator(title: &str) {
 }
 
 fn load_embedder_from_config() -> echo_agent::error::Result<Arc<dyn echo_agent::memory::Embedder>> {
-    let cfg = echo_agent::llm::config::Config::get_embedding().map_err(|e| {
-        echo_agent::error::ReactError::Other(format!("demo27 验收失败：embedding 配置无效：{e}"))
-    })?;
-    let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
-        .with_timeout(Duration::from_secs(cfg.timeout_secs));
-    Ok(Arc::new(embedder))
+    Ok(Arc::new(HttpEmbedder::from_env()))
 }
 
 async fn load_verified_embedder_from_config()
@@ -531,41 +525,16 @@ fn cleanup_sqlite_files(path: &Path) {
     let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }
 
-fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<String> {
+fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<LlmConfig> {
     let app_config = echo_agent::config::load_config(None);
-    let configured = app_config.model.name.trim();
-
-    if !configured.is_empty() {
-        return echo_agent::llm::config::LlmConfig::from_model(configured)
-            .map(|_| configured.to_string())
-            .map_err(|e| {
-                echo_agent::error::ReactError::Other(format!(
-                    "demo27 验收失败：当前 `model.name = {configured}` 配置无效：{e}"
-                ))
-            });
-    }
-
-    if let Some(preferred) = preferred
-        && echo_agent::llm::config::Config::has_model(preferred)
-    {
-        return Ok(preferred.to_string());
-    }
-
-    if let Some(first) = echo_agent::llm::config::Config::list_models()
-        .into_iter()
-        .next()
-    {
-        return Ok(first);
-    }
-
-    let load_err = echo_agent::llm::config::Config::load_cached()
-        .err()
-        .map(|e| format!("配置加载失败：{e}"))
-        .unwrap_or_else(|| {
-            "请在 echo-agent.yaml 的 `models:` 中声明至少一个模型，并让 `model.name` 指向它。"
-                .to_string()
-        });
-    Err(echo_agent::error::ReactError::Other(format!(
-        "demo27 验收失败：缺少模型配置，无法验证 Agent 集成。{load_err}"
-    )))
+    preferred
+        .map(|selector| app_config.resolve_llm_config(Some(selector)))
+        .transpose()
+        .and_then(|preferred| preferred.map_or_else(|| app_config.resolve_llm_config(None), Ok))
+        .or_else(|_| app_config.resolve_llm_config(None))
+        .map_err(|error| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo27 验收失败：缺少显式 provider/model 配置：{error}"
+            ))
+        })
 }

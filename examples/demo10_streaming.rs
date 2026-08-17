@@ -11,14 +11,11 @@
 //! ```
 
 use echo_agent::agent::{Agent, AgentEvent};
-use echo_agent::llm::stream_chat;
 use echo_agent::llm::types::Message;
 use echo_agent::prelude::*;
 use echo_agent::tool;
 use futures::StreamExt;
-use reqwest::Client;
 use std::io::Write;
-use std::sync::Arc;
 
 #[tool(name = "add", description = "两数相加")]
 async fn add(a: f64, b: f64) -> Result<ToolResult> {
@@ -79,36 +76,29 @@ async fn main() -> Result<()> {
 }
 
 async fn demo_raw_stream() -> echo_agent::error::Result<()> {
-    let client = Arc::new(Client::new());
+    let app_config = echo_agent::config::load_config(None);
+    let llm_config = app_config.resolve_llm_config(None)?;
+    let client = llm_config.build_client()?;
     let messages = vec![
         Message::system("你是一个助手，请用中文简洁作答。".to_string()),
         Message::user("用三句话解释什么是流式输出。".to_string()),
     ];
 
-    let mut stream = Box::pin(
-        stream_chat(
-            client,
-            "deepseek-v4-flash",
+    let mut stream = client
+        .chat_stream(ChatRequest {
             messages,
-            Some(0.7),
-            Some(512),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?,
-    );
+            temperature: Some(0.7),
+            max_tokens: Some(512),
+            ..Default::default()
+        })
+        .await?;
 
     print!("  🤖 LLM: ");
     std::io::stdout().flush().ok();
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
-        if let Some(choice) = chunk.choices.first()
-            && let Some(content) = &choice.delta.content
-        {
+        if let Some(content) = &chunk.delta.content {
             print!("{}", content);
             std::io::stdout().flush().ok();
         }

@@ -9,13 +9,40 @@ use crate::error::Result;
 pub use thinking::{ThinkingConfig, ThinkingLevel, ThinkingProtocol};
 pub use types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, DeltaMessage, FunctionCall,
-    FunctionSpec, GlmThinkingBlock, JsonSchemaSpec, Message, ResponseFormat, Role, ToolCall,
+    FunctionSpec, JsonSchemaSpec, Message, ResponseFormat, Role, ThinkingTypeBlock, ToolCall,
     ToolDefinition,
 };
 
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
+
+/// Input modalities accepted by one configured model.
+///
+/// Provider transports describe how content is encoded; this model-level set
+/// describes what a concrete model is allowed to receive.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInputModality {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+impl ModelInputModality {
+    /// Text-only defaults keep unknown models conservative.
+    pub fn text_only() -> Vec<Self> {
+        vec![Self::Text]
+    }
+
+    /// Preserve the framework constructors' historical multimodal behavior.
+    pub fn all_supported() -> Vec<Self> {
+        vec![Self::Text, Self::Image, Self::Audio, Self::Video]
+    }
+}
 
 /// HTTP API protocol used by an LLM provider endpoint.
 ///
@@ -35,6 +62,15 @@ pub enum LlmApiProtocol {
 }
 
 impl LlmApiProtocol {
+    /// Standard endpoint path appended to a provider API root.
+    pub const fn endpoint_path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat/completions",
+            Self::Responses => "responses",
+            Self::Anthropic => "messages",
+        }
+    }
+
     /// Identify the protocol spoken by a complete endpoint URL.
     ///
     /// Returns `None` for provider roots such as `https://api.example.com/v1`

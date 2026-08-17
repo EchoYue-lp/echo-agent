@@ -7,28 +7,17 @@ echo-agent provides two configuration approaches:
 1. **Rust API** — `AgentConfig` + `ReactAgentBuilder` for programmatic configuration
 2. **YAML file** — `echo-agent.yaml` for declarative configuration
 
-## Built-in Provider Wire Protocols
+## Dynamic Providers and Models
 
-`ProviderMetadata` is the authoritative registry for each built-in provider's endpoint,
-environment-variable aliases, and default wire protocol.
+Providers are user-defined connections: a name, base URL, authentication source,
+and optional default API protocol. Models are separate entries linked to a provider;
+each model explicitly selects Chat Completions, Responses, or Anthropic Messages and
+declares its text/image/audio/video input capabilities. Text is always enabled.
 
-| Provider (aliases) | Default wire protocol |
-|--------------------|-----------------------|
-| `openai` | OpenAI Responses |
-| `anthropic` | Anthropic Messages |
-| `deepseek` | OpenAI Chat Completions |
-| `dashscope` (`qwen`, `aliyun`) | OpenAI Chat Completions |
-| `moonshot` (`kimi`) | OpenAI Chat Completions |
-| `zhipu` (`glm`) | OpenAI Chat Completions |
-
-Protocol selection follows one precedence rule: an explicit `api_protocol` wins;
-otherwise a complete custom `base_url` is inspected for a `/responses`, `/messages`,
-or `/chat/completions` suffix; otherwise a provider shorthand uses its metadata
-default. A provider root such as `https://api.example.com/v1` is intentionally not
-enough to infer a protocol. Supplying both `provider` and a recognized complete
-`base_url` makes the URL authoritative unless `api_protocol` is also set. An
-unrecognized root therefore falls back to the provider metadata default, or Chat
-Completions when the provider is also unknown.
+Reasoning wire fields are not user configuration. The framework resolves an internal
+`ThinkingProfile` from provider, model ID, protocol, and endpoint. A recognized model
+exposes only the levels that its documented API accepts. Unknown models continue to
+work normally but use model-managed reasoning, so no reasoning field is sent.
 
 ---
 
@@ -184,17 +173,20 @@ let agent = ReactAgentBuilder::new()
 ### LLM Configuration
 
 ```rust
-// Option 1: Auto-create from model name
-ReactAgentBuilder::new()
-    .model("qwen3-max")
-
-// Option 2: Explicit LLM client
+// Option 1: Explicit LLM client
 ReactAgentBuilder::new()
     .llm_client(my_client)
 
-// Option 3: With config
+// Option 2: Explicit provider/model contract
+let llm_config = LlmConfig::for_provider(
+    "dashscope",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    api_key,
+    "qwen3-max",
+    LlmApiProtocol::ChatCompletions,
+)?;
 ReactAgentBuilder::new()
-    .llm_config(LlmConfig { base_url, api_key, model })
+    .llm_config(llm_config)
 ```
 
 ### Tool Configuration
@@ -433,6 +425,8 @@ logging:
 | Section | Struct | Description |
 |---------|--------|-------------|
 | `model` | `ModelConfig` | LLM model name, temperature, max_tokens |
+| `model_providers` | map of `ModelProviderConfig` | User-defined endpoint and authentication connections |
+| `configured_models` | list of `ConfiguredModel` | Explicit provider, API protocol, and text/image/audio/video capabilities per model |
 | `agent` | `AgentYamlConfig` | Agent behavior toggles and paths |
 | `mcp` | `McpYamlConfig` | MCP config file path |
 | `channels` | `ChannelsConfig` | IM channel integrations (QQ, Feishu) |

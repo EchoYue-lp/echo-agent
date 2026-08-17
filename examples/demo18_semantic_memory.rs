@@ -7,7 +7,6 @@ use echo_agent::prelude::*;
 use echo_core::memory::SearchQuery;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -213,10 +212,7 @@ fn separator(title: &str) {
 }
 
 fn load_embedder_from_config() -> Option<Arc<dyn Embedder>> {
-    let cfg = echo_agent::llm::config::Config::get_embedding().ok()?;
-    let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
-        .with_timeout(Duration::from_secs(cfg.timeout_secs));
-    Some(Arc::new(embedder))
+    Some(Arc::new(HttpEmbedder::from_env()))
 }
 
 async fn load_verified_embedder_from_config() -> echo_agent::error::Result<Arc<dyn Embedder>> {

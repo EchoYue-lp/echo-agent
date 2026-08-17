@@ -356,10 +356,9 @@ pub struct AgentRunSnapshot {
     /// Optional trait-level LLM client. When present, the streaming core loop
     /// (`create_llm_stream`) and `direct_answer_stream` route LLM calls through
     /// this trait object instead of the raw `client` + model-resolve path —
-    /// enabling test doubles (MockLlmClient) to drive the full ReAct loop
-    /// without `echo-agent-models.yaml`. Production agents inject a real
-    /// `LlmClient` impl (OpenAiClient, …); when `None`, the legacy reqwest
-    /// fallback path is used (behavior unchanged).
+    /// enabling test doubles (MockLlmClient) to drive the full ReAct loop.
+    /// Production agents inject a real `LlmClient` implementation; execution
+    /// returns a configuration error when none is attached.
     pub llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
     /// Per-agent thinking-depth config, propagated to the think phase and react
     /// loop so each LLM request carries the configured reasoning depth. `None`

@@ -149,16 +149,15 @@ async fn main() -> Result<()> {
 │  │              Subagent 注册表                      │   │
 │  └──────────────────────────────────────────────────┘   │
 └────────────────────────┬────────────────────────────────┘
-                         │ HTTP（metadata 选择 wire protocol）
+                         │ HTTP（模型选择 wire protocol）
 ┌────────────────────────▼────────────────────────────────┐
 │                  LLM Provider                            │
 │   （Responses / Anthropic Messages / Chat Completions）  │
 └─────────────────────────────────────────────────────────┘
 ```
 
-内置 Provider 的身份、endpoint、别名与默认 wire protocol 统一来自权威
-`ProviderMetadata` 注册表。完整自定义 endpoint 仍根据 URL 推断协议，必要时可用显式
-`api_protocol` 覆盖。
+Provider 是用户自定义的连接。每个模型关联一个 Provider，明确选择 Responses、
+Anthropic Messages 或 Chat Completions，并声明文本、图片、音频、视频输入能力。
 
 ---
 

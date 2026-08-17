@@ -263,10 +263,12 @@ async fn demo_llm_retry() -> Result<()> {
     println!("Part 5: 实际 LLM 调用重试演示");
     println!("─────────────────────────────────────────────\n");
 
-    use echo_agent::llm::chat;
     use echo_agent::llm::types::Message;
+    use echo_agent::llm::{ChatRequest, LlmClient};
 
-    let client = reqwest::Client::new();
+    let app_config = echo_agent::config::load_config(None);
+    let llm_config = app_config.resolve_llm_config(None)?;
+    let client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
 
     // 5.1 模拟网络波动场景
     println!("  [5.1] 模拟网络波动（前两次失败）");
@@ -290,26 +292,11 @@ async fn demo_llm_retry() -> Result<()> {
             }
 
             let messages = vec![Message::user("用一句话介绍 Rust".to_string())];
-            chat(
-                client.into(),
-                "qwen3-max",
-                &messages,
-                None,
-                None,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .map_err(|e| format!("LLM 调用失败: {}", e))
-            .map(|resp| {
-                resp.choices
-                    .first()
-                    .and_then(|c| c.message.content.as_text())
-                    .unwrap_or_default()
-            })
+            client
+                .chat(ChatRequest::new(messages))
+                .await
+                .map_err(|e| format!("LLM 调用失败: {}", e))
+                .map(|response| response.message.content.as_text().unwrap_or_default())
         }
     })
     .await;

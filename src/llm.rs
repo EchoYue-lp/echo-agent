@@ -3,13 +3,13 @@
 //! Unified interface over multiple LLM providers. All clients implement the
 //! [`LlmClient`] trait, providing both `chat()` and `chat_stream()` methods.
 //!
-//! # Supported Providers
+//! # Supported Protocols
 //!
-//! | Client | Backend | Feature |
+//! | Client | Protocol | Feature |
 //! |--------|---------|---------|
 //! | [`OpenAiClient`] | OpenAI & compatible APIs | default |
 //! | [`AnthropicClient`] | Native Claude API | `a2a` |
-//! | [`ProviderFactory`] | Dynamic provider selection from config | default |
+//! | [`ResponsesClient`] | OpenAI Responses | default |
 //!
 //! # Quick Start
 //!
@@ -18,7 +18,14 @@
 //!
 //! # #[tokio::main]
 //! # async fn main() -> echo_agent::error::Result<()> {
-//! let client = OpenAiClient::from_env("qwen3-max")?;
+//! let config = LlmConfig::for_provider(
+//!     "local",
+//!     "http://127.0.0.1:11434/v1",
+//!     "",
+//!     "qwen3",
+//!     LlmApiProtocol::ChatCompletions,
+//! )?;
+//! let client = OpenAiClient::new(config)?;
 //! let response = client.chat(ChatRequest {
 //!     messages: vec![Message::user("Hello".to_string())],
 //!     ..Default::default()
@@ -36,7 +43,14 @@
 //!
 //! # #[tokio::main]
 //! # async fn main() -> echo_agent::error::Result<()> {
-//! let client = OpenAiClient::from_env("qwen3-max")?;
+//! let config = LlmConfig::for_provider(
+//!     "local",
+//!     "http://127.0.0.1:11434/v1",
+//!     "",
+//!     "qwen3",
+//!     LlmApiProtocol::ChatCompletions,
+//! )?;
+//! let client = OpenAiClient::new(config)?;
 //! let mut stream = client.chat_stream(ChatRequest {
 //!     messages: vec![Message::user("Tell me a joke".to_string())],
 //!     ..Default::default()
@@ -82,19 +96,13 @@ pub mod providers {
     pub use echo_integration::providers::responses::ResponsesClient;
 }
 
-use futures::Stream;
-use reqwest::Client;
-use reqwest::header::HeaderMap;
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
-
 // Core traits from echo-core
 pub use echo_core::llm::capabilities::{
     ModelProfile, ModelProfileOverride, ModelProfileResolver, ProviderCapabilities,
 };
 pub use echo_core::llm::{
-    ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, SimpleChatOptions,
-    ThinkingConfig, ThinkingLevel, ThinkingProtocol,
+    ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, ModelInputModality,
+    SimpleChatOptions, ThinkingConfig, ThinkingLevel, ThinkingProtocol,
 };
 
 // Provider implementations from echo_integration::providers
@@ -102,79 +110,7 @@ pub use echo_integration::providers::anthropic::AnthropicClient;
 pub use echo_integration::providers::openai::OpenAiClient;
 pub use echo_integration::providers::responses::ResponsesClient;
 
-// Config & Factory
-pub use config::{LlmConfig, LlmProvider};
-pub use echo_integration::providers::ProviderFactory;
+// Explicit runtime configuration
+pub use config::{LlmConfig, resolve_protocol_endpoint};
 
-// Wire types for internal use
-pub(crate) use types::{ChatCompletionChunk, ChatCompletionResponse, Message};
 pub use types::{JsonSchemaSpec, Message as LlmMessage, ResponseFormat, ToolDefinition};
-
-/// Compatibility helper for assembling OpenAI-compatible request headers.
-///
-/// This remains available from the root facade so older call sites can stay on
-/// `echo_agent::llm::*` while the canonical implementation lives in
-/// `echo_integration::providers::openai`.
-pub fn assemble_req_header(model: &config::ModelConfig) -> echo_core::error::Result<HeaderMap> {
-    echo_integration::providers::openai::assemble_req_header(model)
-}
-
-/// Compatibility helper for a one-shot OpenAI-compatible chat completion call.
-#[allow(clippy::too_many_arguments)]
-pub async fn chat(
-    client: Arc<Client>,
-    model_name: &str,
-    messages: &[Message],
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    stream: Option<bool>,
-    tools: Option<Vec<ToolDefinition>>,
-    tool_choice: Option<String>,
-    response_format: Option<ResponseFormat>,
-    user_id: Option<String>,
-) -> echo_core::error::Result<ChatCompletionResponse> {
-    echo_integration::providers::openai::chat(
-        client,
-        model_name,
-        messages,
-        temperature,
-        max_tokens,
-        stream,
-        tools,
-        tool_choice,
-        response_format,
-        user_id,
-    )
-    .await
-}
-
-/// Compatibility helper for OpenAI-compatible streaming chat completions.
-#[allow(clippy::too_many_arguments)]
-pub async fn stream_chat(
-    client: Arc<Client>,
-    model_name: &str,
-    messages: Vec<Message>,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    tools: Option<Vec<ToolDefinition>>,
-    tool_choice: Option<String>,
-    response_format: Option<ResponseFormat>,
-    cancel_token: Option<CancellationToken>,
-    user_id: Option<String>,
-) -> echo_core::error::Result<
-    impl Stream<Item = echo_core::error::Result<ChatCompletionChunk>> + use<>,
-> {
-    echo_integration::providers::openai::stream_chat(
-        client,
-        model_name,
-        messages,
-        temperature,
-        max_tokens,
-        tools,
-        tool_choice,
-        response_format,
-        cancel_token,
-        user_id,
-    )
-    .await
-}

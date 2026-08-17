@@ -153,16 +153,16 @@ async fn main() -> Result<()> {
 │  │    "writer_agent": ... }                          │   │
 │  └──────────────────────────────────────────────────┘   │
 └────────────────────────┬────────────────────────────────┘
-                         │ HTTP (metadata-selected wire protocol)
+                         │ HTTP (model-selected wire protocol)
 ┌────────────────────────▼────────────────────────────────┐
 │                  LLM Provider                            │
 │   (Responses / Anthropic Messages / Chat Completions)    │
 └─────────────────────────────────────────────────────────┘
 ```
 
-Built-in provider identity, endpoint, aliases, and default wire protocol come from the
-canonical `ProviderMetadata` registry. Complete custom endpoints remain protocol-driven
-by their URL, with an explicit `api_protocol` override when required.
+Providers are user-defined connections. Every configured model links to one provider,
+selects Responses, Anthropic Messages, or Chat Completions explicitly, and declares its
+text/image/audio/video input capabilities.
 
 ---
 

@@ -6,7 +6,6 @@
 //! `previous_response_id`, hosted conversations, or server-side storage.
 
 use echo_core::error::{LlmError, Result};
-use echo_core::llm::capabilities::ProviderCapabilities;
 use echo_core::llm::types::{
     ChatCompletionResponse, Choice, ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
     FunctionCall, Message, MessageContent, ReasoningBlock, ResponseFormat, Role, TokenUsageDetails,
@@ -26,36 +25,34 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
 use super::client::{JsonSseEvent, post_json, stream_json_sse};
-use super::config::{LlmConfig, ModelConfig};
+use super::config::LlmConfig;
 use super::openai::assemble_req_header;
 use super::thinking_translate::translate_thinking_openai_compat;
 
 /// Client for the OpenAI Responses API.
 pub struct ResponsesClient {
     client: Arc<Client>,
-    config: ModelConfig,
+    config: LlmConfig,
     header_map: HeaderMap,
 }
 
 impl ResponsesClient {
     /// Create a Responses client from an injected provider configuration.
     pub fn new(config: LlmConfig) -> Result<Self> {
-        let model_config = config.to_model_config();
-        let header_map = assemble_req_header(&model_config)?;
+        let header_map = assemble_req_header(&config)?;
         Ok(Self {
             client: Arc::new(Self::build_http_client()),
-            config: model_config,
+            config,
             header_map,
         })
     }
 
     /// Create a Responses client with a shared HTTP client.
     pub fn with_client(client: Arc<Client>, config: LlmConfig) -> Result<Self> {
-        let model_config = config.to_model_config();
-        let header_map = assemble_req_header(&model_config)?;
+        let header_map = assemble_req_header(&config)?;
         Ok(Self {
             client,
-            config: model_config,
+            config,
             header_map,
         })
     }
@@ -70,7 +67,7 @@ impl ResponsesClient {
             self.client.clone(),
             request,
             self.header_map.clone(),
-            &self.config.baseurl,
+            &self.config.base_url,
         )
         .await
     }
@@ -85,7 +82,7 @@ impl ResponsesClient {
             self.client.clone(),
             request,
             self.header_map.clone(),
-            self.config.baseurl.clone(),
+            self.config.base_url.clone(),
             self.config.model.clone(),
             cancel_token,
         )
@@ -110,12 +107,11 @@ impl ResponsesClient {
     }
 
     fn request_body(&self, request: &ChatRequest, stream: bool) -> Value {
-        let provider = self.config.provider_name.as_deref().unwrap_or("openai");
         let thinking = translate_thinking_openai_compat(
             &self.config.model,
-            provider,
+            self.config.api_protocol,
+            self.config.thinking_protocol,
             &request.thinking,
-            ProviderCapabilities::openai_compatible(),
         );
         let mut body = json!({
             "model": self.config.model,
@@ -159,12 +155,13 @@ impl LlmClient for ResponsesClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
+                self.config.validate_input_modalities(&request.messages)?;
                 let body = self.request_body(&request, false);
                 let raw = post_json(
                     self.client.clone(),
                     body,
                     self.header_map.clone(),
-                    &self.config.baseurl,
+                    &self.config.base_url,
                 )
                 .await?;
                 response_to_chat(raw)
@@ -180,13 +177,14 @@ impl LlmClient for ResponsesClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
+                self.config.validate_input_modalities(&request.messages)?;
                 let cancel_token = request.cancel_token.clone();
                 let body = self.request_body(&request, true);
                 let raw_stream = stream_json_sse(
                     self.client.clone(),
                     body,
                     self.header_map.clone(),
-                    self.config.baseurl.clone(),
+                    self.config.base_url.clone(),
                     self.config.model.clone(),
                     cancel_token,
                 )
@@ -1093,7 +1091,15 @@ mod tests {
     use echo_core::llm::types::{FunctionSpec, ImageUrl};
 
     fn test_config() -> LlmConfig {
-        LlmConfig::openai("test-key", "gpt-test")
+        LlmConfig {
+            provider_name: Some("test-provider".to_string()),
+            api_protocol: echo_core::llm::LlmApiProtocol::Responses,
+            base_url: "https://api.example.test/v1/responses".to_string(),
+            api_key: "test-key".to_string(),
+            model: "gpt-test".to_string(),
+            input_modalities: echo_core::llm::ModelInputModality::all_supported(),
+            thinking_protocol: echo_core::llm::ThinkingProtocol::OpenaiReasoningEffort,
+        }
     }
 
     fn is_invalid_response<T>(result: &Result<T>) -> bool {

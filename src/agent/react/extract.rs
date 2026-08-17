@@ -9,7 +9,7 @@ use super::ReactAgent;
 use crate::agent::Agent;
 use crate::error::{ReactError, Result};
 use crate::llm::types::Message;
-use crate::llm::{ResponseFormat, chat};
+use crate::llm::{ChatRequest, ResponseFormat};
 
 impl ReactAgent {
     /// One-shot structured JSON extraction, no ReAct loop.
@@ -54,27 +54,27 @@ impl ReactAgent {
 
         let max_retries = self.config.llm_max_retries;
         let retry_delay = std::time::Duration::from_millis(self.config.llm_retry_delay_ms);
+        let llm_client = self.llm_client().ok_or_else(|| {
+            ReactError::Other(
+                "JSON extraction requires an explicit LLM config or injected LLM client"
+                    .to_string(),
+            )
+        })?;
 
         for attempt in 0..=max_retries {
-            let response = chat(
-                self.client.clone(),
-                &self.config.model_name,
-                &messages,
-                Some(0.0),
-                Some(4096),
-                Some(false),
-                None,
-                None,
-                Some(schema.clone()),
-                None,
-            )
-            .await?;
+            let response = llm_client
+                .chat(ChatRequest {
+                    messages: messages.clone(),
+                    temperature: Some(0.0),
+                    max_tokens: Some(4096),
+                    response_format: Some(schema.clone()),
+                    ..Default::default()
+                })
+                .await?;
 
             let text = response
-                .choices
-                .into_iter()
-                .next()
-                .and_then(|c| c.message.content.as_text())
+                .content()
+                .filter(|content| !content.trim().is_empty())
                 .ok_or_else(|| ReactError::Other("LLM returned empty content".to_string()))?;
 
             match serde_json::from_str(&text) {

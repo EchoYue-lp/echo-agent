@@ -7,90 +7,33 @@
 #
 # 语法说明：
 #   - ${VAR_NAME} 会被解析为对应的环境变量值
-#   - provider 字段可替代 base_url，自动填充已知厂商的默认地址
-#   - models.*.model 字段可选，默认使用配置的 key 名称
-#   - api_protocol 可选：responses / chat_completions / anthropic；省略时按
-#     provider 默认值或完整 endpoint URL 推断
-#   - 支持的 provider: openai, anthropic, deepseek, dashscope/qwen/aliyun,
-#                       moonshot/kimi, zhipu/glm, ollama
-#   - `model.name` 应引用 `models` 中已经声明好的一个 key
-#   - 本文件同时包含两类配置：
-#       1) `models` / `embedding`：供 ProviderFactory、语义检索等使用
-#       2) `model` / `agent` / `channels` / `mcp` / `server` / `logging`：
-#          供 `echo_agent::config` 运行时配置使用
+#   - Provider 只保存连接和认证；每个模型明确保存 API 协议和输入能力
+#   - api_protocol: responses / chat_completions / anthropic
+#   - input_modalities: text（默认）、image、audio、video
+#   - 思考协议和有效等级由中央 ThinkingProfile 自动解析，不写入配置
 
-models:
-  # ── 阿里云百炼（DashScope）──────────────────────────────────────────────
-  qwen3.7-max:
-    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
-    api_key: ${DASHSCOPE_API_KEY}
+model_providers:
+  deepseek:
+    name: DeepSeek
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    default_api_protocol: chat_completions
+    requires_api_key: true
 
-  qwen3.7-plus:
-    provider: dashscope
-    api_key: ${DASHSCOPE_API_KEY}
-
-  # 使用 provider 快捷方式（等效于上面手动填 base_url）
-  qwen3-plus:
-    provider: dashscope
-    api_key: ${DASHSCOPE_API_KEY}
-
-  # ── DeepSeek ────────────────────────────────────────────────────────────
-  deepseek-v4-flash:
+configured_models:
+  - id: deepseek:deepseek-v4-flash
+    display_name: DeepSeek V4 Flash
     provider: deepseek
-    api_key: ${DEEPSEEK_API_KEY}
-
-  # deepseek-v4-pro:
-  #   provider: deepseek
-  #   api_key: ${DEEPSEEK_API_KEY}
-
-  # ── OpenAI ──────────────────────────────────────────────────────────────
-  # gpt-5.5:
-  #   provider: openai
-  #   api_protocol: responses
-  #   api_key: ${OPENAI_API_KEY}
-
-  # ── Anthropic ───────────────────────────────────────────────────────────
-  # claude-opus-4-8:
-  #   provider: anthropic
-  #   api_protocol: anthropic
-  #   api_key: ${ANTHROPIC_API_KEY}
-
-  # ── Moonshot / Kimi ─────────────────────────────────────────────────────
-  # kimi-k2.6:
-  #   provider: moonshot
-  #   api_key: ${MOONSHOT_API_KEY}
-
-  # ── 智谱 GLM ────────────────────────────────────────────────────────────
-  # glm-5.1:
-  #   provider: zhipu
-  #   api_key: ${ZHIPU_API_KEY}
-
-  # ── Ollama（本地）───────────────────────────────────────────────────────
-  # llama3.1:
-  #   provider: ollama
-  #   api_key: ollama
-
-  # ── 自定义端点 ──────────────────────────────────────────────────────────
-  # my-custom-model:
-  #   base_url: https://my-proxy.example.com/v1/chat/completions
-  #   api_protocol: chat_completions
-  #   api_key: ${MY_API_KEY}
-  #   model: gpt-5.5          # 实际发送给 API 的模型名（默认使用 key）
-
-# ── Embedding（供语义检索 / 向量记忆使用）────────────────────────────────────
-embedding:
-  # 二选一：
-  # 1) 完整 embeddings 端点
-  # endpoint_url: https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings
-  # 2) 仅 base URL（会自动追加 /v1/embeddings）
-  base_url: https://api.openai.com
-  api_key: ${OPENAI_API_KEY}
-  model: text-embedding-3-small
-  timeout_secs: 30
+    model: deepseek-v4-flash
+    api_protocol: chat_completions
+    input_modalities: [text]
+    enabled: true
 
 # ── Runtime 配置（供 echo_agent::config 使用）───────────────────────────────
 model:
-  name: qwen3.7-plus
+  default_model_id: deepseek:deepseek-v4-flash
+  provider: deepseek
+  name: deepseek-v4-flash
   api_protocol: chat_completions
   max_tokens: 4096
   temperature: 0.7

@@ -19,6 +19,18 @@ use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+fn test_llm_config(model: &str) -> crate::llm::LlmConfig {
+    crate::llm::LlmConfig {
+        provider_name: Some("test-provider".to_string()),
+        api_protocol: crate::llm::LlmApiProtocol::ChatCompletions,
+        base_url: "https://api.example.test/v1/chat/completions".to_string(),
+        api_key: "test-key".to_string(),
+        model: model.to_string(),
+        input_modalities: crate::llm::ModelInputModality::text_only(),
+        thinking_protocol: crate::llm::ThinkingProtocol::None,
+    }
+}
+
 #[cfg(feature = "subagent")]
 #[tokio::test]
 async fn react_agent_initializes_subagent_hook_executor() {
@@ -694,7 +706,7 @@ async fn prepared_model_generation_is_inert_until_infallible_commit() -> crate::
         "test_agent",
         "system prompt",
     ));
-    let llm_config = crate::llm::LlmConfig::openai("test-key", "replacement-model");
+    let llm_config = test_llm_config("replacement-model");
     let client: Arc<dyn crate::llm::LlmClient> =
         Arc::new(crate::testing::MockLlmClient::new().with_model_name("replacement-model"));
 
@@ -752,7 +764,7 @@ async fn mismatched_prepared_client_leaves_agent_unchanged() {
         "test_agent",
         "system prompt",
     )));
-    let llm_config = crate::llm::LlmConfig::openai("test-key", "replacement-model");
+    let llm_config = test_llm_config("replacement-model");
     let client: Arc<dyn crate::llm::LlmClient> =
         Arc::new(crate::testing::MockLlmClient::new().with_model_name("wrong-model"));
 
@@ -792,7 +804,7 @@ async fn owned_critic_refresh_does_not_replace_a_custom_critic() -> crate::error
     assert_eq!(agent.critic_owner(), None);
     let agent = AgentHandle::new(agent);
 
-    let llm_config = crate::llm::LlmConfig::openai("test-key", "replacement-model");
+    let llm_config = test_llm_config("replacement-model");
     let client: Arc<dyn crate::llm::LlmClient> =
         Arc::new(crate::testing::MockLlmClient::new().with_model_name("replacement-model"));
     let replacement = Arc::new(echo_core::agent::StaticCritic::always_fail());
@@ -839,7 +851,7 @@ async fn prepared_generation_is_type_bound_to_its_origin_agent() -> crate::error
         Arc::new(crate::testing::MockLlmClient::new().with_model_name("replacement-model"));
     let prepared = origin
         .prepare_model_generation(
-            crate::llm::LlmConfig::openai("test-key", "replacement-model"),
+            test_llm_config("replacement-model"),
             client,
             None,
             None,

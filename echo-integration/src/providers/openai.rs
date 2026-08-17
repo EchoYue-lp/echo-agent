@@ -1,11 +1,6 @@
 use echo_core::error::{LlmError, ReactError, Result};
-use echo_core::llm::capabilities::ProviderCapabilities;
-use echo_core::llm::types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ContentPart, Message,
-    MessageContent, ResponseFormat, ToolDefinition,
-};
+use echo_core::llm::types::{ChatCompletionRequest, ContentPart, Message, MessageContent};
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
-use futures::Stream;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
@@ -14,7 +9,7 @@ use std::sync::Arc;
 use tracing::{Instrument, info_span};
 
 use super::client::{post, stream_post};
-use super::config::{Config, LlmConfig, ModelConfig};
+use super::config::LlmConfig;
 use super::thinking_translate::translate_thinking_openai_compat;
 
 fn token_limits(model: &str, limit: Option<u32>) -> (Option<u32>, Option<u32>) {
@@ -130,11 +125,11 @@ fn is_text_class_filename(name: &str) -> bool {
 }
 
 /// Assemble request headers
-pub fn assemble_req_header(model: &ModelConfig) -> Result<HeaderMap> {
+pub fn assemble_req_header(model: &LlmConfig) -> Result<HeaderMap> {
     let mut header_map = HeaderMap::new();
     header_map.insert(
         "Authorization",
-        format!("Bearer {}", model.apikey)
+        format!("Bearer {}", model.api_key)
             .parse()
             .map_err(|e| ReactError::Other(format!("Invalid Authorization header: {}", e)))?,
     );
@@ -147,87 +142,6 @@ pub fn assemble_req_header(model: &ModelConfig) -> Result<HeaderMap> {
     Ok(header_map)
 }
 
-/// Synchronous chat request (standalone function, uses environment variable config).
-///
-/// `messages` accepts a slice reference so callers don't need to repeatedly clone
-/// the entire message list in a retry loop. Internally converts to an owned Vec
-/// as needed, with a fixed cost of a single clone.
-#[allow(clippy::too_many_arguments)]
-pub async fn chat(
-    client: Arc<Client>,
-    model_name: &str,
-    messages: &[Message],
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    stream: Option<bool>,
-    tools: Option<Vec<ToolDefinition>>,
-    tool_choice: Option<String>,
-    response_format: Option<ResponseFormat>,
-    user_id: Option<String>,
-) -> Result<ChatCompletionResponse> {
-    let model = Config::get_model(model_name)?;
-    let (max_tokens, max_completion_tokens) = token_limits(&model.model, max_tokens);
-    let request_body = ChatCompletionRequest {
-        model: model.model.clone(),
-        messages: normalize_messages(messages.to_vec()),
-        temperature,
-        max_tokens,
-        max_completion_tokens,
-        stream,
-        tools,
-        tool_choice,
-        response_format,
-        stream_options: None,
-        reasoning_effort: None,
-        enable_thinking: None,
-        thinking_budget: None,
-        glm_thinking: None,
-        user_id,
-    };
-
-    let header_map = assemble_req_header(&model)?;
-    post(client, &request_body, header_map, model.baseurl.as_str()).await
-}
-
-/// Streaming chat request (standalone function, uses environment variable config)
-#[allow(clippy::too_many_arguments)]
-pub async fn stream_chat(
-    client: Arc<Client>,
-    model_name: &str,
-    messages: Vec<Message>,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    tools: Option<Vec<ToolDefinition>>,
-    tool_choice: Option<String>,
-    response_format: Option<ResponseFormat>,
-    cancel_token: Option<tokio_util::sync::CancellationToken>,
-    user_id: Option<String>,
-) -> Result<impl Stream<Item = Result<ChatCompletionChunk>> + use<>> {
-    let model = Config::get_model(model_name)?;
-    let (max_tokens, max_completion_tokens) = token_limits(&model.model, max_tokens);
-    let request_body = ChatCompletionRequest {
-        model: model.model.clone(),
-        messages: normalize_messages(messages),
-        temperature,
-        max_tokens,
-        max_completion_tokens,
-        stream: Some(true),
-        stream_options: Some(serde_json::json!({"include_usage": true})),
-        tools,
-        tool_choice,
-        response_format,
-        reasoning_effort: None,
-        enable_thinking: None,
-        thinking_budget: None,
-        glm_thinking: None,
-        user_id,
-    };
-
-    let header_map = assemble_req_header(&model)?;
-    let url = model.baseurl.clone();
-    stream_post(client, request_body, header_map, url, cancel_token).await
-}
-
 // ── OpenAI Client Implementation ───────────────────────────────────────────────
 
 /// OpenAI-compatible client.
@@ -235,14 +149,13 @@ pub async fn stream_chat(
 /// Supports any service compatible with the OpenAI Chat Completions API.
 pub struct OpenAiClient {
     client: Arc<Client>,
-    config: ModelConfig,
+    config: LlmConfig,
     header_map: HeaderMap,
 }
 
 impl OpenAiClient {
-    /// Create a client from environment variables
-    pub fn from_env(model_name: &str) -> Result<Self> {
-        let config = Config::get_model(model_name)?;
+    /// Create a client with a custom configuration
+    pub fn new(config: LlmConfig) -> Result<Self> {
         let header_map = assemble_req_header(&config)?;
         Ok(Self {
             client: Arc::new(Self::build_http_client()),
@@ -251,24 +164,12 @@ impl OpenAiClient {
         })
     }
 
-    /// Create a client with a custom configuration
-    pub fn new(config: LlmConfig) -> Result<Self> {
-        let model_config = config.to_model_config();
-        let header_map = assemble_req_header(&model_config)?;
-        Ok(Self {
-            client: Arc::new(Self::build_http_client()),
-            config: model_config,
-            header_map,
-        })
-    }
-
     /// Create a client with a shared HTTP client
     pub fn with_client(client: Arc<Client>, config: LlmConfig) -> Result<Self> {
-        let model_config = config.to_model_config();
-        let header_map = assemble_req_header(&model_config)?;
+        let header_map = assemble_req_header(&config)?;
         Ok(Self {
             client,
-            config: model_config,
+            config,
             header_map,
         })
     }
@@ -286,17 +187,12 @@ impl LlmClient for OpenAiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
-                // Resolve the thinking protocol from the REAL provider (e.g.
-                // "dashscope"), not the LlmProvider enum (which collapses all
-                // OpenAI-compatible providers into "openai"). The same model
-                // (e.g. deepseek-v4-pro) uses reasoning_effort via
-                // api.deepseek.com but enable_thinking via Bailian/DashScope.
-                let provider_str = self.config.provider_name.as_deref().unwrap_or("openai");
+                self.config.validate_input_modalities(&request.messages)?;
                 let t = translate_thinking_openai_compat(
                     &self.config.model,
-                    provider_str,
+                    self.config.api_protocol,
+                    self.config.thinking_protocol,
                     &request.thinking,
-                    ProviderCapabilities::openai_compatible(),
                 );
                 let (max_tokens, max_completion_tokens) =
                     token_limits(&self.config.model, request.max_tokens);
@@ -319,7 +215,8 @@ impl LlmClient for OpenAiClient {
                     reasoning_effort: t.reasoning_effort,
                     enable_thinking: t.enable_thinking,
                     thinking_budget: t.thinking_budget,
-                    glm_thinking: t.glm_thinking,
+                    thinking_type: t.thinking_type,
+                    think: t.ollama_think,
                     user_id: request.user_id.clone(),
                 };
 
@@ -327,7 +224,7 @@ impl LlmClient for OpenAiClient {
                     self.client.clone(),
                     &req,
                     self.header_map.clone(),
-                    &self.config.baseurl,
+                    &self.config.base_url,
                 )
                 .await?;
 
@@ -351,12 +248,12 @@ impl LlmClient for OpenAiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
-                let provider_str = self.config.provider_name.as_deref().unwrap_or("openai");
+                self.config.validate_input_modalities(&request.messages)?;
                 let t = translate_thinking_openai_compat(
                     &self.config.model,
-                    provider_str,
+                    self.config.api_protocol,
+                    self.config.thinking_protocol,
                     &request.thinking,
-                    ProviderCapabilities::openai_compatible(),
                 );
                 let (max_tokens, max_completion_tokens) =
                     token_limits(&self.config.model, request.max_tokens);
@@ -378,7 +275,8 @@ impl LlmClient for OpenAiClient {
                     reasoning_effort: t.reasoning_effort,
                     enable_thinking: t.enable_thinking,
                     thinking_budget: t.thinking_budget,
-                    glm_thinking: t.glm_thinking,
+                    thinking_type: t.thinking_type,
+                    think: t.ollama_think,
                     user_id: request.user_id.clone(),
                 };
 
@@ -386,7 +284,7 @@ impl LlmClient for OpenAiClient {
                     self.client.clone(),
                     req,
                     self.header_map.clone(),
-                    self.config.baseurl.clone(),
+                    self.config.base_url.clone(),
                     request.cancel_token,
                 )
                 .await?;
@@ -415,6 +313,7 @@ impl LlmClient for OpenAiClient {
 mod tests {
     use super::*;
     use base64::Engine as _;
+    use echo_core::llm::types::ChatCompletionChunk;
 
     fn multimodal_msg(parts: Vec<ContentPart>) -> Message {
         let mut msg = Message::user(String::new());

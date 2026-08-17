@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
 #[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopProvider, PermissionService};
-use crate::llm::{LlmClient, LlmConfig, OpenAiClient, ResponseFormat};
+use crate::llm::{LlmClient, LlmConfig, ResponseFormat};
 use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy};
 use crate::memory::store::Store;
 use crate::prelude::ReactAgent;
@@ -250,16 +250,6 @@ impl ReactAgentBuilder {
         self.model = config.model.clone();
         self.llm_config = Some(config);
         self
-    }
-
-    /// Use OpenAI client (convenience method)
-    ///
-    /// Reads configuration from environment variables.
-    pub fn with_openai(mut self, model: &str) -> Result<Self> {
-        let client = Arc::new(OpenAiClient::from_env(model)?);
-        self.llm_client = Some(client);
-        self.model = model.to_string();
-        Ok(self)
     }
 
     // ── Tool Configuration ──────────────────────────────────────────────────────
@@ -1145,18 +1135,27 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_llm_config_syncs_runtime_model_name() {
+    fn test_builder_llm_config_syncs_runtime_model_name() -> std::result::Result<(), String> {
+        let config = LlmConfig::for_provider(
+            "openai",
+            "https://api.example.test/v1",
+            "sk-demo",
+            "gpt-5.5",
+            echo_core::llm::LlmApiProtocol::Responses,
+        )
+        .map_err(|error| error.to_string())?;
         let agent = ReactAgentBuilder::new()
-            .llm_config(LlmConfig::openai("sk-demo", "gpt-5.5"))
+            .llm_config(config)
             .system_prompt("Test")
             .build()
-            .unwrap();
+            .map_err(|error| error.to_string())?;
 
         assert_eq!(agent.config().get_model_name(), "gpt-5.5");
         assert_eq!(
             agent.llm_config().map(|cfg| cfg.model.as_str()),
             Some("gpt-5.5")
         );
+        Ok(())
     }
 
     #[test]

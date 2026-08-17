@@ -76,9 +76,9 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
     println!("{}", "─".repeat(55));
     println!("Part 2: Agent 集成浏览器自动化（显示思考过程和工具返回）\n");
 
-    let model_name = require_configured_model(Some("deepseek-v4-flash"))?;
+    let llm_config = require_configured_model(Some("deepseek-v4-flash"))?;
     let mut agent = ReactAgentBuilder::new()
-        .model(&model_name)
+        .llm_config(llm_config)
         .name("browser-agent")
         .system_prompt(
             "你是一个浏览器自动化助手。你可以使用 browser_* 系列工具控制浏览器完成任务。\n\
@@ -194,41 +194,16 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────
 
-fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<String> {
+fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<LlmConfig> {
     let app_config = echo_agent::config::load_config(None);
-    let configured = app_config.model.name.trim();
-
-    if !configured.is_empty() {
-        return echo_agent::llm::config::LlmConfig::from_model(configured)
-            .map(|_| configured.to_string())
-            .map_err(|e| {
-                echo_agent::error::ReactError::Other(format!(
-                    "demo42 验收失败：当前 `model.name = {configured}` 配置无效：{e}"
-                ))
-            });
-    }
-
-    if let Some(preferred) = preferred
-        && echo_agent::llm::config::Config::has_model(preferred)
-    {
-        return Ok(preferred.to_string());
-    }
-
-    if let Some(first) = echo_agent::llm::config::Config::list_models()
-        .into_iter()
-        .next()
-    {
-        return Ok(first);
-    }
-
-    let load_err = echo_agent::llm::config::Config::load_cached()
-        .err()
-        .map(|e| format!("配置加载失败：{e}"))
-        .unwrap_or_else(|| {
-            "请在 echo-agent.yaml 的 `models:` 中声明至少一个模型，并让 `model.name` 指向它。"
-                .to_string()
-        });
-    Err(echo_agent::error::ReactError::Other(format!(
-        "demo42 验收失败：未找到可用模型配置。{load_err}"
-    )))
+    preferred
+        .map(|selector| app_config.resolve_llm_config(Some(selector)))
+        .transpose()
+        .and_then(|preferred| preferred.map_or_else(|| app_config.resolve_llm_config(None), Ok))
+        .or_else(|_| app_config.resolve_llm_config(None))
+        .map_err(|error| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo42 验收失败：请在 echo-agent.yaml 中配置可用的 model_providers/configured_models：{error}"
+            ))
+        })
 }

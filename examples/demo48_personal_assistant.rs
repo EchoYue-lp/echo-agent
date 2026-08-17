@@ -178,25 +178,25 @@ async fn demo_agent_orchestration() -> Result<()> {
     println!("Part 2: Agent 编排协作");
     println!("═══════════════════════════════════════════════════════\n");
 
-    let model_name = require_configured_model(None)?;
+    let llm_config = require_configured_model(None)?;
 
     // 创建专业化子 Agent
     let planner = ReactAgentBuilder::new()
-        .model(&model_name)
+        .llm_config(llm_config.clone())
         .name("planner")
         .system_prompt("你是规划专家，擅长制定计划和分解任务。请用简洁要点输出，不要写冗长铺垫。")
         .max_iterations(5)
         .build()?;
 
     let researcher = ReactAgentBuilder::new()
-        .model(&model_name)
+        .llm_config(llm_config.clone())
         .name("researcher")
         .system_prompt("你是研究专家，擅长收集和分析信息。请只返回高价值学习资源和简短说明。")
         .max_iterations(5)
         .build()?;
 
     let writer = ReactAgentBuilder::new()
-        .model(&model_name)
+        .llm_config(llm_config.clone())
         .name("writer")
         .system_prompt("你是写作专家，擅长整理和表达内容。请输出结构清晰、篇幅适中的最终方案。")
         .max_iterations(5)
@@ -204,7 +204,7 @@ async fn demo_agent_orchestration() -> Result<()> {
 
     // 创建主编排 Agent
     let mut coordinator = ReactAgentBuilder::new()
-        .model(&model_name)
+        .llm_config(llm_config)
         .name("coordinator")
         .system_prompt(
             "你是主编排者，负责协调各个子 Agent 完成复杂任务。
@@ -425,11 +425,11 @@ async fn demo_multimodal_support() -> Result<()> {
 
     println!("  📝 演示多模态消息类型:\n");
 
-    let model_name = require_configured_model(None)?;
+    let llm_config = require_configured_model(None)?;
 
     // 创建支持多模态的 Agent
     let agent = ReactAgentBuilder::new()
-        .model(&model_name)
+        .llm_config(llm_config)
         .name("multimodal-assistant")
         .system_prompt("你是一个多模态助手，可以理解文字和图片。")
         .max_iterations(5)
@@ -480,41 +480,16 @@ fn cleanup_sqlite_files(path: &Path) {
     let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }
 
-fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<String> {
+fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<LlmConfig> {
     let app_config = echo_agent::config::load_config(None);
-    let configured = app_config.model.name.trim();
-
-    if !configured.is_empty() {
-        return echo_agent::llm::config::LlmConfig::from_model(configured)
-            .map(|_| configured.to_string())
-            .map_err(|e| {
-                echo_agent::error::ReactError::Other(format!(
-                    "综合验收失败：当前 `model.name = {configured}` 配置无效：{e}"
-                ))
-            });
-    }
-
-    if let Some(preferred) = preferred
-        && echo_agent::llm::config::Config::has_model(preferred)
-    {
-        return Ok(preferred.to_string());
-    }
-
-    if let Some(first) = echo_agent::llm::config::Config::list_models()
-        .into_iter()
-        .next()
-    {
-        return Ok(first);
-    }
-
-    let load_err = echo_agent::llm::config::Config::load_cached()
-        .err()
-        .map(|e| format!("配置加载失败：{e}"))
-        .unwrap_or_else(|| {
-            "请在 echo-agent.yaml 的 `models:` 中声明至少一个模型，并让 `model.name` 指向它。"
-                .to_string()
-        });
-    Err(echo_agent::error::ReactError::Other(format!(
-        "综合验收失败：未找到可用模型配置。{load_err}"
-    )))
+    preferred
+        .map(|selector| app_config.resolve_llm_config(Some(selector)))
+        .transpose()
+        .and_then(|preferred| preferred.map_or_else(|| app_config.resolve_llm_config(None), Ok))
+        .or_else(|_| app_config.resolve_llm_config(None))
+        .map_err(|error| {
+            echo_agent::error::ReactError::Other(format!(
+                "综合验收失败：缺少显式 provider/model 配置：{error}"
+            ))
+        })
 }

@@ -385,13 +385,11 @@ pub(crate) async fn create_llm_stream(
 > {
     let tools = tools_for_request(snap, final_only);
     log_prompt_cache_shape(&messages, tools.as_deref());
-    let cancel = snap.cancel_token.clone();
 
     // ── Trait path: when an LlmClient trait object is attached (production
     // OpenAiClient / test MockLlmClient), route through it. This avoids the
-    // per-call model-resolve (Config::get_model) of the legacy reqwest path,
-    // which is what makes the core loop testable with a mock and removes the
-    // NotFindModelError dependency on echo-agent-models.yaml.
+    // per-call model resolution, which keeps the core loop testable with a
+    // mock and avoids coupling execution to a global model registry.
     // tracing::info!(
     //     agent = %snap.config.agent_name,
     //     model = %snap.config.model_name,
@@ -466,47 +464,10 @@ pub(crate) async fn create_llm_stream(
         return Ok(stream);
     }
 
-    // ── Legacy reqwest fallback (no LlmClient injected) ──
-    let stream = super::super::retry::retry_llm_call(
-        &snap.config.agent_name,
-        snap.config.llm_max_retries,
-        snap.config.llm_retry_delay_ms,
-        &snap.guard.circuit_breaker,
-        snap.cancel_token.as_ref(),
-        || {
-            let c = snap.client.clone();
-            let m = snap.config.model_name.clone();
-            let ms = messages.clone();
-            let t = tools.clone();
-            let ct = cancel.clone();
-            async move {
-                let s = crate::llm::stream_chat(
-                    c,
-                    &m,
-                    ms,
-                    snap.config.temperature,
-                    snap.config.max_tokens,
-                    t,
-                    (final_only && snap.config.supports_tool_choice_none)
-                        .then(|| "none".to_string()),
-                    None,
-                    ct,
-                    None,
-                )
-                .await?;
-                Ok(Box::pin(s)
-                    as std::pin::Pin<
-                        Box<
-                            dyn futures::Stream<
-                                    Item = Result<crate::llm::types::ChatCompletionChunk>,
-                                > + Send,
-                        >,
-                    >)
-            }
-        },
-    )
-    .await?;
-    Ok(stream)
+    Err(crate::error::ReactError::Other(format!(
+        "agent '{}' has no LlmClient; inject an explicit LlmConfig or LlmClient",
+        snap.config.agent_name
+    )))
 }
 
 fn tools_for_request(snap: &AgentRunSnapshot, final_only: bool) -> Option<Vec<ToolDefinition>> {

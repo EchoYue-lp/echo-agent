@@ -34,16 +34,16 @@ async fn main() -> echo_agent::error::Result<()> {
 
     println!("═══ Multi-Modal Message Demo ═══\n");
 
-    let model_name = require_yaml_model()?;
+    let llm_config = require_yaml_model()?;
 
     // ── Part 1: LLM 图片分析（需要 API Key）────────────────────────────────────
-    demo_live_image_analysis(&model_name).await?;
+    demo_live_image_analysis(&llm_config).await?;
 
     // ── Part 2: Chat 模式连续对话 ─────────────────────────────────────────────
-    demo_live_chat_mode(&model_name).await?;
+    demo_live_chat_mode(&llm_config).await?;
 
     // ── Part 3: 多图分析示例 ───────────────────────────────────────────────────
-    demo_live_multiple_images(&model_name).await?;
+    demo_live_multiple_images(&llm_config).await?;
 
     println!("\n═══ Demo Complete ═══");
     Ok(())
@@ -51,7 +51,8 @@ async fn main() -> echo_agent::error::Result<()> {
 
 // ── Part 3: LLM 图片分析 ─────────────────────────────────────────────────────────
 
-async fn demo_live_image_analysis(model_name: &str) -> echo_agent::error::Result<()> {
+async fn demo_live_image_analysis(config: &LlmConfig) -> echo_agent::error::Result<()> {
+    let model_name = config.model.as_str();
     println!("─────────────────────────────────────────────");
     println!("Part 1: 真实图片分析");
     println!("─────────────────────────────────────────────\n");
@@ -59,7 +60,7 @@ async fn demo_live_image_analysis(model_name: &str) -> echo_agent::error::Result
     println!("  使用模型: {}", model_name);
     println!("  图片 URL: {}\n", live_image_url());
 
-    let agent = build_live_agent(model_name)?;
+    let agent = build_live_agent(config)?;
     let result = agent
         .chat_with_image_url("请用一句话描述这张图片的主体和场景。", live_image_url())
         .await
@@ -72,12 +73,13 @@ async fn demo_live_image_analysis(model_name: &str) -> echo_agent::error::Result
 
 // ── Part 4: Chat 模式连续对话 ───────────────────────────────────────────────────
 
-async fn demo_live_chat_mode(model_name: &str) -> echo_agent::error::Result<()> {
+async fn demo_live_chat_mode(config: &LlmConfig) -> echo_agent::error::Result<()> {
+    let model_name = config.model.as_str();
     println!("─────────────────────────────────────────────");
     println!("Part 2: 真实 Chat 模式多轮对话");
     println!("─────────────────────────────────────────────\n");
 
-    let agent = build_live_agent(model_name)?;
+    let agent = build_live_agent(config)?;
 
     println!("  Q: 什么是多模态 AI？\n");
     match agent.chat("什么是多模态 AI？请用一句话简要说明。").await {
@@ -102,12 +104,13 @@ async fn demo_live_chat_mode(model_name: &str) -> echo_agent::error::Result<()> 
 
 // ── Part 5: 多图分析示例 ─────────────────────────────────────────────────────────
 
-async fn demo_live_multiple_images(model_name: &str) -> echo_agent::error::Result<()> {
+async fn demo_live_multiple_images(config: &LlmConfig) -> echo_agent::error::Result<()> {
+    let model_name = config.model.as_str();
     println!("─────────────────────────────────────────────");
     println!("Part 3: 真实多图分析");
     println!("─────────────────────────────────────────────\n");
 
-    let agent = build_live_agent(model_name)?;
+    let agent = build_live_agent(config)?;
 
     let message = Message::user_multimodal(vec![
         ContentPart::Text {
@@ -136,30 +139,27 @@ async fn demo_live_multiple_images(model_name: &str) -> echo_agent::error::Resul
     Ok(())
 }
 
-fn require_yaml_model() -> echo_agent::error::Result<String> {
+fn require_yaml_model() -> echo_agent::error::Result<LlmConfig> {
     let app_config = load_config(None);
-    let model_name = app_config.model.name.trim().to_string();
-
-    if model_name.is_empty() {
-        return Err(echo_agent::error::ReactError::Other(
-            "demo36 需要在 echo-agent.yaml 中设置 `model.name`，并让它指向 `models.*` 里声明的视觉模型。".to_string(),
-        ));
-    }
-
-    if !echo_agent::llm::config::Config::has_model(&model_name) {
+    let config = app_config.resolve_llm_config(None).map_err(|error| {
+        echo_agent::error::ReactError::Other(format!(
+            "demo36 需要显式配置 provider 和视觉模型：{error}"
+        ))
+    })?;
+    if !config.input_modalities.contains(&ModelInputModality::Image) {
         return Err(echo_agent::error::ReactError::Other(format!(
-            "demo36 当前 `model.name = {model_name}`，但它没有在 `echo-agent.yaml` 的 `models:` 中声明。请先在 YAML 中配置同名模型，并确保它支持视觉输入。"
+            "demo36 模型 '{}' 未启用图片输入能力",
+            config.model
         )));
     }
-
-    Ok(model_name)
+    Ok(config)
 }
 
-fn build_live_agent(model_name: &str) -> echo_agent::error::Result<ReactAgent> {
+fn build_live_agent(config: &LlmConfig) -> echo_agent::error::Result<ReactAgent> {
     ReactAgentBuilder::new()
         .name("multimodal-live-agent")
         .system_prompt("你是一个多模态智能助手，可以分析图片并回答相关问题。")
-        .model(model_name)
+        .llm_config(config.clone())
         .build()
 }
 

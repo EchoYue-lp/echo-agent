@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 结构化输出类型
@@ -526,14 +525,7 @@ fn cleanup_sqlite_files(path: &Path) {
 }
 
 fn load_embedder_from_config() -> Result<Arc<dyn Embedder>> {
-    let cfg = echo_agent::llm::config::Config::get_embedding().map_err(|e| {
-        echo_agent::error::ReactError::Other(format!(
-            "缺少 embedding 配置，无法完成综合验收示例: {e}"
-        ))
-    })?;
-    let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
-        .with_timeout(Duration::from_secs(cfg.timeout_secs));
-    Ok(Arc::new(embedder))
+    Ok(Arc::new(HttpEmbedder::from_env()))
 }
 
 async fn load_verified_embedder_from_config() -> Result<Arc<dyn Embedder>> {
