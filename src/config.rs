@@ -381,21 +381,21 @@ impl AppConfig {
 
 /// Model configuration.
 ///
-/// The default provider is `deepseek` with model `deepseek-v4-flash`.
-/// Users can specify other providers (openai, anthropic, qwen, etc.) and their models.
+/// Provider and model are empty until the consuming application selects an
+/// explicit configured model. The framework does not choose a vendor.
 ///
 /// Authentication and base URL can be set via:
 /// - Config file: auth_token and base_url fields (highest priority)
 /// - Struct fields (the application layer is responsible for filling these
 ///   from its own config file / env vars before constructing a `ModelConfig`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
     /// Default configured model id used by GUI/runtime switchers.
     pub default_model_id: Option<String>,
-    /// Model provider (e.g. "deepseek", "openai", "anthropic", "qwen").
+    /// Model provider selected by the consuming application.
     pub provider: String,
-    /// Model name (e.g. "deepseek-v4-flash", "gpt-5.5", "claude-3.5-sonnet").
+    /// Provider-facing model name selected by the consuming application.
     pub name: String,
     /// API authentication token (optional; the application layer is responsible
     /// for populating this from its own config/env before constructing the struct).
@@ -412,22 +412,6 @@ pub struct ModelConfig {
     /// Optional model context window size in tokens.
     /// When None, falls back to name-based inference.
     pub context_window: Option<u32>,
-}
-
-impl Default for ModelConfig {
-    fn default() -> Self {
-        Self {
-            default_model_id: None,
-            provider: "deepseek".to_string(),
-            name: "deepseek-v4-flash".to_string(),
-            auth_token: None,
-            base_url: None,
-            api_protocol: None,
-            max_tokens: None,
-            temperature: None,
-            context_window: None,
-        }
-    }
 }
 
 impl ModelConfig {
@@ -919,8 +903,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AppConfig::default();
-        assert_eq!(config.model.provider, "deepseek");
-        assert_eq!(config.model.name, "deepseek-v4-flash");
+        assert!(config.model.provider.is_empty());
+        assert!(config.model.name.is_empty());
         assert_eq!(config.agent.name, "echo-assistant");
         assert_eq!(config.agent.max_iterations, 10);
         assert!(config.agent.enable_tools);
@@ -937,7 +921,7 @@ mod tests {
     fn test_to_agent_config() {
         let config = AppConfig::default();
         let agent_config = config.to_agent_config();
-        assert_eq!(agent_config.get_model_name(), "deepseek-v4-flash");
+        assert!(agent_config.get_model_name().is_empty());
         assert_eq!(agent_config.get_agent_name(), "echo-assistant");
         assert!(agent_config.is_tool_enabled());
         assert!(agent_config.is_memory_enabled());
@@ -997,8 +981,8 @@ mod tests {
         let missing_path =
             std::env::temp_dir().join(format!("echo-agent-missing-config-{}.yaml", uuid()));
         let config = load_config(missing_path.to_str());
-        assert_eq!(config.model.provider, "deepseek");
-        assert_eq!(config.model.name, "deepseek-v4-flash");
+        assert!(config.model.provider.is_empty());
+        assert!(config.model.name.is_empty());
     }
 
     #[test]

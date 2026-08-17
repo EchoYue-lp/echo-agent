@@ -795,13 +795,9 @@ impl ReactAgentBuilder {
     /// Build ReAct Agent (internal method)
     pub fn build(self) -> Result<ReactAgent> {
         // ── Construction-time validation ────────────────────────────────────────────
-        if self.model.trim().is_empty() {
-            return Err(crate::error::ConfigError::MissingConfig(
-                "model".to_string(),
-                "Model name cannot be empty".to_string(),
-            )
-            .into());
-        }
+        // A client may be attached later by an application-level setup flow.
+        // Until then the agent can expose configuration and non-LLM tools, and
+        // normal run paths return the existing missing-client error.
         if self.max_iterations == 0 {
             return Err(crate::error::ConfigError::ConfigFileError(
                 "max_iterations must be greater than zero".to_string(),
@@ -1131,6 +1127,19 @@ mod tests {
             assert!(names.iter().any(|name| name == expected));
         }
         assert!(!names.iter().any(|name| name == "todo_write"));
+        Ok(())
+    }
+
+    #[test]
+    fn builder_allows_deferred_llm_configuration() -> std::result::Result<(), String> {
+        let agent = ReactAgentBuilder::new()
+            .system_prompt("Test")
+            .build()
+            .map_err(|error| error.to_string())?;
+
+        assert!(agent.model_name().is_empty());
+        assert!(agent.llm_client().is_none());
+        assert!(agent.llm_config().is_none());
         Ok(())
     }
 
