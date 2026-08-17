@@ -60,10 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commit failure so product adapters can discard unpublished scope resources
   without duplicating framework DAG validation. A failing `ensure_scope` must
   clean its own unpublished side effects before it returns.
-- Team collaboration is now declared with `TeamSpec` / `TeamStrategy`. The
-  shared `SubagentExecutor` resolves every member, compiles the intent into the
-  revisioned Task graph, and executes it through `RuntimeDagExecutor`; Team no
-  longer owns Agent instances, a registry, or a scheduler.
+- Team collaboration can be declared by registered names with `TeamSpec`, or
+  composed from concrete Agent instances with `TeamAgentBuilder`. Programmatic
+  members are registered into the same `SubagentRegistry` and executed by the
+  same `SubagentExecutor`; both entry points compile into the revisioned Task
+  graph and run through `RuntimeDagExecutor`.
 - `JsonlChangeLog::new` and `MemoryRuntimeIntegrationBuilder` initialization
   now return `Result` and fail closed on complete-record corruption. Stable
   audit IDs can be replayed through `ChangeLog::record_idempotent`; identical
@@ -106,10 +107,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Runtime-state `TaskNode` / `TaskNodeStatus` APIs were removed. ReAct
   `RuntimeStateStore` checkpoints now contain only resumable Agent state;
   revisioned task progress remains in the canonical Task graph.
-- The old Team object model (`Team`, `TeamMember`, `TeamRole`, raw Agent
-  ownership, and manager-owned scheduling) was removed. Register ordinary
-  Subagents once and attach a declarative `TeamSpec` to the Team-mode
-  `SubagentDefinition`.
+- The Team-specific `TaskNode` checkpoint format and manager-owned ready/fan-out
+  loop were removed. Dynamic manager plans are committed as a new revision by
+  `TaskRevisionService`, then executed by `RuntimeDagExecutor`. The public
+  `Team`, `TeamMember`, `TeamRole`, `TeamAgentBuilder`, and `TeamStrategy`
+  composition APIs remain available as thin adapters. Shared Agent objects now
+  enter directly through `register_shared` / `add_shared_member`; the obsolete
+  `ArcAgentBox` wrapper is not restored.
+  `TeamRuntime` and `execute_team_on_runtime` let persistent consumers reuse
+  their canonical revision/result authority. `TeamAgent` retains its in-memory
+  runtime only when given an explicit stable run ID; anonymous executions do
+  not accumulate old graphs.
+- Manager-produced task plans now use a strict typed JSON contract. Invalid
+  schemas, unknown Subagents, duplicate task IDs, and invalid dependencies fail
+  closed before the plan is committed as a graph revision.
+- The historical `TeamStrategy::Swarm.batch_size` field was removed because it
+  was never read by the executor. A batching option should only return with an
+  implemented graph-partitioning contract.
 
 ## [0.2.0] — 2026-05-29
 

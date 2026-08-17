@@ -39,7 +39,10 @@ pub use prompt::{
     with_compiled_task,
 };
 pub use registry::{AgentFactory, FnAgentFactory, SubagentRegistry};
-pub use team::{TeamConfig, TeamSpec, TeamStrategy};
+pub use team::{
+    Team, TeamAgent, TeamAgentBuilder, TeamConfig, TeamExecutionResult, TeamMember, TeamRole,
+    TeamRuntime, TeamSpec, TeamStrategy, execute_team, execute_team_on_runtime,
+};
 pub use types::{
     ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentArtifact, SubagentDefinition,
     SubagentKind, SubagentOutcome, SubagentResult, SubagentStatus, SubagentTouchedFiles,

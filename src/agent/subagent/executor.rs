@@ -1229,12 +1229,10 @@ impl SubagentExecutor {
             .unwrap_or_else(|| format!("team-{}", uuid::Uuid::new_v4().as_simple()));
         let parent_agent = req.agent_name.clone();
         let team_runtime = req.runtime_context.clone();
-        let team_cancel = req.cancel.child_token();
         let spawned = self.clone_for_spawn();
-        let dispatch: super::team::TeamDispatchFn = Arc::new(move |agent_name, task| {
+        let dispatch: super::team::TeamDispatchFn = Arc::new(move |agent_name, task, cancel| {
             let executor = spawned.clone_for_spawn();
             let parent_agent = parent_agent.clone();
-            let cancel = team_cancel.child_token();
             let runtime_context = team_runtime.clone().map(|mut context| {
                 context.execution_id =
                     Some(format!("team-member-{}", uuid::Uuid::new_v4().as_simple()));
@@ -1275,7 +1273,7 @@ impl SubagentExecutor {
             })
         });
         let start = Instant::now();
-        let result = super::team::execute_team(
+        let result = super::team::execute_team_with_runtime_dispatch(
             &spec,
             &compiled.task_input,
             &run_id,

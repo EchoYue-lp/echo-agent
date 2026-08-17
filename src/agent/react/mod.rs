@@ -889,6 +889,7 @@ impl ReactAgent {
     /// use echo_agent::llm::LlmConfig;
     /// use echo_agent::prelude::*;
     ///
+    /// # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     /// let llm_config = LlmConfig::for_provider(
     ///     "my-provider",
     ///     "https://api.example.com/v1",
@@ -900,6 +901,8 @@ impl ReactAgent {
     /// let agent = ReactAgent::new(
     ///     AgentConfig::standard("qwen3-max", "assistant", "You are a helpful assistant")
     /// ).with_llm_config(llm_config);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_llm_config(mut self, config: LlmConfig) -> Self {
         self.set_llm_config(config);

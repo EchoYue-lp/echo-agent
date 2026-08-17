@@ -182,17 +182,23 @@ impl SubagentRegistry {
 
     /// Register a pre-built agent with its definition.
     pub async fn register(&self, def: SubagentDefinition, agent: Box<dyn Agent>) {
+        self.register_shared(def, Arc::from(agent)).await;
+    }
+
+    /// Register a shared pre-built Agent without wrapping it in a second
+    /// execution container. This is the programmatic composition path used by
+    /// Team and agents-as-tools style integrations.
+    pub async fn register_shared(&self, def: SubagentDefinition, agent: Arc<dyn Agent>) {
         let name = def.name.clone();
         info!(subagent = %name, mode = %def.execution_mode, "Registering subagent");
 
-        let arc_agent = Arc::new(agent);
         let mut state = self.state.write().await;
         let revision = state.next_revision();
         state.entries.insert(
             name.clone(),
             RegistryEntry {
                 definition: def,
-                agent: Some(arc_agent),
+                agent: Some(agent),
                 factory: None,
                 revision,
             },
@@ -209,8 +215,13 @@ impl SubagentRegistry {
     /// Use this from synchronous contexts (e.g., builder pattern, `main()`).
     /// Falls back to logging a warning if locks are contended.
     pub fn register_sync(&self, def: SubagentDefinition, agent: Box<dyn Agent>) -> bool {
+        self.register_shared_sync(def, Arc::from(agent))
+    }
+
+    /// Synchronous counterpart to [`register_shared`](Self::register_shared).
+    /// Returns `false` rather than blocking when the registry is contended.
+    pub fn register_shared_sync(&self, def: SubagentDefinition, agent: Arc<dyn Agent>) -> bool {
         let name = def.name.clone();
-        let arc_agent = Arc::new(agent);
 
         let ok = match self.state.try_write() {
             Ok(mut state) => {
@@ -219,7 +230,7 @@ impl SubagentRegistry {
                     name.clone(),
                     RegistryEntry {
                         definition: def,
-                        agent: Some(arc_agent),
+                        agent: Some(agent),
                         factory: None,
                         revision,
                     },
@@ -590,6 +601,24 @@ mod tests {
         let registered = registry.get("researcher").await.unwrap();
         assert_eq!(registered.definition.name, "researcher");
         assert!(registered.has_instance);
+    }
+
+    #[tokio::test]
+    async fn shared_registration_preserves_agent_identity() -> Result<()> {
+        let registry = SubagentRegistry::new();
+        let shared: Arc<dyn Agent> = Arc::new(MockAgent::new("shared"));
+        registry
+            .register_shared(
+                SubagentDefinition::new("shared", "Shared programmatic Agent"),
+                shared.clone(),
+            )
+            .await;
+
+        let resolved = registry.get_agent("shared").await.ok_or_else(|| {
+            crate::error::ReactError::Other("shared Agent was not registered".to_string())
+        })?;
+        assert!(Arc::ptr_eq(&shared, &resolved));
+        Ok(())
     }
 
     #[tokio::test]
