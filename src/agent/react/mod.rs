@@ -67,7 +67,10 @@ use crate::agent::react::subsystems::tool_exec::ToolExecutionSubsystem;
 
 pub mod builder;
 mod capabilities;
-pub use capabilities::{PreparedAgentModelGeneration, PreparedCriticUpdate, PreparedTokenLimit};
+pub use capabilities::{
+    PreparedAgentModelDeactivation, PreparedAgentModelGeneration, PreparedCriticUpdate,
+    PreparedTokenLimit,
+};
 mod extract;
 pub mod run;
 pub mod structured;

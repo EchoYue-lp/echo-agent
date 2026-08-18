@@ -138,9 +138,10 @@ pub mod prelude {
     pub use crate::agent::{
         AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle,
         CancellationToken, EventEnvelope, EventIdentity, InterventionCallback, InterventionResult,
-        PreparedAgentModelGeneration, PreparedCriticUpdate, PreparedTokenLimit, ReactAgent,
-        ReactAgentBuilder, StepType, StructuredAgent, ToolInvocation, ToolInvocationRewrite,
-        envelope_event_stream, envelope_event_stream_after, validate_event_trajectory,
+        PreparedAgentModelDeactivation, PreparedAgentModelGeneration, PreparedCriticUpdate,
+        PreparedTokenLimit, ReactAgent, ReactAgentBuilder, StepType, StructuredAgent,
+        ToolInvocation, ToolInvocationRewrite, envelope_event_stream, envelope_event_stream_after,
+        validate_event_trajectory,
     };
     // Prompt Template
     pub use echo_core::agent::{PromptTemplateManager, RunBudgetPolicy};

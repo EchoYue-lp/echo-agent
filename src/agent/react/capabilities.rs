@@ -90,6 +90,12 @@ pub struct PreparedAgentModelGeneration {
     token_limit: PreparedTokenLimitValues,
 }
 
+/// A target-bound receipt that clears one agent's active model generation.
+pub struct PreparedAgentModelDeactivation {
+    agent: tokio::sync::OwnedRwLockWriteGuard<ReactAgent>,
+    critic_owner: Option<String>,
+}
+
 impl PreparedTokenLimit {
     /// Publish the token limit to the exact agent locked during preparation.
     pub fn commit(self) {
@@ -120,10 +126,35 @@ impl PreparedAgentModelGeneration {
         agent.llm_config = Some(llm_config);
         agent.llm_client = Some(llm_client);
         agent.thinking = thinking;
-        if let PreparedCriticUpdate::ReplaceOwned { owner, critic } = critic
+        match critic {
+            PreparedCriticUpdate::ReplaceOwned { owner, critic }
+                if agent.critic_owner.as_deref() == Some(owner.as_str()) =>
+            {
+                agent.critic = Some(critic);
+            }
+            PreparedCriticUpdate::Preserve | PreparedCriticUpdate::ReplaceOwned { .. } => {}
+        }
+    }
+}
+
+impl PreparedAgentModelDeactivation {
+    /// Clear the model generation from the exact agent locked during preparation.
+    pub fn commit(self) {
+        let Self {
+            mut agent,
+            critic_owner,
+        } = self;
+        agent.config.model_name.clear();
+        agent.config.temperature = None;
+        agent.config.max_tokens = None;
+        agent.llm_config = None;
+        agent.llm_client = None;
+        agent.thinking = None;
+        if let Some(owner) = critic_owner
             && agent.critic_owner.as_deref() == Some(owner.as_str())
         {
-            agent.critic = Some(critic);
+            agent.critic = None;
+            agent.critic_owner = None;
         }
     }
 }
@@ -170,6 +201,18 @@ impl AgentHandle {
             critic,
             token_limit,
         })
+    }
+
+    /// Lock this agent for an atomic active-model deactivation.
+    pub async fn prepare_model_deactivation(
+        &self,
+        critic_owner: Option<String>,
+    ) -> PreparedAgentModelDeactivation {
+        let agent = Arc::clone(self.inner()).write_owned().await;
+        PreparedAgentModelDeactivation {
+            agent,
+            critic_owner,
+        }
     }
 }
 

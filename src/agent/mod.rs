@@ -68,7 +68,8 @@ pub use crate::agent::handle::AgentHandle;
 pub use crate::agent::react::builder::ReactAgentBuilder;
 pub use crate::agent::react::structured::StructuredAgent;
 pub use crate::agent::react::{
-    PreparedAgentModelGeneration, PreparedCriticUpdate, PreparedTokenLimit, ReactAgent,
+    PreparedAgentModelDeactivation, PreparedAgentModelGeneration, PreparedCriticUpdate,
+    PreparedTokenLimit, ReactAgent,
 };
 pub use crate::agent::steer::TurnSteerError;
 pub use config::AgentConfig;

@@ -758,6 +758,51 @@ async fn prepared_model_generation_is_inert_until_infallible_commit() -> crate::
 }
 
 #[tokio::test]
+async fn prepared_model_deactivation_clears_the_committed_generation() -> crate::error::Result<()> {
+    let handle = AgentHandle::new(ReactAgent::new(AgentConfig::new(
+        "original-model",
+        "test_agent",
+        "system prompt",
+    )));
+    let client: Arc<dyn crate::llm::LlmClient> =
+        Arc::new(crate::testing::MockLlmClient::new().with_model_name("active-model"));
+    handle
+        .prepare_model_generation(
+            test_llm_config("active-model"),
+            client,
+            Some(0.25),
+            Some(4096),
+            None,
+            32_768,
+            super::PreparedCriticUpdate::Preserve,
+        )
+        .await?
+        .commit();
+
+    let prepared = handle.prepare_model_deactivation(None).await;
+    assert!(handle.try_write(|_| ()).is_none());
+    prepared.commit();
+
+    let projection = handle
+        .read(|agent| {
+            (
+                agent.model_name().to_string(),
+                agent.config().get_temperature(),
+                agent.config().get_max_tokens(),
+                agent.llm_config().is_none(),
+                agent.llm_client().is_none(),
+            )
+        })
+        .await;
+    assert!(projection.0.is_empty());
+    assert_eq!(projection.1, None);
+    assert_eq!(projection.2, None);
+    assert!(projection.3);
+    assert!(projection.4);
+    Ok(())
+}
+
+#[tokio::test]
 async fn mismatched_prepared_client_leaves_agent_unchanged() {
     let agent = AgentHandle::new(ReactAgent::new(AgentConfig::new(
         "original-model",
