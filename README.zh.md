@@ -14,7 +14,7 @@
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20%E5%85%BC%E5%AE%B9-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/runtime-tokio-blue)](https://tokio.rs/)
 
-[English](./README.md) &middot; [文档中心](./docs/zh/README.md) &middot; [示例](./examples/) &middot; [更新日志](./CHANGELOG.md)
+[English](./README.md) &middot; [文档中心](./docs/zh/README.md) &middot; [Rust 学习指南](./docs/zh/rust-learning/README.md) &middot; [示例](./examples/) &middot; [更新日志](./CHANGELOG.md)
 
 </div>
 
@@ -245,8 +245,9 @@ echo-agent/
 ├── echo-orchestration/  工作流、人工审批和 DAG 任务
 ├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
 ├── echo-tools/          领域工具：chart、data、database、git、media、web、rag
+├── echo-rust-learning/  非发布的 Rust 教学 crate 与离线练习
 ├── src/                 Agent 引擎、重导出和门面层
-├── examples/            66 个可运行 Rust 示例
+├── examples/            可运行的框架功能示例
 ├── docs/                双语文档（en + zh）
 └── echo-agent.example.yaml  示例配置
 ```
@@ -340,9 +341,9 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 ## 亮点
 
 - **67 个注册工具** — ReAct 循环、数据分析、论文检索、Web、媒体、RAG、数据库等
-- **66 个可运行示例** — 验收、条件验收与教学示例均有明确分类
+- **可运行示例与教学 crate** — 框架验收示例和 Rust 基础课程分别维护
 - **全模块单元测试** — 覆盖核心路径的测试
-- **8 个 crate，1 个 facade** — 通用类型使用 `echo_agent::prelude::*`，具体工具使用 `echo_agent::tools::<domain>`
+- **8 个生产 crate + 1 个教学 crate** — 生产依赖保持单向，教学代码不进入框架运行时
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
 - **IM 集成** — QQ Bot（WebSocket）& 飞书（Webhook）开箱即用
 - **声明式工作流** — 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
@@ -839,6 +840,7 @@ agent.set_circuit_breaker(cb_config);
 
 | 主题 | English | 中文 |
 |------|---------|------|
+| 面向贡献者的 Rust 教程 | — | [ZH](docs/zh/rust-learning/README.md) |
 | ReAct Agent | [EN](docs/en/01-react-agent.md) | [ZH](docs/zh/01-react-agent.md) |
 | 工具系统 | [EN](docs/en/02-tools.md) | [ZH](docs/zh/02-tools.md) |
 | 记忆系统 | [EN](docs/en/03-memory.md) | [ZH](docs/zh/03-memory.md) |

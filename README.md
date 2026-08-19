@@ -249,8 +249,9 @@ echo-agent/
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
 ├── echo-tools/          Domain tools: chart, data, database, git, media, web, rag
+├── echo-rust-learning/  Non-published Rust lessons and offline exercises
 ├── src/                 Agent engine, re-exports, and facade layer
-├── examples/            66 runnable Rust examples
+├── examples/            Runnable framework feature examples
 ├── docs/                Bilingual documentation (en + zh)
 └── echo-agent.example.yaml  Example configuration
 ```
@@ -349,9 +350,9 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 ## Highlights
 
 - **67 registered tools** — ReAct loop, data analysis, research papers, web, media, RAG, database, and more
-- **66 runnable examples** — acceptance, conditional, and teaching examples are classified explicitly
+- **Runnable examples and a teaching crate** — framework acceptance and Rust lessons are maintained separately
 - **Comprehensive unit tests** — full coverage across all modules
-- **8 crates, 1 facade** — use `echo_agent::prelude::*` for common types and `echo_agent::tools::<domain>` for concrete tools
+- **8 production crates + 1 teaching crate** — production dependencies stay one-way and lessons never enter the runtime
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
 - **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box
 - **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required
@@ -1126,6 +1127,7 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 
 | Topic | English | Chinese |
 |-------|---------|---------|
+| Rust for Contributors | — | [ZH](docs/zh/rust-learning/README.md) |
 | ReAct Agent | [EN](docs/en/01-react-agent.md) | [ZH](docs/zh/01-react-agent.md) |
 | Tool System | [EN](docs/en/02-tools.md) | [ZH](docs/zh/02-tools.md) |
 | Memory System | [EN](docs/en/03-memory.md) | [ZH](docs/zh/03-memory.md) |

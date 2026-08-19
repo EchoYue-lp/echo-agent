@@ -62,6 +62,7 @@
 
 | 文档 | 说明 |
 |------|------|
+| [Rust 学习指南](rust-learning/README.md) | 面向零基础贡献者的多章节教程与可运行教学 crate |
 | [快速入门](getting-started.md) | 从零开始构建你的第一个 Agent |
 | [Skill 创作指南](skill-authoring.md) | 创建自定义 Code-based 和 File-based Skill |
 

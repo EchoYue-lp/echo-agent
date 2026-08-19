@@ -8,6 +8,10 @@ This directory is intentionally split into three contract levels.
 
 Use this file to decide whether an example should be tightened into an acceptance contract or kept readable as a teaching artifact.
 
+Rust language lessons are maintained separately in the non-published
+[`echo-rust-learning`](../echo-rust-learning/README.md) workspace crate. The
+examples below remain focused on framework behavior and APIs.
+
 ## Acceptance Examples
 
 These are the most suitable examples for deterministic local verification.
