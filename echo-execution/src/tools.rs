@@ -94,7 +94,8 @@ async fn cancel_aware<T>(
 pub use echo_core::tools::{
     ScriptExecutionProfile, ScriptExecutionProfileResolver, Tool, ToolContext, ToolExecutionConfig,
     ToolFailure, ToolFailureCategory, ToolOutputChannel, ToolParameters, ToolRecoveryAction,
-    ToolRegistrar, ToolResult, ToolRiskLevel, ToolRunner, ToolSideEffect, ToolStreamEvent,
+    ToolRegistrar, ToolResult, ToolResultContent, ToolRiskLevel, ToolRunner, ToolSideEffect,
+    ToolStreamEvent,
 };
 
 fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32) -> u64 {
@@ -768,6 +769,36 @@ impl ToolManager {
         definitions
     }
 
+    /// Return names of tools whose rich results the configured model cannot consume.
+    pub fn incompatible_tool_names(
+        &self,
+        available: &[echo_core::llm::ModelInputModality],
+    ) -> std::collections::HashSet<String> {
+        self.tools
+            .iter()
+            .filter(|entry| {
+                !entry
+                    .value()
+                    .required_input_modalities()
+                    .iter()
+                    .all(|required| available.contains(required))
+            })
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Return tool schemas compatible with an explicit model capability contract.
+    pub fn get_tool_definitions_for_modalities(
+        &self,
+        available: &[echo_core::llm::ModelInputModality],
+    ) -> Vec<ToolDefinition> {
+        let incompatible = self.incompatible_tool_names(available);
+        self.get_tool_definitions()
+            .into_iter()
+            .filter(|definition| !incompatible.contains(&definition.function.name))
+            .collect()
+    }
+
     /// 执行工具
     ///
     /// 支持并发控制、超时和重试。等价于以空 [`ToolContext`] 调用
@@ -1152,6 +1183,8 @@ mod execute_with_context_tests {
         name: &'static str,
     }
 
+    struct ImageInputTool;
+
     struct DelayedStreamingTool;
 
     struct InternallyTimedTool;
@@ -1529,6 +1562,31 @@ mod execute_with_context_tests {
         fn execute<'a>(
             &'a self,
             _p: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("ok")) })
+        }
+    }
+
+    impl Tool for ImageInputTool {
+        fn name(&self) -> &str {
+            "image_input"
+        }
+
+        fn description(&self) -> &str {
+            "requires an image-capable model"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn required_input_modalities(&self) -> &'static [echo_core::llm::ModelInputModality] {
+            &[echo_core::llm::ModelInputModality::Image]
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
         ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
             Box::pin(async { Ok(ToolResult::success("ok")) })
         }
@@ -2113,6 +2171,29 @@ mod execute_with_context_tests {
         let mut reversed = tm.get_openai_tools();
         reversed.reverse();
         assert_eq!(ToolManager::schema_stats_for(&reversed).ok(), Some(stats));
+    }
+
+    #[test]
+    fn tool_definitions_respect_model_input_modalities() {
+        let manager = ToolManager::new();
+        manager.register(Box::new(NamedTool { name: "text_input" }));
+        manager.register(Box::new(ImageInputTool));
+
+        let text_only = manager
+            .get_tool_definitions_for_modalities(&[echo_core::llm::ModelInputModality::Text]);
+        assert_eq!(
+            text_only
+                .iter()
+                .map(|definition| definition.function.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["text_input"]
+        );
+
+        let multimodal = manager.get_tool_definitions_for_modalities(&[
+            echo_core::llm::ModelInputModality::Text,
+            echo_core::llm::ModelInputModality::Image,
+        ]);
+        assert_eq!(multimodal.len(), 2);
     }
 
     #[tokio::test]

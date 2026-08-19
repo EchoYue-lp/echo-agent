@@ -150,7 +150,7 @@ fn demo_pipeline_stages() {
     println!("    • InterventionStage 是最高优先级决策点（在参数校验之前）");
     println!("    • ExecuteStage 的错误被转化为 ToolResult {{ success: false }}");
     println!("      而非 Err，确保 Trace / Callback 等后续阶段仍然执行");
-    println!("    • PlanModeStage 仅阻止 shell / write_file / edit_file / delete_file");
+    println!("    • PlanModeStage 阻止 shell / apply_patch 等写工具");
     println!("    • ReadBeforeEditStage 仅在 force_read_before_edit = true 时生效");
 
     println!("  → Pipeline 阶段总览 ✓");

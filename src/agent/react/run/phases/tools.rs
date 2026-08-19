@@ -12,7 +12,7 @@ use crate::agent::react::run::pipeline::ToolPipelineEvent;
 use crate::agent::react::{StepType, TOOL_FINAL_ANSWER};
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::{ReactError, Result};
-use crate::llm::types::{Message, MessageContent};
+use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -26,9 +26,10 @@ type ToolCallSpec = (String, String, Value);
 async fn project_typed_tool_result(
     context: &Arc<Mutex<crate::compression::ContextManager>>,
     result: &crate::tools::ToolResult,
-) {
+    accepts_images: bool,
+) -> Option<Message> {
     if !result.success {
-        return;
+        return None;
     }
     if let echo_core::tools::ToolResultKind::SkillActivation { name } = &result.kind {
         crate::agent::react::capabilities::project_skill_activation(
@@ -38,6 +39,22 @@ async fn project_typed_tool_result(
         )
         .await;
     }
+
+    if result.model_content.is_empty() || !accepts_images {
+        return None;
+    }
+    let mut parts = vec![ContentPart::Text {
+        text: "Rich content returned by the preceding tool call.".to_string(),
+    }];
+    parts.extend(result.model_content.iter().map(|content| match content {
+        echo_core::tools::ToolResultContent::ImageUrl { url, detail } => ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: url.clone(),
+                detail: detail.clone(),
+            },
+        },
+    }));
+    Some(Message::user_multimodal(parts))
 }
 
 enum ToolExecutionWave {
@@ -398,9 +415,21 @@ pub(crate) async fn run_tools(
                         Ok(execution) => {
                             batch_success_count = batch_success_count.saturating_add(1);
                             let fname = execution.name;
-                            let result = execution.result;
+                            let mut result = execution.result;
                             let output = result.output.clone();
-                            project_typed_tool_result(context, &result).await;
+                            let model_message = project_typed_tool_result(
+                                context,
+                                &result,
+                                snap.config
+                                    .input_modalities
+                                    .as_ref()
+                                    .is_none_or(|modalities| {
+                                        modalities
+                                            .contains(&echo_core::llm::ModelInputModality::Image)
+                                    }),
+                            )
+                            .await;
+                            result.model_content.clear();
                             yield_event_or!(
                                 tx,
                                 AgentEvent::ToolResult {
@@ -410,11 +439,16 @@ pub(crate) async fn run_tools(
                                 },
                                 IterOutcome::Abandoned
                             );
-                            context.lock().await.push(Message::tool_result(
+                            let mut context_guard = context.lock().await;
+                            context_guard.push(Message::tool_result(
                                 id.clone(),
                                 fname.clone(),
                                 output.clone(),
                             ));
+                            if let Some(message) = model_message {
+                                context_guard.push(message);
+                            }
+                            drop(context_guard);
                             if fname == TOOL_FINAL_ANSWER {
                                 // Verify answer before accepting
                                 if verify_answer(snap, context, &output, state.verifier_retry_count)
@@ -524,9 +558,20 @@ pub(crate) async fn run_tools(
                     Ok(execution) => {
                         batch_success_count = batch_success_count.saturating_add(1);
                         let fname = execution.name;
-                        let result = execution.result;
+                        let mut result = execution.result;
                         let output = result.output.clone();
-                        project_typed_tool_result(context, &result).await;
+                        let model_message = project_typed_tool_result(
+                            context,
+                            &result,
+                            snap.config
+                                .input_modalities
+                                .as_ref()
+                                .is_none_or(|modalities| {
+                                    modalities.contains(&echo_core::llm::ModelInputModality::Image)
+                                }),
+                        )
+                        .await;
+                        result.model_content.clear();
                         yield_event_or!(
                             tx,
                             AgentEvent::ToolResult {
@@ -536,11 +581,12 @@ pub(crate) async fn run_tools(
                             },
                             IterOutcome::Abandoned
                         );
-                        context.lock().await.push(Message::tool_result(
-                            id,
-                            fname.clone(),
-                            output.clone(),
-                        ));
+                        let mut context_guard = context.lock().await;
+                        context_guard.push(Message::tool_result(id, fname.clone(), output.clone()));
+                        if let Some(message) = model_message {
+                            context_guard.push(message);
+                        }
+                        drop(context_guard);
                         if fname == TOOL_FINAL_ANSWER {
                             // Verify answer before accepting
                             if verify_answer(snap, context, &output, state.verifier_retry_count)
@@ -608,9 +654,13 @@ pub(crate) async fn run_tools(
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolExecutionWave, build_execution_waves};
+    use super::{ToolExecutionWave, build_execution_waves, project_typed_tool_result};
+    use crate::llm::types::{ContentPart, MessageContent};
+    use echo_core::tools::{ToolResult, ToolResultContent, ToolResultKind};
     use serde_json::Value;
     use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn call(id: &str) -> (String, String, Value) {
         (id.to_string(), "tool".to_string(), Value::Null)
@@ -637,5 +687,60 @@ mod tests {
             Some(ToolExecutionWave::Concurrent(calls))
                 if calls.iter().map(|call| call.0.as_str()).eq(["b", "c"])
         ));
+    }
+
+    #[tokio::test]
+    async fn image_result_projects_multimodal_message() -> crate::error::Result<()> {
+        let context = Arc::new(Mutex::new(
+            crate::compression::ContextManager::builder(4096).build(),
+        ));
+        let result = ToolResult::success_with_kind(
+            ToolResultKind::Image {
+                mime_type: "image/png".to_string(),
+            },
+            "loaded",
+        )
+        .with_model_content(ToolResultContent::ImageUrl {
+            url: "data:image/png;base64,AAAA".to_string(),
+            detail: Some("high".to_string()),
+        });
+
+        let Some(message) = project_typed_tool_result(&context, &result, true).await else {
+            return Err(std::io::Error::other("image result should create a model message").into());
+        };
+        let MessageContent::Parts(parts) = message.content else {
+            return Err(std::io::Error::other("image result should be multimodal").into());
+        };
+        assert!(matches!(parts.first(), Some(ContentPart::Text { .. })));
+        assert!(matches!(
+            parts.get(1),
+            Some(ContentPart::ImageUrl { image_url })
+                if image_url.url == "data:image/png;base64,AAAA"
+                    && image_url.detail.as_deref() == Some("high")
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn image_result_is_not_projected_to_text_only_model() {
+        let context = Arc::new(Mutex::new(
+            crate::compression::ContextManager::builder(4096).build(),
+        ));
+        let result = ToolResult::success_with_kind(
+            ToolResultKind::Image {
+                mime_type: "image/png".to_string(),
+            },
+            "loaded",
+        )
+        .with_model_content(ToolResultContent::ImageUrl {
+            url: "data:image/png;base64,AAAA".to_string(),
+            detail: None,
+        });
+
+        assert!(
+            project_typed_tool_result(&context, &result, false)
+                .await
+                .is_none()
+        );
     }
 }

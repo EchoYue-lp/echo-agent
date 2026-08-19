@@ -52,7 +52,7 @@ let category = ToolRiskClassifier::classify("read_file");  // ReadOnly, level 0
 | `read_file` | `Read` | `ReadOnly` |
 | `write_file` | `Write` | `Standard` |
 | `delete_file` | `Write` | `Dangerous` |
-| `edit_file` | `Read, Write` | `Standard` |
+| `apply_patch` | `Read, Write` | `Standard` |
 | `shell` | `Execute` | `Dangerous` |
 | `web_fetch` / `web_search` | `Network` | `Standard` |
 | `git_commit` | `Write, Execute` | `Dangerous` |

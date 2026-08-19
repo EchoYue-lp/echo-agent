@@ -355,14 +355,14 @@ mod tests {
             },
             RunEvent::ToolCall {
                 call_id: "test_call".into(),
-                name: "edit_file".into(),
+                name: "apply_patch".into(),
                 args: None,
                 risk: None,
                 duration_ms: 20,
             },
             RunEvent::ToolResult {
                 call_id: "test_call".into(),
-                name: "edit_file".into(),
+                name: "apply_patch".into(),
                 success: true,
                 output_preview: None,
                 output_truncated: false,
@@ -425,14 +425,14 @@ mod tests {
             },
             RunEvent::ToolCall {
                 call_id: "test_call".into(),
-                name: "edit_file".into(),
+                name: "apply_patch".into(),
                 args: None,
                 risk: None,
                 duration_ms: 20,
             },
             RunEvent::ToolResult {
                 call_id: "test_call".into(),
-                name: "edit_file".into(),
+                name: "apply_patch".into(),
                 success: true,
                 output_preview: None,
                 output_truncated: false,

@@ -414,6 +414,7 @@ mod tests {
             truncated: true,
             mime_type: Some("application/json".to_string()),
             metadata: HashMap::from([("artifact_path".to_string(), "/tmp/tool.log".to_string())]),
+            model_content: Vec::new(),
         };
         let completed = SubagentEvent::DispatchToolCompleted {
             parent: "root".to_string(),

@@ -396,15 +396,14 @@ impl PipelineStage for ReadBeforeEditStage {
         if !is_write_tool(&ctx.tool_name) {
             return Ok(());
         }
-        if let Some(path) = extract_path_param(&ctx.tool_name, &ctx.params) {
-            let canonical = std::fs::canonicalize(&path)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.clone());
-            let ttl = std::time::Duration::from_secs(30 * 60);
-            let mut files = snapshot
-                .recently_read_files
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+        let paths = extract_path_params(&ctx.tool_name, &ctx.params);
+        let ttl = std::time::Duration::from_secs(30 * 60);
+        let mut files = snapshot
+            .recently_read_files
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for path in paths {
+            let canonical = resolve_tracking_path(&path, snapshot.config.working_dir.as_deref());
             let read = match files.get(&canonical) {
                 Some(instant) if instant.elapsed() < ttl => true,
                 Some(_) => {
@@ -415,9 +414,9 @@ impl PipelineStage for ReadBeforeEditStage {
             };
             if !read {
                 ctx.block(crate::tools::ToolFailureCategory::Unavailable, format!(
-                    "Read-before-edit is enabled. File '{}' has not been read. Use read_file first.",
-                    path
+                    "Read-before-edit is enabled. File '{path}' has not been read. Use read_file first."
                 ));
+                break;
             }
         }
         Ok(())
@@ -678,6 +677,7 @@ impl PipelineStage for ExecuteStage {
                     truncated: false,
                     mime_type: None,
                     metadata: std::collections::HashMap::new(),
+                    model_content: Vec::new(),
                 }
             }
         };
@@ -1093,12 +1093,38 @@ impl Default for ToolExecutionPipeline {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-fn extract_path_param(_tool_name: &str, params: &ToolParameters) -> Option<String> {
+fn extract_path_params(tool_name: &str, params: &ToolParameters) -> Vec<String> {
+    if tool_name == "apply_patch" {
+        #[cfg(feature = "files")]
+        return params
+            .get("patch")
+            .and_then(Value::as_str)
+            .and_then(|patch| echo_tools::files::apply_patch::existing_file_paths(patch).ok())
+            .unwrap_or_default();
+        #[cfg(not(feature = "files"))]
+        return Vec::new();
+    }
     params
         .get("path")
         .or_else(|| params.get("file_path"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .and_then(Value::as_str)
+        .map(|path| vec![path.to_string()])
+        .unwrap_or_default()
+}
+
+fn resolve_tracking_path(path: &str, working_dir: Option<&std::path::Path>) -> String {
+    let path = std::path::Path::new(path);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Some(working_dir) = working_dir {
+        working_dir.join(path)
+    } else {
+        path.to_path_buf()
+    };
+    std::fs::canonicalize(&resolved)
+        .unwrap_or(resolved)
+        .to_string_lossy()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -1107,24 +1133,37 @@ mod tests {
     use crate::agent::AgentEvent;
     use echo_core::tools::{Tool, ToolContext, ToolOutputChannel};
     use futures::Stream;
+    use std::collections::HashMap;
     use std::pin::Pin;
     use std::sync::Arc;
 
     #[test]
     fn test_is_write_tool() {
-        assert!(is_write_tool("edit_file"));
+        assert!(is_write_tool("apply_patch"));
         assert!(is_write_tool("write_file"));
         assert!(!is_write_tool("read_file"));
     }
 
     #[test]
-    fn test_extract_path_param() {
+    fn test_extract_path_params() {
         let params = vec![("path".to_string(), Value::String("src/main.rs".to_string()))]
             .into_iter()
             .collect();
         assert_eq!(
-            extract_path_param("edit_file", &params),
-            Some("src/main.rs".to_string())
+            extract_path_params("write_file", &params),
+            vec!["src/main.rs".to_string()]
+        );
+
+        let patch_params = HashMap::from([(
+            "patch".to_string(),
+            Value::String(
+                "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** Delete File: stale.txt\n*** End Patch"
+                    .to_string(),
+            ),
+        )]);
+        assert_eq!(
+            extract_path_params("apply_patch", &patch_params),
+            vec!["src/lib.rs".to_string(), "stale.txt".to_string()]
         );
     }
 

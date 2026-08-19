@@ -2241,6 +2241,7 @@ mod tests {
                     truncated: true,
                     mime_type: Some("application/json".to_string()),
                     metadata: HashMap::from([("source".to_string(), "fixture".to_string())]),
+                    model_content: Vec::new(),
                 };
                 let events = vec![
                     Ok(AgentEvent::ToolCall {

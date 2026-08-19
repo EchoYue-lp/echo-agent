@@ -221,7 +221,7 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 | **IM Channels** | QQ Bot (WebSocket) & Feishu (Webhook) built-in | `ChannelManager::new()` |
 | **Web Tools** | Search (DuckDuckGo/Brave/Tavily) + Page Fetch | `WebSearchTool::auto()` |
 | **Research Tools** | ArXiv, Semantic Scholar, PDF fetch, BibTeX generation | `ArxivSearchTool` |
-| **Media Tools** | PDF, Excel, Word, Image analysis built-in | `ImageAnalysisTool` |
+| **Media Tools** | PDF, Excel, Word, multimodal image viewing | `ViewImageTool` |
 | **Data Tools** | Polars-powered filter, aggregate, transform, stats | `DataReadTool` |
 | **Sandbox** | Local / Docker / K8s code execution with limits | `LocalSandbox::new()` |
 | **OpenTelemetry** | Distributed tracing and metrics via OTLP | `init_telemetry(&config)` |

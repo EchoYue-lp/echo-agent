@@ -1,277 +1,271 @@
-//! Image analysis tools
-//!
-//! Provides image analysis capabilities, enabling the Agent to "see" images.
-//! Leverages the framework's existing multimodal support by encoding images
-//! as base64 and sending them to the LLM.
+//! Local image viewing for multimodal agents.
 
-use futures::future::BoxFuture;
-use serde_json::Value;
-
-use crate::security::{ResourceLimits, SecurityConfig};
+use base64::Engine;
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::{
+    Tool, ToolParameters, ToolResult, ToolResultContent, ToolResultKind, ToolRiskLevel,
+};
+use futures::future::BoxFuture;
+use serde_json::{Value, json};
+use std::path::PathBuf;
 
-/// Image analysis tool
-///
-/// Supports:
-/// - Reading images from file paths
-/// - Fetching images from URLs
-/// - Analyzing from base64 data
-pub struct ImageAnalysisTool;
+use crate::security::SecurityConfig;
 
-impl Tool for ImageAnalysisTool {
+/// Load a local image and project its pixels into the next model turn.
+pub struct ViewImageTool {
+    base_dir: Option<PathBuf>,
+}
+
+impl ViewImageTool {
+    pub fn new() -> Self {
+        Self { base_dir: None }
+    }
+
+    pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
+        Self {
+            base_dir: Some(base.into()),
+        }
+    }
+}
+
+impl Default for ViewImageTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Tool for ViewImageTool {
     fn name(&self) -> &str {
-        "analyze_image"
+        "view_image"
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {
-        vec![ToolPermission::Read, ToolPermission::Network]
+        vec![ToolPermission::Read]
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
+    }
+
+    fn required_input_modalities(&self) -> &'static [echo_core::llm::ModelInputModality] {
+        &[echo_core::llm::ModelInputModality::Image]
     }
 
     fn description(&self) -> &str {
-        "Analyze image content, describing the information in the image. Supports reading images from file path, URL, or base64 data. Returns a detailed description and analysis of the image."
+        "View a local image file when visual inspection is needed. The image pixels are sent directly to multimodal models."
     }
 
     fn parameters(&self) -> Value {
-        serde_json::json!({
+        json!({
             "type": "object",
             "properties": {
-                "source": {
+                "path": {
                     "type": "string",
-                    "description": "Image source type: 'file' (file path), 'url' (network address), or 'base64' (encoded data)"
+                    "description": "Local filesystem path to an image file"
                 },
-                "data": {
+                "detail": {
                     "type": "string",
-                    "description": "Image data: file path, URL, or base64 encoded image data"
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Analysis prompt, telling the LLM what information you want from the image (optional)"
+                    "enum": ["auto", "low", "high"],
+                    "description": "Optional model image detail hint; defaults to high"
                 }
             },
-            "required": ["source", "data"]
+            "required": ["path"],
+            "additionalProperties": false
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
-            let source = parameters
-                .get("source")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("source".to_string()))?;
+            let path_input = parameters
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
+            let detail = parameters
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("high");
+            if !matches!(detail, "auto" | "low" | "high") {
+                return Ok(ToolResult::invalid_arguments(
+                    "detail must be one of: auto, low, high",
+                ));
+            }
 
-            let data = parameters
-                .get("data")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("data".to_string()))?;
+            let resolved = resolve_image_path(
+                path_input,
+                self.base_dir.as_deref(),
+                ctx.working_dir.as_deref(),
+            )?;
+            let resolved_text = resolved.to_str().ok_or_else(|| ToolError::InvalidPath {
+                path: resolved.display().to_string(),
+                reason: "Image path is not valid UTF-8".to_string(),
+            })?;
+            let path = SecurityConfig::global().validate_file(resolved_text)?;
+            if !path.is_file() {
+                return Ok(ToolResult::invalid_arguments(format!(
+                    "Image path is not a file: {}",
+                    path.display()
+                )));
+            }
 
-            let prompt = parameters.get("prompt").and_then(|v| v.as_str()).unwrap_or(
-                "Please describe the contents of this image in detail, including main elements, colors, layout, and any visible text information.",
-            );
-
-            let security = SecurityConfig::global();
-
-            // Get image data based on source type
-            let (base64_data, mime_type) = match source {
-                "file" => read_image_from_file(data, &security)?,
-                "url" => fetch_image_from_url(data, &security.limits).await?,
-                "base64" => {
-                    // Validate base64 data
-                    let mime_type = detect_mime_type_from_base64(data);
-                    validate_base64_size(data, &security.limits)?;
-                    (data.to_string(), mime_type)
-                }
-                _ => {
-                    return Err(ToolError::InvalidParameter {
-                        name: "source".to_string(),
-                        message: format!(
-                            "Unsupported source type: '{}', use 'file', 'url', or 'base64'",
-                            source
-                        ),
-                    }
-                    .into());
-                }
+            let bytes =
+                tokio::fs::read(&path)
+                    .await
+                    .map_err(|error| ToolError::ExecutionFailed {
+                        tool: "view_image".to_string(),
+                        message: format!("Failed to read image: {error}"),
+                    })?;
+            let Some(mime_type) = detect_supported_image_mime(&bytes) else {
+                return Ok(ToolResult::invalid_arguments(
+                    "Unsupported or invalid image. Supported formats: PNG, JPEG, GIF, WebP.",
+                ));
             };
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let data_url = format!("data:{mime_type};base64,{encoded}");
 
-            // Return image metadata, not raw base64 data
-            // Note: passing full base64 as text to LLM causes context bloat and LLM cannot "see" the image
-            let size_kb = base64_data.len() as f64 / 1024.0;
-            let estimated_raw_kb = (base64_data.len() as f64 * 3.0 / 4.0) / 1024.0;
-            Ok(ToolResult::success(format!(
-                "Image successfully loaded.\n- MIME type: {}\n- Base64 size: {:.1} KB\n- Estimated raw size: {:.1} KB\n- Analysis prompt: {}\n\nNote: Image data has been loaded but cannot be displayed as text to the LLM. To analyze image content, consider using a multimodal LLM model, or use browser tools to view the image URL.",
-                mime_type, size_kb, estimated_raw_kb, prompt,
-            )))
+            Ok(ToolResult::success_with_kind(
+                ToolResultKind::Image {
+                    mime_type: mime_type.to_string(),
+                },
+                format!(
+                    "Loaded image '{}' ({} bytes, {mime_type}).",
+                    path.display(),
+                    bytes.len()
+                ),
+            )
+            .with_mime_type(mime_type)
+            .with_meta("path", path.display().to_string())
+            .with_meta("byte_size", bytes.len().to_string())
+            .with_model_content(ToolResultContent::ImageUrl {
+                url: data_url,
+                detail: Some(detail.to_string()),
+            }))
         })
     }
 }
 
-/// Read image from file and convert to base64
-fn read_image_from_file(path: &str, security: &SecurityConfig) -> Result<(String, String)> {
-    use std::fs;
-    let path_obj = security.validate_file(path)?;
-
-    // 1. Detect MIME type (using file content, not extension)
-    let mime_type = detect_image_mime_type(&path_obj);
-
-    // 2. Read file
-    let bytes = fs::read(&path_obj).map_err(|e| ToolError::ExecutionFailed {
-        tool: "analyze_image".to_string(),
-        message: format!("Failed to read file: {}", e),
-    })?;
-
-    let base64_data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-
-    Ok((base64_data, mime_type))
-}
-
-/// Fetch image from URL and convert to base64
-async fn fetch_image_from_url(url: &str, limits: &ResourceLimits) -> Result<(String, String)> {
-    // SSRF protection: ssrf_safe_get resolves DNS once, validates addresses,
-    // and connects on pinned IPs — closing the DNS-rebinding TOCTOU window.
-    let response = crate::security::local_http_get(
-        url,
-        std::time::Duration::from_secs(limits.http_timeout_secs),
-        5,
-    )
-    .await
-    .map_err(|e| ToolError::ExecutionFailed {
-        tool: "analyze_image".to_string(),
-        message: format!("Failed to request image: {}", e),
-    })?;
-
-    // Check response status
-    if !response.status().is_success() {
-        return Err(ToolError::ExecutionFailed {
-            tool: "analyze_image".to_string(),
-            message: format!("HTTP request failed: {}", response.status()),
-        }
-        .into());
-    }
-
-    // Check Content-Length
-    if let Some(content_length) = response.headers().get("content-length")
-        && let Ok(len_str) = content_length.to_str()
-        && let Ok(len) = len_str.parse::<u64>()
-        && len > limits.http_max_size
-    {
-        return Err(ToolError::FileTooLarge {
-            size: len,
-            max: limits.http_max_size,
-        }
-        .into());
-    }
-
-    // Get MIME type from response headers
-    let mime_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|ct| {
-            // Extract main type (remove charset etc.)
-            ct.split(';').next()
-        })
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "image/png".to_string());
-
-    // Read response body
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool: "analyze_image".to_string(),
-            message: format!("Failed to read image data: {}", e),
-        })?;
-
-    // Double-check actual size
-    if bytes.len() as u64 > limits.http_max_size {
-        return Err(ToolError::FileTooLarge {
-            size: bytes.len() as u64,
-            max: limits.http_max_size,
-        }
-        .into());
-    }
-
-    let base64_data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-
-    Ok((base64_data, mime_type))
-}
-
-/// Detect image MIME type using magic number
-fn detect_image_mime_type(path: &std::path::Path) -> String {
-    use std::fs::File;
-    use std::io::Read;
-
-    if let Ok(mut file) = File::open(path) {
-        let mut buf = [0u8; 16];
-        if let Ok(n) = file.read(&mut buf) {
-            let header = &buf[..n];
-
-            // PNG: 89 50 4E 47 0D 0A 1A 0A
-            if header.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-                return "image/png".to_string();
-            }
-            // JPEG: FF D8 FF
-            if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
-                return "image/jpeg".to_string();
-            }
-            // GIF: 47 49 46 38
-            if header.starts_with(b"GIF8") {
-                return "image/gif".to_string();
-            }
-            // WebP: 52 49 46 46 ... 57 45 42 50
-            if header.len() >= 12 && &header[0..4] == b"RIFF" && &header[8..12] == b"WEBP" {
-                return "image/webp".to_string();
-            }
-            // BMP: 42 4D
-            if header.starts_with(b"BM") {
-                return "image/bmp".to_string();
-            }
-        }
-    }
-
-    // Fallback to extension detection
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("bmp") => "image/bmp",
-        _ => "image/png",
-    }
-    .to_string()
-}
-
-/// Detect MIME type from base64 data header
-fn detect_mime_type_from_base64(data: &str) -> String {
-    // Check common image format base64 header signatures
-    if data.starts_with("iVBORw0KGgo") {
-        "image/png"
-    } else if data.starts_with("/9j/") {
-        "image/jpeg"
-    } else if data.starts_with("R0lGOD") {
-        "image/gif"
-    } else if data.starts_with("UklGR") {
-        "image/webp"
+fn resolve_image_path(
+    path: &str,
+    base_dir: Option<&std::path::Path>,
+    working_dir: Option<&std::path::Path>,
+) -> Result<PathBuf> {
+    let requested = std::path::Path::new(path);
+    let root = match base_dir.or(working_dir) {
+        Some(root) => root.to_path_buf(),
+        None => std::env::current_dir().map_err(|error| ToolError::ExecutionFailed {
+            tool: "view_image".to_string(),
+            message: format!("Cannot resolve current directory: {error}"),
+        })?,
+    };
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
     } else {
-        "image/png" // default
+        root.join(requested)
+    };
+    let resolved = std::fs::canonicalize(&candidate).map_err(|error| ToolError::InvalidPath {
+        path: candidate.display().to_string(),
+        reason: format!("Image does not exist or cannot be accessed: {error}"),
+    })?;
+    if base_dir.is_some() {
+        let canonical_root =
+            std::fs::canonicalize(&root).map_err(|error| ToolError::ExecutionFailed {
+                tool: "view_image".to_string(),
+                message: format!("Cannot resolve image base directory: {error}"),
+            })?;
+        if !resolved.starts_with(&canonical_root) {
+            return Err(ToolError::AccessDenied {
+                path: resolved.display().to_string(),
+                reason: "Image resolves outside the configured base directory".to_string(),
+            }
+            .into());
+        }
     }
-    .to_string()
+    Ok(resolved)
 }
 
-/// Validate base64 data size
-fn validate_base64_size(data: &str, limits: &ResourceLimits) -> Result<()> {
-    // Base64 encoding size is about 4/3 of raw data
-    // Estimate raw size
-    let estimated_size = (data.len() as u64 * 3) / 4;
+fn detect_supported_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF")
+        && bytes
+            .get(8..12)
+            .is_some_and(|signature| signature == b"WEBP")
+    {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
 
-    if estimated_size > limits.max_file_size {
-        return Err(ToolError::FileTooLarge {
-            size: estimated_size,
-            max: limits.max_file_size,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn tool_context(directory: &std::path::Path) -> echo_core::tools::ToolContext {
+        echo_core::tools::ToolContext {
+            working_dir: Some(directory.to_path_buf()),
+            ..Default::default()
         }
-        .into());
     }
 
-    Ok(())
+    #[tokio::test]
+    async fn view_image_projects_pixels_without_serializing_them() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("示例.png");
+        let bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+        tokio::fs::write(&path, bytes).await?;
+        let parameters = HashMap::from([
+            ("path".to_string(), json!("示例.png")),
+            ("detail".to_string(), json!("low")),
+        ]);
+
+        let result = ViewImageTool::new()
+            .execute_with_context(parameters, &tool_context(directory.path()))
+            .await?;
+
+        assert!(result.success);
+        assert!(matches!(
+            result.kind,
+            ToolResultKind::Image { ref mime_type } if mime_type == "image/png"
+        ));
+        let Some(ToolResultContent::ImageUrl { url, detail }) = result.model_content.first() else {
+            return Err(std::io::Error::other("missing image model content").into());
+        };
+        assert!(url.starts_with("data:image/png;base64,"));
+        assert_eq!(detail.as_deref(), Some("low"));
+
+        let serialized = serde_json::to_string(&result)?;
+        assert!(!serialized.contains("base64"));
+        assert!(!serialized.contains("iVBOR"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn view_image_rejects_non_images() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        tokio::fs::write(directory.path().join("notes.txt"), "not an image").await?;
+        let parameters = HashMap::from([("path".to_string(), json!("notes.txt"))]);
+
+        let result = ViewImageTool::new()
+            .execute_with_context(parameters, &tool_context(directory.path()))
+            .await?;
+
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Unsupported or invalid image"))
+        );
+        Ok(())
+    }
 }

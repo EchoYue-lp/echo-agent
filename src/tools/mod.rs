@@ -129,8 +129,8 @@ pub use echo_core::tools::{ParamValue, ToolCallParams};
 pub use echo_execution::tools::{
     ScriptExecutionProfile, ScriptExecutionProfileResolver, Tool, ToolBudgetMetricsSnapshot,
     ToolContext, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolManager,
-    ToolOutputChannel, ToolParameters, ToolRecoveryAction, ToolResult, ToolRiskLevel, ToolRunner,
-    ToolSchemaStats, ToolSearchTool, ToolSideEffect, ToolStreamEvent,
+    ToolOutputChannel, ToolParameters, ToolRecoveryAction, ToolResult, ToolResultContent,
+    ToolRiskLevel, ToolRunner, ToolSchemaStats, ToolSearchTool, ToolSideEffect, ToolStreamEvent,
 };
 pub use echo_tools::{register_all_tools, register_readonly_tools};
 
@@ -138,7 +138,7 @@ pub use echo_tools::{register_all_tools, register_readonly_tools};
 
 /// Tools that modify files and should require a prior read.
 pub const WRITE_TOOLS: &[&str] = &[
-    "edit_file",
+    "apply_patch",
     "write_file",
     "append_file",
     "create_file",

@@ -261,7 +261,7 @@ impl Tool for DeleteFileTool {
 |------|---------|---------|
 | `ReadOnly` | 0 | `read_file`、`grep`、`git_status` |
 | `NetworkCall` | 1 | `web_fetch`、`web_search` |
-| `FileWrite` | 2 | `edit_file`、`write_file` |
+| `FileWrite` | 2 | `apply_patch` |
 | `GitWrite` | 2 | `git_commit`、`git_push` |
 | `DatabaseWrite` | 2 | `db_execute`、`sql` |
 | `ShellExec` | 3 | `shell`、`execute` |

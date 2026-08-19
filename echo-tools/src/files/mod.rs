@@ -1,10 +1,10 @@
+#[cfg(feature = "files")]
+pub mod apply_patch;
 pub mod artifact;
 #[cfg(feature = "files")]
 pub mod code_search;
 #[cfg(feature = "files")]
 pub mod diff;
-#[cfg(feature = "files")]
-pub mod edit;
 #[cfg(feature = "files")]
 #[allow(clippy::module_inception)]
 pub mod files;

@@ -279,7 +279,7 @@ pub enum ToolResultKind {
         columns: Vec<String>,
         rows: Vec<Vec<String>>,
     },
-    /// A unified diff (e.g., from `edit_file`).
+    /// A unified diff (e.g., from `apply_patch`).
     Diff { unified_diff: String },
     /// A reference to a file (path in metadata).
     FileReference { path: String },
@@ -289,6 +289,33 @@ pub enum ToolResultKind {
     SkillActivation { name: String },
     /// A structured error with an error code.
     StructuredError { error_code: String },
+}
+
+/// Provider-visible rich content produced by a tool.
+///
+/// This payload is intentionally excluded from serialized tool events and
+/// logs. The ReAct runtime projects it into the model conversation after the
+/// matching text tool result, so binary data reaches multimodal models without
+/// leaking large data URLs into UI events, traces, or audit output.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ToolResultContent {
+    /// Image data represented as an HTTPS URL or a Base64 data URL.
+    ImageUrl { url: String, detail: Option<String> },
+}
+
+impl std::fmt::Debug for ToolResultContent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ImageUrl { url, detail } => formatter
+                .debug_struct("ImageUrl")
+                .field(
+                    "url",
+                    &format_args!("<omitted:{} chars>", url.chars().count()),
+                )
+                .field("detail", detail)
+                .finish(),
+        }
+    }
 }
 
 /// 工具执行结果
@@ -319,6 +346,9 @@ pub struct ToolResult {
     /// Arbitrary key-value metadata (e.g. source URL, file path, duration, token count).
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+    /// Rich content projected only into the live model conversation.
+    #[serde(skip)]
+    pub model_content: Vec<ToolResultContent>,
 }
 
 impl ToolResult {
@@ -334,6 +364,7 @@ impl ToolResult {
             truncated: false,
             mime_type: None,
             metadata: HashMap::new(),
+            model_content: Vec::new(),
         }
     }
 
@@ -353,6 +384,7 @@ impl ToolResult {
             truncated: false,
             mime_type: None,
             metadata: HashMap::new(),
+            model_content: Vec::new(),
         }
     }
 
@@ -368,6 +400,7 @@ impl ToolResult {
             truncated: false,
             mime_type: None,
             metadata: HashMap::new(),
+            model_content: Vec::new(),
         }
     }
 
@@ -385,6 +418,7 @@ impl ToolResult {
             truncated: false,
             mime_type: None,
             metadata: HashMap::new(),
+            model_content: Vec::new(),
         }
     }
 
@@ -450,6 +484,13 @@ impl ToolResult {
     /// Bulk-insert metadata entries.
     pub fn with_metadata(mut self, meta: HashMap<String, String>) -> Self {
         self.metadata = meta;
+        self
+    }
+
+    /// Attach rich content that should be visible to the model but omitted
+    /// from serialized tool events and logs.
+    pub fn with_model_content(mut self, content: ToolResultContent) -> Self {
+        self.model_content.push(content);
         self
     }
 }
@@ -725,6 +766,13 @@ pub trait Tool: Send + Sync {
     /// Monotonic revision for tools whose schema depends on runtime metadata.
     fn schema_revision(&self) -> u64 {
         0
+    }
+    /// Model input modalities required to consume this tool's result.
+    ///
+    /// Runtimes omit incompatible tools from model-visible schemas when an
+    /// explicit model capability contract is available.
+    fn required_input_modalities(&self) -> &'static [crate::llm::ModelInputModality] {
+        &[]
     }
     /// Execute the tool with untyped JSON parameters.
     ///

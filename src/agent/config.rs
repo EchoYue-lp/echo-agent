@@ -91,7 +91,7 @@ pub struct AgentConfig {
     pub(crate) enable_cot: bool,
     /// Require that a file be explicitly read (via `read_file`) before any
     /// write/edit/delete operation on it. When enabled, tools like
-    /// `edit_file`, `write_file`, and `delete_file` will reject paths
+    /// `apply_patch` and other file mutation tools will reject paths
     /// that haven't been read in the current conversation turn. (default false)
     pub(crate) force_read_before_edit: bool,
     /// Whether the agent is in plan mode (read-only tools only).

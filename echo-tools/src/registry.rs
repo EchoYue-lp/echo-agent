@@ -1,7 +1,9 @@
 //! Tool registration helper
 //!
-//! Provides [`register_all_tools`] which registers every enabled domain tool
-//! into any type implementing [`ToolRegistrar`](echo_core::tools::ToolRegistrar).
+//! Provides [`register_all_tools`] which registers the canonical default tool
+//! for each enabled domain into any type implementing
+//! [`ToolRegistrar`](echo_core::tools::ToolRegistrar). More granular public
+//! tools remain available for applications that explicitly need them.
 //! [`register_readonly_tools`] registers only read-only tools (no shell, no
 //! file writes) — used by read-only Subagents.
 
@@ -92,7 +94,7 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
     // ── media (read-only subset) ──────────────────────────────────────────
     #[cfg(feature = "media")]
     {
-        use crate::image::ImageAnalysisTool;
+        use crate::image::ViewImageTool;
         use crate::media::image_fetch::ImageFetchTool;
         use crate::pdf::{PdfExtractTool, PdfInfoTool};
         use crate::text::{TextProcessTool, TextSearchTool, TextStatsTool};
@@ -100,7 +102,7 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
         // Excel: EXCLUDED ExcelWriteTool; kept read/info/csv/profile.
         use crate::excel::{ExcelInfoTool, ExcelProfileTool, ExcelReadTool};
 
-        tool_manager.register(Box::new(ImageAnalysisTool));
+        tool_manager.register(Box::new(ViewImageTool::new()));
         if let Ok(tool) = ImageFetchTool::new() {
             tool_manager.register(Box::new(tool));
         }
@@ -186,7 +188,7 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
     }
 }
 
-/// Register all feature-gated domain tools into the given registrar.
+/// Register the canonical default tools for all enabled domains.
 #[allow(unused_variables)]
 pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
     register_all_tools_with_cells(tool_manager, None);
@@ -221,28 +223,19 @@ pub fn register_all_tools_with_cells(
     // ── files ─────────────────────────────────────────────────────────────
     #[cfg(feature = "files")]
     {
+        use crate::files::apply_patch::ApplyPatchTool;
         use crate::files::code_search::CodeSearchTool;
         use crate::files::diff::DiffTool;
-        use crate::files::edit::EditFileTool;
-        use crate::files::files::{
-            AppendFileTool, CreateFileTool, DeleteFileTool, ListDirTool, MoveFileTool,
-            ReadFileTool, UpdateFileTool, WriteFileTool,
-        };
+        use crate::files::files::{ListDirTool, ReadFileTool};
         use crate::files::glob::GlobTool;
         use crate::files::grep::GrepTool;
         use crate::files::repo_map::RepoMapTool;
 
         tool_manager.register(Box::new(ReadFileTool::new()));
-        tool_manager.register(Box::new(WriteFileTool::new()));
-        tool_manager.register(Box::new(AppendFileTool::new()));
         tool_manager.register(Box::new(ListDirTool::new()));
-        tool_manager.register(Box::new(CreateFileTool::new()));
-        tool_manager.register(Box::new(DeleteFileTool::new()));
-        tool_manager.register(Box::new(UpdateFileTool::new()));
-        tool_manager.register(Box::new(MoveFileTool::new()));
         tool_manager.register(Box::new(GrepTool::new()));
         tool_manager.register(Box::new(GlobTool::new()));
-        tool_manager.register(Box::new(EditFileTool::new()));
+        tool_manager.register(Box::new(ApplyPatchTool::new()));
         tool_manager.register(Box::new(DiffTool::new()));
         tool_manager.register(Box::new(RepoMapTool::new()));
         tool_manager.register(Box::new(CodeSearchTool::new()));
@@ -314,13 +307,13 @@ pub fn register_all_tools_with_cells(
         use crate::excel::{
             ExcelInfoTool, ExcelProfileTool, ExcelReadTool, ExcelToCsvTool, ExcelWriteTool,
         };
-        use crate::image::ImageAnalysisTool;
+        use crate::image::ViewImageTool;
         use crate::media::image_fetch::ImageFetchTool;
         use crate::pdf::{PdfExtractTool, PdfInfoTool};
         use crate::text::{TextExportTool, TextProcessTool, TextSearchTool, TextStatsTool};
         use crate::word::{WordInfoTool, WordReadTool, WordStructureTool};
 
-        tool_manager.register(Box::new(ImageAnalysisTool));
+        tool_manager.register(Box::new(ViewImageTool::new()));
         if let Ok(tool) = ImageFetchTool::new() {
             tool_manager.register(Box::new(tool));
         }
@@ -406,15 +399,30 @@ pub fn register_all_tools_with_cells(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "shell", feature = "statistics"))]
+    #[cfg(any(
+        feature = "shell",
+        feature = "statistics",
+        feature = "files",
+        feature = "media"
+    ))]
     use echo_core::tools::{Tool, ToolRegistrar};
 
     /// A registrar that collects the names of every tool registered into it.
-    #[cfg(any(feature = "shell", feature = "statistics"))]
+    #[cfg(any(
+        feature = "shell",
+        feature = "statistics",
+        feature = "files",
+        feature = "media"
+    ))]
     struct Collector {
         names: std::sync::Mutex<Vec<String>>,
     }
-    #[cfg(any(feature = "shell", feature = "statistics"))]
+    #[cfg(any(
+        feature = "shell",
+        feature = "statistics",
+        feature = "files",
+        feature = "media"
+    ))]
     impl ToolRegistrar for Collector {
         fn register(&mut self, tool: Box<dyn Tool>) {
             self.names
@@ -464,6 +472,51 @@ mod tests {
             "run_code must NOT be in the readonly subset: {:?}",
             names
         );
+    }
+
+    #[test]
+    #[cfg(feature = "files")]
+    fn default_file_surface_uses_only_canonical_patch_mutation() {
+        let mut collector = Collector {
+            names: std::sync::Mutex::new(Vec::new()),
+        };
+        crate::register_all_tools(&mut collector);
+        let names = collector
+            .names
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(names.contains(&"apply_patch".to_string()));
+        for legacy in [
+            "edit_file",
+            "write_file",
+            "append_file",
+            "create_file",
+            "delete_file",
+            "update_file",
+            "move_file",
+        ] {
+            assert!(
+                !names.contains(&legacy.to_string()),
+                "legacy mutation tool: {legacy}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "media")]
+    fn media_surface_exposes_real_image_viewing() {
+        let mut collector = Collector {
+            names: std::sync::Mutex::new(Vec::new()),
+        };
+        crate::register_readonly_tools(&mut collector);
+        let names = collector
+            .names
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(names.contains(&"view_image".to_string()));
+        assert!(!names.contains(&"analyze_image".to_string()));
     }
 
     #[test]

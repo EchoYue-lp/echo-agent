@@ -3088,20 +3088,34 @@ impl Agent for ReactAgent {
     }
 
     fn tool_names(&self) -> Vec<String> {
+        let incompatible = self
+            .llm_config
+            .as_ref()
+            .map(|config| {
+                self.tools
+                    .tool_manager
+                    .incompatible_tool_names(&config.input_modalities)
+            })
+            .unwrap_or_default();
         self.tools
             .tool_manager
             .list_tools()
             .into_iter()
-            .filter(|n| *n != TOOL_FINAL_ANSWER)
+            .filter(|name| *name != TOOL_FINAL_ANSWER && !incompatible.contains(name))
             .map(|n| n.to_string())
             .collect()
     }
 
     /// Get the list of tool definitions (name, description, parameter schema).
     fn tool_definitions(&self) -> Vec<crate::llm::types::ToolDefinition> {
-        self.tools
-            .tool_manager
-            .get_tool_definitions()
+        let definitions = match self.llm_config.as_ref() {
+            Some(config) => self
+                .tools
+                .tool_manager
+                .get_tool_definitions_for_modalities(&config.input_modalities),
+            None => self.tools.tool_manager.get_tool_definitions(),
+        };
+        definitions
             .into_iter()
             .filter(|d| d.function.name != TOOL_FINAL_ANSWER)
             .collect()

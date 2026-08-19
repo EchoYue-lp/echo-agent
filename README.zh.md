@@ -177,7 +177,7 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 | **IM 通道** | QQ Bot（WebSocket）+ 飞书（Webhook） | `ChannelManager::new()` |
 | **Web 工具** | 搜索 + 网页获取 | `WebSearchTool::auto()` |
 | **论文检索工具** | ArXiv、Semantic Scholar、PDF 下载、BibTeX 生成 | `ArxivSearchTool` |
-| **媒体工具** | PDF、Excel、Word、图片分析 | `ImageAnalysisTool` |
+| **媒体工具** | PDF、Excel、Word、多模态图片查看 | `ViewImageTool` |
 | **数据工具** | Polars 驱动的过滤、聚合、统计 | `DataReadTool` |
 | **沙箱** | Local / Docker / K8s 代码执行 | `LocalSandbox::new()` |
 | **OpenTelemetry** | 分布式追踪与指标 | `init_telemetry(&config)` |

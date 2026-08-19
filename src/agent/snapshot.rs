@@ -91,6 +91,10 @@ pub struct RuntimeConfig {
     pub token_budget_error: Option<String>,
     pub run_budget: echo_core::agent::RunBudgetPolicy,
     pub supports_tool_choice_none: bool,
+    /// Input modalities accepted by the configured model. `None` preserves
+    /// compatibility for custom agents that do not provide an
+    /// [`crate::config::LlmConfig`].
+    pub input_modalities: Option<Vec<echo_core::llm::ModelInputModality>>,
     pub session_id: Option<String>,
     pub conversation_id: Option<String>,
     /// Session-bound working directory (worktree path). Injected into each
@@ -145,6 +149,7 @@ impl RuntimeConfig {
                 .model_profile
                 .as_ref()
                 .is_none_or(|profile| profile.supports_tool_choice_none),
+            input_modalities: None,
             session_id: config.session_id.clone(),
             conversation_id: config.conversation_id.clone(),
             working_dir: config.working_dir.lock().ok().and_then(|g| g.clone()),
@@ -217,6 +222,9 @@ impl ToolRuntime {
             disabled_tools.extend(invocation_disabled_tools.iter().cloned());
         }
         let tool_manager = Arc::clone(&agent.tools.tool_manager);
+        if let Some(config) = agent.llm_config() {
+            disabled_tools.extend(tool_manager.incompatible_tool_names(&config.input_modalities));
+        }
         let mut skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
         let mut active_skill_names = agent.tools.skill_registry.activated_names();
         if let Some(progressive) = agent
@@ -445,6 +453,9 @@ impl AgentRunSnapshot {
         invocation: Option<&echo_core::agent::AgentInvocationContext>,
     ) -> Self {
         let mut config = RuntimeConfig::from_agent_config(&agent.config);
+        config.input_modalities = agent
+            .llm_config()
+            .map(|llm_config| llm_config.input_modalities.clone());
         if let Some(working_dir) = invocation.and_then(|context| context.working_dir.as_ref()) {
             config.working_dir = Some(working_dir.clone());
         }
@@ -914,9 +925,18 @@ impl AgentRunSnapshot {
 
     /// Record a file read for read-before-edit enforcement.
     pub fn record_file_read(&self, path: &str) {
-        let canonical = std::fs::canonicalize(path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.to_string());
+        let path = std::path::Path::new(path);
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(working_dir) = self.config.working_dir.as_deref() {
+            working_dir.join(path)
+        } else {
+            path.to_path_buf()
+        };
+        let canonical = std::fs::canonicalize(&resolved)
+            .unwrap_or(resolved)
+            .to_string_lossy()
+            .to_string();
         let mut files = self
             .recently_read_files
             .lock()
