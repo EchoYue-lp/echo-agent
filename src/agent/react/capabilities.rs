@@ -1316,6 +1316,15 @@ impl ReactAgent {
     }
 
     #[cfg(feature = "mcp")]
+    fn sync_mcp_resource_tools(&mut self) {
+        for name in crate::mcp::MCP_RESOURCE_TOOL_NAMES {
+            self.remove_tool(name);
+        }
+        let tools = self.tools.mcp_manager.resource_tools();
+        self.add_tools(tools);
+    }
+
+    #[cfg(feature = "mcp")]
     /// Connect to an MCP server based on MCP server configuration
     ///
     /// # Parameters
@@ -1341,6 +1350,7 @@ impl ReactAgent {
         let tools = self.tools.mcp_manager.connect(config).await?;
         let count = tools.len();
         self.add_tools(tools);
+        self.sync_mcp_resource_tools();
         let client = {
             let mgr = &self.tools.mcp_manager;
             mgr.get_client(&name)
@@ -1513,6 +1523,7 @@ impl ReactAgent {
             self.remove_tool(&tool_name);
         }
         let disconnected = self.tools.mcp_manager.disconnect(name).await;
+        self.sync_mcp_resource_tools();
         self.setup_hook_mcp_executor().await;
         disconnected
     }

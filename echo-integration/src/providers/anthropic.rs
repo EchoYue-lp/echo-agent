@@ -1352,8 +1352,12 @@ mod tests {
 
         apply_conversation_cache_breakpoints(&mut messages, 2);
 
-        assert!(has_cache_control(&messages[2]));
-        assert!(!has_cache_control(&messages[3]));
+        assert!(messages.get(2).is_some_and(has_cache_control));
+        assert!(
+            messages
+                .get(3)
+                .is_some_and(|message| !has_cache_control(message))
+        );
     }
 
     // ── stage4 P4.1: cache_user_id single-source ────────────────────────────
@@ -1384,28 +1388,33 @@ mod tests {
     }
 
     #[test]
-    fn metadata_user_id_present_when_set() {
+    fn metadata_user_id_present_when_set() -> std::result::Result<(), serde_json::Error> {
         let client = AnthropicClient::new("ds-xxx".to_string(), "deepseek-chat".to_string());
         let body =
-            serde_json::to_value(client.convert_request(&chat_request_with_user(Some("user-7"))))
-                .expect("serialize AnthropicRequest");
-        assert_eq!(body["metadata"]["user_id"], "user-7");
+            serde_json::to_value(client.convert_request(&chat_request_with_user(Some("user-7"))))?;
+        assert_eq!(
+            body.pointer("/metadata/user_id")
+                .and_then(serde_json::Value::as_str),
+            Some("user-7")
+        );
+        Ok(())
     }
 
     #[test]
-    fn metadata_absent_when_user_id_none() {
+    fn metadata_absent_when_user_id_none() -> std::result::Result<(), serde_json::Error> {
         let client = AnthropicClient::new("ds-xxx".to_string(), "deepseek-chat".to_string());
-        let body = serde_json::to_value(client.convert_request(&chat_request_with_user(None)))
-            .expect("serialize AnthropicRequest");
+        let body = serde_json::to_value(client.convert_request(&chat_request_with_user(None)))?;
         // metadata is skip_serializing_if Option::is_none → absent (not null).
         assert!(
             body.get("metadata").is_none(),
             "metadata should be absent when user_id is None, got: {body}"
         );
+        Ok(())
     }
 
     #[test]
-    fn multiple_system_messages_are_preserved_in_order() {
+    fn multiple_system_messages_are_preserved_in_order()
+    -> std::result::Result<(), serde_json::Error> {
         let client = AnthropicClient::new("sk-test", "claude-sonnet-4-6");
         let request = ChatRequest {
             messages: vec![
@@ -1415,36 +1424,44 @@ mod tests {
             ],
             ..ChatRequest::default()
         };
-        let body = serde_json::to_value(client.convert_request(&request)).expect("serialize");
-        assert_eq!(body["system"][0]["text"], "base rules\n\nrestored context");
+        let body = serde_json::to_value(client.convert_request(&request))?;
+        assert_eq!(
+            body.pointer("/system/0/text")
+                .and_then(serde_json::Value::as_str),
+            Some("base rules\n\nrestored context")
+        );
+        Ok(())
     }
 
     #[test]
-    fn message_delta_usage_accepts_output_tokens_only() {
+    fn message_delta_usage_accepts_output_tokens_only() -> std::result::Result<(), String> {
         let raw = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":17}}"#;
-        let event = serde_json::from_str::<AnthropicStreamEvent>(raw).expect("message_delta");
-        match event {
-            AnthropicStreamEvent::MessageDelta { usage, .. } => {
-                assert_eq!(usage.map(|value| value.output_tokens), Some(17));
-            }
-            _ => panic!("unexpected event"),
-        }
+        let event =
+            serde_json::from_str::<AnthropicStreamEvent>(raw).map_err(|error| error.to_string())?;
+        let AnthropicStreamEvent::MessageDelta { usage, .. } = event else {
+            return Err("expected message_delta event".to_string());
+        };
+        assert_eq!(usage.map(|value| value.output_tokens), Some(17));
+        Ok(())
     }
 
     #[test]
-    fn tool_start_keeps_provider_block_index() {
+    fn tool_start_keeps_provider_block_index() -> std::result::Result<(), String> {
         let raw = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-1","name":"read_file","input":{}}}"#;
-        let event = serde_json::from_str::<AnthropicStreamEvent>(raw).expect("tool start");
-        match event {
-            AnthropicStreamEvent::ContentBlockStart { index, .. } => assert_eq!(index, 1),
-            _ => panic!("unexpected event"),
-        }
+        let event =
+            serde_json::from_str::<AnthropicStreamEvent>(raw).map_err(|error| error.to_string())?;
+        let AnthropicStreamEvent::ContentBlockStart { index, .. } = event else {
+            return Err("expected content_block_start event".to_string());
+        };
+        assert_eq!(index, 1);
+        Ok(())
     }
 
     #[test]
-    fn thinking_response_is_projected_to_reasoning_content() {
+    fn thinking_response_is_projected_to_reasoning_content()
+    -> std::result::Result<(), serde_json::Error> {
         let raw = r#"{"content":[{"type":"thinking","thinking":"reason","signature":"sig"},{"type":"text","text":"answer"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":3}}"#;
-        let response = serde_json::from_str::<AnthropicResponse>(raw).expect("response");
+        let response = serde_json::from_str::<AnthropicResponse>(raw)?;
         let converted =
             AnthropicClient::new("sk-test", "claude-sonnet-4-6").convert_response(response);
         assert_eq!(
@@ -1466,6 +1483,7 @@ mod tests {
             converted.usage.and_then(|usage| usage.total_tokens),
             Some(5)
         );
+        Ok(())
     }
 
     #[test]
@@ -1532,7 +1550,8 @@ mod tests {
     /// emit zero breakpoints (pre-fix bug: has_system/tool=false,
     /// history_breakpoint_count=0 → no cache_control on the main path).
     #[test]
-    fn cache_hints_with_empty_breakpoints_still_places_cache_control() {
+    fn cache_hints_with_empty_breakpoints_still_places_cache_control()
+    -> std::result::Result<(), serde_json::Error> {
         use echo_core::llm::cache::CacheHints;
         use echo_core::llm::types::{FunctionSpec, Message, ToolDefinition};
 
@@ -1566,7 +1585,7 @@ mod tests {
         };
 
         let client = AnthropicClient::new("sk-xxx".to_string(), "claude-sonnet-4-6".to_string());
-        let body = serde_json::to_value(client.convert_request(&req)).expect("serialize");
+        let body = serde_json::to_value(client.convert_request(&req))?;
         // Before fix: zero cache_control. After: from_layout places system +
         // tools + history breakpoints.
         let body_str = body.to_string();
@@ -1578,57 +1597,55 @@ mod tests {
             body_str.contains("ephemeral"),
             "cache_control must be ephemeral; got: {body_str}"
         );
+        Ok(())
     }
 
     // ── 2B: file_to_content_block dispatches by inferred media type ──────────
 
     #[test]
-    fn pdf_attachment_becomes_document_block() {
+    fn pdf_attachment_becomes_document_block() -> std::result::Result<(), String> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4 fake");
         let block = file_to_content_block("report.pdf", &b64);
-        match block {
-            ContentBlock::Document { source, .. } => match source {
-                ImageSource::Base64 { media_type, data } => {
-                    assert_eq!(media_type, "application/pdf");
-                    assert_eq!(data, b64);
-                }
-                ImageSource::Url_ { .. } => panic!("expected base64 source"),
-            },
-            other => panic!("expected Document, got {other:?}"),
-        }
+        let ContentBlock::Document { source, .. } = block else {
+            return Err("expected Document block".to_string());
+        };
+        let ImageSource::Base64 { media_type, data } = source else {
+            return Err("expected base64 document source".to_string());
+        };
+        assert_eq!(media_type, "application/pdf");
+        assert_eq!(data, b64);
+        Ok(())
     }
 
     #[test]
-    fn text_attachment_inlined_as_text() {
+    fn text_attachment_inlined_as_text() -> std::result::Result<(), String> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"hello notes");
         let block = file_to_content_block("notes.txt", &b64);
-        match block {
-            ContentBlock::Text { text, .. } => {
-                assert!(
-                    text.contains("hello notes"),
-                    "text should contain decoded content"
-                );
-                assert!(
-                    text.contains("notes.txt"),
-                    "text should mention the filename"
-                );
-            }
-            other => panic!("expected Text, got {other:?}"),
-        }
+        let ContentBlock::Text { text, .. } = block else {
+            return Err("expected Text block".to_string());
+        };
+        assert!(
+            text.contains("hello notes"),
+            "text should contain decoded content"
+        );
+        assert!(
+            text.contains("notes.txt"),
+            "text should mention the filename"
+        );
+        Ok(())
     }
 
     #[test]
-    fn binary_non_pdf_attachment_is_placeholder() {
+    fn binary_non_pdf_attachment_is_placeholder() -> std::result::Result<(), String> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"\x00\x01binary");
         let block = file_to_content_block("archive.zip", &b64);
-        match block {
-            ContentBlock::Text { text, .. } => {
-                assert!(text.contains("archive.zip"));
-                // Should NOT contain decoded binary garbage.
-                assert!(!text.contains("binary"));
-            }
-            other => panic!("expected Text placeholder, got {other:?}"),
-        }
+        let ContentBlock::Text { text, .. } = block else {
+            return Err("expected Text placeholder".to_string());
+        };
+        assert!(text.contains("archive.zip"));
+        // Should NOT contain decoded binary garbage.
+        assert!(!text.contains("binary"));
+        Ok(())
     }
 
     #[test]

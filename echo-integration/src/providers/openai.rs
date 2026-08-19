@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn text_and_image_parts_pass_through_unchanged() {
+    fn text_and_image_parts_pass_through_unchanged() -> std::result::Result<(), String> {
         let msg = multimodal_msg(vec![
             ContentPart::Text {
                 text: "hi".to_string(),
@@ -335,66 +335,73 @@ mod tests {
             },
         ]);
         let out = normalize_messages(vec![msg]);
-        match &out[0].content {
-            MessageContent::Parts(parts) => {
-                assert_eq!(parts.len(), 2);
-                assert!(matches!(parts[0], ContentPart::Text { .. }));
-                assert!(matches!(parts[1], ContentPart::ImageUrl { .. }));
-            }
-            other => panic!("expected Parts, got {other:?}"),
-        }
+        let parts = out
+            .first()
+            .and_then(|message| match &message.content {
+                MessageContent::Parts(parts) => Some(parts),
+                MessageContent::Text(_) | MessageContent::Empty => None,
+            })
+            .ok_or_else(|| "expected message parts".to_string())?;
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(parts.first(), Some(ContentPart::Text { .. })));
+        assert!(matches!(parts.get(1), Some(ContentPart::ImageUrl { .. })));
+        Ok(())
     }
 
     #[test]
-    fn text_class_file_is_inlined_as_text() {
+    fn text_class_file_is_inlined_as_text() -> std::result::Result<(), String> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"hello notes");
         let msg = multimodal_msg(vec![ContentPart::File {
             name: "notes.txt".to_string(),
             content: b64,
         }]);
         let out = normalize_messages(vec![msg]);
-        match &out[0].content {
-            MessageContent::Parts(parts) => {
-                assert_eq!(parts.len(), 1);
-                match &parts[0] {
-                    ContentPart::Text { text } => {
-                        assert!(text.contains("hello notes"));
-                        assert!(text.contains("notes.txt"));
-                    }
-                    other => panic!("expected Text, got {other:?}"),
-                }
-            }
-            other => panic!("expected Parts, got {other:?}"),
-        }
+        let part = out
+            .first()
+            .and_then(|message| match &message.content {
+                MessageContent::Parts(parts) => parts.first(),
+                MessageContent::Text(_) | MessageContent::Empty => None,
+            })
+            .ok_or_else(|| "expected one message part".to_string())?;
+        let ContentPart::Text { text } = part else {
+            return Err("expected text content part".to_string());
+        };
+        assert!(text.contains("hello notes"));
+        assert!(text.contains("notes.txt"));
+        Ok(())
     }
 
     #[test]
-    fn binary_file_becomes_placeholder() {
+    fn binary_file_becomes_placeholder() -> std::result::Result<(), String> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"\x00\x01zip");
         let msg = multimodal_msg(vec![ContentPart::File {
             name: "archive.zip".to_string(),
             content: b64,
         }]);
         let out = normalize_messages(vec![msg]);
-        match &out[0].content {
-            MessageContent::Parts(parts) => {
-                assert_eq!(parts.len(), 1);
-                match &parts[0] {
-                    ContentPart::Text { text } => {
-                        assert!(text.contains("archive.zip"));
-                    }
-                    other => panic!("expected Text placeholder, got {other:?}"),
-                }
-            }
-            other => panic!("expected Parts, got {other:?}"),
-        }
+        let part = out
+            .first()
+            .and_then(|message| match &message.content {
+                MessageContent::Parts(parts) => parts.first(),
+                MessageContent::Text(_) | MessageContent::Empty => None,
+            })
+            .ok_or_else(|| "expected one message part".to_string())?;
+        let ContentPart::Text { text } = part else {
+            return Err("expected text placeholder".to_string());
+        };
+        assert!(text.contains("archive.zip"));
+        Ok(())
     }
 
     #[test]
-    fn plain_text_message_is_untouched() {
+    fn plain_text_message_is_untouched() -> std::result::Result<(), String> {
         let msg = Message::user("hello".to_string());
         let out = normalize_messages(vec![msg]);
-        assert_eq!(out[0].content.as_text(), Some("hello".to_string()));
+        assert_eq!(
+            out.first().and_then(|message| message.content.as_text()),
+            Some("hello".to_string())
+        );
+        Ok(())
     }
 
     #[test]

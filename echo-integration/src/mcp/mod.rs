@@ -15,6 +15,7 @@
 
 pub mod client;
 pub mod config_loader;
+pub mod resource_tool;
 pub mod server;
 pub mod server_config;
 pub mod tool_adapter;
@@ -28,12 +29,17 @@ pub use client::McpClient;
 pub use config_loader::{
     AGENT_PLUGIN_MCP_SCHEMA_V1, AgentPluginMcpLoad, McpConfigFile, McpServerEntry,
 };
+pub use resource_tool::{
+    LIST_MCP_RESOURCE_TEMPLATES_TOOL, LIST_MCP_RESOURCES_TOOL, MCP_RESOURCE_TOOL_NAMES,
+    READ_MCP_RESOURCE_TOOL, build_mcp_resource_tools,
+};
 pub use server::McpServer;
 pub use server_config::{McpServerConfig, TransportConfig};
 pub use tool_adapter::McpToolAdapter;
 pub use types::{
-    McpContent, McpPrompt, McpPromptGetResult, McpResource, McpResourceReadResult, McpTool,
-    McpToolCallResult, ServerCapabilities,
+    McpContent, McpPrompt, McpPromptGetResult, McpResource, McpResourceReadResult,
+    McpResourceTemplate, McpResourceTemplatesListResult, McpTool, McpToolCallResult,
+    ServerCapabilities,
 };
 
 use echo_core::error::Result;
@@ -150,6 +156,11 @@ impl McpManager {
         self.clients.clone()
     }
 
+    /// Build the canonical model-callable Resource tools for current connections.
+    pub fn resource_tools(&self) -> Vec<Box<dyn Tool>> {
+        build_mcp_resource_tools(self.get_clients())
+    }
+
     /// 列出所有已连接的服务端名称
     pub fn server_names(&self) -> Vec<&str> {
         self.clients.keys().map(|s| s.as_str()).collect()
@@ -180,5 +191,68 @@ impl McpManager {
 impl Default for McpManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::future::BoxFuture;
+
+    use super::transport::McpTransport;
+    use super::types::{
+        JsonRpcNotification, JsonRpcNotificationReceiver, JsonRpcRequest, JsonRpcResponse,
+    };
+    use super::*;
+
+    struct InertTransport;
+
+    impl McpTransport for InertTransport {
+        fn send(&self, _request: JsonRpcRequest) -> BoxFuture<'_, Result<JsonRpcResponse>> {
+            Box::pin(async {
+                Err(echo_core::error::ReactError::Other(
+                    "inert test transport cannot send".to_string(),
+                ))
+            })
+        }
+
+        fn notify(&self, _notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+
+        fn notification_rx(&self) -> Option<Arc<dyn JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
+
+    #[test]
+    fn resource_tool_projection_follows_manager_topology() {
+        let mut manager = McpManager::new();
+        assert!(manager.resource_tools().is_empty());
+
+        manager.clients.insert(
+            "context".to_string(),
+            McpClient::with_test_transport("context", Arc::new(InertTransport)),
+        );
+        let mut names = manager
+            .resource_tools()
+            .into_iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                LIST_MCP_RESOURCE_TEMPLATES_TOOL.to_string(),
+                LIST_MCP_RESOURCES_TOOL.to_string(),
+                READ_MCP_RESOURCE_TOOL.to_string(),
+            ]
+        );
+
+        manager.clients.remove("context");
+        assert!(manager.resource_tools().is_empty());
     }
 }

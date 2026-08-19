@@ -11,9 +11,9 @@ use super::types::{
     ClientCapabilities, ClientInfo, ElicitationCapability, InitializeParams, InitializeResult,
     JsonRpcNotification, JsonRpcRequest, MCP_PROTOCOL_VERSION, McpContent, McpPrompt,
     McpPromptGetParams, McpPromptGetResult, McpPromptsListResult, McpResource,
-    McpResourceReadParams, McpResourceReadResult, McpResourcesListResult, McpTool,
-    McpToolCallParams, McpToolCallResult, McpToolsListResult, RootsCapability, SamplingCapability,
-    ServerCapabilities,
+    McpResourceReadParams, McpResourceReadResult, McpResourceTemplate,
+    McpResourceTemplatesListResult, McpResourcesListResult, McpTool, McpToolCallParams,
+    McpToolCallResult, McpToolsListResult, RootsCapability, SamplingCapability, ServerCapabilities,
 };
 use echo_core::error::{McpError, ReactError, Result};
 
@@ -169,11 +169,11 @@ impl McpClient {
     ) -> Result<Vec<McpTool>> {
         let mut all_tools = Vec::new();
         let mut cursor: Option<String> = None;
-        let mut iterations = 0;
+        let mut iterations = 0_usize;
         const MAX_PAGINATION: usize = 100;
 
         loop {
-            iterations += 1;
+            iterations = iterations.saturating_add(1);
             if iterations > MAX_PAGINATION {
                 tracing::warn!(
                     "MCP: '{}' tools/list 达到最大分页限制 ({})，停止获取",
@@ -264,11 +264,11 @@ impl McpClient {
     ) -> Result<Vec<McpResource>> {
         let mut all_resources = Vec::new();
         let mut cursor: Option<String> = None;
-        let mut iterations = 0;
+        let mut iterations = 0_usize;
         const MAX_PAGINATION: usize = 100;
 
         loop {
-            iterations += 1;
+            iterations = iterations.saturating_add(1);
             if iterations > MAX_PAGINATION {
                 tracing::warn!(
                     "MCP: '{}' resources/list 达到最大分页限制 ({})，停止获取",
@@ -291,12 +291,10 @@ impl McpClient {
                     })??;
 
             if let Some(err) = resp.error {
-                tracing::warn!(
-                    "MCP: '{}' resources/list 返回错误: {}",
-                    server_name,
+                return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
+                    "MCP 服务端 '{server_name}' 获取资源列表失败: {}",
                     err.message
-                );
-                break;
+                )))));
             }
 
             let result: McpResourcesListResult =
@@ -322,6 +320,63 @@ impl McpClient {
             self.resources.len()
         );
         Ok(())
+    }
+
+    /// 获取最新资源列表，不修改握手阶段的缓存。
+    pub async fn list_resources(&self) -> Result<Vec<McpResource>> {
+        Self::fetch_resources(&self.transport, &self.server_name).await
+    }
+
+    /// 获取资源模板列表（支持分页，最大 100 页）。
+    pub async fn list_resource_templates(&self) -> Result<Vec<McpResourceTemplate>> {
+        let mut all_templates = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut iterations = 0_usize;
+        const MAX_PAGINATION: usize = 100;
+
+        loop {
+            iterations = iterations.saturating_add(1);
+            if iterations > MAX_PAGINATION {
+                tracing::warn!(
+                    "MCP: '{}' resources/templates/list 达到最大分页限制 ({})，停止获取",
+                    self.server_name,
+                    MAX_PAGINATION
+                );
+                break;
+            }
+
+            let params = cursor
+                .as_ref()
+                .map(|value| serde_json::json!({ "cursor": value }));
+            let request = JsonRpcRequest::new("resources/templates/list", params);
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.transport.send(request),
+            )
+            .await
+            .map_err(|_| {
+                ReactError::Mcp(Box::new(McpError::ProtocolError(
+                    "获取资源模板列表超时".to_string(),
+                )))
+            })??;
+
+            if let Some(error) = response.error {
+                return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
+                    "MCP 服务端 '{}' 获取资源模板失败: {}",
+                    self.server_name, error.message
+                )))));
+            }
+
+            let result: McpResourceTemplatesListResult =
+                serde_json::from_value(response.result.unwrap_or(Value::Null))?;
+            all_templates.extend(result.resource_templates);
+            cursor = result.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(all_templates)
     }
 
     /// 读取资源内容
@@ -512,5 +567,24 @@ impl McpClient {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_transport(
+        server_name: impl Into<String>,
+        transport: Arc<dyn McpTransport>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            transport,
+            server_name: server_name.into(),
+            negotiated_version: MCP_PROTOCOL_VERSION.to_string(),
+            server_capabilities: ServerCapabilities {
+                resources: Some(super::types::ResourcesCapability::default()),
+                ..ServerCapabilities::default()
+            },
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        })
     }
 }

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// MCP 协议版本（当前支持的最新稳定版本）
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -359,6 +359,9 @@ pub struct McpResource {
     pub uri: String,
     /// 资源名称
     pub name: String,
+    /// 人类可读的显示名称（2025-11-25）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// 资源描述
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -368,6 +371,9 @@ pub struct McpResource {
     /// 资源大小（字节）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// 图标列表（2025-11-25）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<Icon>,
     /// 资源元数据
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
@@ -396,19 +402,23 @@ pub struct McpResourceReadResult {
 
 /// 资源内容
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(untagged)]
 pub enum McpResourceContents {
     Text {
         uri: String,
         #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
         text: String,
+        #[serde(flatten)]
+        extra: Map<String, Value>,
     },
     Blob {
         uri: String,
         #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
         blob: String, // Base64 编码
+        #[serde(flatten)]
+        extra: Map<String, Value>,
     },
 }
 
@@ -420,12 +430,18 @@ pub struct McpResourceTemplate {
     pub uri_template: String,
     /// 模板名称
     pub name: String,
+    /// 人类可读的显示名称（2025-11-25）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// 模板描述
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// MIME 类型
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    /// 图标列表（2025-11-25）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<Icon>,
     /// 模板元数据
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,

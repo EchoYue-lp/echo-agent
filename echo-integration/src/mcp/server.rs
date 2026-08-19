@@ -514,6 +514,7 @@ impl McpServer {
                 uri: resource.uri.clone(),
                 mime_type: resource.mime_type.clone(),
                 text: format!("Resource: {}", resource.name),
+                extra: serde_json::Map::new(),
             }],
         };
         serde_json::to_value(result).map_err(|e| JsonRpcError {
@@ -750,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_basic() {
+    fn test_builder_basic() -> std::result::Result<(), String> {
         let server = McpServer::builder()
             .name("test-server")
             .version("1.0.0")
@@ -761,7 +762,11 @@ mod tests {
         assert_eq!(server.version, "1.0.0");
         assert_eq!(server.tools.len(), 1);
         assert_eq!(server.tool_list.len(), 1);
-        assert_eq!(server.tool_list[0].name, "add");
+        assert_eq!(
+            server.tool_list.first().map(|tool| tool.name.as_str()),
+            Some("add")
+        );
+        Ok(())
     }
 
     #[test]
@@ -773,7 +778,7 @@ mod tests {
         assert_eq!(server.tools.len(), 1);
     }
 
-    fn make_init_params(version: &str) -> Value {
+    fn make_init_params(version: &str) -> std::result::Result<Value, String> {
         serde_json::to_value(InitializeParams {
             protocol_version: version.to_string(),
             capabilities: crate::mcp::types::ClientCapabilities::default(),
@@ -786,11 +791,11 @@ mod tests {
                 website_url: None,
             },
         })
-        .unwrap()
+        .map_err(|error| error.to_string())
     }
 
     #[test]
-    fn test_handle_initialize() {
+    fn test_handle_initialize() -> std::result::Result<(), String> {
         let server = McpServer::builder()
             .name("test")
             .version("0.1.0")
@@ -798,57 +803,79 @@ mod tests {
             .tool(Arc::new(AddTool))
             .build();
 
-        let params = make_init_params(MCP_PROTOCOL_VERSION);
-        let result = server.handle_initialize(Some(params)).unwrap();
-        let init: InitializeResult = serde_json::from_value(result).unwrap();
+        let params = make_init_params(MCP_PROTOCOL_VERSION)?;
+        let result = server
+            .handle_initialize(Some(params))
+            .map_err(|error| error.message)?;
+        let init: InitializeResult =
+            serde_json::from_value(result).map_err(|error| error.to_string())?;
 
         assert_eq!(init.protocol_version, MCP_PROTOCOL_VERSION);
         assert!(init.capabilities.tools.is_some());
-        assert_eq!(init.server_info.as_ref().unwrap().name, "test");
-        assert_eq!(init.instructions.unwrap(), "Test server");
+        assert_eq!(
+            init.server_info.as_ref().map(|info| info.name.as_str()),
+            Some("test")
+        );
+        assert_eq!(init.instructions.as_deref(), Some("Test server"));
+        Ok(())
     }
 
     #[test]
-    fn test_version_negotiation_echo_supported() {
+    fn test_version_negotiation_echo_supported() -> std::result::Result<(), String> {
         let server = McpServer::builder().build();
 
         // 客户端请求旧版本 2025-03-26 → 服务端回复相同版本
-        let params = make_init_params("2025-03-26");
-        let result = server.handle_initialize(Some(params)).unwrap();
-        let init: InitializeResult = serde_json::from_value(result).unwrap();
+        let params = make_init_params("2025-03-26")?;
+        let result = server
+            .handle_initialize(Some(params))
+            .map_err(|error| error.message)?;
+        let init: InitializeResult =
+            serde_json::from_value(result).map_err(|error| error.to_string())?;
         assert_eq!(init.protocol_version, "2025-03-26");
 
         // 客户端请求 2024-11-05 → 同样回复该版本
-        let params = make_init_params("2024-11-05");
-        let result = server.handle_initialize(Some(params)).unwrap();
-        let init: InitializeResult = serde_json::from_value(result).unwrap();
+        let params = make_init_params("2024-11-05")?;
+        let result = server
+            .handle_initialize(Some(params))
+            .map_err(|error| error.message)?;
+        let init: InitializeResult =
+            serde_json::from_value(result).map_err(|error| error.to_string())?;
         assert_eq!(init.protocol_version, "2024-11-05");
+        Ok(())
     }
 
     #[test]
-    fn test_version_negotiation_unsupported_rejects() {
+    fn test_version_negotiation_unsupported_rejects() -> std::result::Result<(), String> {
         let server = McpServer::builder().build();
 
         // 客户端请求不支持的版本 → 服务端返回错误
-        let params = make_init_params("2099-01-01");
-        let err = server.handle_initialize(Some(params)).unwrap_err();
+        let params = make_init_params("2099-01-01")?;
+        let err = server
+            .handle_initialize(Some(params))
+            .err()
+            .ok_or_else(|| "unsupported protocol version was accepted".to_string())?;
         assert_eq!(err.code, ERR_INVALID_REQUEST);
         assert!(err.message.contains("不支持的协议版本"));
+        Ok(())
     }
 
     #[test]
-    fn test_version_negotiation_latest() {
+    fn test_version_negotiation_latest() -> std::result::Result<(), String> {
         let server = McpServer::builder().build();
 
         // 客户端请求最新版本 → 回复最新版本
-        let params = make_init_params("2025-11-25");
-        let result = server.handle_initialize(Some(params)).unwrap();
-        let init: InitializeResult = serde_json::from_value(result).unwrap();
+        let params = make_init_params("2025-11-25")?;
+        let result = server
+            .handle_initialize(Some(params))
+            .map_err(|error| error.message)?;
+        let init: InitializeResult =
+            serde_json::from_value(result).map_err(|error| error.to_string())?;
         assert_eq!(init.protocol_version, "2025-11-25");
+        Ok(())
     }
 
     #[test]
-    fn test_old_client_without_new_fields() {
+    fn test_old_client_without_new_fields() -> std::result::Result<(), String> {
         let server = McpServer::builder().build();
 
         // 模拟旧客户端（无 title/icons 字段），serde 应正常反序列化
@@ -857,56 +884,80 @@ mod tests {
             "capabilities": {},
             "clientInfo": { "name": "old-client", "version": "0.1" }
         });
-        let result = server.handle_initialize(Some(params)).unwrap();
-        let init: InitializeResult = serde_json::from_value(result).unwrap();
+        let result = server
+            .handle_initialize(Some(params))
+            .map_err(|error| error.message)?;
+        let init: InitializeResult =
+            serde_json::from_value(result).map_err(|error| error.to_string())?;
         assert_eq!(init.protocol_version, "2025-03-26");
+        Ok(())
     }
 
     #[test]
-    fn test_handle_tools_list() {
+    fn test_handle_tools_list() -> std::result::Result<(), String> {
         let server = McpServer::builder().tool(Arc::new(AddTool)).build();
 
-        let result = server.handle_tools_list().unwrap();
-        let list: McpToolsListResult = serde_json::from_value(result).unwrap();
+        let result = server.handle_tools_list().map_err(|error| error.message)?;
+        let list: McpToolsListResult =
+            serde_json::from_value(result).map_err(|error| error.to_string())?;
 
         assert_eq!(list.tools.len(), 1);
-        assert_eq!(list.tools[0].name, "add");
         assert_eq!(
-            list.tools[0].description.as_deref(),
+            list.tools.first().map(|tool| tool.name.as_str()),
+            Some("add")
+        );
+        assert_eq!(
+            list.tools
+                .first()
+                .and_then(|tool| tool.description.as_deref()),
             Some("Add two numbers")
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_handle_tools_call() {
+    async fn test_handle_tools_call() -> std::result::Result<(), String> {
         let server = McpServer::builder().tool(Arc::new(AddTool)).build();
 
         let params = serde_json::to_value(McpToolCallParams {
             name: "add".to_string(),
             arguments: Some(serde_json::json!({ "a": 3, "b": 7 })),
         })
-        .unwrap();
+        .map_err(|error| error.to_string())?;
 
-        let result = server.handle_tools_call(Some(params)).await.unwrap();
-        let call_result: McpToolCallResult = serde_json::from_value(result).unwrap();
+        let result = server
+            .handle_tools_call(Some(params))
+            .await
+            .map_err(|error| error.message)?;
+        let call_result: McpToolCallResult =
+            serde_json::from_value(result).map_err(|error| error.to_string())?;
 
         assert!(!call_result.is_error);
         assert_eq!(call_result.content.len(), 1);
-        assert_eq!(call_result.content[0].as_text(), Some("10"));
+        assert_eq!(
+            call_result.content.first().and_then(McpContent::as_text),
+            Some("10")
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_handle_tools_call_not_found() {
+    async fn test_handle_tools_call_not_found() -> std::result::Result<(), String> {
         let server = McpServer::builder().build();
 
         let params = serde_json::to_value(McpToolCallParams {
             name: "nonexistent".to_string(),
             arguments: None,
         })
-        .unwrap();
+        .map_err(|error| error.to_string())?;
 
-        let err = server.handle_tools_call(Some(params)).await.unwrap_err();
+        let err = server
+            .handle_tools_call(Some(params))
+            .await
+            .err()
+            .ok_or_else(|| "unknown MCP tool was accepted".to_string())?;
         assert_eq!(err.code, ERR_INVALID_PARAMS);
+        Ok(())
     }
 
     #[tokio::test]
@@ -931,6 +982,9 @@ mod tests {
             params: None,
         };
         let resp = server.handle_request(req).await;
-        assert_eq!(resp.error.unwrap().code, ERR_METHOD_NOT_FOUND);
+        assert_eq!(
+            resp.error.as_ref().map(|error| error.code),
+            Some(ERR_METHOD_NOT_FOUND)
+        );
     }
 }
