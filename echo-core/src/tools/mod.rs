@@ -775,6 +775,14 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Inject an application-owned persisted-script runtime resolver.
+    fn set_script_execution_profile_resolver(
+        &self,
+        _resolver: Arc<dyn ScriptExecutionProfileResolver>,
+    ) -> bool {
+        false
+    }
+
     /// Whether this tool is exempt from the parallel batch timeout.
     ///
     /// Long-running tools (subagent dispatch such as `agent_tool` /
@@ -943,6 +951,85 @@ impl NestedDelegationPolicy {
     }
 }
 
+/// A caller-resolved runtime for executing one persisted script.
+///
+/// This is an execution mechanism rather than a model-visible parameter. An
+/// application can prepare a deterministic language environment, then inject
+/// the resolved executable through [`ToolContext`]. Tools must not expose the
+/// executable or environment map in their JSON schema.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScriptExecutionProfile {
+    /// Stable, content-derived identity recorded in tool metadata.
+    pub id: String,
+    /// Normalized language this profile can execute, such as `python`.
+    pub language: String,
+    /// Resolved executable path or backend-visible executable name.
+    pub program: std::path::PathBuf,
+    /// Arguments inserted before the relative script path.
+    pub args_prefix: Vec<String>,
+    /// Environment supplied only to the sandboxed child process.
+    pub env: HashMap<String, String>,
+    /// Runtime files that the sandbox must be allowed to read.
+    pub read_only_paths: Vec<std::path::PathBuf>,
+}
+
+impl std::fmt::Debug for ScriptExecutionProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptExecutionProfile")
+            .field("id", &self.id)
+            .field("language", &self.language)
+            .field("program", &self.program)
+            .field("args_prefix", &self.args_prefix)
+            .field("environment_keys", &self.env.keys().collect::<Vec<_>>())
+            .field("read_only_paths", &self.read_only_paths)
+            .finish()
+    }
+}
+
+impl ScriptExecutionProfile {
+    pub fn new(
+        id: impl Into<String>,
+        language: impl Into<String>,
+        program: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            language: language.into(),
+            program: program.into(),
+            args_prefix: Vec::new(),
+            env: HashMap::new(),
+            read_only_paths: Vec::new(),
+        }
+    }
+
+    pub fn with_arg_prefix(mut self, argument: impl Into<String>) -> Self {
+        self.args_prefix.push(argument.into());
+        self
+    }
+
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn with_read_only_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.read_only_paths.push(path.into());
+        self
+    }
+}
+
+/// Resolves an application-owned runtime for persisted scripts.
+///
+/// Implementations may lazily provision a locked environment. The framework
+/// owns invocation and sandboxing; applications own interpreter and package
+/// policy. Returning `None` preserves the built-in language executable.
+pub trait ScriptExecutionProfileResolver: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        language: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Arc<ScriptExecutionProfile>>>>;
+}
+
 #[derive(Clone)]
 pub struct ExternalRunContext {
     /// 当前会话标识，跨主 agent/subagent 保持稳定。
@@ -1007,6 +1094,12 @@ pub struct ToolContext {
     pub output_artifacts: Option<artifact::ToolOutputArtifactConfig>,
     /// Invocation-scoped schema visibility shared with `tool_search`.
     pub tool_visibility: Option<std::sync::Arc<ToolVisibilityState>>,
+    /// Application-resolved runtime for a persisted script execution.
+    ///
+    /// This value is intentionally absent from model-visible tool parameters.
+    /// `run_code` applies it only when `script_path` is used and its normalized
+    /// language matches the tool call.
+    pub script_execution_profile: Option<std::sync::Arc<ScriptExecutionProfile>>,
     /// 跨 spawn 安全的取消令牌（值传递，非 task_local）。
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// 跨 spawn 安全的 trace 回传（值传递）。
@@ -1033,6 +1126,13 @@ impl std::fmt::Debug for ToolContext {
                     .tool_visibility
                     .as_ref()
                     .map(|visibility| visibility.visible_names().len()),
+            )
+            .field(
+                "script_execution_profile",
+                &self
+                    .script_execution_profile
+                    .as_ref()
+                    .map(|profile| profile.id.as_str()),
             )
             .field(
                 "cancel",
@@ -1230,6 +1330,7 @@ mod tool_context_tests {
             call_id: None,
             output_artifacts: None,
             tool_visibility: None,
+            script_execution_profile: None,
             cancel: None,
             trace_sink: None,
             delegation_policy: None,

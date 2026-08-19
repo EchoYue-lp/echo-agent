@@ -552,6 +552,7 @@ impl PipelineStage for ExecuteStage {
             active_message: snapshot.current_message.clone(),
             output_artifacts: snapshot.config.tool_output_artifacts.clone(),
             tool_visibility: snapshot.tools.visibility.clone(),
+            script_execution_profile: None,
             cancel: snapshot.external_cancel.clone(),
             trace_sink: snapshot.external_trace_sink.clone(),
             delegation_policy: snapshot.external_delegation_policy,

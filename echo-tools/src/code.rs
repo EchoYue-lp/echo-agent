@@ -19,8 +19,8 @@ use echo_core::sandbox::{
 };
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
-    Tool, ToolContext, ToolFailure, ToolFailureCategory, ToolParameters, ToolResult,
-    ToolResultKind, ToolRiskLevel, ToolSideEffect,
+    ScriptExecutionProfile, ScriptExecutionProfileResolver, Tool, ToolContext, ToolFailure,
+    ToolFailureCategory, ToolParameters, ToolResult, ToolResultKind, ToolRiskLevel, ToolSideEffect,
 };
 use futures::future::BoxFuture;
 use std::path::{Component, Path, PathBuf};
@@ -86,6 +86,45 @@ fn script_program(language: &str) -> Result<&'static str> {
     }
 }
 
+fn script_command(
+    language: &str,
+    relative_script: &Path,
+    profile: Option<&Arc<ScriptExecutionProfile>>,
+) -> Result<(SandboxCommand, Option<Arc<ScriptExecutionProfile>>)> {
+    let script_argument = relative_script.to_string_lossy().to_string();
+    let Some(profile) = profile else {
+        return Ok((
+            SandboxCommand::program(script_program(language)?, vec![script_argument]),
+            None,
+        ));
+    };
+
+    let profile_language = validate_language(profile.language.trim())?;
+    if profile_language != language {
+        return Err(ReactError::from(ToolError::InvalidParameter {
+            name: "script_execution_profile".to_string(),
+            message: format!(
+                "Script profile '{}' is for language '{}', not '{language}'",
+                profile.id, profile_language
+            ),
+        }));
+    }
+    if profile.id.trim().is_empty() || profile.program.as_os_str().is_empty() {
+        return Err(ReactError::from(ToolError::InvalidParameter {
+            name: "script_execution_profile".to_string(),
+            message: "Script profile must have a non-empty id and program".to_string(),
+        }));
+    }
+
+    let mut args = profile.args_prefix.clone();
+    args.push(script_argument);
+    let mut command = SandboxCommand::program(profile.program.to_string_lossy(), args);
+    for (key, value) in &profile.env {
+        command = command.with_env(key, value);
+    }
+    Ok((command, Some(profile.clone())))
+}
+
 fn validate_script_path(script_path: &str, working_dir: Option<&Path>) -> Result<PathBuf> {
     let trimmed = script_path.trim();
     if trimmed.is_empty() {
@@ -146,6 +185,8 @@ pub struct RunCodeTool {
     /// the executor after construction (via `set_sandbox_manager` →
     /// `ToolManager::apply_sandbox`), without requiring `&mut self`.
     sandbox: Mutex<Option<Arc<dyn SandboxExecutor>>>,
+    /// Optional application-owned lazy runtime resolver for persisted scripts.
+    script_profile_resolver: Mutex<Option<Arc<dyn ScriptExecutionProfileResolver>>>,
     /// Per-call timeout in seconds (default 60, capped at 300 like ShellTool).
     timeout_secs: u64,
     /// Shared retained stdout + stderr budget.
@@ -156,6 +197,7 @@ impl Default for RunCodeTool {
     fn default() -> Self {
         Self {
             sandbox: Mutex::new(None),
+            script_profile_resolver: Mutex::new(None),
             timeout_secs: 60,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         }
@@ -245,6 +287,17 @@ impl Tool for RunCodeTool {
         true
     }
 
+    fn set_script_execution_profile_resolver(
+        &self,
+        resolver: Arc<dyn ScriptExecutionProfileResolver>,
+    ) -> bool {
+        *self
+            .script_profile_resolver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(resolver);
+        true
+    }
+
     fn execute_with_context<'a>(
         &'a self,
         parameters: ToolParameters,
@@ -253,6 +306,11 @@ impl Tool for RunCodeTool {
         Box::pin(async move {
             let sandbox = self
                 .sandbox
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let script_profile_resolver = self
+                .script_profile_resolver
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone();
@@ -273,33 +331,42 @@ impl Tool for RunCodeTool {
                 .get("script_path")
                 .and_then(|value| value.as_str())
                 .filter(|value| !value.trim().is_empty());
-            let (mut sandbox_cmd, execution_mode, persisted_script) = match (code, script_path) {
-                (Some(code), None) => (SandboxCommand::code(&language, code), "inline", None),
-                (None, Some(script_path)) => {
-                    let relative = validate_script_path(script_path, ctx.working_dir.as_deref())?;
-                    let program = script_program(&language)?;
-                    (
-                        SandboxCommand::program(
-                            program,
-                            vec![relative.to_string_lossy().to_string()],
-                        ),
-                        "script",
-                        Some(relative),
-                    )
+            let resolved_script_profile = if script_path.is_some() {
+                if let Some(profile) = &ctx.script_execution_profile {
+                    Some(profile.clone())
+                } else if let Some(resolver) = script_profile_resolver {
+                    resolver.resolve(&language).await?
+                } else {
+                    None
                 }
-                (Some(_), Some(_)) => {
-                    return Err(ReactError::from(ToolError::InvalidParameter {
-                        name: "code/script_path".to_string(),
-                        message: "Provide exactly one of code or script_path".to_string(),
-                    }));
-                }
-                (None, None) => {
-                    return Err(ReactError::from(ToolError::InvalidParameter {
-                        name: "code/script_path".to_string(),
-                        message: "Provide exactly one of code or script_path".to_string(),
-                    }));
-                }
+            } else {
+                None
             };
+            let (mut sandbox_cmd, execution_mode, persisted_script, script_profile) =
+                match (code, script_path) {
+                    (Some(code), None) => {
+                        (SandboxCommand::code(&language, code), "inline", None, None)
+                    }
+                    (None, Some(script_path)) => {
+                        let relative =
+                            validate_script_path(script_path, ctx.working_dir.as_deref())?;
+                        let (command, profile) =
+                            script_command(&language, &relative, resolved_script_profile.as_ref())?;
+                        (command, "script", Some(relative), profile)
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(ReactError::from(ToolError::InvalidParameter {
+                            name: "code/script_path".to_string(),
+                            message: "Provide exactly one of code or script_path".to_string(),
+                        }));
+                    }
+                    (None, None) => {
+                        return Err(ReactError::from(ToolError::InvalidParameter {
+                            name: "code/script_path".to_string(),
+                            message: "Provide exactly one of code or script_path".to_string(),
+                        }));
+                    }
+                };
 
             let timeout_secs = parameters
                 .get("timeout")
@@ -353,6 +420,11 @@ impl Tool for RunCodeTool {
             if let Some(working_dir) = &ctx.working_dir {
                 limits.writable_paths.push(working_dir.clone());
             }
+            if let Some(profile) = &script_profile {
+                limits
+                    .read_only_paths
+                    .extend(profile.read_only_paths.iter().cloned());
+            }
 
             match sandbox
                 .execute_with_limits_and_cancel(sandbox_cmd, limits, ctx.cancel.clone())
@@ -369,6 +441,9 @@ impl Tool for RunCodeTool {
                     if let Some(script) = persisted_script {
                         tool_result = tool_result
                             .with_meta("script_path", script.to_string_lossy().to_string());
+                    }
+                    if let Some(profile) = script_profile {
+                        tool_result = tool_result.with_meta("script_profile", profile.id.clone());
                     }
                     Ok(tool_result)
                 }
@@ -510,6 +585,22 @@ mod tests {
         available: bool,
         result: ExecutionResult,
         seen: std::sync::Mutex<Option<RecordedCall>>,
+    }
+
+    struct FixedProfileResolver {
+        profile: Arc<ScriptExecutionProfile>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptExecutionProfileResolver for FixedProfileResolver {
+        fn resolve<'a>(
+            &'a self,
+            language: &'a str,
+        ) -> BoxFuture<'a, Result<Option<Arc<ScriptExecutionProfile>>>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let profile = (language == self.profile.language).then(|| self.profile.clone());
+            Box::pin(async move { Ok(profile) })
+        }
     }
 
     impl SandboxExecutor for RecordingSandbox {
@@ -747,6 +838,132 @@ mod tests {
             _ => {
                 return Err(ReactError::Other(
                     "expected direct program sandbox command".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_code_uses_caller_resolved_script_profile() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let runtime = tempfile::tempdir()?;
+        std::fs::write(workspace.path().join("分析.py"), "print('reviewed')\n")?;
+        let python = runtime.path().join("bin/python");
+        let profile = ScriptExecutionProfile::new("analytics:sha256", "python", &python)
+            .with_arg_prefix("-I")
+            .with_env("PYTHONUTF8", "1")
+            .with_read_only_path(runtime.path());
+        let sandbox = recording_sandbox(IsolationLevel::OsSandbox, true, success_execution("ok"));
+        let captured = sandbox.clone();
+        let ctx = ToolContext {
+            working_dir: Some(workspace.path().to_path_buf()),
+            script_execution_profile: Some(Arc::new(profile)),
+            ..ToolContext::default()
+        };
+
+        let result = RunCodeTool::new()
+            .with_sandbox(sandbox)
+            .execute_with_context(script_params("Python", "分析.py"), &ctx)
+            .await?;
+        assert!(result.success);
+        assert_eq!(
+            result.metadata.get("script_profile").map(String::as_str),
+            Some("analytics:sha256")
+        );
+
+        let seen = captured
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| ReactError::Other("sandbox call was not recorded".to_string()))?;
+        assert_eq!(
+            seen.command.env.get("PYTHONUTF8").map(String::as_str),
+            Some("1")
+        );
+        assert!(
+            seen.limits
+                .read_only_paths
+                .contains(&runtime.path().to_path_buf())
+        );
+        match seen.command.kind {
+            CommandKind::Program { program, args } => {
+                assert_eq!(program, python.to_string_lossy());
+                assert_eq!(args, vec!["-I".to_string(), "分析.py".to_string()]);
+            }
+            _ => {
+                return Err(ReactError::Other(
+                    "expected resolved program sandbox command".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_code_rejects_mismatched_script_profile() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        std::fs::write(workspace.path().join("analysis.py"), "print(1)\n")?;
+        let profile = ScriptExecutionProfile::new("r-profile", "r", "/usr/bin/Rscript");
+        let ctx = ToolContext {
+            working_dir: Some(workspace.path().to_path_buf()),
+            script_execution_profile: Some(Arc::new(profile)),
+            ..ToolContext::default()
+        };
+
+        let result = RunCodeTool::new()
+            .execute_with_context(script_params("python", "analysis.py"), &ctx)
+            .await;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_code_lazily_resolves_persisted_script_profile() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        std::fs::write(workspace.path().join("analysis.py"), "print(1)\n")?;
+        let runtime = tempfile::tempdir()?;
+        let profile = Arc::new(ScriptExecutionProfile::new(
+            "lazy-profile",
+            "python",
+            runtime.path().join("python"),
+        ));
+        let resolver = Arc::new(FixedProfileResolver {
+            profile,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let sandbox = recording_sandbox(IsolationLevel::OsSandbox, true, success_execution("ok"));
+        let captured = sandbox.clone();
+        let tool = RunCodeTool::new().with_sandbox(sandbox);
+        assert!(tool.set_script_execution_profile_resolver(resolver.clone()));
+        let ctx = ToolContext {
+            working_dir: Some(workspace.path().to_path_buf()),
+            ..ToolContext::default()
+        };
+
+        let result = tool
+            .execute_with_context(script_params("python", "analysis.py"), &ctx)
+            .await?;
+        assert!(result.success);
+        assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            result.metadata.get("script_profile").map(String::as_str),
+            Some("lazy-profile")
+        );
+        let seen = captured
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| ReactError::Other("sandbox call was not recorded".to_string()))?;
+        match seen.command.kind {
+            CommandKind::Program { program, .. } => {
+                assert_eq!(program, runtime.path().join("python").to_string_lossy());
+            }
+            _ => {
+                return Err(ReactError::Other(
+                    "expected lazily resolved program".to_string(),
                 ));
             }
         }

@@ -92,9 +92,9 @@ async fn cancel_aware<T>(
 }
 
 pub use echo_core::tools::{
-    Tool, ToolContext, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolOutputChannel,
-    ToolParameters, ToolRecoveryAction, ToolRegistrar, ToolResult, ToolRiskLevel, ToolRunner,
-    ToolSideEffect, ToolStreamEvent,
+    ScriptExecutionProfile, ScriptExecutionProfileResolver, Tool, ToolContext, ToolExecutionConfig,
+    ToolFailure, ToolFailureCategory, ToolOutputChannel, ToolParameters, ToolRecoveryAction,
+    ToolRegistrar, ToolResult, ToolRiskLevel, ToolRunner, ToolSideEffect, ToolStreamEvent,
 };
 
 fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32) -> u64 {
@@ -735,6 +735,18 @@ impl ToolManager {
     pub fn apply_sandbox(&self, sandbox: Arc<dyn SandboxExecutor>) {
         for mut entry in self.tools.iter_mut() {
             entry.value_mut().set_sandbox(sandbox.clone());
+        }
+    }
+
+    /// Inject a lazy persisted-script runtime resolver into supporting tools.
+    pub fn apply_script_execution_profile_resolver(
+        &self,
+        resolver: Arc<dyn ScriptExecutionProfileResolver>,
+    ) {
+        for mut entry in self.tools.iter_mut() {
+            entry
+                .value_mut()
+                .set_script_execution_profile_resolver(resolver.clone());
         }
     }
 

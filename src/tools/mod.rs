@@ -127,10 +127,10 @@ pub mod execution {
 
 pub use echo_core::tools::{ParamValue, ToolCallParams};
 pub use echo_execution::tools::{
-    Tool, ToolBudgetMetricsSnapshot, ToolContext, ToolExecutionConfig, ToolFailure,
-    ToolFailureCategory, ToolManager, ToolOutputChannel, ToolParameters, ToolRecoveryAction,
-    ToolResult, ToolRiskLevel, ToolRunner, ToolSchemaStats, ToolSearchTool, ToolSideEffect,
-    ToolStreamEvent,
+    ScriptExecutionProfile, ScriptExecutionProfileResolver, Tool, ToolBudgetMetricsSnapshot,
+    ToolContext, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolManager,
+    ToolOutputChannel, ToolParameters, ToolRecoveryAction, ToolResult, ToolRiskLevel, ToolRunner,
+    ToolSchemaStats, ToolSearchTool, ToolSideEffect, ToolStreamEvent,
 };
 pub use echo_tools::{register_all_tools, register_readonly_tools};
 
