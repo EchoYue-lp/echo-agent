@@ -536,7 +536,7 @@ fn which_exists(cmd: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn find_git_bash_path() -> Option<String> {
+pub fn find_git_bash_path() -> Option<String> {
     let candidates = [
         std::env::var("ProgramFiles")
             .ok()
