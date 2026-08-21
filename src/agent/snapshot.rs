@@ -76,6 +76,61 @@ fn filter_user_visible_transcript(messages: &[Message]) -> Vec<Message> {
         .collect()
 }
 
+fn same_transcript_message(
+    left: &crate::memory::StoredMessage,
+    right: &crate::memory::StoredMessage,
+) -> bool {
+    left.role == right.role
+        && left.content == right.content
+        && left.attachments_json == right.attachments_json
+        && left.tool_calls_json == right.tool_calls_json
+        && left.tool_result_json == right.tool_result_json
+}
+
+fn merge_transcript_projection(
+    mut persisted: Vec<crate::memory::StoredMessage>,
+    projected: Vec<crate::memory::StoredMessage>,
+) -> Vec<crate::memory::StoredMessage> {
+    if persisted.is_empty() {
+        return projected;
+    }
+    if projected.is_empty() {
+        return persisted;
+    }
+
+    // The active view may be a compacted suffix, or it may retain the full
+    // conversation while replacing old tool traces in the middle. Anchor on
+    // the last durable message, then choose the occurrence with the longest
+    // backward match. Only the active suffix after that boundary is new.
+    let Some(last_persisted) = persisted.last() else {
+        return projected;
+    };
+    let mut best_boundary: Option<(usize, usize)> = None;
+    for (end_index, candidate) in projected.iter().enumerate() {
+        if !same_transcript_message(last_persisted, candidate) {
+            continue;
+        }
+        let matched = persisted
+            .iter()
+            .rev()
+            .zip(projected.iter().take(end_index.saturating_add(1)).rev())
+            .take_while(|(left, right)| same_transcript_message(left, right))
+            .count();
+        let replace = best_boundary.is_none_or(|(best_matched, best_end)| {
+            matched > best_matched || (matched == best_matched && end_index > best_end)
+        });
+        if replace {
+            best_boundary = Some((matched, end_index));
+        }
+    }
+
+    let append_from = best_boundary
+        .map(|(_, end_index)| end_index.saturating_add(1))
+        .unwrap_or(0);
+    persisted.extend(projected.into_iter().skip(append_from));
+    persisted
+}
+
 // ── RuntimeConfig ────────────────────────────────────────────────────
 
 /// Immutable subset of [`AgentConfig`](crate::agent::AgentConfig) that
@@ -698,8 +753,8 @@ impl AgentRunSnapshot {
     /// This consolidates transcript persistence in the framework: previously,
     /// every product entry point (Tauri commands, TUI loop) had to call
     /// `save_messages` on its own. Now `run_core_loop` invokes this helper at
-    /// finalization, and the product layer only handles conversation
-    /// metadata (title / pinned / agent_type).
+    /// pre-model and finalization safe points, and the product layer only
+    /// handles conversation metadata (title / pinned / agent_type).
     ///
     /// Silently no-ops if no conversation store or `conversation_id` is configured.
     pub async fn save_transcript_projection(
@@ -757,7 +812,20 @@ impl AgentRunSnapshot {
             return;
         }
 
-        if let Err(e) = store.save_messages(conv_id, &projected).await {
+        let persisted = match store.get_messages(conv_id).await {
+            Ok(messages) => messages,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    conversation_id = conv_id.as_str(),
+                    "Failed to load durable transcript before merging active projection"
+                );
+                return;
+            }
+        };
+        let merged = merge_transcript_projection(persisted, projected);
+
+        if let Err(e) = store.save_messages(conv_id, &merged).await {
             tracing::warn!(
                 error = %e,
                 conversation_id = conv_id.as_str(),
@@ -766,7 +834,7 @@ impl AgentRunSnapshot {
         } else {
             tracing::debug!(
                 conversation_id = conv_id.as_str(),
-                message_count = projected.len(),
+                message_count = merged.len(),
                 "Transcript projection saved"
             );
         }

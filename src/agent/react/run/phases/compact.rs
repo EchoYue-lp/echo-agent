@@ -32,7 +32,12 @@ pub(crate) async fn run_compact(
     // `ContextManager::should_compress()` so it only fires when compaction is
     // actually imminent (not every ReAct iteration).
     let _ = snap.pre_compaction_flush(context).await;
-    // Save checkpoint before compression (preserves full context)
+    // Persist the complete user-visible transcript before ContextManager may
+    // replace active history through horizon folding or semantic compaction.
+    // The runtime checkpoint below remains the resume view; these two stores
+    // intentionally have different retention semantics.
+    snap.save_transcript_projection(context).await;
+    // Save checkpoint before compression (preserves the current resume view).
     snap.save_runtime_checkpoint(context, None).await?;
     let projection_context = crate::compression::ProjectionContext {
         iteration,
@@ -278,6 +283,49 @@ mod tests {
             event,
             crate::trace::RunEvent::ContextCompression { source, .. } if source == "auto"
         )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_compact_persists_full_transcript_before_replacing_active_history() -> Result<()> {
+        use crate::memory::{ConversationStore, FileConversationStore};
+
+        let temp = tempfile::tempdir()?;
+        let conversation_store = Arc::new(FileConversationStore::new(temp.path())?);
+        let mut config = AgentConfig::new("test-model", "agent", "sys")
+            .conversation_id("pre-compact-transcript");
+        config.token_limit = 4_096;
+        config.enable_tool = false;
+        let mut agent = ReactAgent::new(config);
+        agent.set_conversation_store(conversation_store.clone());
+        agent.set_compressor(SlidingWindowCompressor::new(1)).await;
+        {
+            let mut context = agent.memory.context.lock().await;
+            context.push(Message::user("original request ".repeat(5_000)));
+            context.push(Message::assistant("original answer ".repeat(500)));
+            context.push(Message::user("latest request".to_string()));
+        }
+        let snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, _rx) = mpsc::channel::<Result<AgentEvent>>(8);
+
+        let outcome = run_compact(&snap, &agent.memory.context, &tx, 0).await?;
+        assert!(matches!(outcome, CompactOutcome::Continue(_)));
+
+        let persisted = conversation_store
+            .get_messages("pre-compact-transcript")
+            .await?;
+        assert!(persisted.iter().any(|message| {
+            message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.starts_with("original request"))
+        }));
+        assert!(persisted.iter().any(|message| {
+            message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.starts_with("original answer"))
+        }));
         Ok(())
     }
 

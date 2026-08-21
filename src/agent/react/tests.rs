@@ -2496,6 +2496,7 @@ async fn save_transcript_projection_writes_to_conversation_store() {
     struct RecordingStore {
         saves: StdMutex<Vec<(String, Vec<StoredMessage>)>>,
         conversations: StdMutex<Vec<Conversation>>,
+        persisted: StdMutex<Vec<StoredMessage>>,
     }
 
     impl RecordingStore {
@@ -2503,6 +2504,7 @@ async fn save_transcript_projection_writes_to_conversation_store() {
             Self {
                 saves: StdMutex::new(Vec::new()),
                 conversations: StdMutex::new(Vec::new()),
+                persisted: StdMutex::new(Vec::new()),
             }
         }
     }
@@ -2576,16 +2578,39 @@ async fn save_transcript_projection_writes_to_conversation_store() {
             let key = conversation_id.to_string();
             let msgs = messages.to_vec();
             Box::pin(async move {
-                self.saves.lock().unwrap().push((key, msgs));
+                self.saves
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((key, msgs.clone()));
+                *self
+                    .persisted
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = msgs;
                 Ok(())
             })
         }
 
         fn get_messages<'a>(
             &'a self,
-            _conversation_id: &'a str,
+            conversation_id: &'a str,
         ) -> BoxFuture<'a, CoreResult<Vec<StoredMessage>>> {
-            Box::pin(async move { Ok(Vec::new()) })
+            Box::pin(async move {
+                let is_known = self
+                    .conversations
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .any(|conversation| conversation.conversation_id == conversation_id);
+                if is_known {
+                    Ok(self
+                        .persisted
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone())
+                } else {
+                    Ok(Vec::new())
+                }
+            })
         }
 
         fn count_messages<'a>(
@@ -2628,6 +2653,60 @@ async fn save_transcript_projection_writes_to_conversation_store() {
         .collect();
     assert!(user_texts.contains(&"hello"));
     assert!(user_texts.contains(&"world"));
+
+    // A compacted active window is only a continuation view. Saving it must
+    // append new visible messages without deleting older transcript entries.
+    {
+        let mut ctx = agent.memory.context.lock().await;
+        ctx.set_messages(vec![
+            Message::system("sys".to_string()),
+            Message::system(
+                "[\u{5bf9}\u{8bdd}\u{5386}\u{53f2}\u{6458}\u{8981}]\ncheckpoint".to_string(),
+            ),
+            Message::user("world".to_string()),
+            Message::assistant("final answer".to_string()),
+        ]);
+    }
+    snap.save_transcript_projection(&agent.memory.context).await;
+    let persisted = store
+        .persisted
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let visible_text: Vec<&str> = persisted
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect();
+    assert_eq!(visible_text, vec!["hello", "world", "final answer"]);
+
+    // Deterministic tool-trace folding can rewrite the middle of the active
+    // view. The last durable message remains the append boundary, so neither
+    // the rewritten prefix nor the existing tail may be duplicated.
+    {
+        let mut ctx = agent.memory.context.lock().await;
+        ctx.set_messages(vec![
+            Message::system("sys".to_string()),
+            Message::user("hello".to_string()),
+            Message::user("[Tool trace compacted]".to_string()),
+            Message::user("world".to_string()),
+            Message::assistant("final answer".to_string()),
+            Message::assistant("post-fold answer".to_string()),
+        ]);
+    }
+    snap.save_transcript_projection(&agent.memory.context).await;
+    let persisted_after_fold = store
+        .persisted
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let visible_after_fold: Vec<&str> = persisted_after_fold
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect();
+    assert_eq!(
+        visible_after_fold,
+        vec!["hello", "world", "final answer", "post-fold answer"]
+    );
 
     // ── Case 2: missing conversation_id → no-op ──
     let store2 = Arc::new(RecordingStore::new());

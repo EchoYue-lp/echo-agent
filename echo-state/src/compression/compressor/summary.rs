@@ -15,23 +15,18 @@ use tracing::warn;
 pub type SummaryPromptFn = Box<dyn Fn(&[Message]) -> String + Send + Sync>;
 
 const COMPRESSION_PROMPT: &str =
-    "你的任务是创建到目前为止对话的详细摘要，密切关注用户的明确请求和你之前的行动。
-此摘要应彻底捕获需求细节和决策，这些对于在不丢失上下文的情况下继续开发工作至关重要。
+    "你的任务是生成一个可供后续 Agent 继续工作的语义检查点，而不是转述整段对话。
+摘要会与近期原始消息、系统/项目规则和外部文件一起重新注入模型。
 
-你的摘要应包括以下部分:
+必须保留：
+1. 用户的当前目标、最新意图和验收条件。
+2. 明确约束、用户偏好、禁止事项与已做决策及其原因。
+3. 已完成、正在进行和待处理的工作，不得把计划写成已完成。
+4. 继续工作所需的精确文件路径、标识符、版本、数值、命令、测试结果和错误。
+5. 工具输出的关键结论与证据位置；不复制可以从仓库或 transcript 重新读取的大段正文。
+6. 紧接着应该执行的下一步。
 
-1. **主要请求和意图**: 详细捕获用户的所有明确请求和意图
-2. **关键技术概念**: 列出讨论的所有重要技术概念、技术和框架
-3. **任务和任务内容**: 枚举检查、修改或创建的特定任务
-4. **错误和修复**: 列出你遇到的所有错误以及修复方法
-5. **问题解决**: 记录已解决的问题和任何正在进行的故障排除工作
-6. **所有用户消息**: 列出所有非工具结果的用户消息
-7. **待处理任务**: 概述你明确被要求处理的任何待处理任务
-8. **当前工作**: 详细描述在此摘要请求之前正在进行的确切工作
-9. **可选的下一步**: 列出与你最近正在做的工作相关的下一步
-
-请确保摘要足够详细，使得另一个AI助手（或你自己在新会话中）能够无缝地继续这个对话和工作。
-";
+必须自包含、准确、紧凑。不要依赖被压缩掉的原文，不要编造进度或结果。";
 
 /// 使用内置中文模板生成默认摘要提示词。
 ///
@@ -92,7 +87,9 @@ const STRUCTURED_SUMMARY_PROMPT: &str = r#"你的任务是创建对话历史的*
   "files_touched": ["涉及的文件路径，如 src/auth.rs"],
   "errors": ["遇到的错误及修复方法，格式：错误描述 → 修复方式"],
   "tool_outputs_summary": "工具输出中的关键发现摘要（字符串）",
-  "user_preferences": ["用户表达的偏好或约束，如 使用 pnpm"],
+  "user_preferences": ["用户表达的偏好，如 使用 pnpm"],
+  "constraints": ["必须遵守的约束、禁止事项或验收条件"],
+  "key_facts": ["继续工作必需的精确 ID、值、版本、命令、路径或证据位置"],
   "next_step": "建议的下一步行动（字符串）"
 }
 
@@ -101,7 +98,8 @@ const STRUCTURED_SUMMARY_PROMPT: &str = r#"你的任务是创建对话历史的*
 2. 所有数组字段如果没有内容，使用空数组 []
 3. 所有字符串字段如果没有内容，使用空字符串 ""
 4. 摘要应足够详细，使另一个 AI 助手能无缝继续工作
-5. 文件路径必须完整且准确"#;
+5. 文件路径、标识符、数值、版本和命令必须保留精确形式
+6. 不复制可从仓库或 transcript 按需取回的大段工具输出"#;
 
 /// Build a structured-summary prompt, optionally with focus instructions.
 pub fn structured_summary_prompt(messages: &[Message], focus: Option<&str>) -> String {
@@ -356,6 +354,11 @@ impl ContextCompressor for SummaryCompressor {
             let system_count = system_msgs.len();
 
             if conv_msgs.len() <= self.keep_recent {
+                if tokens_before > input.token_limit {
+                    return SlidingWindowCompressor::new(self.keep_recent)
+                        .compress(input)
+                        .await;
+                }
                 let mut messages = system_msgs;
                 messages.extend(conv_msgs);
                 let tokens_after: usize = messages
@@ -402,9 +405,22 @@ impl ContextCompressor for SummaryCompressor {
                 }
             };
 
-            let mut messages = system_msgs;
-            messages.push(Message::system(final_summary));
-            messages.extend(to_keep);
+            let mut provisional = system_msgs;
+            provisional.push(Message::system(final_summary));
+            provisional.extend(to_keep);
+            let bounded = SlidingWindowCompressor::new(self.keep_recent)
+                .compress(CompressionInput {
+                    messages: provisional,
+                    token_limit: input.token_limit,
+                    current_query: input.current_query.clone(),
+                    focus_instructions: input.focus_instructions.clone(),
+                    cancel_token: input.cancel_token.clone(),
+                    tokenizer: Some(tokenizer.clone()),
+                })
+                .await?;
+            let messages = bounded.messages;
+            let mut evicted = to_summarize.to_vec();
+            evicted.extend(bounded.evicted);
 
             let tokens_after: usize = messages
                 .iter()
@@ -413,16 +429,19 @@ impl ContextCompressor for SummaryCompressor {
                 .sum();
 
             let checkpoint = CompressionCheckpoint::new(self.name())
-                .with_covered_range(system_count, system_count + split_at - 1)
+                .with_covered_range(
+                    system_count,
+                    system_count.saturating_add(split_at).saturating_sub(1),
+                )
                 .with_summary(summary_for_checkpoint.unwrap_or_default())
-                .with_counts(messages.len(), to_summarize.len())
+                .with_counts(messages.len(), evicted.len())
                 .with_tokens(tokens_before, tokens_after)
                 .with_duration_ms(start.elapsed().as_millis() as u64)
                 .with_focus(focus);
 
             Ok(CompressionOutput {
                 messages,
-                evicted: to_summarize.to_vec(),
+                evicted,
                 checkpoint: Some(checkpoint),
             })
         })
@@ -673,14 +692,26 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                 .map(|c| tokenizer.count_tokens(&c))
                 .sum();
 
-            let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) = input
+            let system_msgs: Vec<Message> = input
                 .messages
                 .iter()
+                .filter(|message| message.role == Role::System && !is_generated_summary(message))
                 .cloned()
-                .partition(|m| m.role == Role::System);
+                .collect();
+            let conv_msgs: Vec<Message> = input
+                .messages
+                .iter()
+                .filter(|message| message.role != Role::System || is_generated_summary(message))
+                .cloned()
+                .collect();
             let system_count = system_msgs.len();
 
             if conv_msgs.len() <= self.keep_recent {
+                if tokens_before > input.token_limit {
+                    return SlidingWindowCompressor::new(self.keep_recent)
+                        .compress(input)
+                        .await;
+                }
                 let mut messages = system_msgs;
                 messages.extend(conv_msgs);
                 let tokens_after: usize = messages
@@ -762,9 +793,22 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                     }
                 };
 
-            let mut messages = system_msgs;
-            messages.push(Message::system(final_text));
-            messages.extend(to_keep);
+            let mut provisional = system_msgs;
+            provisional.push(Message::system(final_text));
+            provisional.extend(to_keep);
+            let bounded = SlidingWindowCompressor::new(self.keep_recent)
+                .compress(CompressionInput {
+                    messages: provisional,
+                    token_limit: input.token_limit,
+                    current_query: input.current_query.clone(),
+                    focus_instructions: input.focus_instructions.clone(),
+                    cancel_token: input.cancel_token.clone(),
+                    tokenizer: Some(tokenizer.clone()),
+                })
+                .await?;
+            let messages = bounded.messages;
+            let mut evicted = to_summarize.to_vec();
+            evicted.extend(bounded.evicted);
 
             let tokens_after: usize = messages
                 .iter()
@@ -773,16 +817,19 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                 .sum();
 
             let checkpoint = CompressionCheckpoint::new(self.name())
-                .with_covered_range(system_count, system_count + split_at - 1)
+                .with_covered_range(
+                    system_count,
+                    system_count.saturating_add(split_at).saturating_sub(1),
+                )
                 .with_summary(summary_for_checkpoint)
-                .with_counts(messages.len(), to_summarize.len())
+                .with_counts(messages.len(), evicted.len())
                 .with_tokens(tokens_before, tokens_after)
                 .with_duration_ms(start.elapsed().as_millis() as u64)
                 .with_focus(focus);
 
             Ok(CompressionOutput {
                 messages,
-                evicted: to_summarize.to_vec(),
+                evicted,
                 checkpoint: Some(checkpoint),
             })
         })
@@ -792,6 +839,92 @@ impl ContextCompressor for IncrementalSummaryCompressor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::llm::capabilities::ProviderCapabilities;
+    use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse};
+    use echo_core::tokenizer::HeuristicTokenizer;
+    use futures::stream::BoxStream;
+
+    struct StaticSummaryLlm;
+
+    impl LlmClient for StaticSummaryLlm {
+        fn chat(&self, _request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
+            Box::pin(async {
+                Ok(ChatResponse {
+                    message: Message::assistant(
+                        "Earlier work, decisions, constraints, and evidence are preserved here."
+                            .to_string(),
+                    ),
+                    finish_reason: Some("stop".to_string()),
+                    usage: None,
+                    raw: echo_core::llm::types::ChatCompletionResponse::default(),
+                })
+            })
+        }
+
+        fn chat_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
+            Box::pin(async {
+                let stream: BoxStream<'static, Result<ChatChunk>> =
+                    Box::pin(futures::stream::empty());
+                Ok(stream)
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "static-summary"
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::anthropic()
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_keeps_checkpoint_and_latest_request_within_token_limit() -> Result<()> {
+        let compressor = SummaryCompressor::new(Arc::new(StaticSummaryLlm), 4);
+        let latest_request = "latest request must survive";
+        let messages = vec![
+            Message::system("system".to_string()),
+            Message::user("old request ".repeat(80)),
+            Message::assistant("old answer ".repeat(80)),
+            Message::user("large recent request ".repeat(80)),
+            Message::assistant("large recent answer ".repeat(80)),
+            Message::user(latest_request.to_string()),
+        ];
+
+        let output = compressor
+            .compress(CompressionInput {
+                messages,
+                token_limit: 100,
+                current_query: Some(latest_request.to_string()),
+                focus_instructions: None,
+                cancel_token: None,
+                tokenizer: None,
+            })
+            .await?;
+        let token_count = output.messages.iter().fold(0usize, |total, message| {
+            total.saturating_add(message.content.estimated_tokens(&HeuristicTokenizer))
+        });
+
+        assert!(token_count <= 100, "bounded summary exceeded token limit");
+        assert!(output.messages.iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains(latest_request))
+        }));
+        assert!(output.messages.iter().any(is_generated_summary));
+        assert!(
+            output
+                .checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.summary.as_deref())
+                .is_some_and(|summary| !summary.is_empty())
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_incremental_summary_state_management() {

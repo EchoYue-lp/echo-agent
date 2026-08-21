@@ -6,6 +6,11 @@ LLM 的上下文窗口（Context Window）是有限的。当对话历史积累�
 
 上下文压缩系统在每次调用 LLM 前自动检查当前消息历史的 token 用量，超限时按照配置的策略压缩，保留最有价值的信息。
 
+压缩只改变发送给模型的活动上下文。配置 `ConversationStore` 后，框架会在任何
+活动历史替换之前持久化用户可见 transcript，并把后续压缩窗口中的新增后缀合并进
+完整记录；`RuntimeStateStore` checkpoint 则继续保存较小的恢复视图。因此摘要不会
+反向覆盖磁盘上的完整会话。
+
 ---
 
 ## 解决什么问题
@@ -45,6 +50,11 @@ SlidingWindowCompressor::new(20) // 保留最新 20 条消息
 
 **缺点**：压缩时需要额外的 LLM 调用（有成本）。
 
+内置提示词生成的是可继续执行的语义检查点，而不是流水账式复述。结构化输出分别
+保存当前目标、工作状态、决策、文件、错误、偏好、不可违反的约束、精确关键事实和
+下一步。摘要与近期原文随后还会经过 token 上限适配，固定的保留条数不会再让最终
+模型输入停留在有效预算之外。
+
 ```rust
 use echo_agent::prelude::*;
 use echo_agent::llm::OpenAiClient;
@@ -63,6 +73,30 @@ SummaryCompressor::with_prompt(
     |messages| format!("请用 3 句话总结以下 {} 条对话：", messages.len()),
 )
 ```
+
+### 设计依据
+
+本实现参考了成熟 coding agent 收敛出的共同模式：
+
+- OpenAI Codex 只用摘要、保留的用户材料和重新构造的 initial/world context 替换
+  活动历史，同时持久化独立 compaction item，并明确提示连续压缩是有损的。实现见
+  固定版本的 [Codex `compact.rs`](https://github.com/openai/codex/blob/53eaa297e595fc98df0f33d4c63686a7014d7c9a/codex-rs/core/src/compact.rs)。
+- Claude Code 提供压缩前 hook，压缩后恢复 session/plan 等状态，并持续修复工具结果
+  和 resume 边界。依据见官方 [Claude Code CHANGELOG](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)。
+- OpenCode 无条件保护最新用户轮次，更旧的原始工具结果共享 40K token 预算，并且
+  只有预计至少释放 20K token 时才清理；其近期压缩尾部同样按 token 而非固定轮数
+  选择。实现见官方 [OpenCode compaction 源码](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/compaction.ts)。
+- Pi 将单个工具结果限制为 2,000 行或 50 KiB，整体压缩保留约 20K recent token，
+  且绝不在 tool call/result 中间切断。依据见官方 [Pi compaction 文档](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/compaction.md)
+  和 [工具截断源码](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/truncate.ts)。
+
+Echo Agent 据此保持四个权威边界：`ConversationStore` 保存完整展示/审计 transcript，
+`ContextManager` 保存有界活动上下文，`CanonicalContext` 与 projection 重建权威规则和
+状态，仓库文件等外部知识继续由工具按需取回。
+
+主动折叠工具轨迹时，应使用混合策略而不是固定轮数：至少保护最新用户轮次；更旧
+原始结果使用随模型窗口缩放的总 token 预算；收益太小时不改写历史；tool call/result
+始终成组保留或成组折叠。
 
 ---
 

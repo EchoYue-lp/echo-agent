@@ -6,6 +6,12 @@ An LLM's context window is finite. As conversation history accumulates, sending 
 
 The context compression system automatically checks token usage before each LLM call and, when over the configured limit, compresses the message history according to the chosen strategy — while keeping the most valuable information intact.
 
+Compression changes only the active model context. When a `ConversationStore`
+is configured, the framework writes the user-visible transcript before any
+active-history replacement and merges later compacted suffixes into that
+durable record. Runtime checkpoints remain the smaller resume view. A compacted
+summary is therefore not treated as a replacement for the full transcript.
+
 ---
 
 ## Problem It Solves
@@ -45,6 +51,13 @@ Best for: High-volume conversations where history is unimportant, or cost-sensit
 
 **Cons**: Compression requires an additional LLM call (has cost).
 
+The built-in prompt produces a continuation checkpoint rather than a narrative
+recap. Structured output separately records the current goal, work state,
+decisions, files, errors, preferences, non-negotiable constraints, exact key
+facts, and next step. The summary plus recent raw messages is passed through a
+token-bounded tail fit, so a fixed retention count cannot leave the final model
+input above its effective budget.
+
 ```rust
 use echo_agent::prelude::*;
 use echo_agent::llm::OpenAiClient;
@@ -63,6 +76,37 @@ SummaryCompressor::with_prompt(
     |messages| format!("Summarize the following {} messages in 3 sentences:", messages.len()),
 )
 ```
+
+### Design rationale
+
+The implementation follows the common shape visible in mature coding agents:
+
+- OpenAI Codex replaces only its live history with a compaction summary,
+  retained user material, and reconstructed initial/world context; it persists
+  a separate compaction item and explicitly warns that repeated compaction is
+  lossy. See the pinned [Codex `compact.rs`](https://github.com/openai/codex/blob/53eaa297e595fc98df0f33d4c63686a7014d7c9a/codex-rs/core/src/compact.rs).
+- Claude Code exposes pre-compaction hooks, preserves session/plan state across
+  compaction, and has repeatedly hardened tool-result and resume behavior. See
+  the official [Claude Code changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+- OpenCode protects the newest user turn, retains older raw tool results under
+  a 40K-token aggregate budget, and only clears them when at least 20K tokens
+  can be reclaimed. Its recent compaction tail is token-budgeted rather than a
+  fixed number of turns. See the official
+  [OpenCode compaction source](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/compaction.ts).
+- Pi bounds each tool result to 2,000 lines or 50 KiB, keeps roughly 20K recent
+  tokens during compaction, and never cuts between a tool call and its result.
+  See the official [Pi compaction guide](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/compaction.md)
+  and [tool truncation source](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/truncate.ts).
+
+Echo Agent keeps those concerns separate: `ConversationStore` owns the complete
+display/audit transcript, `ContextManager` owns the bounded active context,
+`CanonicalContext` and projections restore authoritative rules/state, and
+repository files remain external knowledge that tools fetch on demand.
+
+For proactive tool-trace folding, prefer a hybrid policy over a fixed turn
+count: protect at least the latest user turn, give older raw results an
+aggregate token budget scaled to the model window, require meaningful savings
+before rewriting history, and always keep call/result groups atomic.
 
 ---
 

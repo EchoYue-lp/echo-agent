@@ -42,10 +42,21 @@ use std::time::Instant;
 pub struct VisibilityHorizonConfig {
     /// Number of recent user turns to keep intact.
     ///
-    /// Tool groups that have **more than** this many user messages after them
-    /// are considered beyond the active window and will be compacted.
+    /// Tool groups inside this many newest user turns are always retained.
+    /// Older groups are compacted immediately unless `retained_tool_tokens`
+    /// gives them additional token-budgeted space.
     #[serde(default = "default_active_window")]
     pub active_window_turns: usize,
+
+    /// Aggregate raw-result budget for tool groups older than the protected
+    /// recent turns. `None` preserves the original turn-only behavior.
+    #[serde(default)]
+    pub retained_tool_tokens: Option<usize>,
+
+    /// Do not rewrite history unless selected raw results would free at least
+    /// this many estimated tokens. This avoids churn for tiny traces.
+    #[serde(default)]
+    pub compact_minimum_tokens: usize,
 
     /// Maximum token budget for each compacted summary.
     #[serde(default = "default_compact_max_tokens")]
@@ -74,6 +85,8 @@ impl Default for VisibilityHorizonConfig {
     fn default() -> Self {
         Self {
             active_window_turns: 5,
+            retained_tool_tokens: None,
+            compact_minimum_tokens: 0,
             compact_max_tokens: 50,
             enable_global_objective: false,
             global_objective: None,
@@ -134,20 +147,43 @@ impl VisibilityHorizonCompressor {
     ) -> Vec<Message> {
         let groups = self.identify_tool_groups(messages, tokenizer);
 
-        // Filter groups beyond the active window
-        let to_compact: Vec<&ToolGroup> = groups
-            .iter()
-            .filter(|g| g.user_turns_after > self.config.active_window_turns)
-            .collect();
+        // Walk newest to oldest. Recent turns are always protected; older raw
+        // results share an optional aggregate token budget. The selected list
+        // is already in reverse-index order, which keeps in-place edits safe.
+        let mut retained_tokens = 0usize;
+        let mut budget_exhausted = false;
+        let mut to_compact: Vec<&ToolGroup> = Vec::new();
+        for group in groups.iter().rev() {
+            if group.user_turns_after < self.config.active_window_turns {
+                continue;
+            }
+            if let Some(budget) = self.config.retained_tool_tokens {
+                if !budget_exhausted
+                    && retained_tokens.saturating_add(group.result_tokens) <= budget
+                {
+                    retained_tokens = retained_tokens.saturating_add(group.result_tokens);
+                    continue;
+                }
+                budget_exhausted = true;
+            }
+            to_compact.push(group);
+        }
 
         if to_compact.is_empty() {
+            return vec![];
+        }
+
+        let compacted_tokens = to_compact.iter().fold(0usize, |total, group| {
+            total.saturating_add(group.result_tokens)
+        });
+        if compacted_tokens < self.config.compact_minimum_tokens {
             return vec![];
         }
 
         let mut evicted = Vec::new();
 
         // Process from back to front to preserve indices
-        for group in to_compact.into_iter().rev() {
+        for group in to_compact {
             // 1. Build summary message
             let summary_text = self.build_compact_summary(group);
             let summary_msg = Message::user(summary_text);
@@ -484,7 +520,7 @@ mod tests {
         };
         let compressor = VisibilityHorizonCompressor::new(config);
 
-        // 6-turn conversation with window=2 → turns 1-3 should be compacted
+        // 6-turn conversation with window=2 → turns 1-4 should be compacted
         let mut messages = build_conversation(6);
         let original_len = messages.len();
 
@@ -506,7 +542,7 @@ mod tests {
         });
         assert!(has_summary, "Should contain a horizon compact summary");
 
-        // Verify recent turns (4-6) are NOT compacted — tool results still present
+        // Verify the two most recent turns are NOT compacted.
         let has_recent_tool = messages.iter().any(|m| m.role == Role::Tool);
         assert!(has_recent_tool, "Recent tool results should be preserved");
     }
@@ -582,6 +618,59 @@ mod tests {
                 .is_some_and(|t| t.contains("read_file") && t.contains("grep"))
         });
         assert!(has_summary, "Summary should mention both parallel tools");
+    }
+
+    #[test]
+    fn test_token_budget_and_minimum_savings_control_old_tool_compaction() {
+        let original = build_conversation(6);
+        let mut budgeted = original.clone();
+        let budgeted_compressor = VisibilityHorizonCompressor::new(VisibilityHorizonConfig {
+            active_window_turns: 1,
+            retained_tool_tokens: Some(usize::MAX),
+            ..Default::default()
+        });
+        assert!(
+            budgeted_compressor
+                .compact_horizon(&mut budgeted)
+                .is_empty(),
+            "an ample aggregate budget should retain old raw tool results"
+        );
+
+        let mut thresholded = original.clone();
+        let thresholded_compressor = VisibilityHorizonCompressor::new(VisibilityHorizonConfig {
+            active_window_turns: 1,
+            retained_tool_tokens: Some(0),
+            compact_minimum_tokens: usize::MAX,
+            ..Default::default()
+        });
+        assert!(
+            thresholded_compressor
+                .compact_horizon(&mut thresholded)
+                .is_empty(),
+            "a compaction below the minimum savings threshold should not rewrite history"
+        );
+
+        let mut constrained = original;
+        let constrained_compressor = VisibilityHorizonCompressor::new(VisibilityHorizonConfig {
+            active_window_turns: 1,
+            retained_tool_tokens: Some(0),
+            compact_minimum_tokens: 0,
+            ..Default::default()
+        });
+        assert!(
+            !constrained_compressor
+                .compact_horizon(&mut constrained)
+                .is_empty(),
+            "an exhausted budget should compact tool groups outside the latest turn"
+        );
+        assert_eq!(
+            constrained
+                .iter()
+                .filter(|message| message.role == Role::Tool)
+                .count(),
+            2,
+            "only the latest turn's two raw tool results should remain"
+        );
     }
 
     #[test]
@@ -810,9 +899,7 @@ mod tests {
 
         let evicted = compressor.compact_horizon(&mut messages);
 
-        // With active_window=5 and 30 turns:
-        //   Turns 1-24 have >5 user turns after → compacted
-        //   Turns 25-30 have ≤5 user turns after → preserved (6 turns × 2 tools = 12 results)
+        // With active_window=5 and 30 turns, only turns 26-30 stay intact.
         assert!(
             evicted.len() >= 40,
             "Should evict at least 40 tool result messages, got {}",

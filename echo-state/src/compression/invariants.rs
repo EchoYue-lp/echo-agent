@@ -448,6 +448,7 @@ mod tests {
             compact_max_tokens: 50,
             enable_global_objective: false,
             global_objective: None,
+            ..Default::default()
         };
         let compressor = VisibilityHorizonCompressor::new(config);
 

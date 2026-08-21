@@ -224,6 +224,7 @@ impl CompressionCheckpoint {
 /// - **Verification** — check each field independently
 /// - **Programmatic access** — extract file paths, pending tasks, etc.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct StructuredSummary {
     /// User's primary goal and intent
     pub goal: String,
@@ -243,6 +244,10 @@ pub struct StructuredSummary {
     pub tool_outputs_summary: String,
     /// User preferences or constraints discovered
     pub user_preferences: Vec<String>,
+    /// Non-negotiable requirements, safety boundaries, and acceptance criteria
+    pub constraints: Vec<String>,
+    /// Exact identifiers, values, versions, commands, and other continuation-critical facts
+    pub key_facts: Vec<String>,
     /// Suggested next step
     pub next_step: String,
 }
@@ -348,6 +353,18 @@ impl StructuredSummary {
         for pref in &newer.user_preferences {
             if !self.user_preferences.contains(pref) {
                 self.user_preferences.push(pref.clone());
+            }
+        }
+
+        // constraints and key facts are durable anchors: append and deduplicate.
+        for constraint in &newer.constraints {
+            if !self.constraints.contains(constraint) {
+                self.constraints.push(constraint.clone());
+            }
+        }
+        for fact in &newer.key_facts {
+            if !self.key_facts.contains(fact) {
+                self.key_facts.push(fact.clone());
             }
         }
 
@@ -478,5 +495,48 @@ impl ContextCompressor for Box<dyn ContextCompressor> {
 
     fn name(&self) -> &'static str {
         (**self).name()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StructuredSummary;
+
+    #[test]
+    fn structured_summary_accepts_partial_provider_json() -> Result<(), serde_json::Error> {
+        let summary = StructuredSummary::from_json(
+            r#"{"goal":"ship compaction","constraints":["preserve transcript"]}"#,
+        )?;
+
+        assert_eq!(summary.goal, "ship compaction");
+        assert_eq!(summary.constraints, vec!["preserve transcript"]);
+        assert!(summary.key_facts.is_empty());
+        assert!(summary.pending_tasks.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn structured_summary_merge_preserves_constraints_and_key_facts() {
+        let mut previous = StructuredSummary {
+            constraints: vec!["preserve transcript".to_string()],
+            key_facts: vec!["window=128000".to_string()],
+            ..StructuredSummary::default()
+        };
+        let newer = StructuredSummary {
+            constraints: vec![
+                "preserve transcript".to_string(),
+                "keep recent raw messages".to_string(),
+            ],
+            key_facts: vec!["window=128000".to_string(), "keep_recent=20".to_string()],
+            ..StructuredSummary::default()
+        };
+
+        previous.merge_with(&newer);
+
+        assert_eq!(
+            previous.constraints,
+            vec!["preserve transcript", "keep recent raw messages"]
+        );
+        assert_eq!(previous.key_facts, vec!["window=128000", "keep_recent=20"]);
     }
 }
