@@ -5,6 +5,7 @@ use crate::llm::types::Message;
 use crate::llm::{ChatRequest, LlmClient, ResponseFormat};
 use echo_core::agent::Critic;
 use echo_core::agent::{Critique, CritiqueOutput, critique_output_schema};
+use echo_core::retry::{RetryPolicy, with_retry_if};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -19,6 +20,7 @@ pub struct LlmCritic {
     system_prompt: String,
     pass_threshold: f64,
     cache_user_id: Option<String>,
+    retry_policy: RetryPolicy,
 }
 
 impl LlmCritic {
@@ -37,6 +39,7 @@ impl LlmCritic {
             system_prompt: Self::default_system_prompt().to_string(),
             pass_threshold: 7.0,
             cache_user_id: None,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -56,6 +59,12 @@ impl LlmCritic {
     /// on providers that support it (for example DeepSeek).
     pub fn with_cache_user_id(mut self, user_id: impl Into<String>) -> Self {
         self.cache_user_id = Some(user_id.into());
+        self
+    }
+
+    /// Set the retry policy for transient provider failures during evaluation.
+    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
         self
     }
 
@@ -122,11 +131,11 @@ impl LlmCritic {
     /// `response_format: json_schema`, e.g. "This response_format type is
     /// unavailable now"). Returning the raw text here keeps the JSON parsing
     /// concern in `parse_critique_output`.
-    async fn call_llm(
+    async fn call_llm_once(
         &self,
         messages: &[Message],
         response_format: Option<ResponseFormat>,
-    ) -> std::result::Result<String, String> {
+    ) -> Result<String> {
         let response = self
             .client
             .chat(ChatRequest {
@@ -137,10 +146,25 @@ impl LlmCritic {
                 user_id: self.cache_user_id.clone(),
                 ..Default::default()
             })
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
 
         Ok(response.content().unwrap_or_default())
+    }
+
+    /// Call the provider using the framework retry policy for transient LLM
+    /// failures. Permanent errors stay single-attempt so authentication and
+    /// request-shape problems surface immediately.
+    async fn call_llm(
+        &self,
+        messages: &[Message],
+        response_format: Option<ResponseFormat>,
+    ) -> Result<String> {
+        with_retry_if(
+            &self.retry_policy,
+            || self.call_llm_once(messages, response_format.clone()),
+            crate::agent::react::is_retryable_llm_error,
+        )
+        .await
     }
 
     /// Whether an error message indicates the provider rejected the
@@ -221,7 +245,7 @@ impl Critic for LlmCritic {
                 // guarantees schema-conformant JSON when the provider supports it).
                 match self.call_llm(&messages, response_format).await {
                     Ok(text) => text,
-                    Err(e) if Self::is_response_format_unsupported(&e) => {
+                    Err(e) if Self::is_response_format_unsupported(&e.to_string()) => {
                         // Provider rejects structured output — retry once without
                         // response_format. The system prompt already asks for JSON;
                         // append an explicit instruction so the model emits parseable
@@ -270,7 +294,9 @@ impl Critic for LlmCritic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::LlmError;
     use crate::testing::MockLlmClient;
+    use std::time::Duration;
 
     fn critic_for_model(model: &str) -> LlmCritic {
         LlmCritic::new(Arc::new(
@@ -381,5 +407,44 @@ mod tests {
         assert!(critique.passed);
         assert_eq!(client.call_count(), 1);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn critique_retries_transient_server_error() -> Result<()> {
+        let client = Arc::new(
+            MockLlmClient::new()
+                .with_error(ReactError::Llm(Box::new(LlmError::ApiError {
+                    status: 502,
+                    message: "Upstream request failed".to_string(),
+                })))
+                .with_response(r#"{"score":8.0,"passed":true,"feedback":"ok","suggestions":[]}"#),
+        );
+        let critic =
+            LlmCritic::new(client.clone()).with_retry_policy(RetryPolicy::new(1, Duration::ZERO));
+
+        let critique = critic.critique("task", "answer", "").await?;
+
+        assert!(critique.passed);
+        assert_eq!(client.call_count(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn critique_does_not_retry_permanent_api_error() {
+        let client = Arc::new(
+            MockLlmClient::new()
+                .with_error(ReactError::Llm(Box::new(LlmError::ApiError {
+                    status: 401,
+                    message: "Unauthorized".to_string(),
+                })))
+                .with_response(r#"{"score":8.0,"passed":true,"feedback":"ok","suggestions":[]}"#),
+        );
+        let critic =
+            LlmCritic::new(client.clone()).with_retry_policy(RetryPolicy::new(3, Duration::ZERO));
+
+        let result = critic.critique("task", "answer", "").await;
+
+        assert!(result.is_err());
+        assert_eq!(client.call_count(), 1);
     }
 }
