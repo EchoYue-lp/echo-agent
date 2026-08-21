@@ -632,20 +632,7 @@ impl ReactAgent {
         &mut self,
         layer_manager: Arc<crate::evolution::MemoryLayerManager>,
     ) {
-        self.tools
-            .tool_manager
-            .register(Box::new(LayeredRememberTool::new(layer_manager.clone())));
-        self.tools
-            .tool_manager
-            .register(Box::new(LayeredRecallTool::new(layer_manager.clone())));
-        self.tools
-            .tool_manager
-            .register(Box::new(LayeredSearchMemoryTool::new(
-                layer_manager.clone(),
-            )));
-        self.tools
-            .tool_manager
-            .register(Box::new(LayeredForgetTool::new(layer_manager.clone())));
+        self.replace_layered_memory_tools(&layer_manager);
         self.memory_layer_manager = Some(layer_manager.clone());
         if let Ok(mut context) = self.memory.context.try_lock() {
             context.set_memory_promoter(Arc::new(
@@ -1137,36 +1124,9 @@ impl ReactAgent {
             .map(|part| (*part).to_string())
             .collect::<Vec<_>>();
         if let Some(layer_manager) = &self.memory_layer_manager {
-            self.tools
-                .tool_manager
-                .register(Box::new(LayeredRememberTool::new(layer_manager.clone())));
-            self.tools
-                .tool_manager
-                .register(Box::new(LayeredRecallTool::new(layer_manager.clone())));
-            self.tools
-                .tool_manager
-                .register(Box::new(LayeredSearchMemoryTool::new(
-                    layer_manager.clone(),
-                )));
-            self.tools
-                .tool_manager
-                .register(Box::new(LayeredForgetTool::new(layer_manager.clone())));
+            self.replace_layered_memory_tools(layer_manager);
         } else {
-            self.tools
-                .tool_manager
-                .register(Box::new(LegacyStoreRememberTool::new(
-                    store.clone(),
-                    ns.clone(),
-                )));
-            self.tools
-                .tool_manager
-                .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
-            self.tools
-                .tool_manager
-                .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
-            self.tools
-                .tool_manager
-                .register(Box::new(ForgetTool::new(store.clone(), ns)));
+            self.replace_store_memory_tools(&store, ns);
         }
         self.memory.store = Some(store.clone());
 
@@ -1205,36 +1165,9 @@ impl ReactAgent {
             .map(|part| (*part).to_string())
             .collect::<Vec<_>>();
         if let Some(layer_manager) = &self.memory_layer_manager {
-            self.tools
-                .tool_manager
-                .register(Box::new(LayeredRememberTool::new(layer_manager.clone())));
-            self.tools
-                .tool_manager
-                .register(Box::new(LayeredRecallTool::new(layer_manager.clone())));
-            self.tools
-                .tool_manager
-                .register(Box::new(LayeredSearchMemoryTool::new(
-                    layer_manager.clone(),
-                )));
-            self.tools
-                .tool_manager
-                .register(Box::new(LayeredForgetTool::new(layer_manager.clone())));
+            self.replace_layered_memory_tools(layer_manager);
         } else {
-            self.tools
-                .tool_manager
-                .register(Box::new(LegacyStoreRememberTool::new(
-                    store.clone(),
-                    ns.clone(),
-                )));
-            self.tools
-                .tool_manager
-                .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
-            self.tools
-                .tool_manager
-                .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
-            self.tools
-                .tool_manager
-                .register(Box::new(ForgetTool::new(store.clone(), ns)));
+            self.replace_store_memory_tools(&store, ns);
         }
         self.memory.store = Some(store.clone());
 
@@ -1246,6 +1179,55 @@ impl ReactAgent {
         } else {
             context.remove_memory_promoter();
         }
+    }
+
+    fn replace_store_memory_tools(&self, store: &Arc<dyn Store>, namespace: Vec<String>) {
+        let _ = self
+            .tools
+            .tool_manager
+            .replace(Box::new(LegacyStoreRememberTool::new(
+                store.clone(),
+                namespace.clone(),
+            )));
+        let _ = self
+            .tools
+            .tool_manager
+            .replace(Box::new(RecallTool::new(store.clone(), namespace.clone())));
+        let _ = self
+            .tools
+            .tool_manager
+            .replace(Box::new(SearchMemoryTool::new(
+                store.clone(),
+                namespace.clone(),
+            )));
+        let _ = self
+            .tools
+            .tool_manager
+            .replace(Box::new(ForgetTool::new(store.clone(), namespace)));
+    }
+
+    fn replace_layered_memory_tools(
+        &self,
+        layer_manager: &Arc<crate::evolution::MemoryLayerManager>,
+    ) {
+        let _ = self
+            .tools
+            .tool_manager
+            .replace(Box::new(LayeredRememberTool::new(layer_manager.clone())));
+        let _ = self
+            .tools
+            .tool_manager
+            .replace(Box::new(LayeredRecallTool::new(layer_manager.clone())));
+        let _ = self
+            .tools
+            .tool_manager
+            .replace(Box::new(LayeredSearchMemoryTool::new(
+                layer_manager.clone(),
+            )));
+        let _ = self
+            .tools
+            .tool_manager
+            .replace(Box::new(LayeredForgetTool::new(layer_manager.clone())));
     }
 
     /// Set canonical context sources for re-injection after compression.
@@ -1688,9 +1670,10 @@ impl ReactAgent {
             service.replace_provider(provider.clone());
         }
         if self.tools.tool_manager.get_tool("human_in_loop").is_some() {
-            self.tools
+            let _ = self
+                .tools
                 .tool_manager
-                .register(Box::new(HumanInLoop::new(provider)));
+                .replace(Box::new(HumanInLoop::new(provider)));
         }
     }
 
@@ -1709,9 +1692,10 @@ impl ReactAgent {
             service.replace_provider_preserving_cache(provider.clone());
         }
         if self.tools.tool_manager.get_tool("human_in_loop").is_some() {
-            self.tools
+            let _ = self
+                .tools
                 .tool_manager
-                .register(Box::new(HumanInLoop::new(provider)));
+                .replace(Box::new(HumanInLoop::new(provider)));
         }
     }
 

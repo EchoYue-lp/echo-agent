@@ -752,23 +752,31 @@ impl JsonlRunStore {
             }
         }
         for path in paths {
-            let run = Self::load_run(&path)?;
-            let expected = path
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    crate::error::ReactError::Other(format!(
-                        "run filename is not valid UTF-8: {}",
+            let loaded = (|| -> Result<Run> {
+                let run = Self::load_run(&path)?;
+                let expected =
+                    path.file_stem()
+                        .and_then(|name| name.to_str())
+                        .ok_or_else(|| {
+                            crate::error::ReactError::Other(format!(
+                                "run filename is not valid UTF-8: {}",
+                                path.display()
+                            ))
+                        })?;
+                if run.run_id != expected {
+                    return Err(crate::error::ReactError::Other(format!(
+                        "run identity mismatch in {}",
                         path.display()
-                    ))
-                })?;
-            if run.run_id != expected {
-                return Err(crate::error::ReactError::Other(format!(
-                    "run identity mismatch in {}",
-                    path.display()
-                )));
+                    )));
+                }
+                Ok(run)
+            })();
+            match loaded {
+                Ok(run) => {
+                    cache.insert(run.run_id.clone(), run);
+                }
+                Err(error) => quarantine_corrupt_run_log(&path, &error),
             }
-            cache.insert(run.run_id.clone(), run);
         }
 
         let shared = Arc::new(JsonlRunStoreData {
@@ -877,6 +885,24 @@ impl JsonlRunStore {
             }
         }
         Ok(())
+    }
+}
+
+fn quarantine_corrupt_run_log(path: &Path, error: &dyn std::fmt::Display) {
+    let target = path.with_extension(format!("jsonl.corrupt-{}", uuid::Uuid::new_v4()));
+    match std::fs::rename(path, &target) {
+        Ok(()) => tracing::warn!(
+            path = %path.display(),
+            quarantine = %target.display(),
+            %error,
+            "isolated unreadable run log"
+        ),
+        Err(rename_error) => tracing::warn!(
+            path = %path.display(),
+            %error,
+            %rename_error,
+            "failed to isolate unreadable run log"
+        ),
     }
 }
 
@@ -1270,15 +1296,23 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn jsonl_store_rejects_complete_corrupt_event_tail() -> Result<()> {
+    #[tokio::test]
+    async fn jsonl_store_isolates_complete_corrupt_event_tail() -> Result<()> {
         let dir = temp_dir();
         let run = make_run("complete-corrupt", "session");
         let mut data = serde_json::to_string(&run)?;
         data.push_str("\n{not-an-event}\n");
         std::fs::write(dir.join("complete-corrupt.jsonl"), data)?;
 
-        assert!(JsonlRunStore::new(&dir).is_err());
+        let store = JsonlRunStore::new(&dir)?;
+        assert!(store.shared.cache.read().await.is_empty());
+        assert!(!dir.join("complete-corrupt.jsonl").exists());
+        assert!(std::fs::read_dir(&dir)?.any(|entry| {
+            entry
+                .ok()
+                .and_then(|entry| entry.file_name().to_str().map(str::to_string))
+                .is_some_and(|name| name.starts_with("complete-corrupt.jsonl.corrupt-"))
+        }));
         Ok(())
     }
 
@@ -1471,11 +1505,13 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn jsonl_store_rejects_corrupt_existing_run() -> Result<()> {
+    #[tokio::test]
+    async fn jsonl_store_isolates_corrupt_existing_run() -> Result<()> {
         let dir = temp_dir();
         std::fs::write(dir.join("broken.jsonl"), b"{not-json}\n")?;
-        assert!(JsonlRunStore::new(&dir).is_err());
+        let store = JsonlRunStore::new(&dir)?;
+        assert!(store.shared.cache.read().await.is_empty());
+        assert!(!dir.join("broken.jsonl").exists());
         Ok(())
     }
 }

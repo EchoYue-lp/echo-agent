@@ -1369,6 +1369,53 @@ fn react_agent_no_human_in_loop_without_flag() {
     assert!(!tool_names.contains(&String::from("human_in_loop")));
 }
 
+#[cfg(feature = "human-loop")]
+#[tokio::test]
+async fn runtime_human_loop_provider_replaces_registered_tool() -> Result<(), String> {
+    struct FixedProvider(&'static str);
+
+    impl crate::human_loop::HumanLoopProvider for FixedProvider {
+        fn request(
+            &self,
+            _request: crate::human_loop::HumanLoopRequest,
+        ) -> futures::future::BoxFuture<
+            '_,
+            crate::error::Result<crate::human_loop::HumanLoopResponse>,
+        > {
+            Box::pin(async move {
+                Ok(crate::human_loop::HumanLoopResponse::Text(
+                    self.0.to_string(),
+                ))
+            })
+        }
+    }
+
+    let config = AgentConfig::minimal("model", "agent").enable_human_in_loop(true);
+    let mut agent = ReactAgent::new(config);
+    agent.set_human_loop_provider(Arc::new(FixedProvider("first-provider")));
+    agent.set_human_loop_provider_preserving_approvals(Arc::new(FixedProvider(
+        "replacement-provider",
+    )));
+
+    let result = agent
+        .tool_manager()
+        .execute_tool(
+            "human_in_loop",
+            [
+                ("reasoning".to_string(), json!("test replacement")),
+                ("approval_type".to_string(), json!("LLM")),
+            ]
+            .into(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+    assert!(result.success);
+    assert!(result.output.contains("replacement-provider"));
+    assert!(!result.output.contains("first-provider"));
+    Ok(())
+}
+
 #[tokio::test]
 #[cfg(feature = "human-loop")]
 async fn add_need_appeal_tool_does_not_nest_runtime_with_permission_service() {
@@ -1936,6 +1983,42 @@ fn set_memory_store_registers_search_memory_tool() {
         agent.tool_names().contains(&String::from("search_memory")),
         "Should have search_memory after set_memory_store"
     );
+}
+
+#[tokio::test]
+async fn set_memory_store_replaces_existing_memory_tools() -> Result<(), String> {
+    use crate::memory::{InMemoryStore, Store};
+
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+    let first_store = Arc::new(InMemoryStore::new());
+    let replacement_store = Arc::new(InMemoryStore::new());
+
+    agent.set_memory_store(first_store.clone());
+    agent.set_memory_store(replacement_store.clone());
+
+    let result = agent
+        .tool_manager()
+        .execute_tool(
+            "remember",
+            [("content".to_string(), json!("replacement store marker"))].into(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(result.success);
+
+    let namespace = ["agent", "memories"];
+    let first_hits = first_store
+        .search(&namespace, "replacement store marker", 10)
+        .await
+        .map_err(|error| error.to_string())?;
+    let replacement_hits = replacement_store
+        .search(&namespace, "replacement store marker", 10)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(first_hits.is_empty());
+    assert_eq!(replacement_hits.len(), 1);
+    Ok(())
 }
 
 #[tokio::test]
