@@ -23,7 +23,9 @@ pub use background_task::{
     AnyBackgroundTask, BackgroundTask, BackgroundTaskStatus, TaskSpawner, TaskSpawnerConfig,
     TaskSummary,
 };
-pub use command_cell::{BackgroundCommandManager, BackgroundCommandManagerConfig};
+pub use command_cell::{
+    BackgroundCommandManager, BackgroundCommandManagerConfig, CommandCellReservation,
+};
 pub use events::{
     AsyncTaskEventListener, LoggingListener, TaskEvent, TaskEventBus, TaskEventListener,
 };

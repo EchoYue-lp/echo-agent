@@ -8,8 +8,8 @@
 //!
 //! # Cell semantics (Codex-style background commands)
 //!
-//! - `launch` registers and starts a background command, returning a
-//!   `cell_id` immediately (non-blocking).
+//! - `launch` asynchronously admits and starts a background command, returning
+//!   a typed receipt once bounded tracked capacity is available.
 //! - `wait` long-polls a cell: it returns when the cell reaches a terminal
 //!   phase, new output appears, or the caller's yield budget expires. It is
 //!   **retry-safe**: the terminal state is readable repeatedly (multiple
@@ -27,6 +27,8 @@
 //! does not claim cross-process process reattachment or wait continuity.
 
 use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -41,8 +43,10 @@ use super::artifact::{
 /// store without teaching the framework about an application TaskRun model.
 #[derive(Debug, Clone, Default)]
 pub struct CommandCellOwner {
+    pub conversation_id: Option<String>,
     pub run_id: Option<String>,
     pub turn_id: Option<String>,
+    pub message_id: Option<String>,
     pub execution_id: Option<String>,
     pub call_id: Option<String>,
 }
@@ -58,7 +62,7 @@ pub struct CommandCellRequest {
     /// Optional working directory for the command.
     pub working_dir: Option<String>,
     /// Optional cell lifetime in seconds. `None` uses the registry default;
-    /// `Some(0)` may mean "no timeout" for implementations that support it.
+    /// zero is invalid because every accepted cell has a finite deadline.
     pub timeout_secs: Option<u64>,
     /// The foreground shell had a sandbox executor, so the cell runtime must
     /// not silently downgrade this launch to direct host execution.
@@ -77,9 +81,14 @@ pub struct CommandCellRequest {
 }
 
 /// Lifecycle phase of a command cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CommandCellPhase {
-    /// Process is running (or queued to run).
+    /// Validated and published, but not yet allowed to execute.
+    Prepared,
+    /// Start was accepted and the cell is waiting for execution capacity.
+    Queued,
+    /// The process or sandbox execution is running.
     Running,
     /// Process exited with status success.
     Succeeded,
@@ -96,7 +105,8 @@ pub enum CommandCellPhase {
 /// [`CommandCellPhase`] remains the coarse renderer state. This value keeps
 /// timeout, cancellation, process exit, and runtime failures distinguishable
 /// without asking consumers to classify error text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CommandCellTerminalCause {
     /// The process or sandbox returned an exit status.
     Exited,
@@ -126,7 +136,8 @@ impl CommandCellTerminalCause {
 }
 
 /// State of the optional complete-output artifact writer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CommandCellArtifactStatus {
     /// No artifact policy/identity was supplied for this cell.
     NotRequested,
@@ -155,6 +166,8 @@ impl CommandCellArtifactStatus {
 impl CommandCellPhase {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Prepared => "prepared",
+            Self::Queued => "queued",
             Self::Running => "running",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
@@ -165,12 +178,21 @@ impl CommandCellPhase {
 
     /// Whether this phase is terminal (the cell will not change state again).
     pub const fn is_terminal(self) -> bool {
-        !matches!(self, Self::Running)
+        !matches!(self, Self::Prepared | Self::Queued | Self::Running)
     }
 }
 
+/// Why one long-poll round returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandCellWaitReason {
+    Output,
+    Terminal,
+    YieldElapsed,
+}
+
 /// Non-blocking snapshot of a cell's current state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandCellSnapshot {
     pub cell_id: String,
     /// UTF-8 safe preview of the command (first N chars).
@@ -201,9 +223,10 @@ pub struct CommandCellSnapshot {
 }
 
 /// Result of one `wait` long-poll round.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandCellDelta {
     pub snapshot: CommandCellSnapshot,
+    pub wait_reason: CommandCellWaitReason,
     /// Incremental output since the caller's cursor (UTF-8 lossy, byte-capped).
     pub new_output: String,
     /// Byte cursor to re-pass on the next `wait` call.
@@ -214,16 +237,82 @@ pub struct CommandCellDelta {
     pub output_elided: bool,
 }
 
+/// Receipt returned after a prepared cell is accepted for execution.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandCellLaunchReceipt {
+    pub cell_id: String,
+    pub accepted_at: chrono::DateTime<chrono::Utc>,
+    pub deadline: chrono::DateTime<chrono::Utc>,
+}
+
+/// Stable failures for cell admission, lookup, and shutdown.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CommandCellError {
+    #[error("invalid command cell request: {message}")]
+    Validation { message: String },
+    #[error("command cell identity already exists: {cell_id}")]
+    DuplicateIdentity { cell_id: String },
+    #[error("command cell capacity deadline elapsed")]
+    CapacityDeadline,
+    #[error("command cell admission was cancelled")]
+    Cancelled,
+    #[error("command cell registry is shutting down")]
+    Shutdown,
+    #[error("command cell '{cell_id}' was not found")]
+    NotFound { cell_id: String },
+    #[error("command cell runtime failed: {message}")]
+    Runtime { message: String },
+}
+
+/// Keeps one cell retained across multiple wait rounds.
+#[must_use]
+pub struct CommandCellObservationLease {
+    cell_id: String,
+    release: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl CommandCellObservationLease {
+    pub fn new(cell_id: impl Into<String>, release: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            cell_id: cell_id.into(),
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub fn cell_id(&self) -> &str {
+        &self.cell_id
+    }
+}
+
+impl fmt::Debug for CommandCellObservationLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandCellObservationLease")
+            .field("cell_id", &self.cell_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for CommandCellObservationLease {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
 /// Registry of background command cells.
 ///
 /// Implementations must be `Send + Sync` and support multiple concurrent
-/// waiters on the same cell. All methods are non-blocking except `wait`,
-/// which returns within the caller's yield budget.
+/// waiters on the same cell. `launch` may await bounded capacity; `wait`
+/// returns within the caller's yield budget.
 pub trait CommandCellRegistry: Send + Sync {
-    /// Register and start a background command cell immediately.
-    /// Returns the new `cell_id`. The caller is responsible for security
-    /// validation of `request.command`.
-    fn launch(&self, request: CommandCellRequest) -> std::result::Result<String, String>;
+    /// Register and start a background command cell asynchronously.
+    fn launch(
+        &self,
+        request: CommandCellRequest,
+    ) -> BoxFuture<'_, std::result::Result<CommandCellLaunchReceipt, CommandCellError>>;
 
     /// Long-poll a cell: return when it is terminal, when new output appears
     /// after `cursor`, or when `yield_ms` elapses (whichever comes first).
@@ -237,7 +326,13 @@ pub trait CommandCellRegistry: Send + Sync {
         cell_id: &str,
         cursor: u64,
         yield_ms: u64,
-    ) -> BoxFuture<'_, std::result::Result<CommandCellDelta, String>>;
+    ) -> BoxFuture<'_, std::result::Result<CommandCellDelta, CommandCellError>>;
+
+    /// Retain a cell across multiple wait rounds.
+    fn observe(
+        &self,
+        cell_id: &str,
+    ) -> std::result::Result<CommandCellObservationLease, CommandCellError>;
 
     /// Request that a cell's process be killed. Returns whether the cell
     /// exists (cancellation itself is asynchronous).
@@ -245,6 +340,9 @@ pub trait CommandCellRegistry: Send + Sync {
 
     /// Snapshot every tracked cell (running and terminal).
     fn list(&self) -> BoxFuture<'_, Vec<CommandCellSnapshot>>;
+
+    /// Close admission, cancel active cells, and wait for owned tasks.
+    fn shutdown(&self) -> BoxFuture<'_, std::result::Result<(), CommandCellError>>;
 }
 
 #[cfg(test)]
@@ -253,12 +351,16 @@ mod tests {
 
     #[test]
     fn phase_as_str_and_terminality() {
+        assert_eq!(CommandCellPhase::Prepared.as_str(), "prepared");
+        assert_eq!(CommandCellPhase::Queued.as_str(), "queued");
         assert_eq!(CommandCellPhase::Running.as_str(), "running");
         assert_eq!(CommandCellPhase::Succeeded.as_str(), "succeeded");
         assert_eq!(CommandCellPhase::Failed.as_str(), "failed");
         assert_eq!(CommandCellPhase::Cancelled.as_str(), "cancelled");
         assert_eq!(CommandCellPhase::LaunchFailed.as_str(), "launch_failed");
 
+        assert!(!CommandCellPhase::Prepared.is_terminal());
+        assert!(!CommandCellPhase::Queued.is_terminal());
         assert!(!CommandCellPhase::Running.is_terminal());
         assert!(CommandCellPhase::Succeeded.is_terminal());
         assert!(CommandCellPhase::Failed.is_terminal());

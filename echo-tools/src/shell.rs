@@ -9,7 +9,9 @@ use echo_core::sandbox::{
 use echo_core::tools::artifact::{
     ToolOutputArtifactIdentity, ToolOutputArtifactRef, ToolOutputArtifactWriter,
 };
-use echo_core::tools::cell::{CommandCellOwner, CommandCellRegistry, CommandCellRequest};
+use echo_core::tools::cell::{
+    CommandCellError, CommandCellOwner, CommandCellRegistry, CommandCellRequest,
+};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
     Tool, ToolContext, ToolFailure, ToolFailureCategory, ToolOutputChannel, ToolParameters,
@@ -233,7 +235,7 @@ impl ShellTool {
     ///
     /// `require_sandbox` is carried in the request. A registry without the
     /// matching executor must reject rather than silently downgrade.
-    fn launch_background_cell(
+    async fn launch_background_cell(
         &self,
         command: &str,
         ctx: &ToolContext,
@@ -279,8 +281,10 @@ impl ShellTool {
             // by run identity instead of inheriting the Turn token here.
             cancel: None,
             owner: CommandCellOwner {
+                conversation_id: ctx.conversation_id.clone(),
                 run_id: ctx.run_id.clone(),
                 turn_id: ctx.turn_id.clone(),
+                message_id: ctx.message_id.clone(),
                 execution_id: ctx.execution_id.clone(),
                 call_id: ctx.call_id.clone(),
             },
@@ -290,19 +294,35 @@ impl ShellTool {
                 .as_ref()
                 .map(|_| ToolOutputArtifactIdentity::from_context(ctx, self.name())),
         };
-        match launcher.launch(request) {
-            Ok(cell_id) => {
+        match launcher.launch(request).await {
+            Ok(receipt) => {
                 let payload = serde_json::json!({
-                    "cell_id": cell_id,
-                    "status": "running",
+                    "cell_id": receipt.cell_id,
+                    "status": "queued",
+                    "accepted_at": receipt.accepted_at,
+                    "deadline": receipt.deadline,
                     "hint": "call wait(cell_id, cursor=0, yield_time_ms=30000) to await output; re-pass the returned next_cursor"
                 });
                 ToolResult::success_json(payload)
             }
-            Err(error) => ToolResult::failure(
-                ToolFailureCategory::Permanent,
-                format!("Failed to launch background cell: {error}"),
-            ),
+            Err(error) => {
+                let category = match error {
+                    CommandCellError::Validation { .. }
+                    | CommandCellError::DuplicateIdentity { .. } => {
+                        ToolFailureCategory::InvalidArguments
+                    }
+                    CommandCellError::CapacityDeadline => ToolFailureCategory::Timeout,
+                    CommandCellError::Cancelled => ToolFailureCategory::Cancelled,
+                    CommandCellError::Shutdown | CommandCellError::NotFound { .. } => {
+                        ToolFailureCategory::Unavailable
+                    }
+                    CommandCellError::Runtime { .. } => ToolFailureCategory::Transient,
+                };
+                ToolResult::failure(
+                    category,
+                    format!("Failed to launch background cell: {error}"),
+                )
+            }
         }
     }
 
@@ -568,16 +588,18 @@ impl Tool for ShellTool {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if background {
-                let result = self.launch_background_cell(
-                    command,
-                    &ctx,
-                    if has_timeout_param {
-                        Some(timeout_secs_raw)
-                    } else {
-                        None
-                    },
-                    sandbox.is_some(),
-                );
+                let result = self
+                    .launch_background_cell(
+                        command,
+                        &ctx,
+                        if has_timeout_param {
+                            Some(timeout_secs_raw)
+                        } else {
+                            None
+                        },
+                        sandbox.is_some(),
+                    )
+                    .await;
                 return Ok(single_complete_stream(result));
             }
 
@@ -1212,7 +1234,8 @@ mod tests {
     use super::*;
     use echo_core::sandbox::{ExecutionResult, IsolationLevel};
     use echo_core::tools::cell::{
-        CommandCellArtifactStatus, CommandCellDelta, CommandCellPhase, CommandCellSnapshot,
+        CommandCellArtifactStatus, CommandCellDelta, CommandCellError, CommandCellLaunchReceipt,
+        CommandCellObservationLease, CommandCellPhase, CommandCellSnapshot, CommandCellWaitReason,
     };
     use echo_core::tools::{ToolContext, ToolOutputChannel, ToolStreamEvent};
     use futures::StreamExt;
@@ -1260,12 +1283,23 @@ mod tests {
     }
 
     impl CommandCellRegistry for CapturingCellRegistry {
-        fn launch(&self, request: CommandCellRequest) -> std::result::Result<String, String> {
+        fn launch(
+            &self,
+            request: CommandCellRequest,
+        ) -> BoxFuture<'_, std::result::Result<CommandCellLaunchReceipt, CommandCellError>>
+        {
             *self
                 .request
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request);
-            Ok("captured-cell".to_string())
+            Box::pin(async {
+                let accepted_at = chrono::Utc::now();
+                Ok(CommandCellLaunchReceipt {
+                    cell_id: "captured-cell".to_string(),
+                    accepted_at,
+                    deadline: accepted_at + chrono::Duration::seconds(60),
+                })
+            })
         }
 
         fn wait(
@@ -1273,7 +1307,7 @@ mod tests {
             cell_id: &str,
             cursor: u64,
             _yield_ms: u64,
-        ) -> BoxFuture<'_, std::result::Result<CommandCellDelta, String>> {
+        ) -> BoxFuture<'_, std::result::Result<CommandCellDelta, CommandCellError>> {
             let cell_id = cell_id.to_string();
             Box::pin(async move {
                 Ok(CommandCellDelta {
@@ -1290,11 +1324,19 @@ mod tests {
                         artifact_message: None,
                         output_artifact: None,
                     },
+                    wait_reason: CommandCellWaitReason::YieldElapsed,
                     new_output: String::new(),
                     next_cursor: cursor,
                     output_elided: false,
                 })
             })
+        }
+
+        fn observe(
+            &self,
+            cell_id: &str,
+        ) -> std::result::Result<CommandCellObservationLease, CommandCellError> {
+            Ok(CommandCellObservationLease::new(cell_id, || {}))
         }
 
         fn stop(&self, _cell_id: &str) -> bool {
@@ -1303,6 +1345,10 @@ mod tests {
 
         fn list(&self) -> BoxFuture<'_, Vec<CommandCellSnapshot>> {
             Box::pin(async { Vec::new() })
+        }
+
+        fn shutdown(&self) -> BoxFuture<'_, std::result::Result<(), CommandCellError>> {
+            Box::pin(async { Ok(()) })
         }
     }
 
@@ -1332,7 +1378,9 @@ mod tests {
             .with_cell_launcher(registry.clone())
             .with_sandbox(Arc::new(TestSandbox));
         let context = ToolContext {
+            conversation_id: Some("conversation-1".to_string()),
             run_id: Some("run-that-may-be-paused".to_string()),
+            message_id: Some("message-1".to_string()),
             cancel: Some(Arc::new(echo_core::agent::CancellationToken::new())),
             ..Default::default()
         };
@@ -1354,6 +1402,11 @@ mod tests {
             .ok_or_else(|| "cell registry did not receive the launch".to_string())?;
         assert!(request.require_sandbox);
         assert!(request.cancel.is_none());
+        assert_eq!(
+            request.owner.conversation_id.as_deref(),
+            Some("conversation-1")
+        );
+        assert_eq!(request.owner.message_id.as_deref(), Some("message-1"));
         Ok(())
     }
 

@@ -7,7 +7,7 @@
 //! the agent (one process-wide registry shared by the main agent and its
 //! subagents).
 
-use echo_core::tools::cell::{CommandCellDelta, CommandCellRegistry};
+use echo_core::tools::cell::CommandCellRegistry;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -93,10 +93,8 @@ impl Tool for WaitCellTool {
             debug!(cell_id = %cell_id, cursor, yield_ms, "Waiting on command cell");
 
             match registry.wait(&cell_id, cursor, yield_ms).await {
-                Ok(delta) => Ok(ToolResult::success(format_wait_result(
-                    &cell_id, yield_ms, &delta,
-                ))),
-                Err(error) => Ok(ToolResult::error(error)),
+                Ok(delta) => Ok(ToolResult::success_json(json!(delta))),
+                Err(error) => Ok(ToolResult::error(error.to_string())),
             }
         })
     }
@@ -107,80 +105,6 @@ impl Tool for WaitCellTool {
     fn exempt_from_batch_timeout(&self) -> bool {
         true
     }
-}
-
-/// Render one wait round for the model: phase, exit code, incremental output,
-/// and the cursor to re-pass next time.
-fn format_wait_result(cell_id: &str, yield_ms: u64, delta: &CommandCellDelta) -> String {
-    use echo_core::tools::cell::CommandCellPhase;
-
-    let snapshot = &delta.snapshot;
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "cell {cell_id} [{}]: {}",
-        snapshot.name,
-        snapshot.phase.as_str()
-    ));
-    if snapshot.phase.is_terminal() {
-        if let Some(code) = snapshot.exit_code {
-            lines.push(format!("exit_code: {code}"));
-        } else {
-            // 超时/取消/启动失败没有退出码。
-            lines.push("exit_code: none (timed out, cancelled, or failed to launch)".to_string());
-        }
-    }
-    if matches!(snapshot.phase, CommandCellPhase::LaunchFailed) {
-        lines.push(
-            "the command could not be spawned; check the command and working directory".to_string(),
-        );
-    }
-    lines.push(format!(
-        "output bytes: {}{}",
-        snapshot.total_output_bytes,
-        if snapshot.output_truncated {
-            " (early output discarded, buffer retention cap)"
-        } else {
-            ""
-        }
-    ));
-    if let Some(artifact) = &snapshot.output_artifact {
-        lines.push(format!(
-            "complete output artifact: {} ({} payload bytes, sha256 {})",
-            artifact.path.display(),
-            artifact.payload_bytes,
-            artifact.sha256
-        ));
-    }
-
-    if delta.new_output.is_empty() {
-        if snapshot.phase.is_terminal() {
-            lines.push("no new output since the last cursor.".to_string());
-        } else {
-            lines.push(format!(
-                "still running, no new output within the {yield_ms} ms yield budget — call wait again."
-            ));
-        }
-    } else {
-        lines.push("--- new output ---".to_string());
-        lines.push(delta.new_output.clone());
-        if delta.output_elided {
-            lines.push("(output elided: continue with next_cursor, or early bytes were discarded from memory)".to_string());
-        }
-    }
-
-    lines.push(format!("next_cursor: {}", delta.next_cursor));
-    if delta.next_cursor < snapshot.total_output_bytes {
-        lines.push(format!(
-            "unread output remains; call wait again with cursor={} even though the cell may already be terminal.",
-            delta.next_cursor
-        ));
-    } else {
-        lines.push(format!(
-            "re-pass cursor={} on your next wait call.",
-            delta.next_cursor
-        ));
-    }
-    lines.join("\n")
 }
 
 /// Stop (kill) a background command cell by ID.
@@ -315,7 +239,8 @@ impl Tool for ListCellsTool {
 mod tests {
     use super::*;
     use echo_core::tools::cell::{
-        CommandCellPhase, CommandCellRegistry, CommandCellRequest, CommandCellSnapshot,
+        CommandCellError, CommandCellLaunchReceipt, CommandCellObservationLease, CommandCellPhase,
+        CommandCellRegistry, CommandCellRequest, CommandCellSnapshot,
     };
     use echo_orchestration::tasks::BackgroundCommandManager;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -328,7 +253,10 @@ mod tests {
     }
 
     impl CommandCellRegistry for CountingRegistry {
-        fn launch(&self, request: CommandCellRequest) -> Result<String, String> {
+        fn launch(
+            &self,
+            request: CommandCellRequest,
+        ) -> BoxFuture<'_, Result<CommandCellLaunchReceipt, CommandCellError>> {
             self.inner.launch(request)
         }
 
@@ -337,9 +265,14 @@ mod tests {
             cell_id: &str,
             cursor: u64,
             yield_ms: u64,
-        ) -> BoxFuture<'_, Result<CommandCellDelta, String>> {
+        ) -> BoxFuture<'_, Result<echo_core::tools::cell::CommandCellDelta, CommandCellError>>
+        {
             self.wait_calls.fetch_add(1, Ordering::Relaxed);
             self.inner.wait(cell_id, cursor, yield_ms)
+        }
+
+        fn observe(&self, cell_id: &str) -> Result<CommandCellObservationLease, CommandCellError> {
+            self.inner.observe(cell_id)
         }
 
         fn stop(&self, cell_id: &str) -> bool {
@@ -348,6 +281,10 @@ mod tests {
 
         fn list(&self) -> BoxFuture<'_, Vec<CommandCellSnapshot>> {
             self.inner.list()
+        }
+
+        fn shutdown(&self) -> BoxFuture<'_, Result<(), CommandCellError>> {
+            self.inner.shutdown()
         }
     }
 
@@ -372,11 +309,13 @@ mod tests {
                 timeout_secs: None,
                 ..Default::default()
             })
+            .await
+            .map(|receipt| receipt.cell_id)
             .unwrap_or_default();
         assert!(!cell_id.is_empty());
 
         let tool = WaitCellTool::new(registry.clone());
-        // 排空到终态: wait 工具的返回文本必须带输出与 next_cursor。
+        // 排空到终态: wait 工具必须保留 typed output/phase/cursor。
         let mut cursor = 0_u64;
         let mut saw_output = false;
         for _ in 0..20 {
@@ -389,17 +328,23 @@ mod tests {
                 .await
                 .unwrap();
             assert!(result.success);
-            if result.output.contains("wait-tool-ok") {
+            let data = result.data.as_ref().cloned().unwrap_or(Value::Null);
+            if data
+                .get("new_output")
+                .and_then(Value::as_str)
+                .is_some_and(|output| output.contains("wait-tool-ok"))
+            {
                 saw_output = true;
             }
-            if result.output.contains("succeeded") {
+            if data
+                .get("snapshot")
+                .and_then(|snapshot| snapshot.get("phase"))
+                .and_then(Value::as_str)
+                == Some("succeeded")
+            {
                 break;
             }
-            let next = result
-                .output
-                .lines()
-                .find_map(|line| line.strip_prefix("next_cursor: "))
-                .and_then(|value| value.parse::<u64>().ok());
+            let next = data.get("next_cursor").and_then(Value::as_u64);
             cursor = next.unwrap_or(cursor);
         }
         assert!(saw_output, "wait tool output must include cell output");
@@ -426,12 +371,14 @@ mod tests {
                 timeout_secs: None,
                 ..Default::default()
             })
+            .await
+            .map(|receipt| receipt.cell_id)
             .unwrap_or_default();
 
         let list = ListCellsTool::new(registry.clone());
         let listed = list.execute(params(json!({}))).await.unwrap();
         assert!(listed.success);
-        assert!(listed.output.contains("running"));
+        assert!(listed.output.contains("queued") || listed.output.contains("running"));
 
         let stop = StopCellTool::new(registry.clone());
         let stopped = stop
@@ -448,7 +395,15 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(observed.output.contains("cancelled"));
+        assert_eq!(
+            observed
+                .data
+                .as_ref()
+                .and_then(|data| data.get("snapshot"))
+                .and_then(|snapshot| snapshot.get("phase"))
+                .and_then(Value::as_str),
+            Some("cancelled")
+        );
 
         let unknown = stop
             .execute(params(json!({ "cell_id": "no-such" })))

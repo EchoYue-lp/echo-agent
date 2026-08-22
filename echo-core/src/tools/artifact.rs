@@ -5,6 +5,7 @@
 //! crossed. Applications choose the root directory and retention policy.
 
 use super::{ToolContext, ToolOutputChannel};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -88,7 +89,7 @@ impl ToolOutputArtifactIdentity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutputArtifactRef {
     pub path: PathBuf,
     pub artifact_bytes: u64,
