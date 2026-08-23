@@ -235,12 +235,32 @@ pub struct FileStore {
 struct FileStoreAuthority {
     data: RwLock<FileStoreData>,
     transaction: AsyncMutex<()>,
+    committed_bytes: Mutex<Option<Vec<u8>>>,
+    poison: Mutex<Option<String>>,
     _lease: ExclusiveFileLease,
     #[cfg(test)]
-    persist_failure: Mutex<Option<String>>,
+    persist_fault: Mutex<Option<PersistFault>>,
 }
 
 type FileStoreData = HashMap<String, HashMap<String, StoreItem>>;
+
+struct PersistedFileStoreCandidate {
+    data: FileStoreData,
+    bytes: Vec<u8>,
+    degraded: Option<String>,
+}
+
+enum PersistCandidateFailure {
+    NotCommitted(MemoryError),
+    Poisoned(String),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+enum PersistFault {
+    BeforeWrite(String),
+    AfterReplace(String),
+}
 
 fn file_store_registry() -> &'static Mutex<HashMap<PathBuf, Weak<FileStoreAuthority>>> {
     static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<FileStoreAuthority>>>> = OnceLock::new();
@@ -267,14 +287,14 @@ impl FileStore {
         }
         let lease = try_exclusive_file_lease(&path)
             .map_err(|error| MemoryError::IoError(format!("acquire FileStore lease: {error}")))?;
-        let data = if path.exists() {
-            let raw =
-                std::fs::read_to_string(&path).map_err(|e| MemoryError::IoError(e.to_string()))?;
-            serde_json::from_str(&raw).map_err(|e| {
+        let (data, committed_bytes) = if path.exists() {
+            let raw = std::fs::read(&path).map_err(|e| MemoryError::IoError(e.to_string()))?;
+            let data = serde_json::from_slice(&raw).map_err(|e| {
                 MemoryError::SerializationError(format!("parse {}: {e}", path.display()))
-            })?
+            })?;
+            (data, Some(raw))
         } else {
-            HashMap::new()
+            (HashMap::new(), None)
         };
         let ns_count = data.len();
         let item_count: usize = data
@@ -285,42 +305,144 @@ impl FileStore {
         let authority = Arc::new(FileStoreAuthority {
             data: RwLock::new(data),
             transaction: AsyncMutex::new(()),
+            committed_bytes: Mutex::new(committed_bytes),
+            poison: Mutex::new(None),
             _lease: lease,
             #[cfg(test)]
-            persist_failure: Mutex::new(None),
+            persist_fault: Mutex::new(None),
         });
         registry.insert(path.clone(), Arc::downgrade(&authority));
         Ok(Self { path, authority })
     }
 
-    async fn persist_candidate(&self, candidate: FileStoreData) -> Result<FileStoreData> {
+    async fn persist_candidate(
+        &self,
+        candidate: FileStoreData,
+        prior_bytes: Option<Vec<u8>>,
+    ) -> std::result::Result<PersistedFileStoreCandidate, PersistCandidateFailure> {
         let path = self.path.clone();
-        let persisted_path = path.clone();
         #[cfg(test)]
-        let injected_failure = self
+        let injected_fault = self
             .authority
-            .persist_failure
+            .persist_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .take();
+            .take()
+            .map(|fault| match fault {
+                PersistFault::BeforeWrite(message) => (false, message),
+                PersistFault::AfterReplace(message) => (true, message),
+            });
         #[cfg(not(test))]
-        let injected_failure: Option<String> = None;
-        let candidate = tokio::task::spawn_blocking(move || {
-            if let Some(message) = injected_failure {
-                return Err(MemoryError::IoError(message));
+        let injected_fault: Option<(bool, String)> = None;
+        tokio::task::spawn_blocking(move || {
+            let bytes = serde_json::to_vec_pretty(&candidate).map_err(|error| {
+                PersistCandidateFailure::NotCommitted(MemoryError::SerializationError(
+                    error.to_string(),
+                ))
+            })?;
+            let write_result = match injected_fault {
+                Some((false, message)) => Err(std::io::Error::other(message)),
+                Some((true, message)) => {
+                    match echo_core::utils::fs::atomic_write(&path, &bytes) {
+                        Ok(()) => Err(std::io::Error::other(message)),
+                        Err(error) => Err(error),
+                    }
+                }
+                None => echo_core::utils::fs::atomic_write(&path, &bytes),
+            };
+            match write_result {
+                Ok(()) => Ok(PersistedFileStoreCandidate {
+                    data: candidate,
+                    bytes,
+                    degraded: None,
+                }),
+                Err(write_error) => match std::fs::read(&path) {
+                    Ok(observed) if observed == bytes => Ok(PersistedFileStoreCandidate {
+                        data: candidate,
+                        bytes,
+                        degraded: Some(write_error.to_string()),
+                    }),
+                    Ok(observed) if prior_bytes.as_ref() == Some(&observed) => {
+                        Err(PersistCandidateFailure::NotCommitted(
+                            MemoryError::IoError(write_error.to_string()),
+                        ))
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            && prior_bytes.is_none() =>
+                    {
+                        Err(PersistCandidateFailure::NotCommitted(
+                            MemoryError::IoError(write_error.to_string()),
+                        ))
+                    }
+                    Ok(observed) => Err(PersistCandidateFailure::Poisoned(format!(
+                        "persistence failed ({write_error}) and disk contains {} unreconciled bytes",
+                        observed.len()
+                    ))),
+                    Err(error) => Err(PersistCandidateFailure::Poisoned(format!(
+                        "persistence failed ({write_error}) and disk reconciliation failed ({error})"
+                    ))),
+                },
             }
-            let json = serde_json::to_vec_pretty(&candidate)
-                .map_err(|error| MemoryError::SerializationError(error.to_string()))?;
-            echo_core::utils::fs::atomic_write(&path, &json)
-                .map_err(|error| MemoryError::IoError(error.to_string()))?;
-            Ok::<FileStoreData, MemoryError>(candidate)
         })
         .await
         .map_err(|error| {
-            MemoryError::IoError(format!("FileStore persistence task failed: {error}"))
-        })??;
-        debug!(path = %persisted_path.display(), "Store persisted");
-        Ok(candidate)
+            PersistCandidateFailure::Poisoned(format!(
+                "FileStore persistence task failed before reconciliation: {error}"
+            ))
+        })?
+    }
+
+    fn check_write_authority(&self) -> Result<()> {
+        let poison = self
+            .authority
+            .poison
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = poison.as_ref() {
+            return Err(MemoryError::IoError(format!(
+                "FileStore authority is poisoned: {reason}; reopen after releasing all handles"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    async fn publish_candidate(&self, committed: PersistedFileStoreCandidate) {
+        if let Some(error) = committed.degraded {
+            tracing::warn!(
+                path = %self.path.display(),
+                error = %error,
+                "FileStore candidate committed despite a degraded durability result"
+            );
+        }
+        *self
+            .authority
+            .committed_bytes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(committed.bytes);
+        *self.authority.data.write().await = committed.data;
+        debug!(path = %self.path.display(), "Store persisted");
+    }
+
+    fn map_persist_failure(
+        &self,
+        failure: PersistCandidateFailure,
+    ) -> echo_core::error::ReactError {
+        match failure {
+            PersistCandidateFailure::NotCommitted(error) => error.into(),
+            PersistCandidateFailure::Poisoned(reason) => {
+                *self
+                    .authority
+                    .poison
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(reason.clone());
+                MemoryError::IoError(format!(
+                    "FileStore persistence state is ambiguous: {reason}; authority poisoned"
+                ))
+                .into()
+            }
+        }
     }
 
     async fn transact<T, F>(&self, mutate: F) -> Result<T>
@@ -329,13 +451,23 @@ impl FileStore {
         F: FnOnce(&mut FileStoreData) -> (T, bool) + Send,
     {
         let _transaction = self.authority.transaction.lock().await;
+        self.check_write_authority()?;
         let mut candidate = self.authority.data.read().await.clone();
         let (result, changed) = mutate(&mut candidate);
         if !changed {
             return Ok(result);
         }
-        let committed = self.persist_candidate(candidate).await?;
-        *self.authority.data.write().await = committed;
+        let prior_bytes = self
+            .authority
+            .committed_bytes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let committed = self
+            .persist_candidate(candidate, prior_bytes)
+            .await
+            .map_err(|failure| self.map_persist_failure(failure))?;
+        self.publish_candidate(committed).await;
         Ok(result)
     }
 
@@ -377,9 +509,19 @@ impl FileStore {
     /// Flush in-memory data to disk.
     pub async fn flush_public(&self) -> Result<()> {
         let _transaction = self.authority.transaction.lock().await;
+        self.check_write_authority()?;
         let candidate = self.authority.data.read().await.clone();
-        let committed = self.persist_candidate(candidate).await?;
-        *self.authority.data.write().await = committed;
+        let prior_bytes = self
+            .authority
+            .committed_bytes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let committed = self
+            .persist_candidate(candidate, prior_bytes)
+            .await
+            .map_err(|failure| self.map_persist_failure(failure))?;
+        self.publish_candidate(committed).await;
         Ok(())
     }
 }
@@ -925,10 +1067,11 @@ mod tests {
         let store = FileStore::new(&path)?;
         *store
             .authority
-            .persist_failure
+            .persist_fault
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            Some("injected persistence failure".to_string());
+            .unwrap_or_else(|error| error.into_inner()) = Some(PersistFault::BeforeWrite(
+            "injected persistence failure".to_string(),
+        ));
 
         assert!(
             store
@@ -951,6 +1094,45 @@ mod tests {
                 .await?
                 .map(|item| item.value),
             Some(json!("visible"))
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn after_replace_error_reconciles_as_committed_before_publish() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("echo-store-reconcile-{}", uuid::Uuid::new_v4()));
+        let path = root.join("store.json");
+        let store = FileStore::new(&path)?;
+        *store
+            .authority
+            .persist_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(PersistFault::AfterReplace(
+            "injected parent-directory sync failure".to_string(),
+        ));
+
+        store
+            .put(&["atomic"], "committed", json!("visible after reconcile"))
+            .await?;
+        assert_eq!(
+            store
+                .get(&["atomic"], "committed")
+                .await?
+                .map(|item| item.value),
+            Some(json!("visible after reconcile"))
+        );
+        drop(store);
+
+        let reopened = FileStore::new(&path)?;
+        assert_eq!(
+            reopened
+                .get(&["atomic"], "committed")
+                .await?
+                .map(|item| item.value),
+            Some(json!("visible after reconcile"))
         );
         drop(reopened);
         std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
