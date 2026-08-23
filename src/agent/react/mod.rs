@@ -1302,12 +1302,12 @@ impl ReactAgent {
 
     /// Get the list of connected MCP server names.
     #[cfg(feature = "mcp")]
-    pub fn mcp_server_names(&self) -> Vec<&str> {
+    pub fn mcp_server_names(&self) -> Vec<String> {
         self.tools.mcp_manager.server_names()
     }
 
     #[cfg(not(feature = "mcp"))]
-    pub fn mcp_server_names(&self) -> Vec<&str> {
+    pub fn mcp_server_names(&self) -> Vec<String> {
         vec![]
     }
 
@@ -3100,12 +3100,7 @@ impl Agent for ReactAgent {
     fn mcp_server_names(&self) -> Vec<String> {
         #[cfg(feature = "mcp")]
         {
-            self.tools
-                .mcp_manager
-                .server_names()
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect()
+            self.tools.mcp_manager.server_names()
         }
         #[cfg(not(feature = "mcp"))]
         {

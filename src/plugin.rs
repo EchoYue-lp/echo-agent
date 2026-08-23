@@ -336,7 +336,6 @@ impl PluginIntegrator {
                 let connected = agent
                     .list_mcp_servers()
                     .into_iter()
-                    .map(str::to_string)
                     .collect::<std::collections::HashSet<_>>();
                 let collisions = expected_servers
                     .iter()

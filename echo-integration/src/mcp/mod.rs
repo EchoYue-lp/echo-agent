@@ -23,7 +23,7 @@ pub mod transport;
 pub mod types;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use client::McpClient;
 pub use config_loader::{
@@ -62,6 +62,11 @@ use echo_core::tools::Tool;
 /// # }
 /// ```
 pub struct McpManager {
+    state: Mutex<McpManagerState>,
+}
+
+#[derive(Default)]
+struct McpManagerState {
     clients: HashMap<String, Arc<McpClient>>,
     configs: HashMap<String, McpServerConfig>,
 }
@@ -86,9 +91,12 @@ pub struct McpTargetReceipt {
 impl McpManager {
     pub fn new() -> Self {
         Self {
-            clients: HashMap::new(),
-            configs: HashMap::new(),
+            state: Mutex::new(McpManagerState::default()),
         }
+    }
+
+    fn state(&self) -> MutexGuard<'_, McpManagerState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
     /// 连接到一个 MCP 服务端
@@ -131,31 +139,47 @@ impl McpManager {
                 config.name
             )));
         }
-        if self.configs.get(name) == Some(&config)
-            && let Some(client) = self.clients.get(name)
         {
-            return Ok(McpTargetReceipt {
-                name: name.to_string(),
-                change: McpTargetChange::Unchanged,
-                tools: Self::tools_for_client(name, client),
-            });
+            let state = self.state();
+            if state.configs.get(name) == Some(&config)
+                && let Some(client) = state.clients.get(name)
+            {
+                return Ok(McpTargetReceipt {
+                    name: name.to_string(),
+                    change: McpTargetChange::Unchanged,
+                    tools: Self::tools_for_client(name, client),
+                });
+            }
         }
 
         let client = McpClient::new(config.clone()).await?;
+        Ok(self.install_prepared_target(name, config, client).await)
+    }
+
+    async fn install_prepared_target(
+        &self,
+        name: &str,
+        config: McpServerConfig,
+        client: Arc<McpClient>,
+    ) -> McpTargetReceipt {
         let tools = Self::tools_for_client(name, &client);
-        let previous = self.clients.insert(name.to_string(), client);
-        self.configs.insert(name.to_string(), config);
+        let previous = {
+            let mut state = self.state();
+            let previous = state.clients.insert(name.to_string(), client);
+            state.configs.insert(name.to_string(), config);
+            previous
+        };
         let change = if let Some(previous) = previous {
             previous.close().await;
             McpTargetChange::Replaced
         } else {
             McpTargetChange::Connected
         };
-        Ok(McpTargetReceipt {
+        McpTargetReceipt {
             name: name.to_string(),
             change,
             tools,
-        })
+        }
     }
 
     fn tools_for_client(name: &str, client: &Arc<McpClient>) -> Vec<Box<dyn Tool>> {
@@ -200,7 +224,8 @@ impl McpManager {
 
     /// 获取所有已连接服务端的全部工具
     pub fn get_all_tools(&self) -> Vec<Box<dyn Tool>> {
-        self.clients
+        self.state()
+            .clients
             .iter()
             .flat_map(|(server_name, client)| {
                 client.tools().iter().map(|tool| {
@@ -215,13 +240,13 @@ impl McpManager {
     }
 
     /// 获取指定服务端的客户端引用
-    pub fn get_client(&self, name: &str) -> Option<&Arc<McpClient>> {
-        self.clients.get(name)
+    pub fn get_client(&self, name: &str) -> Option<Arc<McpClient>> {
+        self.state().clients.get(name).cloned()
     }
 
     /// 获取所有已连接客户端的快照（用于 hook 执行器等场景）。
     pub fn get_clients(&self) -> HashMap<String, Arc<McpClient>> {
-        self.clients.clone()
+        self.state().clients.clone()
     }
 
     /// Build the canonical model-callable Resource tools for current connections.
@@ -230,13 +255,18 @@ impl McpManager {
     }
 
     /// 列出所有已连接的服务端名称
-    pub fn server_names(&self) -> Vec<&str> {
-        self.clients.keys().map(|s| s.as_str()).collect()
+    pub fn server_names(&self) -> Vec<String> {
+        self.state().clients.keys().cloned().collect()
     }
 
     /// 关闭所有服务端连接
     pub async fn close_all(&self) {
-        for (name, client) in &self.clients {
+        let clients = {
+            let mut state = self.state();
+            state.configs.clear();
+            std::mem::take(&mut state.clients)
+        };
+        for (name, client) in clients {
             tracing::info!("MCP: 关闭服务端 '{}'", name);
             client.close().await;
         }
@@ -246,8 +276,12 @@ impl McpManager {
     ///
     /// 关闭连接并从管理器中移除。成功返回 true，服务端不存在返回 false。
     pub async fn disconnect(&mut self, name: &str) -> bool {
-        self.configs.remove(name);
-        if let Some(client) = self.clients.remove(name) {
+        let client = {
+            let mut state = self.state();
+            state.configs.remove(name);
+            state.clients.remove(name)
+        };
+        if let Some(client) = client {
             tracing::info!("MCP: 断开服务端 '{}'", name);
             client.close().await;
             true
@@ -299,10 +333,10 @@ mod tests {
 
     #[test]
     fn resource_tool_projection_follows_manager_topology() {
-        let mut manager = McpManager::new();
+        let manager = McpManager::new();
         assert!(manager.resource_tools().is_empty());
 
-        manager.clients.insert(
+        manager.state().clients.insert(
             "context".to_string(),
             McpClient::with_test_transport("context", Arc::new(InertTransport)),
         );
@@ -321,7 +355,7 @@ mod tests {
             ]
         );
 
-        manager.clients.remove("context");
+        manager.state().clients.remove("context");
         assert!(manager.resource_tools().is_empty());
     }
 
@@ -330,22 +364,21 @@ mod tests {
         let mut manager = McpManager::new();
         let config = McpServerConfig::stdio("context", "test-command", Vec::<String>::new());
         let client = McpClient::with_test_transport("context", Arc::new(InertTransport));
-        manager
-            .clients
-            .insert("context".to_string(), Arc::clone(&client));
-        manager
-            .configs
-            .insert("context".to_string(), config.clone());
+        {
+            let mut state = manager.state();
+            state
+                .clients
+                .insert("context".to_string(), Arc::clone(&client));
+            state.configs.insert("context".to_string(), config.clone());
+        }
 
         let unchanged = manager
             .reconcile_target("context", Some(config))
             .await
             .expect("unchanged reconcile");
         assert_eq!(unchanged.change, McpTargetChange::Unchanged);
-        assert!(Arc::ptr_eq(
-            manager.get_client("context").expect("client retained"),
-            &client
-        ));
+        let retained = manager.get_client("context").expect("client retained");
+        assert!(Arc::ptr_eq(&retained, &client));
 
         let disconnected = manager
             .reconcile_target("context", None)
@@ -358,5 +391,34 @@ mod tests {
             .await
             .expect("idempotent disconnect");
         assert_eq!(absent.change, McpTargetChange::Absent);
+    }
+
+    #[tokio::test]
+    async fn close_all_drains_topology_before_same_config_reconcile() {
+        let manager = McpManager::new();
+        let config = McpServerConfig::stdio("context", "test-command", Vec::<String>::new());
+        let original = McpClient::with_test_transport("context", Arc::new(InertTransport));
+        {
+            let mut state = manager.state();
+            state
+                .clients
+                .insert("context".to_string(), Arc::clone(&original));
+            state.configs.insert("context".to_string(), config.clone());
+        }
+
+        manager.close_all().await;
+        assert!(manager.get_client("context").is_none());
+        assert!(manager.server_names().is_empty());
+        assert!(manager.state().configs.is_empty());
+
+        let replacement = McpClient::with_test_transport("context", Arc::new(InertTransport));
+        let receipt = manager
+            .install_prepared_target("context", config, Arc::clone(&replacement))
+            .await;
+        assert_eq!(receipt.change, McpTargetChange::Connected);
+        let connected = manager
+            .get_client("context")
+            .expect("replacement connected");
+        assert!(Arc::ptr_eq(&connected, &replacement));
     }
 }

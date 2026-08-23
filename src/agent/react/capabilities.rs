@@ -1353,16 +1353,14 @@ impl ReactAgent {
         self.sync_mcp_resource_tools();
         let client = {
             let mgr = &self.tools.mcp_manager;
-            mgr.get_client(&name)
-                .ok_or_else(|| {
-                    crate::error::ReactError::Agent(Box::new(
-                        crate::error::AgentError::InitializationFailed(format!(
-                            "MCP client '{}' not found after connection",
-                            name
-                        )),
-                    ))
-                })?
-                .clone()
+            mgr.get_client(&name).ok_or_else(|| {
+                crate::error::ReactError::Agent(Box::new(
+                    crate::error::AgentError::InitializationFailed(format!(
+                        "MCP client '{}' not found after connection",
+                        name
+                    )),
+                ))
+            })?
         };
         tracing::info!(
             agent = %self.config.agent_name,
@@ -1472,12 +1470,12 @@ impl ReactAgent {
     /// * `name` - MCP server name
     ///
     /// # Returns
-    /// Returns a reference to the MCP client with the given name, or `None` if not found
+    /// Returns the shared MCP client with the given name, or `None` if not found
     ///
     /// # Description
     /// This method retrieves a connected MCP client for direct method invocation.
     /// Clients are connected via `connect_mcp_from_config` or `load_mcp_from_file`.
-    pub fn mcp_client(&self, name: &str) -> Option<&Arc<McpClient>> {
+    pub fn mcp_client(&self, name: &str) -> Option<Arc<McpClient>> {
         self.tools.mcp_manager.get_client(name)
     }
 
@@ -1490,7 +1488,7 @@ impl ReactAgent {
     /// # Description
     /// This method returns the names of all currently successfully connected MCP servers,
     /// useful for displaying connection status or letting users select a specific server.
-    pub fn list_mcp_servers(&self) -> Vec<&str> {
+    pub fn list_mcp_servers(&self) -> Vec<String> {
         self.tools.mcp_manager.server_names()
     }
 
