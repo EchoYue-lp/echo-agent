@@ -30,7 +30,7 @@
 #[macro_export]
 macro_rules! agent {
     // terminal
-    (@build $b:expr $(,)?) => { $b.build() };
+    (@build $b:expr $(,)?) => { $b.build_strict() };
 
     (@build $b:expr, model: $v:expr, $($rest:tt)*) => {
         $crate::agent!(@build $b.model($v), $($rest)*)
@@ -342,7 +342,7 @@ mod tests {
             model: "test-model",
             system_prompt: "You are an assistant",
         };
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -356,9 +356,6 @@ mod tests {
             tools: [FinalAnswerTool],
             max_iterations: 5,
         };
-        assert!(result.is_ok());
-
-        let agent = result.unwrap();
-        assert!(agent.tool_names().contains(&String::from("final_answer")));
+        assert!(result.is_err());
     }
 }

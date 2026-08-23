@@ -135,22 +135,8 @@ pub struct ReactAgent {
     /// request issued by this agent (think phase, react loop). `None` means
     /// "use the model's default" — no thinking field is sent.
     thinking: Option<crate::llm::ThinkingConfig>,
-    /// Cancellation token for the current streaming request, set in
-    /// `chat_stream_with_cancel` / `execute_stream_with_cancel`.
-    /// `create_llm_stream` reads this field and passes it to the HTTP layer
-    /// to support request-level stream cancellation.
-    /// Uses `tokio::sync::Mutex` to support `&self` streaming methods.
-    pub(crate) cancel_token: tokio::sync::Mutex<Option<CancellationToken>>,
     /// Same-turn user input mailbox shared with streaming snapshots.
     pub(crate) turn_steer_mailbox: Arc<crate::agent::steer::TurnSteerMailbox>,
-
-    /// Shared handle to the `AgentDispatchTool`'s cancel token (P1-11).
-    ///
-    /// Mirrors [`cancel_token`] into the LLM-callable dispatch tool so that a
-    /// subagent dispatched via the `agent_tool` is cancelled when the parent
-    /// run is. Updated alongside `cancel_token` at run start. `None` when
-    /// subagents are disabled (`AgentDispatchTool` never registered).
-    pub(crate) dispatch_cancel_handle: Option<Arc<tokio::sync::Mutex<Option<CancellationToken>>>>,
 
     /// Optional run store for persisting execution traces.
     /// When set, each streaming execution records a [`Run`](crate::trace::Run)
@@ -518,12 +504,6 @@ impl ReactAgent {
 
         // ── AgentDispatch tool (after all other tools + store are ready) ──
         // Context inheritance factory needs the final tool_manager Arc and store.
-        // Shared cancel handle so the parent run can push its token into the
-        // LLM-callable dispatch tool (P1-11). `None` when subagents disabled.
-        #[cfg(feature = "subagent")]
-        let mut dispatch_cancel_handle: Option<
-            Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
-        > = None;
         #[cfg(feature = "subagent")]
         if config.register_agent_dispatch_tool {
             let factory = Arc::new(
@@ -539,9 +519,6 @@ impl ReactAgent {
                 CancellationToken::new(),
             )
             .with_parent_context(factory);
-            // Capture the shared handle before the tool is moved into the
-            // tool_manager, so the agent can update it at run start.
-            dispatch_cancel_handle = Some(dispatch_tool.cancel_handle());
             tool_manager.register(Box::new(dispatch_tool));
         }
 
@@ -587,12 +564,7 @@ impl ReactAgent {
             llm_client: None,
             llm_config: None,
             thinking: None,
-            cancel_token: tokio::sync::Mutex::new(None),
             turn_steer_mailbox: Arc::new(crate::agent::steer::TurnSteerMailbox::default()),
-            #[cfg(feature = "subagent")]
-            dispatch_cancel_handle,
-            #[cfg(not(feature = "subagent"))]
-            dispatch_cancel_handle: None,
             run_store: None,
             current_run_id: std::sync::Mutex::new(None),
             current_trace_run_id: std::sync::Mutex::new(None),
@@ -2110,23 +2082,22 @@ impl ReactAgent {
                 .first()
                 .map(|d| d.name.clone())
                 .unwrap_or_else(|| "default".to_string());
+            let cancel = self
+                .external_cancel
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .map(|token| token.as_ref().child_token())
+                .unwrap_or_default();
 
             let req = DispatchRequest {
                 agent_name,
                 task: task.to_string(),
                 mode_override: Some(ExecutionMode::Fork),
-                // Inherit the parent run's cancel token (P1-11): a bare
-                // `CancellationToken::new()` here would detach the subagent
-                // from the parent, so cancelling the parent run would not
-                // propagate to the delegated subagent. Fall back to a fresh
-                // token only if no run is active (cancel_token not set).
-                cancel: self
-                    .cancel_token
-                    .lock()
-                    .await
-                    .as_ref()
-                    .map(|t| t.child_token())
-                    .unwrap_or_else(CancellationToken::new),
+                // Invocation cancellation is carried in ToolContext for the
+                // active run. A direct framework call has no parent token and
+                // therefore starts with an independent cancellation scope.
+                cancel,
                 parent_agent: self.config.agent_name.clone(),
                 parent_context: self
                     .build_parent_context_with(
@@ -2186,18 +2157,21 @@ impl ReactAgent {
 
         let mode = ExecutionMode::Fork;
         let inheritance = crate::agent::subagent::context::ContextInheritance::fresh_default();
+        let cancel = self
+            .external_cancel
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|token| token.as_ref().child_token())
+            .unwrap_or_default();
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
             mode_override: Some(mode),
-            // Inherit the parent run's cancel token (P1-11) — see delegate_task.
-            cancel: self
-                .cancel_token
-                .lock()
-                .await
-                .as_ref()
-                .map(|t| t.child_token())
-                .unwrap_or_else(CancellationToken::new),
+            // See `delegate_task`: cancellation is invocation-scoped and is
+            // carried by the active ToolContext when dispatch originates in a
+            // running turn.
+            cancel,
             parent_agent: self.config.agent_name.clone(),
             parent_context: self.build_parent_context_with(&inheritance).await,
             delegation_policy: DispatchRequest::policy_from_depth(depth),
@@ -2953,21 +2927,18 @@ impl Agent for ReactAgent {
 
     fn chat_stream_with_cancel<'a>(
         &'a self,
-        _message: &'a str,
+        message: &'a str,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         let agent = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
+        let invocation = echo_core::agent::AgentInvocationContext {
+            cancel: Some(cancel),
+            ..Default::default()
+        };
         Box::pin(
             async move {
-                *self.cancel_token.lock().await = Some(cancel.clone());
-                // Mirror the active run's token into the LLM-callable dispatch
-                // tool (P1-11): subagents dispatched via `agent_tool` derive a
-                // child_token from this, so they're cancelled with the parent.
-                if let Some(handle) = &self.dispatch_cancel_handle {
-                    *handle.lock().await = Some(cancel);
-                }
-                self.run_stream_entry(_message, run::StreamMode::Chat, None)
+                self.run_stream_entry(message, run::StreamMode::Chat, Some(invocation))
                     .await
             }
             .instrument(info_span!("agent_chat_stream_with_cancel", agent.name = %agent, agent.model = %model)),
@@ -2976,21 +2947,18 @@ impl Agent for ReactAgent {
 
     fn execute_stream_with_cancel<'a>(
         &'a self,
-        _task: &'a str,
+        task: &'a str,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         let agent = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
+        let invocation = echo_core::agent::AgentInvocationContext {
+            cancel: Some(cancel),
+            ..Default::default()
+        };
         Box::pin(
             async move {
-                *self.cancel_token.lock().await = Some(cancel.clone());
-                // Mirror the active run's token into the LLM-callable dispatch
-                // tool (P1-11): subagents dispatched via `agent_tool` derive a
-                // child_token from this, so they're cancelled with the parent.
-                if let Some(handle) = &self.dispatch_cancel_handle {
-                    *handle.lock().await = Some(cancel);
-                }
-                self.run_stream_entry(_task, run::StreamMode::Execute, None)
+                self.run_stream_entry(task, run::StreamMode::Execute, Some(invocation))
                     .await
             }
             .instrument(info_span!("agent_execute_stream_with_cancel", agent.name = %agent, agent.model = %model)),
@@ -3026,13 +2994,13 @@ impl Agent for ReactAgent {
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         let agent = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
+        let invocation = echo_core::agent::AgentInvocationContext {
+            cancel: Some(cancel),
+            ..Default::default()
+        };
         Box::pin(
             async move {
-                *self.cancel_token.lock().await = Some(cancel.clone());
-                if let Some(handle) = &self.dispatch_cancel_handle {
-                    *handle.lock().await = Some(cancel);
-                }
-                self.run_stream_message_entry(message, run::StreamMode::Execute, None)
+                self.run_stream_message_entry(message, run::StreamMode::Execute, Some(invocation))
                     .await
             }
             .instrument(info_span!(
@@ -3072,22 +3040,7 @@ impl Agent for ReactAgent {
     }
 
     fn tool_names(&self) -> Vec<String> {
-        let incompatible = self
-            .llm_config
-            .as_ref()
-            .map(|config| {
-                self.tools
-                    .tool_manager
-                    .incompatible_tool_names(&config.input_modalities)
-            })
-            .unwrap_or_default();
-        self.tools
-            .tool_manager
-            .list_tools()
-            .into_iter()
-            .filter(|name| *name != TOOL_FINAL_ANSWER && !incompatible.contains(name))
-            .map(|n| n.to_string())
-            .collect()
+        ReactAgent::tool_names(self)
     }
 
     /// Get the list of tool definitions (name, description, parameter schema).
@@ -3148,9 +3101,15 @@ impl Agent for ReactAgent {
     }
 
     fn messages(&self) -> Vec<crate::llm::types::Message> {
-        // context_manager uses tokio::sync::Mutex, requiring async.
-        // Return empty for sync method. Use async get_messages_async() for full data.
-        vec![]
+        // The trait is synchronous, so take a non-blocking snapshot. The
+        // execution mutex serializes normal turns; during an active turn a
+        // caller may observe the last available snapshot rather than blocking
+        // the runtime thread.
+        self.memory
+            .context
+            .try_lock()
+            .map(|context| context.messages().to_vec())
+            .unwrap_or_default()
     }
 
     fn register_tool(&self, tool: Box<dyn crate::tools::Tool>) {
@@ -3228,15 +3187,13 @@ impl ReactAgent {
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         let agent = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
+        let invocation = echo_core::agent::AgentInvocationContext {
+            cancel: Some(cancel),
+            ..Default::default()
+        };
         Box::pin(
             async move {
-                *self.cancel_token.lock().await = Some(cancel.clone());
-                // Mirror the active run's token into the LLM-callable dispatch
-                // tool so subagents are cancelled with the parent (P1-11).
-                if let Some(handle) = &self.dispatch_cancel_handle {
-                    *handle.lock().await = Some(cancel);
-                }
-                self.run_stream_message_entry(message, run::StreamMode::Chat, None)
+                self.run_stream_message_entry(message, run::StreamMode::Chat, Some(invocation))
                     .await
             }
             .instrument(info_span!(

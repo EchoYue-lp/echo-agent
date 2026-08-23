@@ -500,6 +500,18 @@ impl WsClient {
         self.fragment_cache
             .retain(|_, (created, _)| created.elapsed() < ttl);
 
+        // A message id is expected to be stable, but malformed or retried
+        // frames can reuse it with a different fragment count. Replace the
+        // entry when the declared shape changes; otherwise an old, shorter
+        // vector would make the new sequence index out of bounds.
+        let shape_changed = self
+            .fragment_cache
+            .get(&cache_key)
+            .is_some_and(|entry| entry.value().1.len() != count);
+        if shape_changed {
+            self.fragment_cache.remove(&cache_key);
+        }
+
         // Initialize cache
         if !self.fragment_cache.contains_key(&cache_key) {
             let fragments: Vec<Option<Vec<u8>>> = vec![None; count];
@@ -520,7 +532,15 @@ impl WsClient {
                 self.fragment_cache.remove(&cache_key);
                 return None;
             }
-            fragments[index] = payload;
+            let Some(fragment) = fragments.get_mut(index) else {
+                // The entry may have been concurrently replaced after the
+                // shape check. Treat this frame as incomplete and discard the
+                // malformed cache entry instead of panicking.
+                drop(entry);
+                self.fragment_cache.remove(&cache_key);
+                return None;
+            };
+            *fragment = payload;
 
             let all_received = fragments.iter().all(|f| f.is_some());
             if all_received {
@@ -710,4 +730,42 @@ fn rand_jitter(max: Duration) -> Duration {
     }
     let jitter_ms = rand::rng().random_range(0..max_ms);
     Duration::from_millis(jitter_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WsClient, WsClientConfig};
+
+    fn client() -> WsClient {
+        WsClient::new(WsClientConfig::new(
+            "app-id".to_string(),
+            "app-secret".to_string(),
+            "wss://example.test".to_string(),
+        ))
+    }
+
+    #[test]
+    fn fragment_count_change_replaces_cached_shape_without_panicking() {
+        let client = client();
+
+        assert_eq!(
+            client.combine_fragments("same-id", 2, 0, Some(b"old".to_vec())),
+            None
+        );
+
+        // The same id now declares three parts. This used to index the old
+        // two-element vector with seq=2 and panic.
+        assert_eq!(
+            client.combine_fragments("same-id", 3, 2, Some(b"c".to_vec())),
+            None
+        );
+        assert_eq!(
+            client.combine_fragments("same-id", 3, 0, Some(b"a".to_vec())),
+            None
+        );
+        assert_eq!(
+            client.combine_fragments("same-id", 3, 1, Some(b"b".to_vec())),
+            Some(Some(b"abc".to_vec()))
+        );
+    }
 }
