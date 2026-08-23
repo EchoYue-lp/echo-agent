@@ -27,6 +27,25 @@ fn io_error(context: &str, error: std::io::Error) -> ReactError {
     ReactError::Other(format!("{context}: {error}"))
 }
 
+#[cfg(unix)]
+fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    std::fs::File::open(directory)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn finish_new_journal_creation(
+    file: &std::fs::File,
+    parent: &Path,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    file.sync_data()?;
+    sync_parent(parent)
+}
+
 /// Scanned state of a journal file on open.
 struct ScannedJournal {
     /// Byte length of the valid prefix (records plus their newlines).
@@ -172,9 +191,18 @@ impl<E: JournalEvent> FileEventJournal<E> {
     pub fn open(path: impl Into<PathBuf>, durability: FileDurability) -> Result<Self> {
         let path = path.into();
         let context = format!("journal open {}", path.display());
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| io_error(&context, error))?;
-        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|error| io_error(&context, error))?;
+        let canonical_parent =
+            std::fs::canonicalize(parent).map_err(|error| io_error(&context, error))?;
+        let file_name = path.file_name().ok_or_else(|| {
+            ReactError::Other(format!("{context}: journal path has no file name"))
+        })?;
+        let path = canonical_parent.join(file_name);
+        let context = format!("journal open {}", path.display());
         // Appends go through `append_existing`, which requires the target to
         // already be a regular file, so a fresh journal creates an empty one.
         match std::fs::OpenOptions::new()
@@ -182,16 +210,23 @@ impl<E: JournalEvent> FileEventJournal<E> {
             .create_new(true)
             .open(&path)
         {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Ok(file) => finish_new_journal_creation(&file, &canonical_parent, sync_directory)
+                .map_err(|error| io_error(&context, error))?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(&path)
+                    .map_err(|metadata_error| io_error(&context, metadata_error))?;
+                if metadata.file_type().is_file() && metadata.len() == 0 {
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .map_err(|open_error| io_error(&context, open_error))?;
+                    finish_new_journal_creation(&file, &canonical_parent, sync_directory)
+                        .map_err(|barrier_error| io_error(&context, barrier_error))?;
+                }
+            }
             Err(error) => return Err(io_error(&context, error)),
         }
-        let path = path
-            .parent()
-            .and_then(|parent| std::fs::canonicalize(parent).ok())
-            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
-            .unwrap_or(path);
-        let context = format!("journal open {}", path.display());
         let mut registry = file_journal_registry().lock().map_err(|error| {
             ReactError::Other(format!("journal registry lock poisoned: {error}"))
         })?;
@@ -866,6 +901,56 @@ mod tests {
         );
         drop(first);
         drop(second);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bare_and_dot_relative_paths_share_one_authority() {
+        let name = format!("echo-file-journal-bare-{}.jsonl", uuid::Uuid::new_v4());
+        let bare = PathBuf::from(&name);
+        let dotted = PathBuf::from(".").join(&name);
+        let first = FileEventJournal::<String>::open(&bare, FileDurability::Flush)
+            .expect("open bare journal path");
+        let second = FileEventJournal::<String>::open(&dotted, FileDurability::Flush)
+            .expect("open dotted journal path");
+        assert!(Arc::ptr_eq(&first.shared, &second.shared));
+        assert_eq!(first.path(), second.path());
+        drop(first);
+        drop(second);
+        std::fs::remove_file(&bare).ok();
+        std::fs::remove_file(format!(".{name}.lease")).ok();
+    }
+
+    #[test]
+    fn fresh_file_creation_requires_file_and_parent_barrier() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create fresh journal fixture");
+        let called = std::cell::Cell::new(false);
+        let error = finish_new_journal_creation(&file, &root, |_| {
+            called.set(true);
+            Err(std::io::Error::other("injected parent barrier failure"))
+        })
+        .expect_err("parent barrier failure must surface");
+        assert!(called.get());
+        assert!(error.to_string().contains("parent barrier failure"));
+        finish_new_journal_creation(&file, &root, sync_directory)
+            .expect("retry file and parent barrier");
+        drop(file);
+
+        let retry_path = root.join("retry.jsonl");
+        std::fs::File::create(&retry_path).expect("leave ambiguous empty journal");
+        let reopened = FileEventJournal::<String>::open(&retry_path, FileDurability::SyncData)
+            .expect("production open reconciles empty existing journal");
+        assert_eq!(reopened.last_sequence(), 0);
+        reopened
+            .append("durable".to_string())
+            .expect("append after reconciled creation");
+        drop(reopened);
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -15,8 +15,8 @@ use super::{
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
 use echo_core::utils::fs::{
-    ExclusiveFileLease, FileDurability, append_existing, read_existing, read_existing_from,
-    read_existing_lines_from, truncate_existing, try_exclusive_file_lease,
+    ExclusiveFileLease, FileDurability, append_existing, atomic_write, read_existing,
+    read_existing_from, read_existing_lines_from, truncate_existing, try_exclusive_file_lease,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 const SEGMENT_SUFFIX: &str = ".jsonl";
 const SEGMENT_DIGITS: usize = 20;
 const LEASE_AUTHORITY: &str = "segmented-event-journal";
+const RETENTION_MARKER: &str = ".retained-floor.json";
+const RETENTION_SCHEMA_VERSION: u16 = 1;
 
 fn journal_error(message: impl Into<String>) -> ReactError {
     ReactError::Other(message.into())
@@ -59,12 +61,98 @@ struct StoredRecord<E> {
     digest: String,
 }
 
-fn record_digest<E: Serialize>(sequence: u64, event: &E) -> Result<String> {
-    let bytes = canonical_json_bytes(&IntegrityPayload { sequence, event }).map_err(|error| {
+#[derive(Debug, Serialize)]
+struct RetentionIntegrity {
+    schema_version: u16,
+    retained_floor: u64,
+    cleanup_pending: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetentionMarker {
+    schema_version: u16,
+    retained_floor: u64,
+    cleanup_pending: bool,
+    digest: String,
+}
+
+enum MarkerWriteStatus {
+    Confirmed,
+    Degraded { error: String },
+}
+
+fn integrity_digest<T: Serialize>(value: &T) -> Result<String> {
+    let bytes = canonical_json_bytes(value).map_err(|error| {
         journal_error(format!("failed to encode journal integrity input: {error}"))
     })?;
     let digest = Sha256::digest(bytes);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    let mut encoded = String::with_capacity(digest.len().saturating_mul(2));
+    for byte in digest {
+        encoded.push(lower_hex_digit(byte >> 4));
+        encoded.push(lower_hex_digit(byte & 0x0f));
+    }
+    Ok(encoded)
+}
+
+fn lower_hex_digit(nibble: u8) -> char {
+    match nibble {
+        0..=9 => char::from(b'0'.saturating_add(nibble)),
+        _ => char::from(b'a'.saturating_add(nibble.saturating_sub(10))),
+    }
+}
+
+fn record_digest<E: Serialize>(sequence: u64, event: &E) -> Result<String> {
+    integrity_digest(&IntegrityPayload { sequence, event })
+}
+
+fn retention_digest(
+    schema_version: u16,
+    retained_floor: u64,
+    cleanup_pending: bool,
+) -> Result<String> {
+    integrity_digest(&RetentionIntegrity {
+        schema_version,
+        retained_floor,
+        cleanup_pending,
+    })
+}
+
+fn load_retention_marker(directory: &Path, context: &str) -> Result<Option<RetentionMarker>> {
+    let path = directory.join(RETENTION_MARKER);
+    let bytes = match read_existing(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(context, error)),
+    };
+    let marker: RetentionMarker = serde_json::from_slice(&bytes).map_err(|error| {
+        journal_error(format!(
+            "{context}: corrupt retained-floor marker {}: {error}",
+            path.display()
+        ))
+    })?;
+    if marker.schema_version != RETENTION_SCHEMA_VERSION {
+        return Err(journal_error(format!(
+            "{context}: unsupported retained-floor marker schema {}",
+            marker.schema_version
+        )));
+    }
+    if marker.retained_floor == 0 {
+        return Err(journal_error(format!(
+            "{context}: retained-floor marker must be positive"
+        )));
+    }
+    let expected = retention_digest(
+        marker.schema_version,
+        marker.retained_floor,
+        marker.cleanup_pending,
+    )?;
+    if marker.digest != expected {
+        return Err(journal_error(format!(
+            "{context}: retained-floor marker digest mismatch"
+        )));
+    }
+    Ok(Some(marker))
 }
 
 fn verify_record<E: JournalEvent>(
@@ -244,6 +332,29 @@ fn sync_directory(_directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn ensure_journal_directory(
+    directory: &Path,
+    context: &str,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    std::fs::create_dir_all(directory).map_err(|error| io_error(context, error))?;
+    let metadata = std::fs::metadata(directory).map_err(|error| io_error(context, error))?;
+    if !metadata.is_dir() {
+        return Err(journal_error(format!(
+            "{context}: journal root is not a directory"
+        )));
+    }
+    sync_parent(directory).map_err(|error| io_error(context, error))
+}
+
+fn sync_parent_directory_entry(directory: &Path) -> std::io::Result<()> {
+    let parent = directory
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    sync_directory(parent)
+}
+
 fn create_segment(directory: &Path, start_sequence: u64, context: &str) -> Result<SegmentState> {
     let path = segment_path(directory, start_sequence);
     let file = match std::fs::OpenOptions::new()
@@ -287,10 +398,18 @@ fn scan_directory<E: JournalEvent>(
 ) -> Result<SegmentedJournalState> {
     let listed = list_segment_paths(directory, context)?;
     if listed.is_empty() {
+        if load_retention_marker(directory, context)?.is_some() {
+            return Err(journal_error(format!(
+                "{context}: retained-floor marker exists but every journal segment is missing"
+            )));
+        }
         let active = create_segment(directory, 1, context)?;
         return Ok(SegmentedJournalState {
             next_sequence: 1,
             segments: vec![active],
+            retained_floor: 1,
+            cleanup_pending: false,
+            marker_barrier_pending: false,
             poison: None,
         });
     }
@@ -315,9 +434,60 @@ fn scan_directory<E: JournalEvent>(
         .last()
         .and_then(|segment| segment.end_sequence.checked_add(1))
         .ok_or_else(|| journal_error(format!("{context}: journal sequence exhausted")))?;
+    let marker = load_retention_marker(directory, context)?;
+    let (retained_floor, cleanup_pending) = match marker {
+        Some(marker) => {
+            if marker.retained_floor > next_sequence {
+                return Err(journal_error(format!(
+                    "{context}: retained floor {} is ahead of next journal sequence {next_sequence}",
+                    marker.retained_floor
+                )));
+            }
+            let logical = segments
+                .iter()
+                .find(|segment| segment.start_sequence >= marker.retained_floor)
+                .ok_or_else(|| {
+                    journal_error(format!(
+                        "{context}: no segment starts at retained floor {}",
+                        marker.retained_floor
+                    ))
+                })?;
+            if logical.start_sequence != marker.retained_floor {
+                return Err(journal_error(format!(
+                    "{context}: missing segment at retained floor {}, found {}",
+                    marker.retained_floor, logical.start_sequence
+                )));
+            }
+            let first_start = segments
+                .first()
+                .map(|segment| segment.start_sequence)
+                .ok_or_else(|| journal_error(format!("{context}: journal has no segments")))?;
+            if !marker.cleanup_pending && first_start != marker.retained_floor {
+                return Err(journal_error(format!(
+                    "{context}: retained-floor cleanup is confirmed but prefix segment {first_start} remains"
+                )));
+            }
+            (marker.retained_floor, marker.cleanup_pending)
+        }
+        None => {
+            let first_start = segments
+                .first()
+                .map(|segment| segment.start_sequence)
+                .ok_or_else(|| journal_error(format!("{context}: journal has no segments")))?;
+            if first_start != 1 {
+                return Err(journal_error(format!(
+                    "{context}: journal prefix starts at {first_start} without an authorized retained-floor marker"
+                )));
+            }
+            (1, false)
+        }
+    };
     Ok(SegmentedJournalState {
         next_sequence,
         segments,
+        retained_floor,
+        cleanup_pending,
+        marker_barrier_pending: false,
         poison: None,
     })
 }
@@ -338,10 +508,55 @@ pub struct JournalSegmentMetadata {
     pub active: bool,
 }
 
+/// Durable logical retention state for a segmented journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournalRetentionMetadata {
+    /// Earliest sequence callers may request from replay.
+    pub retained_floor: u64,
+    /// Physical prefix deletion or its directory barrier still needs retry.
+    pub cleanup_pending: bool,
+}
+
+/// Outcome of physical cleanup after a logical prune commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JournalPhysicalCleanupStatus {
+    /// Every logically pruned file was removed and the directory was synced.
+    Confirmed,
+    /// The logical floor committed, but physical cleanup remains retryable.
+    Degraded { error: String },
+}
+
+/// Durability of the logical retained-floor marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JournalPruneCommitStatus {
+    /// The logical retained floor and its parent-directory barrier completed.
+    Confirmed,
+    /// The complete marker is visible, but its directory barrier needs retry.
+    Degraded { error: String },
+}
+
+/// Typed receipt for whole-segment pruning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalPruneReceipt {
+    /// Durable earliest logically retained sequence.
+    pub retained_floor: u64,
+    /// Durability of the logical retained-floor transition.
+    pub commit: JournalPruneCommitStatus,
+    /// Segments newly excluded from logical replay by this call.
+    pub logically_pruned: Vec<JournalSegmentMetadata>,
+    /// Segment files physically removed by this call.
+    pub physically_removed: Vec<JournalSegmentMetadata>,
+    /// Whether physical deletion and its directory barrier completed.
+    pub cleanup: JournalPhysicalCleanupStatus,
+}
+
 #[derive(Debug)]
 struct SegmentedJournalState {
     next_sequence: u64,
     segments: Vec<SegmentState>,
+    retained_floor: u64,
+    cleanup_pending: bool,
+    marker_barrier_pending: bool,
     poison: Option<String>,
 }
 
@@ -377,6 +592,16 @@ pub struct SegmentedFileEventJournal<E> {
     sync_fault: Mutex<bool>,
     #[cfg(test)]
     create_fault: Mutex<bool>,
+    #[cfg(test)]
+    marker_write_fault_after: Mutex<Option<usize>>,
+    #[cfg(test)]
+    marker_full_write_fault: Mutex<bool>,
+    #[cfg(test)]
+    delete_fault_after: Mutex<Option<usize>>,
+    #[cfg(test)]
+    directory_sync_fault: Mutex<bool>,
+    #[cfg(test)]
+    directory_sync_attempts: std::sync::atomic::AtomicUsize,
     _event: PhantomData<fn() -> E>,
 }
 
@@ -402,13 +627,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         }
         let directory = directory.into();
         let context = format!("segmented journal open {}", directory.display());
-        std::fs::create_dir_all(&directory).map_err(|error| io_error(&context, error))?;
-        let metadata = std::fs::metadata(&directory).map_err(|error| io_error(&context, error))?;
-        if !metadata.is_dir() {
-            return Err(journal_error(format!(
-                "{context}: journal root is not a directory"
-            )));
-        }
+        ensure_journal_directory(&directory, &context, sync_parent_directory_entry)?;
         let directory =
             std::fs::canonicalize(&directory).map_err(|error| io_error(&context, error))?;
         let context = format!("segmented journal open {}", directory.display());
@@ -432,7 +651,11 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            *state = scan_directory::<E>(&directory, durability, &context)?;
+            let marker_barrier_pending = state.marker_barrier_pending;
+            let mut rescanned = scan_directory::<E>(&directory, durability, &context)?;
+            rescanned.marker_barrier_pending |= marker_barrier_pending;
+            rescanned.cleanup_pending |= marker_barrier_pending;
+            *state = rescanned;
             drop(state);
             return Ok(Self {
                 directory,
@@ -443,6 +666,16 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 sync_fault: Mutex::new(false),
                 #[cfg(test)]
                 create_fault: Mutex::new(false),
+                #[cfg(test)]
+                marker_write_fault_after: Mutex::new(None),
+                #[cfg(test)]
+                marker_full_write_fault: Mutex::new(false),
+                #[cfg(test)]
+                delete_fault_after: Mutex::new(None),
+                #[cfg(test)]
+                directory_sync_fault: Mutex::new(false),
+                #[cfg(test)]
+                directory_sync_attempts: std::sync::atomic::AtomicUsize::new(0),
                 _event: PhantomData,
             });
         }
@@ -466,6 +699,16 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             sync_fault: Mutex::new(false),
             #[cfg(test)]
             create_fault: Mutex::new(false),
+            #[cfg(test)]
+            marker_write_fault_after: Mutex::new(None),
+            #[cfg(test)]
+            marker_full_write_fault: Mutex::new(false),
+            #[cfg(test)]
+            delete_fault_after: Mutex::new(None),
+            #[cfg(test)]
+            directory_sync_fault: Mutex::new(false),
+            #[cfg(test)]
+            directory_sync_attempts: std::sync::atomic::AtomicUsize::new(0),
             _event: PhantomData,
         })
     }
@@ -487,13 +730,27 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             .segments
             .iter()
             .enumerate()
+            .filter(|(_, segment)| segment.start_sequence >= state.retained_floor)
             .map(|(index, segment)| segment.metadata(index == last))
             .collect()
     }
 
-    /// Force a data durability barrier on the active segment.
-    pub fn sync_data(&self) -> Result<()> {
+    /// Read the durable logical replay floor and pending cleanup state.
+    pub fn retention_metadata(&self) -> JournalRetentionMetadata {
         let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        JournalRetentionMetadata {
+            retained_floor: state.retained_floor,
+            cleanup_pending: state.cleanup_pending,
+        }
+    }
+
+    /// Force a data durability barrier and finish pending prune cleanup.
+    pub fn sync_data(&self) -> Result<()> {
+        let mut state = self
             .shared
             .state
             .lock()
@@ -504,52 +761,300 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             .ok_or_else(|| journal_error("segmented journal has no active segment"))?;
         let context = format!("segmented journal sync_data {}", active.path.display());
         self.sync_active(&active.path)
-            .map_err(|error| io_error(&context, error))
+            .map_err(|error| io_error(&context, error))?;
+        if state.marker_barrier_pending {
+            self.confirm_marker_barrier(&mut state)?;
+        }
+        if state.cleanup_pending {
+            let (_, cleanup) = self.finish_pending_cleanup(&mut state);
+            if let JournalPhysicalCleanupStatus::Degraded { error } = cleanup {
+                return Err(journal_error(format!(
+                    "segmented journal pending cleanup remains degraded: {error}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Remove complete closed segments strictly before the caller's keep
     /// cursor. The active segment is never removed and no retention policy is
-    /// inferred by the framework.
+    /// inferred by the framework. The caller must first persist a checkpoint
+    /// through `retained_floor - 1` and preserve any product-level pins.
+    ///
+    /// Once the retained-floor marker commits, this returns a typed receipt
+    /// even if physical deletion is degraded. Retry this method or call
+    /// [`Self::sync_data`] to finish pending cleanup.
     pub fn prune_closed_segments_before(
         &self,
         keep_from_sequence: u64,
-    ) -> Result<Vec<JournalSegmentMetadata>> {
+    ) -> Result<JournalPruneReceipt> {
         let mut state = self
             .shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if state.marker_barrier_pending
+            && let Err(error) = self.confirm_marker_barrier(&mut state)
+        {
+            let message = error.to_string();
+            return Ok(JournalPruneReceipt {
+                retained_floor: state.retained_floor,
+                commit: JournalPruneCommitStatus::Degraded {
+                    error: message.clone(),
+                },
+                logically_pruned: Vec::new(),
+                physically_removed: Vec::new(),
+                cleanup: JournalPhysicalCleanupStatus::Degraded { error: message },
+            });
+        }
         let active_index = state.segments.len().saturating_sub(1);
-        let candidates = state
+        let candidate_count = state
             .segments
             .iter()
             .enumerate()
             .filter(|(index, segment)| {
                 *index < active_index && segment.end_sequence < keep_from_sequence
             })
-            .map(|(_, segment)| segment.clone())
+            .count();
+        let requested_floor = state
+            .segments
+            .get(candidate_count)
+            .map(|segment| segment.start_sequence)
+            .unwrap_or(state.retained_floor);
+        let target_floor = requested_floor.max(state.retained_floor);
+        let logically_pruned = state
+            .segments
+            .iter()
+            .filter(|segment| {
+                segment.start_sequence >= state.retained_floor
+                    && segment.start_sequence < target_floor
+            })
+            .map(|segment| segment.metadata(false))
+            .collect::<Vec<_>>();
+        let commit = if target_floor > state.retained_floor {
+            match self.write_retention_marker(target_floor, true)? {
+                MarkerWriteStatus::Confirmed => {
+                    state.retained_floor = target_floor;
+                    state.cleanup_pending = true;
+                    JournalPruneCommitStatus::Confirmed
+                }
+                MarkerWriteStatus::Degraded { error } => {
+                    state.retained_floor = target_floor;
+                    state.cleanup_pending = true;
+                    state.marker_barrier_pending = true;
+                    return Ok(JournalPruneReceipt {
+                        retained_floor: target_floor,
+                        commit: JournalPruneCommitStatus::Degraded {
+                            error: error.clone(),
+                        },
+                        logically_pruned,
+                        physically_removed: Vec::new(),
+                        cleanup: JournalPhysicalCleanupStatus::Degraded {
+                            error: format!(
+                                "physical cleanup blocked on retained-floor barrier: {error}"
+                            ),
+                        },
+                    });
+                }
+            }
+        } else {
+            JournalPruneCommitStatus::Confirmed
+        };
+        let (physically_removed, cleanup) = if state.cleanup_pending {
+            self.finish_pending_cleanup(&mut state)
+        } else {
+            (Vec::new(), JournalPhysicalCleanupStatus::Confirmed)
+        };
+        Ok(JournalPruneReceipt {
+            retained_floor: state.retained_floor,
+            commit,
+            logically_pruned,
+            physically_removed,
+            cleanup,
+        })
+    }
+
+    fn write_retention_marker(
+        &self,
+        retained_floor: u64,
+        cleanup_pending: bool,
+    ) -> Result<MarkerWriteStatus> {
+        #[cfg(test)]
+        {
+            let mut fault = self
+                .marker_write_fault_after
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(remaining) = fault.as_mut() {
+                if *remaining == 0 {
+                    *fault = None;
+                    return Err(journal_error(
+                        "injected retained-floor marker write failure",
+                    ));
+                }
+                *remaining = remaining.saturating_sub(1);
+            }
+        }
+        let marker = RetentionMarker {
+            schema_version: RETENTION_SCHEMA_VERSION,
+            retained_floor,
+            cleanup_pending,
+            digest: retention_digest(RETENTION_SCHEMA_VERSION, retained_floor, cleanup_pending)?,
+        };
+        let bytes = serde_json::to_vec(&marker).map_err(|error| {
+            journal_error(format!("failed to encode retained-floor marker: {error}"))
+        })?;
+        let path = self.directory.join(RETENTION_MARKER);
+        let write_result = atomic_write(&path, &bytes);
+        #[cfg(test)]
+        if write_result.is_ok()
+            && std::mem::take(
+                &mut *self
+                    .marker_full_write_fault
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+            )
+        {
+            return Ok(MarkerWriteStatus::Degraded {
+                error: "injected visible marker parent barrier failure".to_string(),
+            });
+        }
+        match write_result {
+            Ok(()) => Ok(MarkerWriteStatus::Confirmed),
+            Err(error) => {
+                let reconciled = load_retention_marker(
+                    &self.directory,
+                    "segmented journal marker write reconciliation",
+                );
+                if reconciled.is_ok_and(|marker| {
+                    marker.is_some_and(|marker| {
+                        marker.schema_version == RETENTION_SCHEMA_VERSION
+                            && marker.retained_floor == retained_floor
+                            && marker.cleanup_pending == cleanup_pending
+                    })
+                }) {
+                    Ok(MarkerWriteStatus::Degraded {
+                        error: error.to_string(),
+                    })
+                } else {
+                    Err(io_error(
+                        &format!("segmented journal retention marker {}", path.display()),
+                        error,
+                    ))
+                }
+            }
+        }
+    }
+
+    fn confirm_marker_barrier(&self, state: &mut SegmentedJournalState) -> Result<()> {
+        self.sync_segment_directory()
+            .map_err(|error| io_error("segmented journal retained-floor barrier retry", error))?;
+        let marker = load_retention_marker(
+            &self.directory,
+            "segmented journal retained-floor barrier retry",
+        )?
+        .ok_or_else(|| journal_error("retained-floor marker disappeared before barrier retry"))?;
+        state.marker_barrier_pending = false;
+        state.cleanup_pending = marker.cleanup_pending;
+        Ok(())
+    }
+
+    fn finish_pending_cleanup(
+        &self,
+        state: &mut SegmentedJournalState,
+    ) -> (Vec<JournalSegmentMetadata>, JournalPhysicalCleanupStatus) {
+        let candidates = state
+            .segments
+            .iter()
+            .filter(|segment| segment.start_sequence < state.retained_floor)
+            .cloned()
             .collect::<Vec<_>>();
         let mut removed = Vec::new();
+        let mut deletion_error = None;
         for candidate in candidates {
-            let context = format!("segmented journal prune {}", candidate.path.display());
-            if let Err(error) = std::fs::remove_file(&candidate.path) {
-                state.segments.retain(|segment| {
-                    !removed
-                        .iter()
-                        .any(|metadata: &JournalSegmentMetadata| metadata.path == segment.path)
-                });
-                return Err(io_error(&context, error));
+            if let Err(error) = self.remove_pruned_segment(&candidate.path) {
+                deletion_error = Some(format!(
+                    "failed to remove {}: {error}",
+                    candidate.path.display()
+                ));
+                break;
             }
+            state
+                .segments
+                .retain(|segment| segment.path != candidate.path);
             removed.push(candidate.metadata(false));
         }
-        state
-            .segments
-            .retain(|segment| !removed.iter().any(|metadata| metadata.path == segment.path));
-        if !removed.is_empty() {
-            sync_directory(&self.directory)
-                .map_err(|error| io_error("segmented journal prune directory sync", error))?;
+        let sync_error = self
+            .sync_segment_directory()
+            .err()
+            .map(|error| format!("directory sync failed: {error}"));
+        if deletion_error.is_some() || sync_error.is_some() {
+            state.cleanup_pending = true;
+            let error = [deletion_error, sync_error]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; ");
+            return (removed, JournalPhysicalCleanupStatus::Degraded { error });
         }
-        Ok(removed)
+        match self.write_retention_marker(state.retained_floor, false) {
+            Ok(MarkerWriteStatus::Confirmed) => {}
+            Ok(MarkerWriteStatus::Degraded { error }) => {
+                state.cleanup_pending = true;
+                state.marker_barrier_pending = true;
+                return (removed, JournalPhysicalCleanupStatus::Degraded { error });
+            }
+            Err(error) => {
+                state.cleanup_pending = true;
+                return (
+                    removed,
+                    JournalPhysicalCleanupStatus::Degraded {
+                        error: error.to_string(),
+                    },
+                );
+            }
+        }
+        state.cleanup_pending = false;
+        (removed, JournalPhysicalCleanupStatus::Confirmed)
+    }
+
+    fn remove_pruned_segment(&self, path: &Path) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let mut fault = self
+                .delete_fault_after
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(remaining) = fault.as_mut() {
+                if *remaining == 0 {
+                    *fault = None;
+                    return Err(std::io::Error::other(
+                        "injected segmented prune delete failure",
+                    ));
+                }
+                *remaining = remaining.saturating_sub(1);
+            }
+        }
+        std::fs::remove_file(path)
+    }
+
+    fn sync_segment_directory(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+
+            self.directory_sync_attempts.fetch_add(1, Ordering::SeqCst);
+            let mut fail = self
+                .directory_sync_fault
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if std::mem::take(&mut *fail) {
+                return Err(std::io::Error::other(
+                    "injected segmented directory sync failure",
+                ));
+            }
+        }
+        sync_directory(&self.directory)
     }
 
     fn roll_segment(&self, state: &mut SegmentedJournalState) -> Result<()> {
@@ -744,22 +1249,41 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
         self.next_sequence().saturating_sub(1)
     }
 
+    fn retained_floor(&self) -> u64 {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retained_floor
+    }
+
     fn replay_after(&self, after_sequence: u64, limit: usize) -> Result<Vec<JournalRecord<E>>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
         let context = format!("segmented journal replay {}", self.directory.display());
         let state = self
             .shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let requested_sequence = after_sequence.saturating_add(1);
+        if requested_sequence < state.retained_floor {
+            return Err(journal_error(format!(
+                "{context}: requested sequence {requested_sequence} is below retained floor {}; restart replay at cursor {}",
+                state.retained_floor,
+                state.retained_floor.saturating_sub(1)
+            )));
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         if after_sequence >= state.next_sequence.saturating_sub(1) {
             return Ok(Vec::new());
         }
         let mut records = Vec::new();
         for segment in &state.segments {
-            if !segment.has_records() || segment.end_sequence <= after_sequence {
+            if !segment.has_records()
+                || segment.start_sequence < state.retained_floor
+                || segment.end_sequence <= after_sequence
+            {
                 continue;
             }
             let first_sequence = after_sequence.saturating_add(1).max(segment.start_sequence);
@@ -806,6 +1330,7 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{CheckpointedReducer, EventReducer, FileCheckpointStore};
     use super::*;
     use std::sync::Barrier;
 
@@ -845,6 +1370,31 @@ mod tests {
         std::fs::write(path, encoded).expect("write mutated segment");
     }
 
+    #[derive(Default, Debug, Serialize, Deserialize)]
+    struct RetainedReducer {
+        events: Vec<String>,
+    }
+
+    impl EventReducer for RetainedReducer {
+        type Event = String;
+
+        fn apply(&mut self, event: &String) {
+            self.events.push(event.clone());
+        }
+    }
+
+    fn write_checkpoint(path: &Path, sequence: u64, events: &[&str]) {
+        let state = RetainedReducer {
+            events: events.iter().map(|event| (*event).to_string()).collect(),
+        };
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "sequence": sequence,
+            "state": state,
+        }))
+        .expect("encode checkpoint fixture");
+        std::fs::write(path, bytes).expect("write checkpoint fixture");
+    }
+
     #[test]
     fn rollover_preserves_one_global_cursor() {
         let root = temp_root("rollover");
@@ -870,6 +1420,40 @@ mod tests {
             vec![1, 2, 3]
         );
         drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn integrity_digest_is_fixed_width_lowercase_hex() {
+        let digest = record_digest(42, &"digest-event").expect("compute digest");
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+    }
+
+    #[test]
+    fn fresh_directory_requires_parent_entry_barrier() {
+        let root = temp_root("fresh-parent-sync");
+        let directory = root.join("journal");
+        let called = std::cell::Cell::new(false);
+        let error = ensure_journal_directory(&directory, "fresh journal", |_| {
+            called.set(true);
+            Err(std::io::Error::other("injected parent sync failure"))
+        })
+        .expect_err("parent sync failure must fail fresh open");
+        assert!(called.get());
+        assert!(directory.is_dir());
+        assert!(error.to_string().contains("parent sync failure"));
+
+        ensure_journal_directory(
+            &directory,
+            "fresh journal retry",
+            sync_parent_directory_entry,
+        )
+        .expect("retry parent entry barrier");
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1228,11 +1812,14 @@ mod tests {
             .find(|segment| segment.active)
             .expect("active segment")
             .path;
-        let removed = journal
+        let receipt = journal
             .prune_closed_segments_before(3)
             .expect("prune closed segments");
-        assert_eq!(removed.len(), 2);
-        assert!(removed.iter().all(|segment| !segment.active));
+        assert_eq!(receipt.retained_floor, 3);
+        assert_eq!(receipt.commit, JournalPruneCommitStatus::Confirmed);
+        assert_eq!(receipt.logically_pruned.len(), 2);
+        assert_eq!(receipt.physically_removed.len(), 2);
+        assert_eq!(receipt.cleanup, JournalPhysicalCleanupStatus::Confirmed);
         assert!(active_path.exists());
         let remaining = journal.segments();
         assert_eq!(remaining.len(), 1);
@@ -1241,13 +1828,353 @@ mod tests {
         let reopened = open_strings(&root, 1, FileDurability::Flush);
         assert_eq!(reopened.last_sequence(), 3);
         assert_eq!(
+            reopened.retention_metadata(),
+            JournalRetentionMetadata {
+                retained_floor: 3,
+                cleanup_pending: false,
+            }
+        );
+        let too_old = reopened
+            .replay_after(0, usize::MAX)
+            .expect_err("replay below retained floor must fail");
+        assert!(too_old.to_string().contains("below retained floor"));
+        assert_eq!(
             reopened
-                .replay_after(0, usize::MAX)
+                .replay_after(2, usize::MAX)
                 .expect("replay retained")
                 .len(),
             1
         );
         drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn zero_limit_still_rejects_a_cursor_below_retained_floor() {
+        let root = temp_root("zero-limit-floor");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        journal
+            .prune_closed_segments_before(3)
+            .expect("prune prefix");
+        let error = journal
+            .replay_after(0, 0)
+            .expect_err("zero limit must still validate cursor");
+        assert!(error.to_string().contains("below retained floor"));
+        assert!(journal.replay_after(2, 0).expect("floor cursor").is_empty());
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn missing_prefix_without_marker_fails_open() {
+        let root = temp_root("missing-prefix-marker");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        journal.append("one".to_string()).expect("append one");
+        journal.append("two".to_string()).expect("append two");
+        let first = journal
+            .segments()
+            .into_iter()
+            .find(|segment| segment.start_sequence == 1)
+            .expect("first segment");
+        drop(journal);
+        std::fs::remove_file(first.path).expect("remove prefix without marker");
+        let error = SegmentedFileEventJournal::<String>::open(&root, 1, FileDurability::Flush)
+            .expect_err("missing unmarked prefix must fail");
+        assert!(error.to_string().contains("without an authorized"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn corrupt_retained_floor_marker_fails_open() {
+        let root = temp_root("corrupt-floor-marker");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        journal
+            .prune_closed_segments_before(3)
+            .expect("prune prefix");
+        drop(journal);
+        let marker = root.join(RETENTION_MARKER);
+        mutate_json_line(&marker, |record| {
+            record.insert(
+                "digest".to_string(),
+                serde_json::Value::String("0".repeat(64)),
+            );
+        });
+        let error = SegmentedFileEventJournal::<String>::open(&root, 1, FileDurability::Flush)
+            .expect_err("corrupt marker must fail");
+        assert!(error.to_string().contains("marker digest mismatch"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn initial_marker_write_failure_does_not_commit_logical_prune() {
+        let root = temp_root("marker-first-fault");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        *journal
+            .marker_write_fault_after
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(0);
+        let error = journal
+            .prune_closed_segments_before(3)
+            .expect_err("marker failure precedes logical commit");
+        assert!(error.to_string().contains("marker write failure"));
+        assert_eq!(journal.retention_metadata().retained_floor, 1);
+        assert_eq!(journal.segments().len(), 3);
+        assert_eq!(
+            journal.replay_after(0, usize::MAX).expect("replay").len(),
+            3
+        );
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn partial_delete_is_degraded_synced_and_retryable_after_reopen() {
+        use std::sync::atomic::Ordering;
+
+        let root = temp_root("partial-prune-delete");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three", "four"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        *journal
+            .delete_fault_after
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(1);
+        let before = journal.directory_sync_attempts.load(Ordering::SeqCst);
+        let receipt = journal
+            .prune_closed_segments_before(4)
+            .expect("logical prune commits before delete failure");
+        assert_eq!(receipt.retained_floor, 4);
+        assert_eq!(receipt.logically_pruned.len(), 3);
+        assert_eq!(receipt.physically_removed.len(), 1);
+        assert!(matches!(
+            receipt.cleanup,
+            JournalPhysicalCleanupStatus::Degraded { .. }
+        ));
+        assert!(journal.directory_sync_attempts.load(Ordering::SeqCst) > before);
+        assert!(journal.retention_metadata().cleanup_pending);
+        assert_eq!(
+            journal
+                .segments()
+                .first()
+                .map(|segment| segment.start_sequence),
+            Some(4)
+        );
+        drop(journal);
+
+        let reopened = open_strings(&root, 1, FileDurability::Flush);
+        assert_eq!(
+            reopened.retention_metadata(),
+            JournalRetentionMetadata {
+                retained_floor: 4,
+                cleanup_pending: true,
+            }
+        );
+        assert_eq!(
+            reopened
+                .segments()
+                .first()
+                .map(|segment| segment.start_sequence),
+            Some(4)
+        );
+        assert_eq!(
+            reopened
+                .replay_after(3, usize::MAX)
+                .expect("floor replay")
+                .len(),
+            1
+        );
+        let retry = reopened
+            .prune_closed_segments_before(4)
+            .expect("retry pending cleanup");
+        assert_eq!(retry.cleanup, JournalPhysicalCleanupStatus::Confirmed);
+        assert_eq!(retry.physically_removed.len(), 2);
+        assert!(!reopened.retention_metadata().cleanup_pending);
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn directory_sync_failure_stays_pending_until_explicit_barrier() {
+        let root = temp_root("prune-dir-sync");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        *journal
+            .directory_sync_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let receipt = journal
+            .prune_closed_segments_before(3)
+            .expect("logical prune commits before sync failure");
+        assert!(matches!(
+            receipt.cleanup,
+            JournalPhysicalCleanupStatus::Degraded { .. }
+        ));
+        assert!(journal.retention_metadata().cleanup_pending);
+        drop(journal);
+
+        let reopened = open_strings(&root, 1, FileDurability::Flush);
+        assert!(reopened.retention_metadata().cleanup_pending);
+        reopened
+            .sync_data()
+            .expect("retry cleanup and directory barrier");
+        assert!(!reopened.retention_metadata().cleanup_pending);
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn final_marker_failure_returns_degraded_receipt_and_survives_reopen() {
+        let root = temp_root("marker-final-fault");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        *journal
+            .marker_write_fault_after
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(1);
+        let receipt = journal
+            .prune_closed_segments_before(3)
+            .expect("logical prune remains committed");
+        assert!(matches!(
+            receipt.cleanup,
+            JournalPhysicalCleanupStatus::Degraded { .. }
+        ));
+        assert_eq!(receipt.physically_removed.len(), 2);
+        assert!(journal.retention_metadata().cleanup_pending);
+        drop(journal);
+
+        let reopened = open_strings(&root, 1, FileDurability::Flush);
+        assert!(reopened.retention_metadata().cleanup_pending);
+        reopened.sync_data().expect("finish marker transition");
+        assert!(!reopened.retention_metadata().cleanup_pending);
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn visible_marker_barrier_failure_is_typed_and_deletes_nothing() {
+        let root = temp_root("visible-marker-barrier");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        *journal
+            .marker_full_write_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let receipt = journal
+            .prune_closed_segments_before(3)
+            .expect("visible marker failure returns receipt");
+        assert!(matches!(
+            receipt.commit,
+            JournalPruneCommitStatus::Degraded { .. }
+        ));
+        assert!(receipt.physically_removed.is_empty());
+        assert_eq!(
+            list_segment_paths(&root, "test list")
+                .expect("physical segments")
+                .len(),
+            3
+        );
+        assert!(journal.retention_metadata().cleanup_pending);
+
+        let reopened = open_strings(&root, 1, FileDurability::Flush);
+        assert!(Arc::ptr_eq(&journal.shared, &reopened.shared));
+        assert_eq!(
+            list_segment_paths(&root, "test reopen list")
+                .expect("physical segments after reopen")
+                .len(),
+            3
+        );
+        let retry = reopened
+            .prune_closed_segments_before(3)
+            .expect("retry marker barrier and cleanup");
+        assert_eq!(retry.commit, JournalPruneCommitStatus::Confirmed);
+        assert_eq!(retry.physically_removed.len(), 2);
+        assert_eq!(retry.cleanup, JournalPhysicalCleanupStatus::Confirmed);
+        assert!(!reopened.retention_metadata().cleanup_pending);
+        drop(journal);
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn pruned_recovery_rejects_missing_corrupt_behind_and_ahead_checkpoints() {
+        let root = temp_root("pruned-checkpoints");
+        let journal = Arc::new(open_strings(&root, 1, FileDurability::Flush));
+        for value in ["one", "two", "three"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        journal
+            .prune_closed_segments_before(3)
+            .expect("prune prefix");
+        let checkpoint_path = root.join("checkpoint.json");
+
+        for (label, contents) in [
+            ("corrupt", b"{partial".to_vec()),
+            (
+                "behind",
+                serde_json::to_vec(&serde_json::json!({
+                    "sequence": 1,
+                    "state": { "events": ["one"] },
+                }))
+                .expect("behind checkpoint"),
+            ),
+            (
+                "ahead",
+                serde_json::to_vec(&serde_json::json!({
+                    "sequence": 99,
+                    "state": { "events": [] },
+                }))
+                .expect("ahead checkpoint"),
+            ),
+        ] {
+            std::fs::write(&checkpoint_path, contents).expect("write checkpoint case");
+            let reducer = CheckpointedReducer::<_, RetainedReducer>::new(
+                Arc::clone(&journal),
+                Arc::new(FileCheckpointStore::open(&checkpoint_path)),
+                0,
+            );
+            let error = reducer.recover().expect_err(label);
+            assert!(error.to_string().contains("checkpoint"));
+        }
+        std::fs::remove_file(&checkpoint_path).expect("remove checkpoint");
+        let missing = CheckpointedReducer::<_, RetainedReducer>::new(
+            Arc::clone(&journal),
+            Arc::new(FileCheckpointStore::open(&checkpoint_path)),
+            0,
+        );
+        assert!(missing.recover().is_err());
+
+        write_checkpoint(&checkpoint_path, 2, &["one", "two"]);
+        let valid = CheckpointedReducer::<_, RetainedReducer>::new(
+            Arc::clone(&journal),
+            Arc::new(FileCheckpointStore::open(&checkpoint_path)),
+            0,
+        );
+        assert_eq!(
+            valid
+                .recover()
+                .expect("valid floor checkpoint")
+                .last_applied_sequence,
+            3
+        );
+        valid.with_state(|state| assert_eq!(state.events, vec!["one", "two", "three"]));
+        drop(valid);
+        drop(journal);
         std::fs::remove_dir_all(root).ok();
     }
 

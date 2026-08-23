@@ -93,7 +93,10 @@ pub mod file;
 pub mod segmented;
 
 pub use file::{FileCheckpointStore, FileEventJournal};
-pub use segmented::{JournalSegmentMetadata, SegmentedFileEventJournal};
+pub use segmented::{
+    JournalPhysicalCleanupStatus, JournalPruneCommitStatus, JournalPruneReceipt,
+    JournalRetentionMetadata, JournalSegmentMetadata, SegmentedFileEventJournal,
+};
 
 use echo_core::error::{ReactError, Result};
 use serde::de::DeserializeOwned;
@@ -178,6 +181,13 @@ pub trait EventJournal<E: JournalEvent>: Send + Sync {
     /// Consult the append receipt to distinguish confirmed durability from a
     /// full-write degraded commit.
     fn last_sequence(&self) -> u64;
+
+    /// Earliest sequence that remains logically replayable.
+    ///
+    /// Non-pruning journals retain their complete history and inherit `1`.
+    fn retained_floor(&self) -> u64 {
+        1
+    }
 
     /// Replay up to `limit` records with `sequence > after_sequence`, in order.
     fn replay_after(&self, after_sequence: u64, limit: usize) -> Result<Vec<JournalRecord<E>>>;
@@ -494,9 +504,23 @@ where
     pub fn recover(&self) -> Result<RecoveryReceipt> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let journal_last = self.journal.last_sequence();
+        let retained_floor = self.journal.retained_floor();
+        let required_checkpoint = retained_floor.saturating_sub(1);
         let loaded = self.checkpoints.load();
         let (mut state, mut last_applied, mut checkpoint_sequence, mut repair_reason) = match loaded
         {
+            Ok(Some(frame)) if frame.sequence < required_checkpoint => {
+                return Err(ReactError::Other(format!(
+                    "checkpoint sequence {} is behind retained journal floor {retained_floor}; expected at least {required_checkpoint}",
+                    frame.sequence
+                )));
+            }
+            Ok(Some(frame)) if retained_floor > 1 && frame.sequence > journal_last => {
+                return Err(ReactError::Other(format!(
+                    "checkpoint sequence {} is ahead of journal sequence {journal_last} after prefix pruning",
+                    frame.sequence
+                )));
+            }
             Ok(Some(frame)) if frame.sequence <= journal_last => {
                 (frame.state, frame.sequence, frame.sequence, None)
             }
@@ -509,7 +533,17 @@ where
                     frame.sequence
                 )),
             ),
+            Ok(None) if retained_floor > 1 => {
+                return Err(ReactError::Other(format!(
+                    "checkpoint is required through sequence {required_checkpoint} because journal retention starts at {retained_floor}"
+                )));
+            }
             Ok(None) => (R::default(), 0, 0, None),
+            Err(error) if retained_floor > 1 => {
+                return Err(ReactError::Other(format!(
+                    "checkpoint load failed for retained journal floor {retained_floor}: {error}"
+                )));
+            }
             Err(error) => (
                 R::default(),
                 0,
