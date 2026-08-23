@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 /// MCP 服务端完整配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerConfig {
     /// 服务端标识名称
     pub name: String,
@@ -10,7 +10,7 @@ pub struct McpServerConfig {
 }
 
 /// 传输层配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportConfig {
     /// stdio 传输：框架启动子进程，通过 stdin/stdout 通信
     /// 适用场景：本地工具（filesystem、git、sqlite 等）

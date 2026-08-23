@@ -63,12 +63,31 @@ use echo_core::tools::Tool;
 /// ```
 pub struct McpManager {
     clients: HashMap<String, Arc<McpClient>>,
+    configs: HashMap<String, McpServerConfig>,
+}
+
+/// Topology change performed by [`McpManager::reconcile_target`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTargetChange {
+    Unchanged,
+    Connected,
+    Replaced,
+    Disconnected,
+    Absent,
+}
+
+/// Typed receipt for reconciling one named MCP target.
+pub struct McpTargetReceipt {
+    pub name: String,
+    pub change: McpTargetChange,
+    pub tools: Vec<Box<dyn Tool>>,
 }
 
 impl McpManager {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
+            configs: HashMap::new(),
         }
     }
 
@@ -80,28 +99,77 @@ impl McpManager {
     /// 如果已存在同名连接，会先断开旧连接再建立新连接。
     pub async fn connect(&mut self, config: McpServerConfig) -> Result<Vec<Box<dyn Tool>>> {
         let name = config.name.clone();
-        // 防止同名覆盖：先断开已有连接
-        if self.clients.contains_key(&name) {
-            tracing::warn!("MCP: 服务端 '{}' 已存在，先断开旧连接", name);
-            self.disconnect(&name).await;
+        Ok(self.reconcile_target(&name, Some(config)).await?.tools)
+    }
+
+    /// Reconcile one named server against an optional desired configuration.
+    ///
+    /// An unchanged target keeps its live connection. A replacement is fully
+    /// connected and initialized before the old client is swapped out, so a
+    /// failed prepare preserves the last-known-good connection. `None` removes
+    /// the target idempotently.
+    pub async fn reconcile_target(
+        &mut self,
+        name: &str,
+        desired: Option<McpServerConfig>,
+    ) -> Result<McpTargetReceipt> {
+        let Some(config) = desired else {
+            let change = if self.disconnect(name).await {
+                McpTargetChange::Disconnected
+            } else {
+                McpTargetChange::Absent
+            };
+            return Ok(McpTargetReceipt {
+                name: name.to_string(),
+                change,
+                tools: Vec::new(),
+            });
+        };
+        if config.name != name {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "MCP reconcile target '{name}' does not match config name '{}'",
+                config.name
+            )));
+        }
+        if self.configs.get(name) == Some(&config)
+            && let Some(client) = self.clients.get(name)
+        {
+            return Ok(McpTargetReceipt {
+                name: name.to_string(),
+                change: McpTargetChange::Unchanged,
+                tools: Self::tools_for_client(name, client),
+            });
         }
 
-        let client = McpClient::new(config).await?;
+        let client = McpClient::new(config.clone()).await?;
+        let tools = Self::tools_for_client(name, &client);
+        let previous = self.clients.insert(name.to_string(), client);
+        self.configs.insert(name.to_string(), config);
+        let change = if let Some(previous) = previous {
+            previous.close().await;
+            McpTargetChange::Replaced
+        } else {
+            McpTargetChange::Connected
+        };
+        Ok(McpTargetReceipt {
+            name: name.to_string(),
+            change,
+            tools,
+        })
+    }
 
-        let tools = client
+    fn tools_for_client(name: &str, client: &Arc<McpClient>) -> Vec<Box<dyn Tool>> {
+        client
             .tools()
             .iter()
             .map(|tool| {
                 Box::new(McpToolAdapter::with_server_name(
-                    client.clone(),
+                    Arc::clone(client),
                     tool.clone(),
-                    name.clone(),
+                    name.to_string(),
                 )) as Box<dyn Tool>
             })
-            .collect::<Vec<_>>();
-
-        self.clients.insert(name, client);
-        Ok(tools)
+            .collect()
     }
 
     /// 从配置文件连接多个服务端
@@ -178,6 +246,7 @@ impl McpManager {
     ///
     /// 关闭连接并从管理器中移除。成功返回 true，服务端不存在返回 false。
     pub async fn disconnect(&mut self, name: &str) -> bool {
+        self.configs.remove(name);
         if let Some(client) = self.clients.remove(name) {
             tracing::info!("MCP: 断开服务端 '{}'", name);
             client.close().await;
@@ -254,5 +323,40 @@ mod tests {
 
         manager.clients.remove("context");
         assert!(manager.resource_tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_unchanged_target_and_disconnects_idempotently() {
+        let mut manager = McpManager::new();
+        let config = McpServerConfig::stdio("context", "test-command", Vec::<String>::new());
+        let client = McpClient::with_test_transport("context", Arc::new(InertTransport));
+        manager
+            .clients
+            .insert("context".to_string(), Arc::clone(&client));
+        manager
+            .configs
+            .insert("context".to_string(), config.clone());
+
+        let unchanged = manager
+            .reconcile_target("context", Some(config))
+            .await
+            .expect("unchanged reconcile");
+        assert_eq!(unchanged.change, McpTargetChange::Unchanged);
+        assert!(Arc::ptr_eq(
+            manager.get_client("context").expect("client retained"),
+            &client
+        ));
+
+        let disconnected = manager
+            .reconcile_target("context", None)
+            .await
+            .expect("disconnect reconcile");
+        assert_eq!(disconnected.change, McpTargetChange::Disconnected);
+        assert!(manager.get_client("context").is_none());
+        let absent = manager
+            .reconcile_target("context", None)
+            .await
+            .expect("idempotent disconnect");
+        assert_eq!(absent.change, McpTargetChange::Absent);
     }
 }
