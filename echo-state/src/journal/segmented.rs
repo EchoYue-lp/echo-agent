@@ -1497,6 +1497,10 @@ mod tests {
     #[test]
     fn integrity_digest_is_fixed_width_lowercase_hex() {
         let digest = record_digest(42, &"digest-event").expect("compute digest");
+        assert_eq!(
+            digest,
+            "210912c51b7695a5b542fd2a506eaf15b0cbc34627d40bb0349f40a26fa578b6"
+        );
         assert_eq!(digest.len(), 64);
         assert!(
             digest

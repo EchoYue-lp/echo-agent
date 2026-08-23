@@ -531,6 +531,34 @@ fn lower_hex_digit(nibble: u8) -> char {
     }
 }
 
+fn save_checkpoint_with<S: Serialize>(
+    path: &Path,
+    state: &S,
+    through_sequence: u64,
+    create_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    write: impl FnOnce(&Path, &[u8]) -> std::io::Result<()>,
+) -> Result<()> {
+    let state = serde_json::to_value(state).map_err(|error| {
+        ReactError::Other(format!("failed to encode checkpoint state: {error}"))
+    })?;
+    let digest = checkpoint_digest(CHECKPOINT_SCHEMA_VERSION, through_sequence, &state)?;
+    let frame = StoredCheckpointRef {
+        schema_version: CHECKPOINT_SCHEMA_VERSION,
+        sequence: through_sequence,
+        state: &state,
+        digest: &digest,
+    };
+    let bytes = serde_json::to_vec(&frame)
+        .map_err(|error| ReactError::Other(format!("failed to encode checkpoint: {error}")))?;
+    let context = format!("checkpoint save {}", path.display());
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    create_parent(parent).map_err(|error| io_error(&context, error))?;
+    write(path, &bytes).map_err(|error| io_error(&context, error))
+}
+
 /// Single-file [`CheckpointStore`] written with atomic replace.
 ///
 /// The snapshot is written to a temporary sibling and renamed, so readers
@@ -562,23 +590,13 @@ impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
     for FileCheckpointStore<S>
 {
     fn save(&self, state: &S, through_sequence: u64) -> Result<()> {
-        let state = serde_json::to_value(state).map_err(|error| {
-            ReactError::Other(format!("failed to encode checkpoint state: {error}"))
-        })?;
-        let digest = checkpoint_digest(CHECKPOINT_SCHEMA_VERSION, through_sequence, &state)?;
-        let frame = StoredCheckpointRef {
-            schema_version: CHECKPOINT_SCHEMA_VERSION,
-            sequence: through_sequence,
-            state: &state,
-            digest: &digest,
-        };
-        let bytes = serde_json::to_vec(&frame)
-            .map_err(|error| ReactError::Other(format!("failed to encode checkpoint: {error}")))?;
-        let context = format!("checkpoint save {}", self.path.display());
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| io_error(&context, error))?;
-        }
-        atomic_write(&self.path, &bytes).map_err(|error| io_error(&context, error))
+        save_checkpoint_with(
+            &self.path,
+            state,
+            through_sequence,
+            create_dir_all_durable,
+            atomic_write,
+        )
     }
 
     fn load(&self) -> Result<Option<CheckpointFrame<S>>> {
@@ -616,13 +634,61 @@ impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
 
 #[cfg(test)]
 mod tests {
-    use super::super::CheckpointedReducer;
+    use super::super::{CheckpointApplyStatus, CheckpointedReducer, MemoryEventJournal};
     use super::*;
     use serde::{Deserialize, Serialize};
 
     #[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
     struct LensReducer {
         applied: u64,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct WideIntegerState {
+        min: i128,
+        max: u128,
+    }
+
+    struct VisibleFailureCheckpointStore {
+        inner: FileCheckpointStore<LensReducer>,
+        fail_once: std::sync::atomic::AtomicBool,
+    }
+
+    impl VisibleFailureCheckpointStore {
+        fn new(path: impl Into<PathBuf>) -> Self {
+            Self {
+                inner: FileCheckpointStore::open(path),
+                fail_once: std::sync::atomic::AtomicBool::new(true),
+            }
+        }
+    }
+
+    impl CheckpointStore<LensReducer> for VisibleFailureCheckpointStore {
+        fn save(&self, state: &LensReducer, through_sequence: u64) -> Result<()> {
+            if self
+                .fail_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                save_checkpoint_with(
+                    self.inner.path(),
+                    state,
+                    through_sequence,
+                    create_dir_all_durable,
+                    |path, bytes| {
+                        atomic_write(path, bytes)?;
+                        Err(std::io::Error::other(
+                            "injected parent sync failure after visible checkpoint rename",
+                        ))
+                    },
+                )
+            } else {
+                self.inner.save(state, through_sequence)
+            }
+        }
+
+        fn load(&self) -> Result<Option<CheckpointFrame<LensReducer>>> {
+            self.inner.load()
+        }
     }
 
     impl super::super::EventReducer for LensReducer {
@@ -956,6 +1022,113 @@ mod tests {
                 .map(str::len),
             Some(64)
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn checkpoint_round_trips_wide_integers_with_fixed_canonical_digest() {
+        let root = temp_root();
+        let checkpoint_path = root.join("checkpoint.json");
+        let store = FileCheckpointStore::<WideIntegerState>::open(&checkpoint_path);
+        let expected = WideIntegerState {
+            min: i128::MIN,
+            max: u128::MAX,
+        };
+        store
+            .save(&expected, u64::MAX)
+            .expect("save wide integer checkpoint");
+
+        let loaded = store
+            .load()
+            .expect("load wide integer checkpoint")
+            .expect("wide integer checkpoint exists");
+        assert_eq!(loaded.sequence, u64::MAX);
+        assert_eq!(loaded.state, expected);
+
+        let state = serde_json::to_value(&expected).expect("encode wide integer state");
+        assert_eq!(
+            checkpoint_digest(CHECKPOINT_SCHEMA_VERSION, u64::MAX, &state)
+                .expect("compute checkpoint digest"),
+            "e4ef5435fac64f6da1c37dc31e4118b3927ccd0cd8ca1d2512e3225e436bf447"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn checkpoint_nested_parent_failure_is_retryable() {
+        let root = temp_root();
+        let checkpoint_path = root
+            .join("missing-a")
+            .join("missing-b")
+            .join("checkpoint.json");
+        let parent = checkpoint_path.parent().expect("checkpoint parent");
+        let state = LensReducer { applied: 4 };
+        let error = save_checkpoint_with(
+            &checkpoint_path,
+            &state,
+            4,
+            |directory| {
+                std::fs::create_dir_all(directory)?;
+                Err(std::io::Error::other(
+                    "injected checkpoint parent-directory barrier failure",
+                ))
+            },
+            atomic_write,
+        )
+        .expect_err("parent durability failure must surface");
+        assert!(
+            error
+                .to_string()
+                .contains("parent-directory barrier failure")
+        );
+        assert!(parent.is_dir());
+        assert!(!checkpoint_path.exists());
+
+        let store = FileCheckpointStore::<LensReducer>::open(&checkpoint_path);
+        store.save(&state, 4).expect("retry checkpoint save");
+        let loaded = store
+            .load()
+            .expect("load retried checkpoint")
+            .expect("retried checkpoint exists");
+        assert_eq!(loaded.sequence, 4);
+        assert_eq!(loaded.state, state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn visible_checkpoint_with_parent_sync_error_is_reported_as_degraded() {
+        let root = temp_root();
+        let checkpoints = std::sync::Arc::new(VisibleFailureCheckpointStore::new(
+            root.join("checkpoint.json"),
+        ));
+        let reducer = CheckpointedReducer::new(
+            std::sync::Arc::new(MemoryEventJournal::<String>::new()),
+            std::sync::Arc::clone(&checkpoints) as std::sync::Arc<dyn CheckpointStore<LensReducer>>,
+            1,
+        );
+
+        let first = reducer.apply("one".to_string()).expect("apply first event");
+        assert!(matches!(
+            first.checkpoint,
+            CheckpointApplyStatus::Degraded { .. }
+        ));
+        let visible = checkpoints
+            .load()
+            .expect("load visible checkpoint")
+            .expect("visible checkpoint exists");
+        assert_eq!(visible.sequence, 1);
+        assert_eq!(visible.state, LensReducer { applied: 1 });
+
+        let second = reducer
+            .apply("two".to_string())
+            .expect("apply second event");
+        assert_eq!(second.checkpoint, CheckpointApplyStatus::Saved);
+        let repaired = checkpoints
+            .load()
+            .expect("load confirmed checkpoint")
+            .expect("confirmed checkpoint exists");
+        assert_eq!(repaired.sequence, 2);
+        assert_eq!(repaired.state, LensReducer { applied: 2 });
         std::fs::remove_dir_all(root).ok();
     }
 
