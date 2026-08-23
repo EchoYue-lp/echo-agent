@@ -299,6 +299,75 @@ enum ExistingFileAccess {
     Write,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExistingFileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+}
+
+/// Open descriptor that keeps one existing regular-file identity alive.
+///
+/// File-backed authorities retain this guard for their complete lifetime. A
+/// later no-follow path open can then distinguish the original file from a
+/// delete-and-recreate replacement, even if the replacement has the same
+/// length and the filesystem would otherwise reuse its identity.
+#[derive(Debug)]
+pub struct ExistingRegularFileGuard {
+    file: std::fs::File,
+    identity: ExistingFileIdentity,
+}
+
+impl ExistingRegularFileGuard {
+    /// Current length of the guarded file descriptor.
+    pub fn len(&self) -> std::io::Result<u64> {
+        self.file.metadata().map(|metadata| metadata.len())
+    }
+
+    /// Whether the guarded file currently has no data.
+    pub fn is_empty(&self) -> std::io::Result<bool> {
+        self.len().map(|len| len == 0)
+    }
+}
+
+fn existing_file_identity(metadata: &std::fs::Metadata) -> std::io::Result<ExistingFileIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(ExistingFileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let volume_serial_number = metadata.volume_serial_number().ok_or_else(|| {
+            std::io::Error::other("existing regular file has no volume serial number")
+        })?;
+        let file_index = metadata
+            .file_index()
+            .ok_or_else(|| std::io::Error::other("existing regular file has no file index"))?;
+        Ok(ExistingFileIdentity {
+            volume_serial_number,
+            file_index,
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "existing regular-file identity is unavailable on this platform",
+        ))
+    }
+}
+
 fn open_existing_regular(
     path: &Path,
     access: ExistingFileAccess,
@@ -352,6 +421,160 @@ fn open_existing_regular(
         ));
     }
     Ok(file)
+}
+
+fn verify_open_file_matches(
+    path: &Path,
+    file: &std::fs::File,
+    guard: &ExistingRegularFileGuard,
+    expected_len: Option<u64>,
+) -> std::io::Result<u64> {
+    let metadata = file.metadata()?;
+    let identity = existing_file_identity(&metadata)?;
+    if identity != guard.identity {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "existing regular file identity changed; verified reopen required: {}",
+                path.display()
+            ),
+        ));
+    }
+    let len = metadata.len();
+    if let Some(expected_len) = expected_len
+        && len != expected_len
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "existing regular file length changed from {expected_len} to {len}; verified reopen required: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(len)
+}
+
+/// Open an existing no-follow regular file and retain its stable identity.
+pub fn open_existing_regular_guard(path: &Path) -> std::io::Result<ExistingRegularFileGuard> {
+    let file = open_existing_regular(path, ExistingFileAccess::Read)?;
+    let identity = existing_file_identity(&file.metadata()?)?;
+    Ok(ExistingRegularFileGuard { file, identity })
+}
+
+/// Return the current length only when `path` still names `guard`'s file.
+pub fn matching_existing_regular_len(
+    path: &Path,
+    guard: &ExistingRegularFileGuard,
+) -> std::io::Result<u64> {
+    let file = open_existing_regular(path, ExistingFileAccess::Read)?;
+    verify_open_file_matches(path, &file, guard, None)
+}
+
+/// Append through one no-follow descriptor after verifying identity and size.
+///
+/// The check and mutation use the same descriptor, so a path replacement
+/// cannot race between them.
+pub fn append_existing_matching(
+    path: &Path,
+    guard: &ExistingRegularFileGuard,
+    expected_len: u64,
+    bytes: &[u8],
+    durability: FileDurability,
+) -> std::io::Result<()> {
+    let mut file = open_existing_regular(path, ExistingFileAccess::Append)?;
+    verify_open_file_matches(path, &file, guard, Some(expected_len))?;
+    file.write_all(bytes)?;
+    finish_existing_mutation(&mut file, durability)
+}
+
+/// Read the complete no-follow file only when it still names `guard`'s file.
+pub fn read_existing_matching(
+    path: &Path,
+    guard: &ExistingRegularFileGuard,
+) -> std::io::Result<Vec<u8>> {
+    let mut file = open_existing_regular(path, ExistingFileAccess::Read)?;
+    verify_open_file_matches(path, &file, guard, None)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Read a suffix only when the path still names `guard`'s file.
+pub fn read_existing_from_matching(
+    path: &Path,
+    guard: &ExistingRegularFileGuard,
+    offset: u64,
+) -> std::io::Result<Vec<u8>> {
+    let mut file = open_existing_regular(path, ExistingFileAccess::Read)?;
+    let len = verify_open_file_matches(path, &file, guard, None)?;
+    if offset > len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "read offset {offset} exceeds file length {len}: {}",
+                path.display()
+            ),
+        ));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Read bounded complete records only when identity and total length match.
+pub fn read_existing_lines_from_matching(
+    path: &Path,
+    guard: &ExistingRegularFileGuard,
+    expected_len: u64,
+    offset: u64,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut file = open_existing_regular(path, ExistingFileAccess::Read)?;
+    verify_open_file_matches(path, &file, guard, Some(expected_len))?;
+    if offset > expected_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "read offset {offset} exceeds file length {expected_len}: {}",
+                path.display()
+            ),
+        ));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::new();
+    for _ in 0..limit {
+        let read = reader.read_until(b'\n', &mut bytes)?;
+        if read == 0 {
+            break;
+        }
+        if bytes.last() != Some(&b'\n') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("incomplete newline-terminated record in {}", path.display()),
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
+/// Truncate through one no-follow descriptor after identity and size checks.
+pub fn truncate_existing_matching(
+    path: &Path,
+    guard: &ExistingRegularFileGuard,
+    expected_len: u64,
+    len: u64,
+    durability: FileDurability,
+) -> std::io::Result<()> {
+    let mut file = open_existing_regular(path, ExistingFileAccess::Write)?;
+    verify_open_file_matches(path, &file, guard, Some(expected_len))?;
+    file.set_len(len)?;
+    finish_existing_mutation(&mut file, durability)
 }
 
 fn finish_existing_mutation(
@@ -612,6 +835,35 @@ mod tests {
         let bounded = read_existing_lines_from(&path, 0, 2)?;
         assert_eq!(bounded, b"record-00000\nrecord-00001\n");
         assert!(bounded.len() < contents.len());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn guarded_existing_operations_reject_same_length_replacement() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("echo-core-guarded-{}", uuid::Uuid::new_v4()));
+        let path = root.join("events.jsonl");
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(&path, b"one\n")?;
+        let guard = open_existing_regular_guard(&path)?;
+
+        assert_eq!(matching_existing_regular_len(&path, &guard)?, 4);
+        assert_eq!(
+            read_existing_lines_from_matching(&path, &guard, 4, 0, 1)?,
+            b"one\n"
+        );
+        append_existing_matching(&path, &guard, 4, b"x", FileDurability::Flush)?;
+        assert_eq!(read_existing_from_matching(&path, &guard, 4)?, b"x");
+        truncate_existing_matching(&path, &guard, 5, 4, FileDurability::Flush)?;
+
+        std::fs::remove_file(&path)?;
+        std::fs::write(&path, b"two\n")?;
+        assert!(matching_existing_regular_len(&path, &guard).is_err());
+        assert!(read_existing_lines_from_matching(&path, &guard, 4, 0, 1).is_err());
+        assert!(append_existing_matching(&path, &guard, 4, b"x", FileDurability::Flush).is_err());
+        assert!(truncate_existing_matching(&path, &guard, 4, 0, FileDurability::Flush).is_err());
+
+        drop(guard);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

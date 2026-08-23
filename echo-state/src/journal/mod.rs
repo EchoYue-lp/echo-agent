@@ -100,6 +100,7 @@ pub use segmented::{
 };
 
 use echo_core::error::{ReactError, Result};
+use echo_core::utils::fs::{ExclusiveFileLease, try_exclusive_file_lease};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -113,6 +114,8 @@ use std::sync::{Arc, Mutex, Weak};
 // policy: live authorities are never removed.
 pub(super) const WEAK_REGISTRY_PRUNE_THRESHOLD: usize = 128;
 pub(super) const WEAK_REGISTRY_PRUNE_INTERVAL: usize = 32;
+pub(super) const WEAK_REGISTRY_HARD_LIMIT: usize = 256;
+const CLOSING_LEASE_RETRY_LIMIT: usize = 64;
 
 pub(super) struct WeakRegistry<T> {
     entries: HashMap<PathBuf, Weak<T>>,
@@ -129,9 +132,11 @@ impl<T> WeakRegistry<T> {
 
     pub(super) fn prune_dead_if_due(&mut self) {
         self.opens_since_prune = self.opens_since_prune.saturating_add(1);
-        if self.entries.len() < WEAK_REGISTRY_PRUNE_THRESHOLD
-            || self.opens_since_prune < WEAK_REGISTRY_PRUNE_INTERVAL
-        {
+        let len = self.entries.len();
+        let hard_limit_due = len >= WEAK_REGISTRY_HARD_LIMIT;
+        let cadence_due = (WEAK_REGISTRY_PRUNE_THRESHOLD..WEAK_REGISTRY_HARD_LIMIT).contains(&len)
+            && self.opens_since_prune >= WEAK_REGISTRY_PRUNE_INTERVAL;
+        if !hard_limit_due && !cadence_due {
             return;
         }
         self.entries
@@ -147,17 +152,18 @@ impl<T> WeakRegistry<T> {
         self.entries.insert(path, Arc::downgrade(authority));
     }
 
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn dead_len(&self) -> usize {
-        self.entries
-            .values()
-            .filter(|authority| authority.strong_count() == 0)
-            .count()
+    pub(super) fn remove_if_last(&mut self, path: &Path, authority: &Arc<T>) {
+        if Arc::strong_count(authority) != 1 {
+            return;
+        }
+        let authority = Arc::downgrade(authority);
+        let matches = self
+            .entries
+            .get(path)
+            .is_some_and(|registered| registered.ptr_eq(&authority));
+        if matches {
+            self.entries.remove(path);
+        }
     }
 
     #[cfg(test)]
@@ -167,6 +173,29 @@ impl<T> WeakRegistry<T> {
             .filter(|path| path.starts_with(root))
             .count()
     }
+}
+
+/// Acquire a new authority lease across the brief interval after its registry
+/// entry was removed but before the closing handle's final `Arc` released the
+/// lease. Persistent contention from another process still fails boundedly.
+pub(super) fn acquire_file_lease_with_closing_retry(
+    authority_path: &Path,
+) -> std::io::Result<ExclusiveFileLease> {
+    for attempt in 0..=CLOSING_LEASE_RETRY_LIMIT {
+        match try_exclusive_file_lease(authority_path) {
+            Ok(lease) => return Ok(lease),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && attempt < CLOSING_LEASE_RETRY_LIMIT =>
+            {
+                std::thread::yield_now();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other(
+        "file authority lease retry limit exhausted",
+    ))
 }
 
 /// Event payload accepted by an [`EventJournal`].
@@ -679,6 +708,44 @@ mod tests {
     use super::*;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn weak_registry_prunes_on_soft_cadence_and_immediate_hard_limit() {
+        let root = PathBuf::from("registry-test");
+        let mut registry = WeakRegistry::<()>::new();
+        for index in 0..WEAK_REGISTRY_PRUNE_THRESHOLD {
+            let authority = Arc::new(());
+            registry.insert(root.join(format!("soft-{index}")), &authority);
+        }
+        for _ in 1..WEAK_REGISTRY_PRUNE_INTERVAL {
+            registry.prune_dead_if_due();
+        }
+        assert_eq!(registry.paths_beneath(&root), WEAK_REGISTRY_PRUNE_THRESHOLD);
+        registry.prune_dead_if_due();
+        assert_eq!(registry.paths_beneath(&root), 0);
+
+        for index in 0..WEAK_REGISTRY_HARD_LIMIT {
+            let authority = Arc::new(());
+            registry.insert(root.join(format!("hard-{index}")), &authority);
+        }
+        registry.prune_dead_if_due();
+        assert_eq!(registry.paths_beneath(&root), 0);
+
+        let mut live = Vec::new();
+        for index in 0..WEAK_REGISTRY_HARD_LIMIT.saturating_add(8) {
+            let authority = Arc::new(());
+            registry.insert(root.join(format!("live-{index}")), &authority);
+            live.push(authority);
+        }
+        registry.prune_dead_if_due();
+        assert_eq!(
+            registry.paths_beneath(&root),
+            WEAK_REGISTRY_HARD_LIMIT.saturating_add(8)
+        );
+        drop(live);
+        registry.prune_dead_if_due();
+        assert_eq!(registry.paths_beneath(&root), 0);
+    }
 
     #[derive(Default, Serialize, Deserialize, Debug)]
     struct SumReducer {

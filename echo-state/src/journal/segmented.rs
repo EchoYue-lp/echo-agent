@@ -13,14 +13,13 @@
 
 use super::{
     EventJournal, JournalAppendReceipt, JournalDurabilityStatus, JournalEvent, JournalRecord,
-    WeakRegistry,
+    WeakRegistry, acquire_file_lease_with_closing_retry,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
 use echo_core::utils::fs::{
     ExclusiveFileLease, FileDurability, append_existing, atomic_write, create_dir_all_durable,
     read_existing, read_existing_from, read_existing_lines_from, truncate_existing,
-    try_exclusive_file_lease,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -625,6 +624,17 @@ pub struct SegmentedFileEventJournal<E> {
     _event: PhantomData<fn() -> E>,
 }
 
+impl<E> Drop for SegmentedFileEventJournal<E> {
+    fn drop(&mut self) {
+        let mut registry = segmented_registry()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        registry.remove_if_last(&self.directory, &self.shared);
+        drop(registry);
+        // `shared` releases its lease only after the registry lock is gone.
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 enum AppendFault {
@@ -702,7 +712,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 _event: PhantomData,
             });
         }
-        let lease = try_exclusive_file_lease(&directory.join(LEASE_AUTHORITY))
+        let lease = acquire_file_lease_with_closing_retry(&directory.join(LEASE_AUTHORITY))
             .map_err(|error| io_error(&context, error))?;
         let state = scan_directory::<E>(&directory, durability, &context)?;
         let shared = Arc::new(SharedSegmentedJournalState {
@@ -2443,42 +2453,50 @@ mod tests {
     }
 
     #[test]
-    fn weak_registry_prunes_dead_paths_without_removing_live_authority() {
+    fn registry_mass_live_drop_is_exact_across_multiple_waves() {
         let root = temp_root("weak-registry");
         let canonical_root = std::fs::canonicalize(&root).expect("canonical test root");
         let live_directory = canonical_root.join("live");
         let live = open_strings(&live_directory, 4096, FileDurability::Flush);
         let live_directory = live.directory().to_path_buf();
-        let created = super::super::WEAK_REGISTRY_PRUNE_THRESHOLD
-            .saturating_add(super::super::WEAK_REGISTRY_PRUNE_INTERVAL)
-            .saturating_add(8);
-        for index in 0..created {
-            let directory = canonical_root.join(format!("dead-{index}"));
-            let journal = open_strings(&directory, 4096, FileDurability::Flush);
-            drop(journal);
-        }
-
-        {
+        let per_wave = super::super::WEAK_REGISTRY_HARD_LIMIT.saturating_add(8);
+        for wave in 0..2 {
+            let mut journals = Vec::with_capacity(per_wave);
+            for index in 0..per_wave {
+                let directory = canonical_root.join(format!("wave-{wave}-{index}"));
+                journals.push(open_strings(&directory, 4096, FileDurability::Flush));
+            }
             let registry = segmented_registry()
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            assert!(registry.paths_beneath(&canonical_root) < created.saturating_add(1));
-            assert!(
-                registry.dead_len()
-                    <= super::super::WEAK_REGISTRY_PRUNE_THRESHOLD
-                        .saturating_add(super::super::WEAK_REGISTRY_PRUNE_INTERVAL)
-            );
+            assert_eq!(registry.paths_beneath(&canonical_root), per_wave + 1);
             let retained = registry
                 .upgrade(&live_directory)
                 .expect("live registry entry");
             assert!(Arc::ptr_eq(&retained, &live.shared));
-            assert!(registry.len() >= 1);
+            drop(retained);
+            drop(registry);
+            drop(journals);
+            assert_eq!(
+                segmented_registry()
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .paths_beneath(&canonical_root),
+                1
+            );
         }
 
         let alias = open_strings(&live_directory, 4096, FileDurability::Flush);
         assert!(Arc::ptr_eq(&live.shared, &alias.shared));
         drop(live);
         drop(alias);
+        assert_eq!(
+            segmented_registry()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .paths_beneath(&canonical_root),
+            0
+        );
 
         let reopened = open_strings(&live_directory, 4096, FileDurability::Flush);
         assert_eq!(
@@ -2490,6 +2508,47 @@ mod tests {
             1
         );
         drop(reopened);
+        assert_eq!(
+            segmented_registry()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .paths_beneath(&canonical_root),
+            0
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concurrent_last_drop_and_immediate_reopen_remains_available() {
+        let root = temp_root("concurrent-close-reopen");
+        let canonical_root = std::fs::canonicalize(&root).expect("canonical test root");
+        for _ in 0..64 {
+            let journal = open_strings(&canonical_root, 4096, FileDurability::Flush);
+            let barrier = Arc::new(Barrier::new(2));
+            let drop_barrier = Arc::clone(&barrier);
+            let dropping = std::thread::spawn(move || {
+                drop_barrier.wait();
+                drop(journal);
+            });
+            barrier.wait();
+            let reopened = open_strings(&canonical_root, 4096, FileDurability::Flush);
+            dropping.join().expect("join dropping handle");
+            assert_eq!(
+                segmented_registry()
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .paths_beneath(&canonical_root),
+                1
+            );
+            drop(reopened);
+            assert_eq!(
+                segmented_registry()
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .paths_beneath(&canonical_root),
+                0
+            );
+        }
         std::fs::remove_dir_all(root).ok();
     }
 

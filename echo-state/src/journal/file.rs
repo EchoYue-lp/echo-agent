@@ -8,14 +8,15 @@
 
 use super::{
     CheckpointFrame, CheckpointStore, EventJournal, JournalAppendReceipt, JournalDurabilityStatus,
-    JournalEvent, JournalRecord, WeakRegistry,
+    JournalEvent, JournalRecord, WeakRegistry, acquire_file_lease_with_closing_retry,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
 use echo_core::utils::fs::{
-    ExclusiveFileLease, FileDurability, append_existing, atomic_write, create_dir_all_durable,
-    read_existing, read_existing_from, read_existing_lines_from, truncate_existing,
-    try_exclusive_file_lease,
+    ExclusiveFileLease, ExistingRegularFileGuard, FileDurability, append_existing,
+    append_existing_matching, atomic_write, create_dir_all_durable, matching_existing_regular_len,
+    open_existing_regular_guard, read_existing, read_existing_from_matching,
+    read_existing_lines_from_matching, read_existing_matching, truncate_existing_matching,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -124,6 +125,7 @@ struct SharedFileJournalState {
     event_type: TypeId,
     durability: FileDurability,
     state: Mutex<FileJournalState>,
+    file_guard: ExistingRegularFileGuard,
     _lease: ExclusiveFileLease,
 }
 
@@ -134,26 +136,47 @@ fn file_journal_registry() -> &'static Mutex<WeakRegistry<SharedFileJournalState
 
 fn scan_and_repair_journal<E: JournalEvent>(
     path: &Path,
+    file_guard: &ExistingRegularFileGuard,
     context: &str,
     durability: FileDurability,
 ) -> Result<ScannedJournal> {
-    match read_existing(path) {
-        Ok(bytes) => {
-            let scanned = scan_journal::<E>(context, &bytes)?;
-            let file_len = u64::try_from(bytes.len()).map_err(|_| {
-                ReactError::Other(format!("{context}: journal exceeds supported size"))
-            })?;
-            if scanned.valid_len < file_len {
-                truncate_existing(path, scanned.valid_len, durability)
-                    .map_err(|error| io_error(context, error))?;
+    let bytes =
+        read_existing_matching(path, file_guard).map_err(|error| io_error(context, error))?;
+    let scanned = scan_journal::<E>(context, &bytes)?;
+    let file_len = u64::try_from(bytes.len())
+        .map_err(|_| ReactError::Other(format!("{context}: journal exceeds supported size")))?;
+    if scanned.valid_len < file_len {
+        truncate_existing_matching(path, file_guard, file_len, scanned.valid_len, durability)
+            .map_err(|error| io_error(context, error))?;
+    }
+    let final_len = matching_existing_regular_len(path, file_guard)
+        .map_err(|error| io_error(context, error))?;
+    if final_len != scanned.valid_len {
+        return Err(ReactError::Other(format!(
+            "{context}: journal length changed during verified scan; reopen required"
+        )));
+    }
+    Ok(scanned)
+}
+
+fn ensure_journal_file(path: &Path, parent: &Path, context: &str) -> Result<()> {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => finish_new_journal_creation(&file, parent, sync_directory)
+            .map_err(|error| io_error(context, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|metadata_error| io_error(context, metadata_error))?;
+            if metadata.file_type().is_file() && metadata.len() == 0 {
+                append_existing(path, b"", FileDurability::SyncData)
+                    .map_err(|barrier_error| io_error(context, barrier_error))?;
+                sync_directory(parent).map_err(|barrier_error| io_error(context, barrier_error))?;
             }
-            Ok(scanned)
+            Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ScannedJournal {
-            valid_len: 0,
-            next_sequence: 1,
-            record_offsets: Vec::new(),
-        }),
         Err(error) => Err(io_error(context, error)),
     }
 }
@@ -176,6 +199,18 @@ pub struct FileEventJournal<E> {
     #[cfg(test)]
     sync_fault: Mutex<bool>,
     _event: PhantomData<fn() -> E>,
+}
+
+impl<E> Drop for FileEventJournal<E> {
+    fn drop(&mut self) {
+        let mut registry = file_journal_registry()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        registry.remove_if_last(&self.path, &self.shared);
+        drop(registry);
+        // The registry lock is released before `shared` drops and releases the
+        // file identity guard and process lease.
+    }
 }
 
 #[cfg(test)]
@@ -206,27 +241,6 @@ impl<E: JournalEvent> FileEventJournal<E> {
         })?;
         let path = canonical_parent.join(file_name);
         let context = format!("journal open {}", path.display());
-        // Appends go through `append_existing`, which requires the target to
-        // already be a regular file, so a fresh journal creates an empty one.
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => finish_new_journal_creation(&file, &canonical_parent, sync_directory)
-                .map_err(|error| io_error(&context, error))?,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = std::fs::symlink_metadata(&path)
-                    .map_err(|metadata_error| io_error(&context, metadata_error))?;
-                if metadata.file_type().is_file() && metadata.len() == 0 {
-                    append_existing(&path, b"", FileDurability::SyncData)
-                        .map_err(|barrier_error| io_error(&context, barrier_error))?;
-                    sync_directory(&canonical_parent)
-                        .map_err(|barrier_error| io_error(&context, barrier_error))?;
-                }
-            }
-            Err(error) => return Err(io_error(&context, error)),
-        }
         let mut registry = file_journal_registry().lock().map_err(|error| {
             ReactError::Other(format!("journal registry lock poisoned: {error}"))
         })?;
@@ -249,10 +263,24 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let scanned = scan_and_repair_journal::<E>(&path, &context, durability)?;
-            state.next_sequence = scanned.next_sequence;
-            state.valid_len = scanned.valid_len;
-            state.record_offsets = scanned.record_offsets;
+            let observed_len = matching_existing_regular_len(&path, &shared.file_guard)
+                .map_err(|error| io_error(&context, error))?;
+            if observed_len < state.valid_len {
+                return Err(ReactError::Other(format!(
+                    "{context}: live journal shrank from {} to {observed_len}; close the existing authority before verified repair",
+                    state.valid_len
+                )));
+            }
+            let scanned =
+                scan_and_repair_journal::<E>(&path, &shared.file_guard, &context, durability)?;
+            if scanned.next_sequence != state.next_sequence
+                || scanned.valid_len != state.valid_len
+                || scanned.record_offsets != state.record_offsets
+            {
+                return Err(ReactError::Other(format!(
+                    "{context}: disk prefix diverged from the live authority; close it before verified reopen"
+                )));
+            }
             state.poison = None;
             drop(state);
             return Ok(Self {
@@ -266,8 +294,14 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 _event: PhantomData,
             });
         }
-        let lease = try_exclusive_file_lease(&path).map_err(|error| io_error(&context, error))?;
-        let scanned = scan_and_repair_journal::<E>(&path, &context, durability)?;
+        let lease = acquire_file_lease_with_closing_retry(&path)
+            .map_err(|error| io_error(&context, error))?;
+        // Only a lease-owning new authority may create the data file. A live
+        // in-process authority was resolved above without touching the path.
+        ensure_journal_file(&path, &canonical_parent, &context)?;
+        let file_guard =
+            open_existing_regular_guard(&path).map_err(|error| io_error(&context, error))?;
+        let scanned = scan_and_repair_journal::<E>(&path, &file_guard, &context, durability)?;
         let shared = Arc::new(SharedFileJournalState {
             event_type: TypeId::of::<E>(),
             durability,
@@ -277,6 +311,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 record_offsets: scanned.record_offsets,
                 poison: None,
             }),
+            file_guard,
             _lease: lease,
         });
         registry.insert(path.clone(), &shared);
@@ -318,11 +353,24 @@ impl<E: JournalEvent> FileEventJournal<E> {
             )));
         }
         let context = format!("journal sync_data {}", self.path.display());
-        self.sync_journal_data()
+        self.verify_current_file(&state, &context)?;
+        self.sync_journal_data(state.valid_len)
             .map_err(|error| io_error(&context, error))
     }
 
-    fn sync_journal_data(&self) -> std::io::Result<()> {
+    fn verify_current_file(&self, state: &FileJournalState, context: &str) -> Result<()> {
+        let observed_len = matching_existing_regular_len(&self.path, &self.shared.file_guard)
+            .map_err(|error| io_error(context, error))?;
+        if observed_len != state.valid_len {
+            return Err(ReactError::Other(format!(
+                "{context}: journal length changed from {} to {observed_len}; verified reopen required",
+                state.valid_len
+            )));
+        }
+        Ok(())
+    }
+
+    fn sync_journal_data(&self, expected_len: u64) -> std::io::Result<()> {
         #[cfg(test)]
         {
             let mut fail = self
@@ -333,10 +381,16 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 return Err(std::io::Error::other("injected journal sync_data failure"));
             }
         }
-        append_existing(&self.path, b"", FileDurability::SyncData)
+        append_existing_matching(
+            &self.path,
+            &self.shared.file_guard,
+            expected_len,
+            b"",
+            FileDurability::SyncData,
+        )
     }
 
-    fn append_line(&self, line: &[u8]) -> std::io::Result<()> {
+    fn append_line(&self, expected_len: u64, line: &[u8]) -> std::io::Result<()> {
         #[cfg(test)]
         if let Some(fault) = self
             .append_fault
@@ -344,21 +398,30 @@ impl<E: JournalEvent> FileEventJournal<E> {
             .unwrap_or_else(|error| error.into_inner())
             .take()
         {
-            use std::io::Write;
-
-            let mut file = std::fs::OpenOptions::new().append(true).open(&self.path)?;
-            match fault {
-                AppendFault::FullWrite => file.write_all(line)?,
+            let bytes = match fault {
+                AppendFault::FullWrite => line,
                 AppendFault::PartialWrite { bytes } => {
-                    file.write_all(line.get(..bytes.min(line.len())).unwrap_or(line))?;
+                    line.get(..bytes.min(line.len())).unwrap_or(line)
                 }
-                AppendFault::UnrecognizedSuffix => file.write_all(b"x")?,
-            }
-            file.flush()?;
+                AppendFault::UnrecognizedSuffix => b"x",
+            };
+            append_existing_matching(
+                &self.path,
+                &self.shared.file_guard,
+                expected_len,
+                bytes,
+                FileDurability::Flush,
+            )?;
             return Err(std::io::Error::other("injected append durability failure"));
         }
 
-        append_existing(&self.path, line, self.durability)
+        append_existing_matching(
+            &self.path,
+            &self.shared.file_guard,
+            expected_len,
+            line,
+            self.durability,
+        )
     }
 
     /// Reconcile the suffix after an append error. `Some` means the complete
@@ -371,8 +434,9 @@ impl<E: JournalEvent> FileEventJournal<E> {
         context: &str,
         append_error: &std::io::Error,
     ) -> Result<Option<JournalDurabilityStatus>> {
-        let suffix = read_existing_from(&self.path, state.valid_len)
-            .map_err(|error| io_error(context, error))?;
+        let suffix =
+            read_existing_from_matching(&self.path, &self.shared.file_guard, state.valid_len)
+                .map_err(|error| io_error(context, error))?;
         if suffix == line {
             return Ok(Some(JournalDurabilityStatus::Degraded {
                 error: append_error.to_string(),
@@ -380,8 +444,20 @@ impl<E: JournalEvent> FileEventJournal<E> {
         }
         if line.starts_with(&suffix) {
             if !suffix.is_empty() {
-                truncate_existing(&self.path, state.valid_len, self.durability)
-                    .map_err(|error| io_error(context, error))?;
+                let suffix_len = u64::try_from(suffix.len()).map_err(|_| {
+                    ReactError::Other(format!("{context}: journal suffix exceeds supported size"))
+                })?;
+                let current_len = state.valid_len.checked_add(suffix_len).ok_or_else(|| {
+                    ReactError::Other(format!("{context}: journal byte length exhausted"))
+                })?;
+                truncate_existing_matching(
+                    &self.path,
+                    &self.shared.file_guard,
+                    current_len,
+                    state.valid_len,
+                    self.durability,
+                )
+                .map_err(|error| io_error(context, error))?;
             }
             return Ok(None);
         }
@@ -407,6 +483,8 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
                 self.path.display()
             )));
         }
+        let context = format!("journal append {}", self.path.display());
+        self.verify_current_file(&state, &context)?;
         let next_sequence = state.next_sequence.checked_add(1).ok_or_else(|| {
             ReactError::Other("journal sequence exhausted before append".to_string())
         })?;
@@ -423,13 +501,20 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
         let valid_len = state.valid_len.checked_add(line_len).ok_or_else(|| {
             ReactError::Other("journal byte length exhausted before append".to_string())
         })?;
-        let context = format!("journal append {}", self.path.display());
-        let durability = match self.append_line(&line) {
+        let durability = match self.append_line(state.valid_len, &line) {
             Ok(()) => JournalDurabilityStatus::Confirmed,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(io_error(&context, error));
+            }
             Err(error) => match self.reconcile_failed_append(&mut state, &line, &context, &error) {
                 Ok(Some(status)) => status,
                 Ok(None) => return Err(io_error(&context, error)),
                 Err(repair_error) => {
+                    if matching_existing_regular_len(&self.path, &self.shared.file_guard).is_err() {
+                        return Err(ReactError::Other(format!(
+                            "{context}: append failed ({error}); authority verification failed during reconciliation ({repair_error}); verified reopen required"
+                        )));
+                    }
                     let reason =
                         format!("append failed ({error}); reconciliation failed ({repair_error})");
                     state.poison = Some(reason.clone());
@@ -487,8 +572,14 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
                     "{context}: missing byte offset after sequence {after_sequence}"
                 ))
             })?;
-        let bytes = read_existing_lines_from(&self.path, start_offset, limit)
-            .map_err(|error| io_error(&context, error))?;
+        let bytes = read_existing_lines_from_matching(
+            &self.path,
+            &self.shared.file_guard,
+            state.valid_len,
+            start_offset,
+            limit,
+        )
+        .map_err(|error| io_error(&context, error))?;
         let mut expected = after_sequence
             .checked_add(1)
             .ok_or_else(|| ReactError::Other(format!("{context}: journal sequence exhausted")))?;
@@ -992,23 +1083,146 @@ mod tests {
     }
 
     #[test]
-    fn sync_data_rejects_missing_journal_and_can_retry_after_repair() {
+    fn replacement_requires_last_handle_close_and_verified_reopen() {
         let root = temp_root();
         let path = root.join("events.jsonl");
         let journal =
             FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
+        journal.append("one".to_string()).expect("append original");
+        let original = read_existing(&path).expect("read original record");
+        let mut replacement = serde_json::to_vec(&JournalRecord {
+            sequence: 1,
+            event: Arc::new("two".to_string()),
+        })
+        .expect("encode replacement record");
+        replacement.push(b'\n');
+        assert_eq!(replacement.len(), original.len());
         std::fs::remove_file(&path).expect("remove journal fixture");
+        let missing_open = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .expect_err("live missing file must not be recreated");
+        assert!(missing_open.to_string().contains("journal open"));
+        assert!(!path.exists());
+        assert_eq!(journal.next_sequence(), 2);
+        std::fs::write(&path, &replacement).expect("write same-length replacement");
 
-        let error = journal
+        let replay_error = journal
+            .replay_after(0, usize::MAX)
+            .expect_err("replacement must reject replay");
+        assert!(replay_error.to_string().contains("identity changed"));
+        let append_error = journal
+            .append("must-not-commit".to_string())
+            .expect_err("replacement must reject append");
+        assert!(append_error.to_string().contains("identity changed"));
+        let sync_error = journal
             .sync_data()
-            .expect_err("missing journal must reject barrier");
-        assert!(error.to_string().contains("journal sync_data"));
-        assert_eq!(journal.next_sequence(), 1);
-        std::fs::File::create(&path).expect("restore empty journal fixture");
-        journal.sync_data().expect("retry repaired journal barrier");
-        assert_eq!(journal.next_sequence(), 1);
+            .expect_err("replacement must reject barrier");
+        assert!(sync_error.to_string().contains("identity changed"));
+        let second_open = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .expect_err("live replacement must not reset shared state");
+        assert!(second_open.to_string().contains("identity changed"));
+        assert_eq!(journal.next_sequence(), 2);
+        assert!(
+            journal
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .poison
+                .is_none()
+        );
 
         drop(journal);
+        let reopened = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .expect("verified new authority opens replacement");
+        let records = reopened
+            .replay_after(0, usize::MAX)
+            .expect("replay replacement");
+        assert_eq!(
+            records.first().map(|record| record.event.as_str()),
+            Some("two")
+        );
+        assert_eq!(
+            reopened
+                .append("after-reopen".to_string())
+                .expect("append after verified reopen")
+                .record
+                .sequence,
+            2
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn live_reopen_repairs_only_a_torn_extra_suffix() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal =
+            FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
+        journal.append("one".to_string()).expect("append original");
+        let committed_len = read_existing(&path).expect("read original").len();
+        append_existing(&path, b"{\"sequence\":2", FileDurability::Flush)
+            .expect("append torn external suffix");
+
+        assert!(journal.append("blocked".to_string()).is_err());
+        assert!(journal.sync_data().is_err());
+        assert_eq!(journal.next_sequence(), 2);
+        let repaired = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .expect("verified live reopen repairs torn suffix");
+        assert!(Arc::ptr_eq(&journal.shared, &repaired.shared));
+        assert_eq!(
+            read_existing(&path).expect("read repaired journal").len(),
+            committed_len
+        );
+        assert_eq!(
+            repaired
+                .append("two".to_string())
+                .expect("append after repair")
+                .record
+                .sequence,
+            2
+        );
+
+        drop(journal);
+        drop(repaired);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn truncated_live_journal_requires_authority_close_before_repair() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal =
+            FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
+        journal.append("one".to_string()).expect("append original");
+        let len = std::fs::metadata(&path).expect("journal metadata").len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open journal fixture")
+            .set_len(len.saturating_sub(1))
+            .expect("truncate journal fixture");
+
+        assert!(journal.append("blocked".to_string()).is_err());
+        assert!(journal.sync_data().is_err());
+        let second_open = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .expect_err("live truncated authority must not reset");
+        assert!(second_open.to_string().contains("live journal shrank"));
+        assert_eq!(journal.next_sequence(), 2);
+
+        drop(journal);
+        let repaired = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .expect("new authority repairs torn record");
+        assert_eq!(repaired.next_sequence(), 1);
+        assert_eq!(
+            repaired
+                .append("replacement".to_string())
+                .expect("append after verified repair")
+                .record
+                .sequence,
+            1
+        );
+        drop(repaired);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1055,6 +1269,7 @@ mod tests {
             corrupted.extend_from_slice(line);
             corrupted.push(b'\n');
         }
+        drop(journal);
         std::fs::write(&path, corrupted).expect("write corrupted");
 
         let error = FileEventJournal::<String>::open(&path, FileDurability::Flush)
@@ -1428,35 +1643,38 @@ mod tests {
     }
 
     #[test]
-    fn weak_registry_prunes_dead_paths_without_removing_live_authority() {
+    fn registry_mass_live_drop_is_exact_across_multiple_waves() {
         let root = temp_root();
         let canonical_root = std::fs::canonicalize(&root).expect("canonical test root");
         let live_path = canonical_root.join("live.jsonl");
         let live = FileEventJournal::<String>::open(&live_path, FileDurability::Flush)
             .expect("open live journal");
-        let created = super::super::WEAK_REGISTRY_PRUNE_THRESHOLD
-            .saturating_add(super::super::WEAK_REGISTRY_PRUNE_INTERVAL)
-            .saturating_add(8);
-        for index in 0..created {
-            let path = canonical_root.join(format!("dead-{index}.jsonl"));
-            let journal = FileEventJournal::<String>::open(path, FileDurability::Flush)
-                .expect("open transient journal");
-            drop(journal);
-        }
-
-        {
+        let per_wave = super::super::WEAK_REGISTRY_HARD_LIMIT.saturating_add(8);
+        for wave in 0..2 {
+            let mut journals = Vec::with_capacity(per_wave);
+            for index in 0..per_wave {
+                let path = canonical_root.join(format!("wave-{wave}-{index}.jsonl"));
+                journals.push(
+                    FileEventJournal::<String>::open(path, FileDurability::Flush)
+                        .expect("open live wave journal"),
+                );
+            }
             let registry = file_journal_registry()
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            assert!(registry.paths_beneath(&canonical_root) < created.saturating_add(1));
-            assert!(
-                registry.dead_len()
-                    <= super::super::WEAK_REGISTRY_PRUNE_THRESHOLD
-                        .saturating_add(super::super::WEAK_REGISTRY_PRUNE_INTERVAL)
-            );
+            assert_eq!(registry.paths_beneath(&canonical_root), per_wave + 1);
             let retained = registry.upgrade(&live_path).expect("live registry entry");
             assert!(Arc::ptr_eq(&retained, &live.shared));
-            assert!(registry.len() >= 1);
+            drop(retained);
+            drop(registry);
+            drop(journals);
+            assert_eq!(
+                file_journal_registry()
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .paths_beneath(&canonical_root),
+                1
+            );
         }
 
         let alias = FileEventJournal::<String>::open(&live_path, FileDurability::Flush)
@@ -1464,6 +1682,13 @@ mod tests {
         assert!(Arc::ptr_eq(&live.shared, &alias.shared));
         drop(live);
         drop(alias);
+        assert_eq!(
+            file_journal_registry()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .paths_beneath(&canonical_root),
+            0
+        );
 
         let reopened = FileEventJournal::<String>::open(&live_path, FileDurability::Flush)
             .expect("reacquire authority and lease");
@@ -1476,6 +1701,50 @@ mod tests {
             1
         );
         drop(reopened);
+        assert_eq!(
+            file_journal_registry()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .paths_beneath(&canonical_root),
+            0
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concurrent_last_drop_and_immediate_reopen_remains_available() {
+        let root = temp_root();
+        let canonical_root = std::fs::canonicalize(&root).expect("canonical test root");
+        let path = canonical_root.join("events.jsonl");
+        for _ in 0..64 {
+            let journal = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+                .expect("open journal");
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let drop_barrier = Arc::clone(&barrier);
+            let dropping = std::thread::spawn(move || {
+                drop_barrier.wait();
+                drop(journal);
+            });
+            barrier.wait();
+            let reopened = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+                .expect("immediate reopen during last drop");
+            dropping.join().expect("join dropping handle");
+            assert_eq!(
+                file_journal_registry()
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .paths_beneath(&canonical_root),
+                1
+            );
+            drop(reopened);
+            assert_eq!(
+                file_journal_registry()
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .paths_beneath(&canonical_root),
+                0
+            );
+        }
         std::fs::remove_dir_all(root).ok();
     }
 
