@@ -117,13 +117,30 @@ pub struct JournalRecord<E> {
     pub event: E,
 }
 
+/// Durability result for one record that is present in the journal file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JournalDurabilityStatus {
+    /// The append and requested durability operation both completed.
+    Confirmed,
+    /// The complete record is present and owns its sequence, but the requested
+    /// durability barrier reported an error. Callers must not retry the event.
+    Degraded { error: String },
+}
+
+/// Receipt for one committed journal append.
+#[derive(Debug, Clone)]
+pub struct JournalAppendReceipt<E> {
+    pub record: JournalRecord<E>,
+    pub durability: JournalDurabilityStatus,
+}
+
 /// Append-only sequenced journal of events.
 ///
 /// Implementations assign contiguous 1-based sequences at append time and can
 /// replay any suffix of the journal in order.
 pub trait EventJournal<E: JournalEvent>: Send + Sync {
-    /// Durably append one event and return the record with its sequence.
-    fn append(&self, event: &E) -> Result<JournalRecord<E>>;
+    /// Append one event and report both its record and durability outcome.
+    fn append(&self, event: &E) -> Result<JournalAppendReceipt<E>>;
 
     /// Sequence that the next append will assign.
     fn next_sequence(&self) -> u64;
@@ -165,7 +182,7 @@ impl<E: JournalEvent> MemoryEventJournal<E> {
 }
 
 impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
-    fn append(&self, event: &E) -> Result<JournalRecord<E>> {
+    fn append(&self, event: &E) -> Result<JournalAppendReceipt<E>> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let next_sequence = inner.next_sequence.checked_add(1).ok_or_else(|| {
             ReactError::Other("journal sequence exhausted before append".to_string())
@@ -176,7 +193,10 @@ impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
         };
         inner.next_sequence = next_sequence;
         inner.records.push(record.clone());
-        Ok(record)
+        Ok(JournalAppendReceipt {
+            record,
+            durability: JournalDurabilityStatus::Confirmed,
+        })
     }
 
     fn next_sequence(&self) -> u64 {
@@ -232,6 +252,8 @@ pub enum CheckpointApplyStatus {
 pub struct ApplyReceipt {
     /// Sequence durably assigned to the event.
     pub sequence: u64,
+    /// Outcome of the authoritative journal append.
+    pub journal: JournalDurabilityStatus,
     /// Outcome of optional checkpoint compounding.
     pub checkpoint: CheckpointApplyStatus,
 }
@@ -349,6 +371,9 @@ struct ReducerInner<R> {
     since_checkpoint: u64,
 }
 
+/// Maximum records materialized by one recovery replay operation.
+const RECOVER_BATCH: usize = 512;
+
 /// Folds journal events into a reducer state and compounds checkpoints.
 ///
 /// `apply` appends to the journal first (durability before projection), then
@@ -390,9 +415,9 @@ where
     /// Returns the journal sequence assigned to the event.
     pub fn apply(&self, event: &R::Event) -> Result<ApplyReceipt> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        let record = self.journal.append(event)?;
-        inner.state.apply(&record.event);
-        inner.last_applied = record.sequence;
+        let appended = self.journal.append(event)?;
+        inner.state.apply(&appended.record.event);
+        inner.last_applied = appended.record.sequence;
         inner.since_checkpoint = inner.since_checkpoint.saturating_add(1);
         let checkpoint =
             if self.checkpoint_every != 0 && inner.since_checkpoint >= self.checkpoint_every {
@@ -409,7 +434,8 @@ where
                 CheckpointApplyStatus::NotDue
             };
         Ok(ApplyReceipt {
-            sequence: record.sequence,
+            sequence: appended.record.sequence,
+            journal: appended.durability,
             checkpoint,
         })
     }
@@ -451,10 +477,15 @@ where
                 Some(format!("checkpoint load failed: {error}")),
             ),
         };
-        let records = self.journal.replay_after(last_applied, usize::MAX)?;
-        for record in records {
-            state.apply(&record.event);
-            last_applied = record.sequence;
+        loop {
+            let records = self.journal.replay_after(last_applied, RECOVER_BATCH)?;
+            if records.is_empty() {
+                break;
+            }
+            for record in records {
+                state.apply(&record.event);
+                last_applied = record.sequence;
+            }
         }
         let replayed_since_checkpoint = last_applied.saturating_sub(checkpoint_sequence);
         let checkpoint_due =
@@ -533,6 +564,46 @@ mod tests {
         checkpoints: Arc<MemoryCheckpointStore<SumReducer>>,
     }
 
+    struct TrackingJournal {
+        inner: MemoryEventJournal<i32>,
+        replay_limits: Mutex<Vec<usize>>,
+    }
+
+    impl TrackingJournal {
+        fn new() -> Self {
+            Self {
+                inner: MemoryEventJournal::new(),
+                replay_limits: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl EventJournal<i32> for TrackingJournal {
+        fn append(&self, event: &i32) -> Result<JournalAppendReceipt<i32>> {
+            self.inner.append(event)
+        }
+
+        fn next_sequence(&self) -> u64 {
+            self.inner.next_sequence()
+        }
+
+        fn last_sequence(&self) -> u64 {
+            self.inner.last_sequence()
+        }
+
+        fn replay_after(
+            &self,
+            after_sequence: u64,
+            limit: usize,
+        ) -> Result<Vec<JournalRecord<i32>>> {
+            self.replay_limits
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(limit);
+            self.inner.replay_after(after_sequence, limit)
+        }
+    }
+
     fn reducer_with(checkpoint_every: u64) -> SumFixture {
         let journal = Arc::new(MemoryEventJournal::new());
         let checkpoints = Arc::new(MemoryCheckpointStore::new());
@@ -555,8 +626,10 @@ mod tests {
         assert_eq!(journal.next_sequence(), 1);
         let first = journal.append(&10).expect("append");
         let second = journal.append(&20).expect("append");
-        assert_eq!(first.sequence, 1);
-        assert_eq!(second.sequence, 2);
+        assert_eq!(first.record.sequence, 1);
+        assert_eq!(second.record.sequence, 2);
+        assert_eq!(first.durability, JournalDurabilityStatus::Confirmed);
+        assert_eq!(second.durability, JournalDurabilityStatus::Confirmed);
         assert_eq!(journal.last_sequence(), 2);
         assert_eq!(journal.next_sequence(), 3);
     }
@@ -640,6 +713,32 @@ mod tests {
         );
         assert_eq!(second.recover().expect("recover").last_applied_sequence, 4);
         second.with_state(|state| assert_eq!(state.total, 10));
+    }
+
+    #[test]
+    fn recovery_replays_large_missing_checkpoint_tail_in_fixed_batches() {
+        const EVENTS: i32 = 1_537;
+        let journal = Arc::new(TrackingJournal::new());
+        for value in 0..EVENTS {
+            journal.append(&value).expect("append");
+        }
+        let reducer = CheckpointedReducer::<_, SumReducer>::new(
+            Arc::clone(&journal),
+            Arc::new(MemoryCheckpointStore::new()),
+            0,
+        );
+
+        let recovered = reducer.recover().expect("recover");
+        assert_eq!(
+            recovered.last_applied_sequence,
+            u64::try_from(EVENTS).unwrap_or(u64::MAX)
+        );
+        let limits = journal
+            .replay_limits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(limits.len() >= 4);
+        assert!(limits.iter().all(|limit| *limit == RECOVER_BATCH));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Filesystem safety primitives shared by framework crates.
 
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 /// Validate an external identifier before using it as one filesystem segment.
@@ -280,6 +280,37 @@ pub fn read_existing_from(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> 
     Ok(bytes)
 }
 
+/// Read at most `limit` complete newline-terminated records from `offset`.
+///
+/// Unlike [`read_existing_from`], this bounds materialized memory by the
+/// requested record count and stops once the final requested newline is seen.
+pub fn read_existing_lines_from(
+    path: &Path,
+    offset: u64,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut file = open_existing_regular(path, ExistingFileAccess::Read)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::new();
+    for _ in 0..limit {
+        let read = reader.read_until(b'\n', &mut bytes)?;
+        if read == 0 {
+            break;
+        }
+        if bytes.last() != Some(&b'\n') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("incomplete newline-terminated record in {}", path.display()),
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
 /// Truncate an existing regular file without following a final symlink.
 ///
 /// Recovery code uses this after it has validated the last complete record;
@@ -355,6 +386,26 @@ mod tests {
 
         assert_eq!(read_existing_from(&path, 7)?, b"suffix");
         assert!(read_existing_from(&path, 14).is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_existing_lines_from_materializes_only_the_requested_prefix() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("echo-core-lines-{}", uuid::Uuid::new_v4()));
+        let path = root.join("events.jsonl");
+        std::fs::create_dir_all(&root)?;
+        let mut contents = String::new();
+        for index in 0..10_000usize {
+            use std::fmt::Write as _;
+            writeln!(&mut contents, "record-{index:05}")
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+        std::fs::write(&path, contents.as_bytes())?;
+
+        let bounded = read_existing_lines_from(&path, 0, 2)?;
+        assert_eq!(bounded, b"record-00000\nrecord-00001\n");
+        assert!(bounded.len() < contents.len());
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -6,11 +6,14 @@
 //! mid-file corruption loudly. [`FileCheckpointStore`] writes one atomic
 //! snapshot file that pairs the reducer state with its applied sequence.
 
-use super::{CheckpointFrame, CheckpointStore, EventJournal, JournalEvent, JournalRecord};
+use super::{
+    CheckpointFrame, CheckpointStore, EventJournal, JournalAppendReceipt, JournalDurabilityStatus,
+    JournalEvent, JournalRecord,
+};
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::fs::{
     FileDurability, append_existing, atomic_write, read_existing, read_existing_from,
-    truncate_existing,
+    read_existing_lines_from, truncate_existing,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -92,6 +95,7 @@ struct FileJournalState {
     next_sequence: u64,
     valid_len: u64,
     record_offsets: Vec<u64>,
+    poison: Option<String>,
 }
 
 #[derive(Debug)]
@@ -143,7 +147,17 @@ pub struct FileEventJournal<E> {
     path: PathBuf,
     durability: FileDurability,
     shared: Arc<SharedFileJournalState>,
+    #[cfg(test)]
+    append_fault: Mutex<Option<AppendFault>>,
     _event: PhantomData<fn() -> E>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+enum AppendFault {
+    FullWrite,
+    PartialWrite { bytes: usize },
+    UnrecognizedSuffix,
 }
 
 impl<E: JournalEvent> FileEventJournal<E> {
@@ -194,11 +208,14 @@ impl<E: JournalEvent> FileEventJournal<E> {
             state.next_sequence = scanned.next_sequence;
             state.valid_len = scanned.valid_len;
             state.record_offsets = scanned.record_offsets;
+            state.poison = None;
             drop(state);
             return Ok(Self {
                 path,
                 durability,
                 shared,
+                #[cfg(test)]
+                append_fault: Mutex::new(None),
                 _event: PhantomData,
             });
         }
@@ -209,6 +226,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 next_sequence: scanned.next_sequence,
                 valid_len: scanned.valid_len,
                 record_offsets: scanned.record_offsets,
+                poison: None,
             }),
         });
         registry.insert(path.clone(), Arc::downgrade(&shared));
@@ -216,6 +234,8 @@ impl<E: JournalEvent> FileEventJournal<E> {
             path,
             durability,
             shared,
+            #[cfg(test)]
+            append_fault: Mutex::new(None),
             _event: PhantomData,
         })
     }
@@ -224,10 +244,65 @@ impl<E: JournalEvent> FileEventJournal<E> {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    fn append_line(&self, line: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(fault) = self
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            use std::io::Write;
+
+            let mut file = std::fs::OpenOptions::new().append(true).open(&self.path)?;
+            match fault {
+                AppendFault::FullWrite => file.write_all(line)?,
+                AppendFault::PartialWrite { bytes } => {
+                    file.write_all(line.get(..bytes.min(line.len())).unwrap_or(line))?;
+                }
+                AppendFault::UnrecognizedSuffix => file.write_all(b"x")?,
+            }
+            file.flush()?;
+            return Err(std::io::Error::other("injected append durability failure"));
+        }
+
+        append_existing(&self.path, line, self.durability)
+    }
+
+    /// Reconcile the suffix after an append error. `Some` means the complete
+    /// record committed despite the durability error; `None` means no record
+    /// committed and any partial suffix was removed.
+    fn reconcile_failed_append(
+        &self,
+        state: &mut FileJournalState,
+        line: &[u8],
+        context: &str,
+        append_error: &std::io::Error,
+    ) -> Result<Option<JournalDurabilityStatus>> {
+        let suffix = read_existing_from(&self.path, state.valid_len)
+            .map_err(|error| io_error(context, error))?;
+        if suffix == line {
+            return Ok(Some(JournalDurabilityStatus::Degraded {
+                error: append_error.to_string(),
+            }));
+        }
+        if line.starts_with(&suffix) {
+            if !suffix.is_empty() {
+                truncate_existing(&self.path, state.valid_len, self.durability)
+                    .map_err(|error| io_error(context, error))?;
+            }
+            return Ok(None);
+        }
+        Err(ReactError::Other(format!(
+            "{context}: append error left an unrecognized {}-byte suffix",
+            suffix.len()
+        )))
+    }
 }
 
 impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
-    fn append(&self, event: &E) -> Result<JournalRecord<E>> {
+    fn append(&self, event: &E) -> Result<JournalAppendReceipt<E>> {
         // The lock spans encoding + write + advance so concurrent appends
         // cannot observe or reuse an in-flight sequence.
         let mut state = self
@@ -235,6 +310,12 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = &state.poison {
+            return Err(ReactError::Other(format!(
+                "journal append {} refused because the handle is poisoned: {reason}; reopen the journal to recover",
+                self.path.display()
+            )));
+        }
         let next_sequence = state.next_sequence.checked_add(1).ok_or_else(|| {
             ReactError::Other("journal sequence exhausted before append".to_string())
         })?;
@@ -252,13 +333,26 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
             ReactError::Other("journal byte length exhausted before append".to_string())
         })?;
         let context = format!("journal append {}", self.path.display());
-        append_existing(&self.path, &line, self.durability)
-            .map_err(|error| io_error(&context, error))?;
+        let durability = match self.append_line(&line) {
+            Ok(()) => JournalDurabilityStatus::Confirmed,
+            Err(error) => match self.reconcile_failed_append(&mut state, &line, &context, &error) {
+                Ok(Some(status)) => status,
+                Ok(None) => return Err(io_error(&context, error)),
+                Err(repair_error) => {
+                    let reason =
+                        format!("append failed ({error}); reconciliation failed ({repair_error})");
+                    state.poison = Some(reason.clone());
+                    return Err(ReactError::Other(format!(
+                        "{context}: {reason}; handle poisoned until reopen"
+                    )));
+                }
+            },
+        };
         let record_offset = state.valid_len;
         state.record_offsets.push(record_offset);
         state.valid_len = valid_len;
         state.next_sequence = next_sequence;
-        Ok(record)
+        Ok(JournalAppendReceipt { record, durability })
     }
 
     fn next_sequence(&self) -> u64 {
@@ -302,7 +396,7 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
                     "{context}: missing byte offset after sequence {after_sequence}"
                 ))
             })?;
-        let bytes = read_existing_from(&self.path, start_offset)
+        let bytes = read_existing_lines_from(&self.path, start_offset, limit)
             .map_err(|error| io_error(&context, error))?;
         let mut expected = after_sequence
             .checked_add(1)
@@ -469,8 +563,8 @@ mod tests {
                 barrier.wait();
                 let mut sequences = Vec::new();
                 for index in 0..APPENDS_PER_HANDLE {
-                    let record = journal.append(&format!("{label}-{index}"))?;
-                    sequences.push(record.sequence);
+                    let receipt = journal.append(&format!("{label}-{index}"))?;
+                    sequences.push(receipt.record.sequence);
                 }
                 Ok::<Vec<u64>, ReactError>(sequences)
             }));
@@ -501,6 +595,101 @@ mod tests {
             .replay_after(0, usize::MAX)
             .expect("replay reopened journal");
         assert_eq!(records.len(), expected_count);
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn full_record_with_durability_error_advances_sequence_as_degraded() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal =
+            FileEventJournal::<String>::open(&path, FileDurability::SyncData).expect("open");
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWrite);
+
+        let first = journal.append(&"one".to_string()).expect("degraded append");
+        assert_eq!(first.record.sequence, 1);
+        assert!(matches!(
+            first.durability,
+            JournalDurabilityStatus::Degraded { .. }
+        ));
+        assert_eq!(journal.next_sequence(), 2);
+        let second = journal.append(&"two".to_string()).expect("second append");
+        assert_eq!(second.record.sequence, 2);
+        assert_eq!(second.durability, JournalDurabilityStatus::Confirmed);
+
+        drop(journal);
+        let reopened =
+            FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("reopen");
+        let records = reopened.replay_after(0, usize::MAX).expect("replay");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn partial_append_error_truncates_suffix_before_sequence_reuse() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open");
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::PartialWrite { bytes: 9 });
+
+        assert!(journal.append(&"partial".to_string()).is_err());
+        assert_eq!(journal.next_sequence(), 1);
+        assert!(read_existing(&path).expect("read repaired file").is_empty());
+        let committed = journal.append(&"committed".to_string()).expect("retry");
+        assert_eq!(committed.record.sequence, 1);
+
+        drop(journal);
+        let reopened =
+            FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("reopen");
+        let records = reopened.replay_after(0, usize::MAX).expect("replay");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records.first().map(|record| record.event.as_str()),
+            Some("committed")
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unreconciled_append_error_poisons_handle_until_reopen() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open");
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::UnrecognizedSuffix);
+
+        let first_error = journal
+            .append(&"first".to_string())
+            .expect_err("unrecognized suffix must fail");
+        assert!(first_error.to_string().contains("handle poisoned"));
+        let second_error = journal
+            .append(&"second".to_string())
+            .expect_err("poisoned handle must reject append");
+        assert!(second_error.to_string().contains("handle is poisoned"));
+
+        drop(journal);
+        let reopened = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .expect("repair on reopen");
+        let committed = reopened.append(&"recovered".to_string()).expect("append");
+        assert_eq!(committed.record.sequence, 1);
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
     }

@@ -32,6 +32,8 @@ impl EventReducer for BenchReducer {
 }
 
 fn bench_journal(c: &mut Criterion) {
+    const RECOVERY_EVENTS: u64 = 105_321;
+    const CHECKPOINT_CADENCE: u64 = 10_000;
     let mut group = c.benchmark_group("journal");
 
     group.bench_function("memory_append", |b| {
@@ -92,15 +94,15 @@ fn bench_journal(c: &mut Criterion) {
         )
     });
 
-    // The memory baseline keeps a non-zero 321-event tail after the last 1k
-    // checkpoint. This isolates reducer work without falsely measuring an
-    // exactly-on-cadence, zero-tail recovery.
+    // The compounded cases keep a non-zero 5,321-event tail after the last 10k
+    // checkpoint. This crosses multiple fixed recovery batches instead of
+    // measuring an exactly-on-cadence or single-batch tail.
     let build_memory_journal = |size: u64| {
         let journal = Arc::new(MemoryEventJournal::<u64>::new());
         let writer = CheckpointedReducer::<_, BenchReducer>::new(
             Arc::clone(&journal),
             Arc::new(MemoryCheckpointStore::new()),
-            1_000,
+            CHECKPOINT_CADENCE,
         );
         for value in 0..size {
             writer.apply(&value).expect("apply");
@@ -108,14 +110,14 @@ fn bench_journal(c: &mut Criterion) {
         journal
     };
 
-    group.bench_function("recover_full_replay_100k", |b| {
+    group.bench_function("recover_full_replay_105k", |b| {
         b.iter_batched(
-            || build_memory_journal(100_321),
+            || build_memory_journal(RECOVERY_EVENTS),
             |journal| {
                 let reducer = CheckpointedReducer::<_, BenchReducer>::new(
                     journal,
                     Arc::new(MemoryCheckpointStore::new()),
-                    1_000,
+                    CHECKPOINT_CADENCE,
                 );
                 reducer.recover().expect("recover").last_applied_sequence
             },
@@ -123,10 +125,10 @@ fn bench_journal(c: &mut Criterion) {
         )
     });
 
-    group.bench_function("recover_compounded_100k", |b| {
+    group.bench_function("recover_compounded_105k_tail_5321", |b| {
         b.iter_batched(
             || {
-                // Real-world path: a writer compounded checkpoints every 1k
+                // Real-world path: a writer compounded checkpoints every 10k
                 // events; recovery loads the latest frame and replays only
                 // the tail.
                 let journal = Arc::new(MemoryEventJournal::<u64>::new());
@@ -135,16 +137,19 @@ fn bench_journal(c: &mut Criterion) {
                 let writer = CheckpointedReducer::<_, BenchReducer>::new(
                     Arc::clone(&journal),
                     Arc::clone(&checkpoints),
-                    1_000,
+                    CHECKPOINT_CADENCE,
                 );
-                for value in 0..100_321u64 {
+                for value in 0..RECOVERY_EVENTS {
                     writer.apply(&value).expect("apply");
                 }
                 (journal, checkpoints)
             },
             |(journal, checkpoints)| {
-                let reducer =
-                    CheckpointedReducer::<_, BenchReducer>::new(journal, checkpoints, 1_000);
+                let reducer = CheckpointedReducer::<_, BenchReducer>::new(
+                    journal,
+                    checkpoints,
+                    CHECKPOINT_CADENCE,
+                );
                 let recovered = reducer.recover().expect("recover").last_applied_sequence;
                 reducer.with_state(|state| {
                     assert_eq!(state.applied, recovered);
@@ -172,17 +177,17 @@ fn bench_journal(c: &mut Criterion) {
     let persistent_writer = CheckpointedReducer::<_, BenchReducer>::new(
         Arc::clone(&persistent_journal),
         Arc::clone(&persistent_checkpoints),
-        1_000,
+        CHECKPOINT_CADENCE,
     );
-    for value in 0..100_321u64 {
+    for value in 0..RECOVERY_EVENTS {
         persistent_writer.apply(&value).expect("persistent apply");
     }
-    group.bench_function("file_recover_compounded_100k_tail_321", |b| {
+    group.bench_function("file_recover_compounded_105k_tail_5321", |b| {
         b.iter(|| {
             let reducer = CheckpointedReducer::<_, BenchReducer>::new(
                 Arc::clone(&persistent_journal),
                 Arc::clone(&persistent_checkpoints),
-                1_000,
+                CHECKPOINT_CADENCE,
             );
             reducer
                 .recover()
