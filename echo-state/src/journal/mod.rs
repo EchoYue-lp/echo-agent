@@ -17,6 +17,8 @@
 //! - LangGraph persistence: execution progress is saved as
 //!   checkpoint/thread-identity pairs, and resume continues from the persisted
 //!   fact rather than replaying the whole history.
+//! - Apache Kafka's log storage: immutable segment files divide physical I/O
+//!   while records retain one global ordered offset space.
 //! - Classic event sourcing snapshots: fold events into state and periodically
 //!   persist `(state, applied_sequence)` so recovery replays only the tail.
 //!
@@ -24,18 +26,20 @@
 //!
 //! Journal sequencing, durable append, tolerant replay, and
 //! checkpoint compounding are generic mechanisms needed by any agent runtime,
-//! so they live in the framework (`echo-state`). Directory layout, retention,
-//! and product projections stay with consumers. Migrating EKO's duplicated
-//! file algorithms onto this module is planned follow-up work and deletes the
-//! duplicated algorithms at that point; nothing here depends on it.
+//! so they live in the framework (`echo-state`). The segmented implementation
+//! owns only its internal file naming and integrity contract. Data-root and
+//! stream-directory selection, retention counts, pins, and product projections
+//! stay with consumers. Migrating EKO's duplicated file algorithms onto this
+//! module is planned follow-up work and deletes the duplicated algorithms at
+//! that point; nothing here depends on it.
 //!
 //! # Invariants
 //!
 //! - Sequences are 1-based and contiguous (`1, 2, 3, ...`). A journal load
 //!   that observes a gap or a non-monotonic record fails loudly instead of
 //!   silently mis-replaying.
-//! - Journals are single-writer within a process. Cross-process writers are
-//!   out of scope for the local personal-assistant threat model.
+//! - Journal implementations serialize their append authority. File-backed
+//!   implementations additionally hold an exclusive process-lifetime lease.
 //! - A torn trailing record (partial write followed by a crash) is tolerated
 //!   and truncated on the next open. Corruption before the trailing record is
 //!   an error.
@@ -72,9 +76,9 @@
 //!     Arc::new(MemoryCheckpointStore::new());
 //! let reducer = CheckpointedReducer::new(Arc::clone(&journal), Arc::clone(&checkpoints), 2);
 //!
-//! reducer.apply(&"one".to_string())?;
-//! reducer.apply(&"two".to_string())?; // checkpoint compounding fires here
-//! reducer.apply(&"three".to_string())?;
+//! reducer.apply("one".to_string())?;
+//! reducer.apply("two".to_string())?; // checkpoint compounding fires here
+//! reducer.apply("three".to_string())?;
 //! assert_eq!(reducer.last_applied_sequence(), 3);
 //!
 //! // Recovery loads the checkpoint and replays only the tail.
@@ -86,8 +90,10 @@
 //! ```
 
 pub mod file;
+pub mod segmented;
 
 pub use file::{FileCheckpointStore, FileEventJournal};
+pub use segmented::{JournalSegmentMetadata, SegmentedFileEventJournal};
 
 use echo_core::error::{ReactError, Result};
 use serde::de::DeserializeOwned;
@@ -97,24 +103,36 @@ use std::sync::{Arc, Mutex};
 
 /// Event payload accepted by an [`EventJournal`].
 ///
-/// A blanket impl covers every `serde`-capable, cloneable, thread-safe type.
+/// A blanket impl covers every `serde`-capable, thread-safe type. Events do not
+/// need to be [`Clone`]: append consumes the value and records share it through
+/// an [`Arc`] for receipts and in-memory replay.
 pub trait JournalEvent:
-    Serialize + DeserializeOwned + Clone + Send + Sync + std::fmt::Debug + 'static
+    Serialize + DeserializeOwned + Send + Sync + std::fmt::Debug + 'static
 {
 }
 
 impl<T> JournalEvent for T where
-    T: Serialize + DeserializeOwned + Clone + Send + Sync + std::fmt::Debug + 'static
+    T: Serialize + DeserializeOwned + Send + Sync + std::fmt::Debug + 'static
 {
 }
 
 /// One durable journal entry with its assigned sequence.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JournalRecord<E> {
     /// 1-based contiguous sequence assigned by the journal.
     pub sequence: u64,
     /// The persisted event payload.
-    pub event: E,
+    pub event: Arc<E>,
+}
+
+impl<E> Clone for JournalRecord<E> {
+    fn clone(&self) -> Self {
+        Self {
+            sequence: self.sequence,
+            event: Arc::clone(&self.event),
+        }
+    }
 }
 
 /// Durability result for one record that is present in the journal file.
@@ -128,10 +146,19 @@ pub enum JournalDurabilityStatus {
 }
 
 /// Receipt for one committed journal append.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct JournalAppendReceipt<E> {
     pub record: JournalRecord<E>,
     pub durability: JournalDurabilityStatus,
+}
+
+impl<E> Clone for JournalAppendReceipt<E> {
+    fn clone(&self) -> Self {
+        Self {
+            record: self.record.clone(),
+            durability: self.durability.clone(),
+        }
+    }
 }
 
 /// Append-only sequenced journal of events.
@@ -139,13 +166,17 @@ pub struct JournalAppendReceipt<E> {
 /// Implementations assign contiguous 1-based sequences at append time and can
 /// replay any suffix of the journal in order.
 pub trait EventJournal<E: JournalEvent>: Send + Sync {
-    /// Append one event and report both its record and durability outcome.
-    fn append(&self, event: &E) -> Result<JournalAppendReceipt<E>>;
+    /// Consume one event and report both its shared owned record and durability
+    /// outcome. A [`JournalDurabilityStatus::Degraded`] receipt means the full
+    /// record owns its sequence and must not be retried.
+    fn append(&self, event: E) -> Result<JournalAppendReceipt<E>>;
 
     /// Sequence that the next append will assign.
     fn next_sequence(&self) -> u64;
 
-    /// Last durably persisted sequence (`0` when the journal is empty).
+    /// Last committed sequence present in the journal (`0` when empty).
+    /// Consult the append receipt to distinguish confirmed durability from a
+    /// full-write degraded commit.
     fn last_sequence(&self) -> u64;
 
     /// Replay up to `limit` records with `sequence > after_sequence`, in order.
@@ -182,14 +213,14 @@ impl<E: JournalEvent> MemoryEventJournal<E> {
 }
 
 impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
-    fn append(&self, event: &E) -> Result<JournalAppendReceipt<E>> {
+    fn append(&self, event: E) -> Result<JournalAppendReceipt<E>> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let next_sequence = inner.next_sequence.checked_add(1).ok_or_else(|| {
             ReactError::Other("journal sequence exhausted before append".to_string())
         })?;
         let record = JournalRecord {
             sequence: inner.next_sequence,
-            event: event.clone(),
+            event: Arc::new(event),
         };
         inner.next_sequence = next_sequence;
         inner.records.push(record.clone());
@@ -232,6 +263,15 @@ pub trait EventReducer: Default + Serialize + DeserializeOwned + Send + Sync + '
     type Event: JournalEvent;
 
     fn apply(&mut self, event: &Self::Event);
+
+    /// Fold an authoritative journal record, including its assigned sequence.
+    ///
+    /// Reducers that only need the payload inherit this default. Sequence-aware
+    /// projections override the hook instead of preallocating a sequence into
+    /// the event before append.
+    fn apply_record(&mut self, record: &JournalRecord<Self::Event>) {
+        self.apply(record.event.as_ref());
+    }
 }
 
 /// Result of automatic checkpoint compounding after an append.
@@ -250,7 +290,7 @@ pub enum CheckpointApplyStatus {
 /// Commit receipt for one journaled projection update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyReceipt {
-    /// Sequence durably assigned to the event.
+    /// Sequence committed to the authoritative journal.
     pub sequence: u64,
     /// Outcome of the authoritative journal append.
     pub journal: JournalDurabilityStatus,
@@ -413,10 +453,10 @@ where
     /// Append one event, fold it, and maybe compound a checkpoint.
     ///
     /// Returns the journal sequence assigned to the event.
-    pub fn apply(&self, event: &R::Event) -> Result<ApplyReceipt> {
+    pub fn apply(&self, event: R::Event) -> Result<ApplyReceipt> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let appended = self.journal.append(event)?;
-        inner.state.apply(&appended.record.event);
+        inner.state.apply_record(&appended.record);
         inner.last_applied = appended.record.sequence;
         inner.since_checkpoint = inner.since_checkpoint.saturating_add(1);
         let checkpoint =
@@ -483,7 +523,7 @@ where
                 break;
             }
             for record in records {
-                state.apply(&record.event);
+                state.apply_record(&record);
                 last_applied = record.sequence;
             }
         }
@@ -579,7 +619,7 @@ mod tests {
     }
 
     impl EventJournal<i32> for TrackingJournal {
-        fn append(&self, event: &i32) -> Result<JournalAppendReceipt<i32>> {
+        fn append(&self, event: i32) -> Result<JournalAppendReceipt<i32>> {
             self.inner.append(event)
         }
 
@@ -624,8 +664,8 @@ mod tests {
         let journal = MemoryEventJournal::new();
         assert_eq!(journal.last_sequence(), 0);
         assert_eq!(journal.next_sequence(), 1);
-        let first = journal.append(&10).expect("append");
-        let second = journal.append(&20).expect("append");
+        let first = journal.append(10).expect("append");
+        let second = journal.append(20).expect("append");
         assert_eq!(first.record.sequence, 1);
         assert_eq!(second.record.sequence, 2);
         assert_eq!(first.durability, JournalDurabilityStatus::Confirmed);
@@ -638,7 +678,7 @@ mod tests {
     fn replay_after_respects_boundary_and_limit() {
         let journal = MemoryEventJournal::new();
         for value in 0..10 {
-            journal.append(&value).expect("append");
+            journal.append(value).expect("append");
         }
         let records = journal.replay_after(7, 2).expect("replay");
         assert_eq!(
@@ -654,8 +694,8 @@ mod tests {
     #[test]
     fn apply_folds_state_and_returns_sequence() {
         let fixture = reducer_with(0);
-        assert_eq!(fixture.reducer.apply(&5).expect("apply").sequence, 1);
-        assert_eq!(fixture.reducer.apply(&7).expect("apply").sequence, 2);
+        assert_eq!(fixture.reducer.apply(5).expect("apply").sequence, 1);
+        assert_eq!(fixture.reducer.apply(7).expect("apply").sequence, 2);
         assert_eq!(fixture.journal.last_sequence(), 2);
         fixture.reducer.with_state(|state| {
             assert_eq!(state.total, 12);
@@ -666,9 +706,9 @@ mod tests {
     #[test]
     fn automatic_checkpoint_fires_on_cadence() {
         let fixture = reducer_with(2);
-        fixture.reducer.apply(&1).expect("apply");
+        fixture.reducer.apply(1).expect("apply");
         assert!(fixture.checkpoints.load().expect("load").is_none());
-        fixture.reducer.apply(&2).expect("apply");
+        fixture.reducer.apply(2).expect("apply");
         let frame = fixture
             .checkpoints
             .load()
@@ -682,7 +722,7 @@ mod tests {
     fn recover_replays_from_checkpoint_then_tail() {
         let fixture = reducer_with(2);
         for value in 1..=5 {
-            fixture.reducer.apply(&value).expect("apply");
+            fixture.reducer.apply(value).expect("apply");
         }
         assert_eq!(fixture.reducer.last_applied_sequence(), 5);
 
@@ -704,7 +744,7 @@ mod tests {
     fn recover_without_checkpoint_replays_everything() {
         let fixture = reducer_with(0);
         for value in 1..=4 {
-            fixture.reducer.apply(&value).expect("apply");
+            fixture.reducer.apply(value).expect("apply");
         }
         let second: SumHarness = CheckpointedReducer::new(
             fixture.journal,
@@ -720,7 +760,7 @@ mod tests {
         const EVENTS: i32 = 1_537;
         let journal = Arc::new(TrackingJournal::new());
         for value in 0..EVENTS {
-            journal.append(&value).expect("append");
+            journal.append(value).expect("append");
         }
         let reducer = CheckpointedReducer::<_, SumReducer>::new(
             Arc::clone(&journal),
@@ -745,7 +785,7 @@ mod tests {
     fn manual_checkpoint_round_trips_through_store() {
         let fixture = reducer_with(0);
         for value in 1..=3 {
-            fixture.reducer.apply(&value).expect("apply");
+            fixture.reducer.apply(value).expect("apply");
         }
         fixture.reducer.checkpoint().expect("checkpoint");
         let frame = fixture
@@ -800,7 +840,7 @@ mod tests {
             1,
         );
 
-        let first = reducer.apply(&7).expect("event append must commit");
+        let first = reducer.apply(7).expect("event append must commit");
         assert_eq!(first.sequence, 1);
         assert!(matches!(
             first.checkpoint,
@@ -809,7 +849,7 @@ mod tests {
         assert_eq!(journal.last_sequence(), 1);
         reducer.with_state(|state| assert_eq!(state.events, vec![7]));
 
-        let second = reducer.apply(&9).expect("later append retries checkpoint");
+        let second = reducer.apply(9).expect("later append retries checkpoint");
         assert_eq!(second.sequence, 2);
         assert_eq!(second.checkpoint, CheckpointApplyStatus::Saved);
         let frame = checkpoints
@@ -837,7 +877,7 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
                 let value = i32::try_from(value).unwrap_or(i32::MAX);
-                reducer.apply(&value).map(|receipt| receipt.sequence)
+                reducer.apply(value).map(|receipt| receipt.sequence)
             }));
         }
         for handle in handles {
@@ -848,7 +888,7 @@ mod tests {
             .replay_after(0, usize::MAX)
             .expect("journal replay")
             .into_iter()
-            .map(|record| record.event)
+            .map(|record| *record.event)
             .collect::<Vec<_>>();
         reducer.with_state(|state| assert_eq!(state.events, journal_events));
         assert_eq!(
@@ -860,7 +900,7 @@ mod tests {
     #[test]
     fn checkpoint_ahead_of_journal_is_rebuilt_from_authoritative_events() {
         let journal = Arc::new(MemoryEventJournal::new());
-        journal.append(&3).expect("append");
+        journal.append(3).expect("append");
         let checkpoints = Arc::new(MemoryCheckpointStore::new());
         checkpoints
             .save(
@@ -895,5 +935,41 @@ mod tests {
                 .sequence,
             1
         );
+    }
+
+    #[derive(Default, Serialize, Deserialize)]
+    struct SequenceAwareReducer {
+        sequences: Vec<u64>,
+    }
+
+    impl EventReducer for SequenceAwareReducer {
+        type Event = String;
+
+        fn apply(&mut self, _event: &String) {}
+
+        fn apply_record(&mut self, record: &JournalRecord<Self::Event>) {
+            self.sequences.push(record.sequence);
+        }
+    }
+
+    #[test]
+    fn reducer_receives_authoritative_sequence_on_apply_and_recovery() {
+        let journal = Arc::new(MemoryEventJournal::new());
+        let writer = CheckpointedReducer::<_, SequenceAwareReducer>::new(
+            Arc::clone(&journal),
+            Arc::new(MemoryCheckpointStore::new()),
+            0,
+        );
+        writer.apply("one".to_string()).expect("first apply");
+        writer.apply("two".to_string()).expect("second apply");
+        writer.with_state(|state| assert_eq!(state.sequences, vec![1, 2]));
+
+        let recovered = CheckpointedReducer::<_, SequenceAwareReducer>::new(
+            journal,
+            Arc::new(MemoryCheckpointStore::new()),
+            0,
+        );
+        recovered.recover().expect("recover");
+        recovered.with_state(|state| assert_eq!(state.sequences, vec![1, 2]));
     }
 }

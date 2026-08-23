@@ -8,11 +8,11 @@
 //! recovery should replay only the tail, not the whole journal).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use echo_agent::workspace::state::journal::{
+use echo_agent::state::journal::{
     CheckpointStore, CheckpointedReducer, EventJournal, EventReducer, FileCheckpointStore,
-    FileEventJournal, MemoryCheckpointStore, MemoryEventJournal,
+    FileEventJournal, MemoryCheckpointStore, MemoryEventJournal, SegmentedFileEventJournal,
 };
-use echo_core::utils::fs::FileDurability;
+use echo_agent::utils::fs::FileDurability;
 use std::sync::Arc;
 
 /// Reducer that folds counted events into a small state.
@@ -40,7 +40,7 @@ fn bench_journal(c: &mut Criterion) {
         b.iter(|| {
             let journal = MemoryEventJournal::<u64>::new();
             for value in 0..10_000u64 {
-                journal.append(&value).expect("append");
+                journal.append(value).expect("append");
             }
             journal.last_sequence()
         })
@@ -51,7 +51,7 @@ fn bench_journal(c: &mut Criterion) {
             || {
                 let journal = MemoryEventJournal::<u64>::new();
                 for value in 0..10_000u64 {
-                    journal.append(&value).expect("append");
+                    journal.append(value).expect("append");
                 }
                 journal
             },
@@ -69,7 +69,7 @@ fn bench_journal(c: &mut Criterion) {
             )
             .expect("open journal");
             for value in 0..10_000u64 {
-                journal.append(&value).expect("append");
+                journal.append(value).expect("append");
             }
             journal.last_sequence()
         })
@@ -85,7 +85,43 @@ fn bench_journal(c: &mut Criterion) {
                 )
                 .expect("open journal");
                 for value in 0..10_000u64 {
-                    journal.append(&value).expect("append");
+                    journal.append(value).expect("append");
+                }
+                (dir, journal)
+            },
+            |(_dir, journal)| journal.replay_after(0, usize::MAX).expect("replay").len(),
+            criterion::BatchSize::LargeInput,
+        )
+    });
+
+    group.bench_function("segmented_append_flush_10k", |b| {
+        b.iter(|| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let journal = SegmentedFileEventJournal::<u64>::open(
+                dir.path().join("segments"),
+                64 * 1024,
+                FileDurability::Flush,
+            )
+            .expect("open segmented journal");
+            for value in 0..10_000u64 {
+                journal.append(value).expect("append");
+            }
+            journal.last_sequence()
+        })
+    });
+
+    group.bench_function("segmented_replay_after_zero_10k", |b| {
+        b.iter_batched(
+            || {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let journal = SegmentedFileEventJournal::<u64>::open(
+                    dir.path().join("segments"),
+                    64 * 1024,
+                    FileDurability::Flush,
+                )
+                .expect("open segmented journal");
+                for value in 0..10_000u64 {
+                    journal.append(value).expect("append");
                 }
                 (dir, journal)
             },
@@ -105,7 +141,7 @@ fn bench_journal(c: &mut Criterion) {
             CHECKPOINT_CADENCE,
         );
         for value in 0..size {
-            writer.apply(&value).expect("apply");
+            writer.apply(value).expect("apply");
         }
         journal
     };
@@ -140,7 +176,7 @@ fn bench_journal(c: &mut Criterion) {
                     CHECKPOINT_CADENCE,
                 );
                 for value in 0..RECOVERY_EVENTS {
-                    writer.apply(&value).expect("apply");
+                    writer.apply(value).expect("apply");
                 }
                 (journal, checkpoints)
             },
@@ -180,7 +216,7 @@ fn bench_journal(c: &mut Criterion) {
         CHECKPOINT_CADENCE,
     );
     for value in 0..RECOVERY_EVENTS {
-        persistent_writer.apply(&value).expect("persistent apply");
+        persistent_writer.apply(value).expect("persistent apply");
     }
     group.bench_function("file_recover_compounded_105k_tail_5321", |b| {
         b.iter(|| {

@@ -12,8 +12,8 @@ use super::{
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::fs::{
-    FileDurability, append_existing, atomic_write, read_existing, read_existing_from,
-    read_existing_lines_from, truncate_existing,
+    ExclusiveFileLease, FileDurability, append_existing, atomic_write, read_existing,
+    read_existing_from, read_existing_lines_from, truncate_existing, try_exclusive_file_lease,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -101,7 +101,9 @@ struct FileJournalState {
 #[derive(Debug)]
 struct SharedFileJournalState {
     event_type: TypeId,
+    durability: FileDurability,
     state: Mutex<FileJournalState>,
+    _lease: ExclusiveFileLease,
 }
 
 fn file_journal_registry() -> &'static Mutex<HashMap<PathBuf, Weak<SharedFileJournalState>>> {
@@ -141,7 +143,9 @@ fn scan_and_repair_journal<E: JournalEvent>(
 /// Appends serialize one [`JournalRecord`] per line with the caller-selected
 /// durability policy; `Flush` survives process crashes, `SyncData` additionally
 /// survives power loss. Open validates the complete file once and records byte
-/// offsets; replay then seeks directly to the requested sequence suffix.
+/// offsets; replay then seeks directly to the requested sequence suffix. A
+/// canonical in-process authority shares sequencing across handles and holds a
+/// process-lifetime exclusive lease against competing writers.
 #[derive(Debug)]
 pub struct FileEventJournal<E> {
     path: PathBuf,
@@ -197,6 +201,11 @@ impl<E: JournalEvent> FileEventJournal<E> {
                     "{context}: journal is already open with a different event type"
                 )));
             }
+            if shared.durability != durability {
+                return Err(ReactError::Other(format!(
+                    "{context}: journal is already open with a different durability configuration"
+                )));
+            }
             // Reopening is also an integrity boundary. Scan while holding the
             // shared append lock so a second handle cannot miss or race a torn
             // write, including one caused outside this process.
@@ -219,15 +228,18 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 _event: PhantomData,
             });
         }
+        let lease = try_exclusive_file_lease(&path).map_err(|error| io_error(&context, error))?;
         let scanned = scan_and_repair_journal::<E>(&path, &context, durability)?;
         let shared = Arc::new(SharedFileJournalState {
             event_type: TypeId::of::<E>(),
+            durability,
             state: Mutex::new(FileJournalState {
                 next_sequence: scanned.next_sequence,
                 valid_len: scanned.valid_len,
                 record_offsets: scanned.record_offsets,
                 poison: None,
             }),
+            _lease: lease,
         });
         registry.insert(path.clone(), Arc::downgrade(&shared));
         Ok(Self {
@@ -302,7 +314,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
 }
 
 impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
-    fn append(&self, event: &E) -> Result<JournalAppendReceipt<E>> {
+    fn append(&self, event: E) -> Result<JournalAppendReceipt<E>> {
         // The lock spans encoding + write + advance so concurrent appends
         // cannot observe or reuse an in-flight sequence.
         let mut state = self
@@ -321,7 +333,7 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
         })?;
         let record = JournalRecord {
             sequence: state.next_sequence,
-            event: event.clone(),
+            event: Arc::new(event),
         };
         let mut line = serde_json::to_vec(&record).map_err(|error| {
             ReactError::Other(format!("failed to encode journal record: {error}"))
@@ -527,15 +539,15 @@ mod tests {
         let journal =
             FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
         assert_eq!(journal.last_sequence(), 0);
-        journal.append(&"one".to_string()).expect("append");
-        journal.append(&"two".to_string()).expect("append");
+        journal.append("one".to_string()).expect("append");
+        journal.append("two".to_string()).expect("append");
 
         let reopened =
             FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("reopen journal");
         assert_eq!(reopened.next_sequence(), 3);
         let records = reopened.replay_after(0, usize::MAX).expect("replay");
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].event, "one");
+        assert_eq!(records[0].event.as_str(), "one");
         assert_eq!(records[1].sequence, 2);
         std::fs::remove_dir_all(root).ok();
     }
@@ -563,7 +575,7 @@ mod tests {
                 barrier.wait();
                 let mut sequences = Vec::new();
                 for index in 0..APPENDS_PER_HANDLE {
-                    let receipt = journal.append(&format!("{label}-{index}"))?;
+                    let receipt = journal.append(format!("{label}-{index}"))?;
                     sequences.push(receipt.record.sequence);
                 }
                 Ok::<Vec<u64>, ReactError>(sequences)
@@ -610,14 +622,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWrite);
 
-        let first = journal.append(&"one".to_string()).expect("degraded append");
+        let first = journal.append("one".to_string()).expect("degraded append");
         assert_eq!(first.record.sequence, 1);
         assert!(matches!(
             first.durability,
             JournalDurabilityStatus::Degraded { .. }
         ));
         assert_eq!(journal.next_sequence(), 2);
-        let second = journal.append(&"two".to_string()).expect("second append");
+        let second = journal.append("two".to_string()).expect("second append");
         assert_eq!(second.record.sequence, 2);
         assert_eq!(second.durability, JournalDurabilityStatus::Confirmed);
 
@@ -647,10 +659,10 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner()) =
             Some(AppendFault::PartialWrite { bytes: 9 });
 
-        assert!(journal.append(&"partial".to_string()).is_err());
+        assert!(journal.append("partial".to_string()).is_err());
         assert_eq!(journal.next_sequence(), 1);
         assert!(read_existing(&path).expect("read repaired file").is_empty());
-        let committed = journal.append(&"committed".to_string()).expect("retry");
+        let committed = journal.append("committed".to_string()).expect("retry");
         assert_eq!(committed.record.sequence, 1);
 
         drop(journal);
@@ -677,18 +689,18 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::UnrecognizedSuffix);
 
         let first_error = journal
-            .append(&"first".to_string())
+            .append("first".to_string())
             .expect_err("unrecognized suffix must fail");
         assert!(first_error.to_string().contains("handle poisoned"));
         let second_error = journal
-            .append(&"second".to_string())
+            .append("second".to_string())
             .expect_err("poisoned handle must reject append");
         assert!(second_error.to_string().contains("handle is poisoned"));
 
         drop(journal);
         let reopened = FileEventJournal::<String>::open(&path, FileDurability::Flush)
             .expect("repair on reopen");
-        let committed = reopened.append(&"recovered".to_string()).expect("append");
+        let committed = reopened.append("recovered".to_string()).expect("append");
         assert_eq!(committed.record.sequence, 1);
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
@@ -700,7 +712,7 @@ mod tests {
         let path = root.join("events.jsonl");
         let journal =
             FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
-        journal.append(&"one".to_string()).expect("append");
+        journal.append("one".to_string()).expect("append");
         // Simulate a torn append: a partial line without the newline.
         let good = read_existing(&path).expect("read");
         let mut torn = good.clone();
@@ -720,9 +732,9 @@ mod tests {
         let path = root.join("events.jsonl");
         let journal =
             FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
-        journal.append(&"one".to_string()).expect("append");
-        journal.append(&"two".to_string()).expect("append");
-        journal.append(&"three".to_string()).expect("append");
+        journal.append("one".to_string()).expect("append");
+        journal.append("two".to_string()).expect("append");
+        journal.append("three".to_string()).expect("append");
         let contents = read_existing(&path).expect("read");
         let lines: Vec<&[u8]> = contents
             .split(|byte| *byte == b'\n')
@@ -772,7 +784,7 @@ mod tests {
         ));
         let reducer = CheckpointedReducer::new(std::sync::Arc::clone(&journal), checkpoints, 2);
         for index in 0..5 {
-            reducer.apply(&format!("event-{index}")).expect("apply");
+            reducer.apply(format!("event-{index}")).expect("apply");
         }
 
         let recovered = CheckpointedReducer::new(
@@ -808,7 +820,7 @@ mod tests {
                 .expect("open journal"),
         );
         for value in ["one", "two", "three"] {
-            journal.append(&value.to_string()).expect("append");
+            journal.append(value.to_string()).expect("append");
         }
         let checkpoint_path = root.join("checkpoint.json");
         std::fs::write(&checkpoint_path, b"{partial").expect("write corrupt checkpoint");
@@ -830,6 +842,69 @@ mod tests {
             .expect("load repaired checkpoint")
             .expect("repaired checkpoint exists");
         assert_eq!(repaired.sequence, 3);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn duplicate_open_shares_lease_and_mismatched_durability_rejects() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let first = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .expect("open first journal");
+        let second = FileEventJournal::<String>::open(
+            root.join(".").join("events.jsonl"),
+            FileDurability::Flush,
+        )
+        .expect("open shared journal");
+        assert!(Arc::ptr_eq(&first.shared, &second.shared));
+        let error = FileEventJournal::<String>::open(&path, FileDurability::SyncData)
+            .expect_err("mismatched durability must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("different durability configuration")
+        );
+        drop(first);
+        drop(second);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    const FILE_LEASE_PROBE_ENV: &str = "ECHO_FILE_JOURNAL_LEASE_PROBE";
+
+    #[test]
+    fn file_process_lease_probe() {
+        let Ok(path) = std::env::var(FILE_LEASE_PROBE_ENV) else {
+            return;
+        };
+        let error = FileEventJournal::<String>::open(path, FileDurability::Flush)
+            .expect_err("competing process must fail open");
+        assert!(
+            error
+                .to_string()
+                .contains("already open in another process")
+        );
+    }
+
+    #[test]
+    fn file_journal_rejects_competing_process_while_lease_is_alive() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .expect("open leased journal");
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("current test binary"))
+                .arg("journal::file::tests::file_process_lease_probe")
+                .arg("--exact")
+                .arg("--nocapture")
+                .env(FILE_LEASE_PROBE_ENV, &path)
+                .output()
+                .expect("run file lease probe");
+        assert!(
+            output.status.success(),
+            "file lease probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        drop(journal);
         std::fs::remove_dir_all(root).ok();
     }
 }

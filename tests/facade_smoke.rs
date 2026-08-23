@@ -1,7 +1,9 @@
 use echo_agent::config::FrameworkConfig;
 use echo_agent::paths::DataRoot;
 use echo_agent::runtime::{AgentTurnDriver, TurnMode};
-use echo_agent::state::journal::{EventJournal, JournalDurabilityStatus, MemoryEventJournal};
+use echo_agent::state::journal::{
+    EventJournal, JournalDurabilityStatus, MemoryEventJournal, SegmentedFileEventJournal,
+};
 use echo_agent::tasks::{RuntimeTaskMutationError, RuntimeTaskRequeueOutcome};
 use echo_agent::tools::{StandardToolPack, ToolPack};
 
@@ -22,7 +24,7 @@ fn public_facade_composes_without_split_crates() {
 #[test]
 fn runtime_state_and_task_primitives_are_available_from_the_facade() {
     let journal = MemoryEventJournal::new();
-    let receipt = journal.append(&"facade-event".to_string()).expect("append");
+    let receipt = journal.append("facade-event".to_string()).expect("append");
     assert_eq!(receipt.record.sequence, 1);
     assert_eq!(receipt.durability, JournalDurabilityStatus::Confirmed);
 
@@ -30,6 +32,22 @@ fn runtime_state_and_task_primitives_are_available_from_the_facade() {
     let _mode = TurnMode::Chat;
     let _mutation_error: Option<RuntimeTaskMutationError> = None;
     let _requeue = RuntimeTaskRequeueOutcome::Superseded;
+}
+
+#[test]
+fn segmented_journal_is_available_from_the_public_facade() {
+    let root = tempfile::tempdir().expect("segmented facade tempdir");
+    let journal = SegmentedFileEventJournal::<String>::open(
+        root.path().join("events"),
+        1024,
+        echo_agent::utils::fs::FileDurability::Flush,
+    )
+    .expect("open segmented journal through facade");
+    let receipt = journal
+        .append("facade-segmented-event".to_string())
+        .expect("append segmented facade event");
+    assert_eq!(receipt.record.sequence, 1);
+    assert_eq!(journal.segments().len(), 1);
 }
 
 #[cfg(feature = "mcp")]
