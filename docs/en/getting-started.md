@@ -91,8 +91,21 @@ async fn multiply(a: f64, b: f64) -> Result<ToolResult> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+        echo_agent::error::ConfigError::MissingConfig(
+            "getting-started".to_string(),
+            "OPENAI_API_KEY".to_string(),
+        )
+    })?;
+    let llm_config = LlmConfig::for_provider(
+        "openai",
+        "https://api.openai.com/v1",
+        api_key,
+        "gpt-5.5",
+        LlmApiProtocol::Responses,
+    )?;
     let agent = agent! {
-        model: "deepseek-v4-flash",
+        llm_config: llm_config,
         system_prompt: "You are a math assistant. Use tools to calculate.",
         tools: [AddTool, MultiplyTool],
     }?;
@@ -106,7 +119,7 @@ async fn main() -> Result<()> {
 When you run this, the agent will reason through the problem: first call `add(3, 4)` to get 7, then `multiply(7, 5)` to get 35.
 
 ```bash
-cargo run
+OPENAI_API_KEY=sk-... cargo run
 ```
 
 ---
