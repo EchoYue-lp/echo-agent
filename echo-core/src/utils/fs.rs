@@ -3,6 +3,63 @@
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
+/// Lifetime-held exclusive lease for one file-backed authority.
+#[derive(Debug)]
+pub struct ExclusiveFileLease {
+    file: std::fs::File,
+    path: PathBuf,
+}
+
+impl ExclusiveFileLease {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ExclusiveFileLease {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// Acquire a non-blocking exclusive sidecar lease for `authority_path`.
+///
+/// One process owns the lease for the authority lifetime. Additional handles
+/// in that process must share the same authority rather than acquiring another
+/// lease; a competing process fails open instead of silently racing writes.
+pub fn try_exclusive_file_lease(authority_path: &Path) -> std::io::Result<ExclusiveFileLease> {
+    use fs2::FileExt;
+
+    let parent = authority_path.parent().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "authority path has no parent: {}",
+            authority_path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let name = authority_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("authority");
+    let path = parent.join(format!(".{name}.lease"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    file.try_lock_exclusive().map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "file-backed authority {} is already open in another process: {error}",
+                authority_path.display()
+            ),
+        )
+    })?;
+    Ok(ExclusiveFileLease { file, path })
+}
+
 /// Validate an external identifier before using it as one filesystem segment.
 pub fn validate_path_segment(value: &str) -> std::io::Result<&str> {
     if value.is_empty()
@@ -373,6 +430,21 @@ mod tests {
         atomic_write(&path, b"one")?;
         atomic_write(&path, b"two")?;
         assert_eq!(std::fs::read(&path)?, b"two");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn exclusive_file_lease_rejects_a_second_authority() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("echo-core-lease-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let authority = root.join("store.json");
+        let first = try_exclusive_file_lease(&authority)?;
+        assert!(try_exclusive_file_lease(&authority).is_err());
+        drop(first);
+        let reacquired = try_exclusive_file_lease(&authority)?;
+        assert!(reacquired.path().exists());
+        drop(reacquired);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

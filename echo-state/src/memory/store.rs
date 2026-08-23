@@ -6,6 +6,7 @@
 use crate::util::expand_tilde;
 use echo_core::error::{MemoryError, Result};
 pub use echo_core::memory::store::{Store, StoreItem};
+use echo_core::utils::fs::{ExclusiveFileLease, try_exclusive_file_lease};
 use echo_core::utils::time::now_secs;
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -221,16 +222,25 @@ impl Store for InMemoryStore {
 
 // ── FileStore ─────────────────────────────────────────────────────────────────
 
-/// JSON file-based persistent Store
+/// JSON file-based persistent Store.
+///
+/// Handles opened on the same canonical path share one in-process authority.
+/// Mutations persist a copy-on-write candidate before publishing it to readers,
+/// and a lifetime-held sidecar lease rejects a competing process.
 pub struct FileStore {
     path: PathBuf,
     authority: Arc<FileStoreAuthority>,
 }
 
 struct FileStoreAuthority {
-    data: RwLock<HashMap<String, HashMap<String, StoreItem>>>,
-    flush: AsyncMutex<()>,
+    data: RwLock<FileStoreData>,
+    transaction: AsyncMutex<()>,
+    _lease: ExclusiveFileLease,
+    #[cfg(test)]
+    persist_failure: Mutex<Option<String>>,
 }
+
+type FileStoreData = HashMap<String, HashMap<String, StoreItem>>;
 
 fn file_store_registry() -> &'static Mutex<HashMap<PathBuf, Weak<FileStoreAuthority>>> {
     static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<FileStoreAuthority>>>> = OnceLock::new();
@@ -255,6 +265,8 @@ impl FileStore {
         if let Some(authority) = registry.get(&path).and_then(Weak::upgrade) {
             return Ok(Self { path, authority });
         }
+        let lease = try_exclusive_file_lease(&path)
+            .map_err(|error| MemoryError::IoError(format!("acquire FileStore lease: {error}")))?;
         let data = if path.exists() {
             let raw =
                 std::fs::read_to_string(&path).map_err(|e| MemoryError::IoError(e.to_string()))?;
@@ -272,33 +284,59 @@ impl FileStore {
         info!(path = %path.display(), namespaces = ns_count, items = item_count, "FileStore initialized");
         let authority = Arc::new(FileStoreAuthority {
             data: RwLock::new(data),
-            flush: AsyncMutex::new(()),
+            transaction: AsyncMutex::new(()),
+            _lease: lease,
+            #[cfg(test)]
+            persist_failure: Mutex::new(None),
         });
         registry.insert(path.clone(), Arc::downgrade(&authority));
         Ok(Self { path, authority })
     }
 
-    async fn flush(&self) -> Result<()> {
-        let _flush = self.authority.flush.lock().await;
-        let snapshot = {
-            let data = self.authority.data.read().await;
-            data.clone()
-        };
+    async fn persist_candidate(&self, candidate: FileStoreData) -> Result<FileStoreData> {
         let path = self.path.clone();
         let persisted_path = path.clone();
-        tokio::task::spawn_blocking(move || {
-            let json = serde_json::to_vec_pretty(&snapshot)
+        #[cfg(test)]
+        let injected_failure = self
+            .authority
+            .persist_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        #[cfg(not(test))]
+        let injected_failure: Option<String> = None;
+        let candidate = tokio::task::spawn_blocking(move || {
+            if let Some(message) = injected_failure {
+                return Err(MemoryError::IoError(message));
+            }
+            let json = serde_json::to_vec_pretty(&candidate)
                 .map_err(|error| MemoryError::SerializationError(error.to_string()))?;
             echo_core::utils::fs::atomic_write(&path, &json)
                 .map_err(|error| MemoryError::IoError(error.to_string()))?;
-            Ok::<(), MemoryError>(())
+            Ok::<FileStoreData, MemoryError>(candidate)
         })
         .await
         .map_err(|error| {
             MemoryError::IoError(format!("FileStore persistence task failed: {error}"))
         })??;
         debug!(path = %persisted_path.display(), "Store persisted");
-        Ok(())
+        Ok(candidate)
+    }
+
+    async fn transact<T, F>(&self, mutate: F) -> Result<T>
+    where
+        T: Send,
+        F: FnOnce(&mut FileStoreData) -> (T, bool) + Send,
+    {
+        let _transaction = self.authority.transaction.lock().await;
+        let mut candidate = self.authority.data.read().await.clone();
+        let (result, changed) = mutate(&mut candidate);
+        if !changed {
+            return Ok(result);
+        }
+        let committed = self.persist_candidate(candidate).await?;
+        *self.authority.data.write().await = committed;
+        Ok(result)
     }
 
     /// Batch write: write multiple records to memory then flush to disk once, reducing IO overhead.
@@ -306,27 +344,43 @@ impl FileStore {
         &self,
         entries: impl IntoIterator<Item = (Vec<&str>, &str, Value)>,
     ) -> Result<()> {
-        {
-            let mut data = self.authority.data.write().await;
+        let entries = entries
+            .into_iter()
+            .map(|(namespace, key, value)| {
+                (
+                    namespace
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                    key.to_string(),
+                    value,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.transact(move |data| {
             for (namespace, key, value) in entries {
-                let ns_key = namespace_key(&namespace);
-                let ns_vec: Vec<String> = namespace.iter().map(|s| s.to_string()).collect();
+                let ns_key = namespace_key_owned(&namespace);
                 let bucket = data.entry(ns_key).or_default();
                 bucket
-                    .entry(key.to_string())
+                    .entry(key.clone())
                     .and_modify(|item| {
                         item.value = value.clone();
                         item.updated_at = now_secs();
                     })
-                    .or_insert_with(|| StoreItem::new(ns_vec, key.to_string(), value));
+                    .or_insert_with(|| StoreItem::new(namespace, key, value));
             }
-        }
-        self.flush().await
+            ((), true)
+        })
+        .await
     }
 
     /// Flush in-memory data to disk.
     pub async fn flush_public(&self) -> Result<()> {
-        self.flush().await
+        let _transaction = self.authority.transaction.lock().await;
+        let candidate = self.authority.data.read().await.clone();
+        let committed = self.persist_candidate(candidate).await?;
+        *self.authority.data.write().await = committed;
+        Ok(())
     }
 }
 
@@ -340,18 +394,19 @@ impl Store for FileStore {
         Box::pin(async move {
             let ns_key = namespace_key(namespace);
             let ns_vec: Vec<String> = namespace.iter().map(|s| s.to_string()).collect();
-            {
-                let mut data = self.authority.data.write().await;
+            let key = key.to_string();
+            self.transact(move |data| {
                 let bucket = data.entry(ns_key).or_default();
                 bucket
-                    .entry(key.to_string())
+                    .entry(key.clone())
                     .and_modify(|item| {
                         item.value = value.clone();
                         item.updated_at = now_secs();
                     })
-                    .or_insert_with(|| StoreItem::new(ns_vec, key.to_string(), value));
-            }
-            self.flush().await
+                    .or_insert_with(|| StoreItem::new(ns_vec, key, value));
+                ((), true)
+            })
+            .await
         })
     }
 
@@ -407,16 +462,15 @@ impl Store for FileStore {
     fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>> {
         Box::pin(async move {
             let ns_key = namespace_key(namespace);
-            let found = {
-                let mut data = self.authority.data.write().await;
-                data.get_mut(&ns_key)
-                    .map(|b| b.remove(key).is_some())
-                    .unwrap_or(false)
-            };
-            if found {
-                self.flush().await?;
-            }
-            Ok(found)
+            let key = key.to_string();
+            self.transact(move |data| {
+                let found = data
+                    .get_mut(&ns_key)
+                    .map(|b| b.remove(&key).is_some())
+                    .unwrap_or(false);
+                (found, found)
+            })
+            .await
         })
     }
 
@@ -458,30 +512,26 @@ impl Store for FileStore {
     fn prune_expired<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
         let ns_key = namespace_key(namespace);
         Box::pin(async move {
-            let removed = {
-                let mut data = self.authority.data.write().await;
+            self.transact(move |data| {
                 let Some(bucket) = data.get_mut(&ns_key) else {
-                    return Ok(0);
+                    return (0, false);
                 };
                 let before = bucket.len();
                 let now = now_secs();
                 bucket.retain(|_k, item| is_item_valid(item, now));
-                (before - bucket.len()) as u64
-            };
-            if removed > 0 {
-                self.flush().await?;
-            }
-            Ok(removed)
+                let removed = (before - bucket.len()) as u64;
+                (removed, removed > 0)
+            })
+            .await
         })
     }
 
     fn dedup_by_content<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
         let ns_key = namespace_key(namespace);
         Box::pin(async move {
-            let removed = {
-                let mut data = self.authority.data.write().await;
+            self.transact(move |data| {
                 let Some(bucket) = data.get_mut(&ns_key) else {
-                    return Ok(0);
+                    return (0, false);
                 };
                 let before = bucket.len();
                 let mut seen: std::collections::HashMap<u64, String> =
@@ -505,12 +555,10 @@ impl Store for FileStore {
                 for key in &to_remove {
                     bucket.remove(key);
                 }
-                (before - bucket.len()) as u64
-            };
-            if removed > 0 {
-                self.flush().await?;
-            }
-            Ok(removed)
+                let removed = (before - bucket.len()) as u64;
+                (removed, removed > 0)
+            })
+            .await
         })
     }
 }
@@ -812,7 +860,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_flushes_cannot_persist_an_older_snapshot_last() -> Result<()> {
+    async fn concurrent_transactions_publish_in_serial_commit_order() -> Result<()> {
         let root =
             std::env::temp_dir().join(format!("echo-store-flush-order-{}", uuid::Uuid::new_v4()));
         let path = root.join("store.json");
@@ -820,50 +868,34 @@ mod tests {
         let second = Arc::new(FileStore::new(&path)?);
         assert!(Arc::ptr_eq(&first.authority, &second.authority));
 
-        // Park both public mutations after their in-memory write but before
-        // either snapshot is captured for disk persistence.
-        let flush_guard = first.authority.flush.lock().await;
+        // Queue both copy-on-write transactions behind the same authority
+        // lock. Tokio's FIFO mutex ordering makes the expected commit order
+        // deterministic while neither candidate is visible before commit.
+        let transaction_guard = first.authority.transaction.lock().await;
+        let (old_started, old_ready) = tokio::sync::oneshot::channel();
         let old_store = Arc::clone(&first);
-        let old_write =
-            tokio::spawn(async move { old_store.put(&["order"], "key", json!("old")).await });
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if first
-                    .get(&["order"], "key")
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|item| item.value == json!("old"))
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|error| MemoryError::IoError(format!("old mutation did not park: {error}")))?;
+        let old_write = tokio::spawn(async move {
+            let _ = old_started.send(());
+            old_store.put(&["order"], "key", json!("old")).await
+        });
+        old_ready
+            .await
+            .map_err(|error| MemoryError::IoError(format!("old writer did not start: {error}")))?;
+        tokio::task::yield_now().await;
 
+        let (new_started, new_ready) = tokio::sync::oneshot::channel();
         let new_store = Arc::clone(&second);
-        let new_write =
-            tokio::spawn(async move { new_store.put(&["order"], "key", json!("new")).await });
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if second
-                    .get(&["order"], "key")
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|item| item.value == json!("new"))
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|error| MemoryError::IoError(format!("new mutation did not park: {error}")))?;
+        let new_write = tokio::spawn(async move {
+            let _ = new_started.send(());
+            new_store.put(&["order"], "key", json!("new")).await
+        });
+        new_ready
+            .await
+            .map_err(|error| MemoryError::IoError(format!("new writer did not start: {error}")))?;
+        tokio::task::yield_now().await;
+        assert!(first.get(&["order"], "key").await?.is_none());
 
-        drop(flush_guard);
+        drop(transaction_guard);
         old_write
             .await
             .map_err(|error| MemoryError::IoError(format!("old write task failed: {error}")))??;
@@ -880,6 +912,45 @@ mod tests {
                 .await?
                 .map(|item| item.value),
             Some(json!("new"))
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_never_publishes_or_leaks_into_later_commit() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("echo-store-atomic-{}", uuid::Uuid::new_v4()));
+        let path = root.join("store.json");
+        let store = FileStore::new(&path)?;
+        *store
+            .authority
+            .persist_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some("injected persistence failure".to_string());
+
+        assert!(
+            store
+                .put(&["atomic"], "failed", json!("must stay invisible"))
+                .await
+                .is_err()
+        );
+        assert!(store.get(&["atomic"], "failed").await?.is_none());
+        store
+            .put(&["atomic"], "committed", json!("visible"))
+            .await?;
+        assert!(store.get(&["atomic"], "failed").await?.is_none());
+        drop(store);
+
+        let reopened = FileStore::new(&path)?;
+        assert!(reopened.get(&["atomic"], "failed").await?.is_none());
+        assert_eq!(
+            reopened
+                .get(&["atomic"], "committed")
+                .await?
+                .map(|item| item.value),
+            Some(json!("visible"))
         );
         drop(reopened);
         std::fs::remove_dir_all(root).map_err(MemoryError::from)?;

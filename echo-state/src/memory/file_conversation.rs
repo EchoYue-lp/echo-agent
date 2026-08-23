@@ -33,13 +33,14 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use echo_core::error::{MemoryError, Result};
 use echo_core::memory::conversation::{
     Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
     StoredMessage,
 };
+use echo_core::utils::fs::{ExclusiveFileLease, try_exclusive_file_lease};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -221,13 +222,25 @@ struct StoreState {
 
 /// File-backed conversation store.
 ///
-/// All operations are serialized by an in-process `Mutex`. Suitable for a
-/// single-process local agent (the typical echo-agent consumer). For multi-
-/// process concurrency, use the SQLite backend.
+/// Handles opened on the same canonical base share one in-process authority
+/// and serialize operations through its mutex. A lifetime-held sidecar lease
+/// rejects a competing process instead of allowing unsynchronized file writes.
 #[derive(Clone)]
 pub struct FileConversationStore {
     base: PathBuf,
-    lock: Arc<Mutex<StoreState>>,
+    authority: Arc<FileConversationAuthority>,
+}
+
+struct FileConversationAuthority {
+    state: Mutex<StoreState>,
+    _lease: ExclusiveFileLease,
+}
+
+fn file_conversation_registry() -> &'static Mutex<HashMap<PathBuf, Weak<FileConversationAuthority>>>
+{
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<FileConversationAuthority>>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl FileConversationStore {
@@ -236,15 +249,29 @@ impl FileConversationStore {
         let base = base.as_ref().join("conversations");
         std::fs::create_dir_all(&base)
             .map_err(|e| MemoryError::IoError(format!("create conversations dir: {e}")))?;
+        let base = std::fs::canonicalize(&base).map_err(|error| {
+            MemoryError::IoError(format!("canonicalize conversations dir: {error}"))
+        })?;
+        let mut registry = file_conversation_registry().lock().map_err(|error| {
+            MemoryError::IoError(format!("FileConversationStore registry poisoned: {error}"))
+        })?;
+        if let Some(authority) = registry.get(&base).and_then(Weak::upgrade) {
+            return Ok(Self { base, authority });
+        }
+        let lease = try_exclusive_file_lease(&base).map_err(|error| {
+            MemoryError::IoError(format!("acquire FileConversationStore lease: {error}"))
+        })?;
         let meta = Self::read_meta(&base)?;
         Self::cleanup_orphaned_message_logs(&base)?;
-        Ok(Self {
-            base,
-            lock: Arc::new(Mutex::new(StoreState {
+        let authority = Arc::new(FileConversationAuthority {
+            state: Mutex::new(StoreState {
                 meta,
                 conversations: HashMap::new(),
-            })),
-        })
+            }),
+            _lease: lease,
+        });
+        registry.insert(base.clone(), Arc::downgrade(&authority));
+        Ok(Self { base, authority })
     }
 
     fn run_blocking<'a, T, F>(&'a self, operation: F) -> BoxFut<'a, T>
@@ -754,7 +781,7 @@ fn poison<T>(_: std::sync::PoisonError<T>) -> MemoryError {
 impl ConversationStore for FileConversationStore {
     fn create_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
         self.run_blocking(move |store| {
-            let mut state = store.lock.lock().map_err(poison)?;
+            let mut state = store.authority.state.lock().map_err(poison)?;
             store.create_conversation_locked(conv, &mut state.meta)
         })
     }
@@ -765,7 +792,7 @@ impl ConversationStore for FileConversationStore {
     ) -> BoxFut<'a, Option<Conversation>> {
         let conversation_id = conversation_id.to_string();
         self.run_blocking(move |store| {
-            let _guard = store.lock.lock().map_err(poison)?;
+            let _guard = store.authority.state.lock().map_err(poison)?;
             Ok(store
                 .read_manifest(&conversation_id)?
                 .map(|record| record.conversation))
@@ -777,7 +804,7 @@ impl ConversationStore for FileConversationStore {
         filter: ConversationFilter,
     ) -> BoxFut<'a, Vec<ConversationMeta>> {
         self.run_blocking(move |store| {
-            let _g = store.lock.lock().map_err(poison)?;
+            let _g = store.authority.state.lock().map_err(poison)?;
             let mut metas: Vec<ConversationMeta> = store
                 .read_all_manifests()?
                 .into_iter()
@@ -829,7 +856,7 @@ impl ConversationStore for FileConversationStore {
         let title = title.map(str::to_string);
         let summary = summary.map(str::to_string);
         self.run_blocking(move |store| {
-            let _guard = store.lock.lock().map_err(poison)?;
+            let _guard = store.authority.state.lock().map_err(poison)?;
             let mut record = match store.read_manifest(&conversation_id)? {
                 Some(r) => r,
                 None => return Ok(()), // matches SQL UPDATE on 0 rows.
@@ -857,7 +884,7 @@ impl ConversationStore for FileConversationStore {
     fn delete_conversation<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, ()> {
         let conversation_id = conversation_id.to_string();
         self.run_blocking(move |store| {
-            let mut state = store.lock.lock().map_err(poison)?;
+            let mut state = store.authority.state.lock().map_err(poison)?;
             let manifest = store.read_manifest(&conversation_id)?;
             let path = store.conv_path(&conversation_id)?;
             match std::fs::remove_file(&path) {
@@ -886,7 +913,7 @@ impl ConversationStore for FileConversationStore {
         let conversation_id = conversation_id.to_string();
         let messages = messages.to_vec();
         self.run_blocking(move |store| {
-            let mut state = store.lock.lock().map_err(poison)?;
+            let mut state = store.authority.state.lock().map_err(poison)?;
             let mut record = store
                 .read_manifest(&conversation_id)?
                 .ok_or_else(|| MemoryError::NotFound(format!("conversation: {conversation_id}")))?;
@@ -1033,7 +1060,7 @@ impl ConversationStore for FileConversationStore {
     fn get_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, Vec<StoredMessage>> {
         let conversation_id = conversation_id.to_string();
         self.run_blocking(move |store| {
-            let mut state = store.lock.lock().map_err(poison)?;
+            let mut state = store.authority.state.lock().map_err(poison)?;
             let record = store.read_record(&conversation_id)?;
             if let Some(record) = record {
                 state
@@ -1049,7 +1076,7 @@ impl ConversationStore for FileConversationStore {
     fn count_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, usize> {
         let conversation_id = conversation_id.to_string();
         self.run_blocking(move |store| {
-            let _guard = store.lock.lock().map_err(poison)?;
+            let _guard = store.authority.state.lock().map_err(poison)?;
             Ok(store
                 .read_manifest(&conversation_id)?
                 .map(|record| {
@@ -1069,7 +1096,7 @@ impl ConversationStore for FileConversationStore {
     ) -> BoxFut<'a, Vec<ConversationMeta>> {
         let query = query.to_string();
         self.run_blocking(move |store| {
-            let _guard = store.lock.lock().map_err(poison)?;
+            let _guard = store.authority.state.lock().map_err(poison)?;
             let needle = query.to_lowercase();
             let mut results = Vec::new();
             for mut record in store.read_all_manifests()? {
@@ -1124,7 +1151,7 @@ impl ConversationStore for FileConversationStore {
 
     fn ensure_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
         self.run_blocking(move |store| {
-            let mut state = store.lock.lock().map_err(poison)?;
+            let mut state = store.authority.state.lock().map_err(poison)?;
             if let Some(existing) = store.read_manifest(&conv.conversation_id)? {
                 return Ok(existing.conversation);
             }
@@ -1247,6 +1274,39 @@ mod tests {
             .await?;
 
         assert_ne!(io_thread, runtime_thread);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn independent_constructors_share_authority_and_allocate_unique_ids() -> TestResult {
+        let base = tmp_base();
+        let first_base = base.clone();
+        let second_base = base.clone();
+        let (first, second) = tokio::join!(
+            tokio::task::spawn_blocking(move || FileConversationStore::new(first_base)),
+            tokio::task::spawn_blocking(move || FileConversationStore::new(second_base)),
+        );
+        let first = first??;
+        let second = second??;
+        assert!(Arc::ptr_eq(&first.authority, &second.authority));
+
+        let (first_created, second_created) = tokio::join!(
+            first.create_conversation(new_conv("first", None)),
+            second.create_conversation(new_conv("second", None)),
+        );
+        let first_created = first_created?;
+        let second_created = second_created?;
+        assert_ne!(first_created.id, second_created.id);
+        drop(first);
+        drop(second);
+
+        let reopened = FileConversationStore::new(&base)?;
+        let listed = reopened
+            .list_conversations(ConversationFilter::default())
+            .await?;
+        assert_eq!(listed.len(), 2);
+        drop(reopened);
         std::fs::remove_dir_all(base)?;
         Ok(())
     }
