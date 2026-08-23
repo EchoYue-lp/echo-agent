@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::tasks::{TaskState, TaskStatus};
+use crate::tasks::TaskStatus;
 
 /// Background task state
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,25 +115,6 @@ impl BackgroundTaskState {
     pub fn is_terminal(&self) -> bool {
         self.status.is_terminal()
     }
-
-    /// Convert to TaskState
-    pub fn to_task_state(&self) -> TaskState {
-        TaskState {
-            task_id: self.task_id.clone(),
-            status: self.status.clone(),
-            evidence: Vec::new(),
-            changed_files: Vec::new(),
-            artifacts: Vec::new(),
-            commands_run: Vec::new(),
-            verification_result: None,
-            remaining_risks: Vec::new(),
-            next_unblocked_tasks: Vec::new(),
-            context_summary: None,
-            retry_count: 0,
-            parent_task_id: self.parent_task_id.clone(),
-            checkpoint_at: self.checkpoint_at,
-        }
-    }
 }
 
 /// Checkpoint store trait for persisting task states.
@@ -212,17 +193,5 @@ mod tests {
         state.mark_failed("error occurred");
         assert!(matches!(state.status, TaskStatus::Failed(_)));
         assert!(state.completed_at.is_some());
-    }
-
-    #[test]
-    fn test_background_task_state_to_task_state() {
-        let mut state = BackgroundTaskState::new("task1");
-        state.mark_started();
-        state.mark_completed(0, "success".to_string(), String::new());
-
-        let task_state = state.to_task_state();
-        assert_eq!(task_state.task_id, "task1");
-        assert_eq!(task_state.status, TaskStatus::Completed);
-        assert!(task_state.parent_task_id.is_none());
     }
 }

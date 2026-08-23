@@ -594,7 +594,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::tasks::{TaskKind, TaskStatus};
+    use crate::tasks::TaskStatus;
 
     #[derive(Default)]
     struct ScriptedController {
@@ -866,19 +866,12 @@ mod tests {
                 id: id.to_string(),
                 title: id.to_string(),
                 description: format!("execute {id}"),
-                kind: TaskKind::Investigation,
-                agent_role: "explorer".to_string(),
                 depends_on: dependencies
                     .iter()
                     .map(|dependency| dependency.to_string())
                     .collect(),
-                files: Vec::new(),
-                allowed_tools: Vec::new(),
-                required_artifacts: Vec::new(),
-                execution_checks: Vec::new(),
-                acceptance_criteria: Vec::new(),
                 max_retries: 1,
-                metadata: serde_json::Value::Null,
+                extension: serde_json::Value::Null,
             },
             execution: crate::tasks::TaskExecution {
                 task_id: id.to_string(),

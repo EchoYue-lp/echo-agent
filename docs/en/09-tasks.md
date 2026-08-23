@@ -8,10 +8,10 @@ one revisioned task graph. There is no separate task-manager state machine.
 - `TaskRevisionService` is the only CRUD, relation, validation, and revision
   authority.
 - `RuntimeDagExecutor` is the only dependency execution kernel.
-- `ManagedTask` is a rich serialization and presentation DTO. Converting or
-  mutating it does not commit graph state.
 - `TaskSpawner` tracks process-local background futures only; it does not own
   durable task relationships.
+- A plan is an editable, versioned artifact over the graph. It is not an
+  approval state machine.
 
 ## Task Model
 
@@ -25,10 +25,11 @@ pub struct Task {
 }
 ```
 
-`TaskSpec` contains the task id, title, description, kind, Subagent role,
-dependencies, file scope, tool constraints, verification requirements, and
-retry limit. `TaskExecution` contains status, retry count, failure fingerprint,
-and an optional attempt-scoped claim.
+`TaskSpec` contains only the task id, title, description, dependencies, retry
+limit, and an opaque product extension. `TaskExecution` contains status, retry
+count, failure fingerprint, and an optional attempt-scoped claim. Coding kinds,
+Subagent selection, files, tools, checks, review, and UI projections belong in
+an application-owned typed extension.
 
 The shared lifecycle includes `Pending`, `Running`, `Blocked`, `Retrying`,
 `Paused`, `Completed`, `Failed`, `TimedOut`, `Skipped`, and `Cancelled`.
@@ -68,8 +69,8 @@ let agent = ReactAgentBuilder::new()
     .build()?;
 ```
 
-The policy adapter may resolve scope and attach product metadata, but generic
-patch semantics and DAG validation stay in the framework.
+The policy adapter may resolve scope and attach a lossless product extension,
+but generic patch semantics and DAG validation stay in the framework.
 
 ## Runtime Execution
 
@@ -94,10 +95,10 @@ overwriting a reclaimed attempt.
 
 ## Projection and Progress
 
-`ManagedTask`, `TaskEvent`, and `TaskProgress` are consumer-facing projections.
-They can carry richer display, evidence, and progress data, but the next
-runtime decision is always made from a committed revision loaded through the
-canonical service/controller boundary.
+`TaskEvent` and `TaskProgress` are consumer-facing projections. Applications
+may derive richer todo, evidence, and UI data from the committed task extension,
+but the next runtime decision is always made from a committed revision loaded
+through the canonical service/controller boundary.
 
 See `demo48_personal_assistant` for direct service use and the
 `runtime_executor` tests for a deterministic controller implementation.

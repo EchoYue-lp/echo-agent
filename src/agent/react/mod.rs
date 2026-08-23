@@ -417,8 +417,7 @@ impl ReactAgent {
                 SubagentExecutorConfig {
                     unified_hook_executor: Some(unified_executor),
                     default_timeout_secs: config.subagent_timeout_secs,
-                    worktree_factory: config.subagent_worktree_factory.clone(),
-                    data_workspace_factory: config.subagent_data_workspace_factory.clone(),
+                    isolation_provider: config.subagent_isolation_provider.clone(),
                     prompt_compiler: config.subagent_prompt_compiler.clone(),
                     ..SubagentExecutorConfig::default()
                 },

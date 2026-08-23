@@ -50,8 +50,7 @@ impl SubagentBuilder {
                 can_delegate: false,
                 tags: Vec::new(),
                 lightweight: false,
-                isolate_worktree: false,
-                isolate_workspace: false,
+                isolation: None,
                 team: None,
                 is_background: false,
             },
@@ -179,25 +178,10 @@ impl SubagentBuilder {
         self
     }
 
-    /// Request that Fork-dispatched execution of this subagent run inside an
-    /// isolated git worktree (Sprint 8). Mirrors Claude Code's
-    /// `isolation: worktree`. Only effective for writer subagents; requires a
-    /// `WorktreeFactory` configured on the executor (else a warning is logged
-    /// and the subagent runs without isolation).
-    pub fn isolate_worktree(mut self) -> Self {
-        self.definition.isolate_worktree = true;
-        self
-    }
-
-    /// Request that Fork-dispatched execution of this subagent run inside an
-    /// isolated data workspace (Sprint 10) — a per-subagent disjoint working
-    /// directory for data/research subagents emitting generated artifacts
-    /// (CSVs/parquet/charts), without git coupling. Requires a
-    /// `DataWorkspaceFactory` configured on the executor (else a warning is
-    /// logged and the subagent runs without a workspace). A subagent should declare
-    /// at most one of `.isolate_worktree()` / `.isolate_workspace()`.
-    pub fn isolate_workspace(mut self) -> Self {
-        self.definition.isolate_workspace = true;
+    /// Request a product-defined isolation kind for Fork dispatch.
+    pub fn isolation(mut self, kind: impl Into<String>) -> Self {
+        let kind = kind.into();
+        self.definition.isolation = (!kind.trim().is_empty()).then(|| kind.trim().to_string());
         self
     }
 

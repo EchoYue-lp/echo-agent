@@ -28,9 +28,8 @@ use super::prompt::{
 };
 use super::registry::SubagentRegistry;
 use super::types::{
-    ExecutionMode, ObservedIsolation, SubagentArtifact, SubagentOutcome, SubagentResult,
-    SubagentStatus, SubagentTouchedFiles, SubagentVerification, SubagentVerificationSource,
-    SubagentVerificationStatus,
+    ExecutionMode, ObservedIsolation, SubagentArtifact, SubagentEvidence, SubagentEvidenceSource,
+    SubagentOutcome, SubagentResult, SubagentStatus,
 };
 use crate::tasks::NestedDelegationPolicy;
 
@@ -180,74 +179,26 @@ fn correlate_subagent_hook(
     ctx.with_run_correlation(run_id, None, execution_id, Some(attempt))
 }
 
-fn verification_check_from_tool(name: &str, args: &serde_json::Value) -> Option<String> {
-    let normalized = name.to_ascii_lowercase().replace('-', "_");
-    if !matches!(
-        normalized.as_str(),
-        "shell" | "bash" | "terminal" | "run_code" | "execute_command"
-    ) {
-        return None;
-    }
-    ["command", "cmd", "code", "script"]
-        .iter()
-        .find_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn file_access_from_tool(name: &str, args: &serde_json::Value) -> Option<(bool, String)> {
-    let normalized = name.to_ascii_lowercase().replace('-', "_");
-    let write = normalized.contains("write")
-        || normalized.contains("edit")
-        || normalized.contains("delete")
-        || normalized.contains("patch");
-    let read = normalized.contains("read")
-        || normalized.contains("search")
-        || normalized.contains("glob")
-        || normalized.contains("grep");
-    if !write && !read {
-        return None;
-    }
-    ["path", "file_path", "target", "directory"]
-        .iter()
-        .find_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|path| (write, path.to_string()))
-}
-
 fn bounded_detail(text: &str) -> String {
     text.chars().take(500).collect()
 }
 
-fn push_unique(values: &mut Vec<String>, value: String) {
-    if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
-        values.push(value);
-    }
-}
-
 /// Merge runtime-observed evidence into a parsed result.
 ///
-/// Observed checks replace older facts for the same exact check, while file
-/// access and artifacts are unioned under the shared result bounds.
+/// Observed facts replace older evidence with the same kind, subject, and
+/// attributes, while distinct invocations and artifacts are preserved.
 pub fn merge_observed_evidence(
     outcome: &mut SubagentOutcome,
-    verification: Vec<SubagentVerification>,
-    touched_files: SubagentTouchedFiles,
+    evidence: Vec<SubagentEvidence>,
     artifacts: Vec<SubagentArtifact>,
 ) {
-    for observed in verification {
-        outcome
-            .verification
-            .retain(|existing| existing.check != observed.check);
-        outcome.verification.push(observed);
-    }
-    for path in touched_files.read {
-        push_unique(&mut outcome.touched_files.read, path);
-    }
-    for path in touched_files.written {
-        push_unique(&mut outcome.touched_files.written, path);
+    for observed in evidence {
+        outcome.evidence.retain(|existing| {
+            existing.kind != observed.kind
+                || existing.subject != observed.subject
+                || existing.attributes != observed.attributes
+        });
+        outcome.evidence.push(observed);
     }
     for artifact in artifacts {
         outcome
@@ -353,20 +304,8 @@ pub struct SubagentExecutorConfig {
     /// When set, SubagentStart/SubagentStop events are fired into the
     /// unified HookRegistry alongside the trait-based SubagentHooks.
     pub unified_hook_executor: Option<crate::skills::hooks::UnifiedHookExecutorFn>,
-    /// Optional worktree-isolation factory (Sprint 8). When set, Fork-dispatched
-    /// subagents whose `SubagentDefinition.isolate_worktree == true` run inside an
-    /// isolated git worktree created by this factory. `None` = isolation
-    /// unavailable: subagents declaring `isolate_worktree` **hard-fail** (do not
-    /// silently share the main tree). Application supplies a git-backed impl;
-    /// framework stays free of git deps.
-    pub worktree_factory: Option<super::worktree::SharedWorktreeFactory>,
-    /// Optional data-workspace factory (Sprint 10). When set, Fork-dispatched
-    /// subagents whose `SubagentDefinition.isolate_workspace == true` run inside
-    /// an isolated per-subagent working directory (tmpdir) created by this
-    /// factory — for data/research subagents emitting disjoint output artifacts.
-    /// `None` = no workspace isolation available. Application supplies a
-    /// tmpdir-backed impl.
-    pub data_workspace_factory: Option<super::workspace::SharedDataWorkspaceFactory>,
+    /// Optional application-owned provider for product-defined isolation kinds.
+    pub isolation_provider: Option<super::isolation::SharedIsolationProvider>,
     /// Compiler shared by direct `agent_tool` and programmatic delegation.
     pub prompt_compiler: Arc<dyn SubagentPromptCompiler>,
 }
@@ -378,8 +317,7 @@ impl Default for SubagentExecutorConfig {
             default_timeout_secs: 600,
             enable_hooks: true,
             unified_hook_executor: None,
-            worktree_factory: None,
-            data_workspace_factory: None,
+            isolation_provider: None,
             prompt_compiler: Arc::new(super::prompt::DefaultSubagentPromptCompiler),
         }
     }
@@ -917,8 +855,7 @@ impl SubagentExecutor {
                 default_timeout_secs: self.config.default_timeout_secs,
                 enable_hooks: self.config.enable_hooks,
                 unified_hook_executor: self.config.unified_hook_executor.clone(),
-                worktree_factory: self.config.worktree_factory.clone(),
-                data_workspace_factory: self.config.data_workspace_factory.clone(),
+                isolation_provider: self.config.isolation_provider.clone(),
                 prompt_compiler: self.config.prompt_compiler.clone(),
             },
             semaphore: self.semaphore.clone(),
@@ -1297,7 +1234,7 @@ impl SubagentExecutor {
             tokens_used,
             was_truncated: false,
             mode: ExecutionMode::Team,
-            isolation_observed: ObservedIsolation::Subagent,
+            isolation_observed: ObservedIsolation::new("subagent"),
             usage: result.usage,
         }
         .with_structured(
@@ -1400,10 +1337,8 @@ impl SubagentExecutor {
         let mut prompt_tokens: usize = 0;
         let mut completion_tokens: usize = 0;
         let mut usage_stats = super::usage::LlmUsageStats::default();
-        let mut pending_verification = HashMap::<String, String>::new();
-        let mut pending_file_access = HashMap::<String, (bool, String)>::new();
-        let mut observed_verification = Vec::new();
-        let mut touched_files = SubagentTouchedFiles::default();
+        let mut pending_tool_evidence = HashMap::<String, (String, serde_json::Value)>::new();
+        let mut observed_evidence = Vec::new();
         let mut observed_artifacts = Vec::new();
 
         while let Some(event_result) = stream.next().await {
@@ -1490,15 +1425,10 @@ impl SubagentExecutor {
                     call_id,
                     invocation,
                 } => {
-                    if let Some(check) =
-                        verification_check_from_tool(&invocation.name, &invocation.args)
-                    {
-                        pending_verification.insert(call_id.clone(), check);
-                    }
-                    if let Some(access) = file_access_from_tool(&invocation.name, &invocation.args)
-                    {
-                        pending_file_access.insert(call_id.clone(), access);
-                    }
+                    pending_tool_evidence.insert(
+                        call_id.clone(),
+                        (invocation.name.clone(), invocation.args.clone()),
+                    );
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolStarted {
@@ -1520,29 +1450,21 @@ impl SubagentExecutor {
                         .as_deref()
                         .filter(|value| !value.is_empty())
                         .unwrap_or(&result.output);
-                    if let Some(check) = pending_verification.remove(&call_id) {
-                        observed_verification.push(SubagentVerification {
-                            check,
-                            status: if result.success {
-                                SubagentVerificationStatus::Passed
-                            } else {
-                                SubagentVerificationStatus::Failed
-                            },
-                            details: bounded_detail(detail),
-                            source: SubagentVerificationSource::Observed,
-                        });
-                    }
-                    if result.success
-                        && let Some((write, path)) = pending_file_access.remove(&call_id)
-                    {
-                        if write {
-                            push_unique(&mut touched_files.written, path);
+                    let (subject, args) = pending_tool_evidence
+                        .remove(&call_id)
+                        .unwrap_or_else(|| (name.clone(), serde_json::Value::Null));
+                    observed_evidence.push(SubagentEvidence {
+                        kind: "tool_result".to_string(),
+                        subject,
+                        outcome: Some(if result.success {
+                            "succeeded".to_string()
                         } else {
-                            push_unique(&mut touched_files.read, path);
-                        }
-                    } else {
-                        pending_file_access.remove(&call_id);
-                    }
+                            "failed".to_string()
+                        }),
+                        details: bounded_detail(detail),
+                        source: SubagentEvidenceSource::Observed,
+                        attributes: serde_json::json!({ "args": args }),
+                    });
                     if let Some(artifact) =
                         echo_core::tools::artifact::ToolOutputArtifactRef::from_metadata(
                             &result.metadata,
@@ -1623,16 +1545,11 @@ impl SubagentExecutor {
             tokens_used,
             was_truncated: false,
             mode,
-            isolation_observed: ObservedIsolation::Unknown,
+            isolation_observed: ObservedIsolation::default(),
             usage,
         }
         .with_structured(execution_id.as_deref(), artifact_base_dir.as_deref());
-        merge_observed_evidence(
-            &mut result.outcome,
-            observed_verification,
-            touched_files,
-            observed_artifacts,
-        );
+        merge_observed_evidence(&mut result.outcome, observed_evidence, observed_artifacts);
         Ok(result)
     }
 
@@ -1828,39 +1745,15 @@ impl SubagentExecutor {
             .and_then(|ctx| ctx.execution_id.clone());
         let event_run_id = runtime_context.as_ref().and_then(|ctx| ctx.run_id.clone());
 
-        // Sprint 8: worktree isolation for writer subagents. Resolve the intent
-        // before spawning so the closure can capture a shared factory clone.
-        let isolate = registered.definition.isolate_worktree;
-        let worktree_factory = if isolate {
-            self.config.worktree_factory.clone()
-        } else {
-            None
-        };
-        if isolate && worktree_factory.is_none() {
-            // Hard-fail: a subagent that declared isolate_worktree must not
-            // silently share the main tree (multi-implementer safety). Local
-            // personal-assistant threat model still needs this — otherwise
-            // parallel writers corrupt each other's edits.
+        let isolation_kind = registered.definition.isolation.clone();
+        let isolation_provider = isolation_kind
+            .as_ref()
+            .and_then(|_| self.config.isolation_provider.clone());
+        if isolation_kind.is_some() && isolation_provider.is_none() {
+            // Local execution still requires this guard: silently dropping a
+            // requested isolation boundary can corrupt user data.
             return Err(ReactError::Other(format!(
-                "Subagent '{}' declares isolate_worktree but no WorktreeFactory is configured; \
-                 refusing to run without isolation",
-                agent_name
-            )));
-        }
-        // Sprint 10: data-workspace isolation for data/research subagents.
-        // Mutually exclusive with worktree in intent — if a subagent declares
-        // both, worktree wins (it also provides disjoint FS). Resolve the
-        // workspace factory only when worktree isolation isn't being used.
-        let isolate_workspace = registered.definition.isolate_workspace && !isolate;
-        let data_workspace_factory = if isolate_workspace {
-            self.config.data_workspace_factory.clone()
-        } else {
-            None
-        };
-        if isolate_workspace && data_workspace_factory.is_none() {
-            return Err(ReactError::Other(format!(
-                "Subagent '{}' declares isolate_workspace but no DataWorkspaceFactory is configured; \
-                 refusing to run without isolation",
+                "Subagent '{}' requests isolation but no IsolationProvider is configured; refusing to run without isolation",
                 agent_name
             )));
         }
@@ -1878,14 +1771,13 @@ impl SubagentExecutor {
             has_runtime_context = runtime_context.is_some(),
             has_trace_sink,
             timeout_secs,
-            isolate_worktree = isolate,
-            isolate_workspace,
+            isolation = isolation_kind.as_deref().unwrap_or("context"),
             "subagent_fork_start"
         );
         // Prefer a caller-supplied stable isolation identity so retries of one
         // logical task can reuse the same worktree/workspace while preserving
         // their distinct execution ids for events and audit records.
-        let worktree_identity = runtime_context
+        let isolation_identity = runtime_context
             .as_ref()
             .and_then(|context| {
                 context
@@ -1897,7 +1789,7 @@ impl SubagentExecutor {
             })
             .map(str::to_string)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_simple().to_string());
-        let worktree_label = format!("{agent_name}-{worktree_identity}");
+        let isolation_label = format!("{agent_name}-{isolation_identity}");
         let execution_cancel = cancel.child_token();
         let invocation_allowed_tools = req
             .parent_context
@@ -1921,64 +1813,35 @@ impl SubagentExecutor {
                 return Ok(result);
             }
 
-            // Sprint 8: if isolation was requested and a factory is available,
-            // create a worktree and bind it as the subagent's working_dir BEFORE
-            // execution. Creation failure is a hard error — never silently run
-            // a writer without the promised isolation (would let it touch the
-            // main checkout, a data-loss hazard).
-            //
-            // `create` may block on a git subprocess; the application's factory
-            // is responsible for offloading that to spawn_blocking if needed.
-            // We capture the handle to finalize (diff summary) after the run.
-            let mut worktree_handle: Option<super::worktree::WorktreeHandle> = None;
-            if let Some(factory) = &worktree_factory {
-                match factory.create(&worktree_label) {
+            let mut isolation_handle: Option<super::isolation::IsolationHandle> = None;
+            if let (Some(provider), Some(kind)) = (&isolation_provider, &isolation_kind) {
+                let request = super::isolation::IsolationRequest {
+                    kind: kind.clone(),
+                    label: isolation_label,
+                };
+                match provider.isolate(&request) {
                     Ok(handle) => {
-                        worktree_handle = Some(handle);
+                        isolation_handle = Some(handle);
                     }
-                    Err(e) => {
+                    Err(error) => {
                         return Err(ReactError::Other(format!(
-                            "Worktree isolation for Fork subagent '{agent_name}' failed: {e}"
+                            "Isolation '{}' for Fork subagent '{agent_name}' failed: {error}",
+                            request.kind
                         )));
                     }
                 }
             }
-
-            // Sprint 10: data-workspace isolation. Same shape as worktree above
-            // but for data/research subagents: a per-subagent tmpdir bound as
-            // working_dir so output files are disjoint across parallel subagents.
-            // Creation failure is a hard error (consistent with worktree).
-            let mut workspace_handle: Option<super::workspace::DataWorkspaceHandle> = None;
-            if let Some(factory) = &data_workspace_factory {
-                match factory.create(&worktree_label) {
-                    Ok(handle) => {
-                        workspace_handle = Some(handle);
-                    }
-                    Err(e) => {
-                        return Err(ReactError::Other(format!(
-                            "Data workspace for Fork subagent '{agent_name}' failed: {e}"
-                        )));
-                    }
-                }
-            }
-
-            let isolation_observed = if worktree_handle.is_some() {
-                ObservedIsolation::Worktree
-            } else if workspace_handle.is_some() {
-                ObservedIsolation::Workspace
-            } else {
-                ObservedIsolation::Context
-            };
+            let isolation_observed = isolation_handle
+                .as_ref()
+                .map(|handle| handle.observed.clone())
+                .unwrap_or_else(|| ObservedIsolation::new("context"));
             let disabled_tools = invocation_disabled_tools(
                 agent_arc.tool_names(),
                 invocation_allowed_tools.as_deref(),
             );
             let invocation = AgentInvocationContext {
                 runtime: runtime_context.clone(),
-                working_dir: worktree_handle
-                    .as_ref()
-                    .map(|handle| handle.path.clone())
-                    .or_else(|| workspace_handle.as_ref().map(|handle| handle.path.clone())),
+                working_dir: isolation_handle.as_ref().map(|handle| handle.path.clone()),
                 cancel: None,
                 disabled_tools,
                 visible_tools: None,
@@ -1990,7 +1853,7 @@ impl SubagentExecutor {
                 .emit(SubagentEvent::DispatchIsolationObserved {
                     parent: parent_agent.clone(),
                     agent: agent_name.clone(),
-                    isolation: isolation_observed,
+                    isolation: isolation_observed.clone(),
                     execution_id: event_execution_id.clone(),
                     run_id: event_run_id.clone(),
                 });
@@ -2062,50 +1925,29 @@ impl SubagentExecutor {
                 subagent_result.isolation_observed = isolation_observed;
             }
 
-            // Sprint 8: finalize the worktree and append its diff summary. The
-            // working directory is invocation-scoped, so reusable subagents keep
-            // no mutable directory state that needs restoring after dispatch.
-            if let Some(handle) = worktree_handle {
+            if let Some(handle) = isolation_handle {
                 match (handle.finalize)() {
-                    Ok(diff) => {
+                    Ok(finalized) => {
                         if let Ok(mut r) = result {
-                            if !diff.trim().is_empty() {
-                                r.output =
-                                    format!("{}\n\n--- worktree diff ---\n{}", r.output, diff);
-                            }
-                            return Ok(r);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            subagent = %agent_name,
-                            error = %e,
-                            "Worktree finalize (diff summary) failed; result preserved"
-                        );
-                    }
-                }
-            }
-
-            // Sprint 10: finalize the invocation-scoped data workspace and
-            // append its file listing so downstream subagents can find outputs.
-            if let Some(handle) = workspace_handle {
-                match (handle.finalize)() {
-                    Ok(listing) => {
-                        if let Ok(mut r) = result {
-                            if !listing.trim().is_empty() {
+                            if !finalized.summary.trim().is_empty() {
                                 r.output = format!(
-                                    "{}\n\n--- workspace outputs ---\n{}",
-                                    r.output, listing
+                                    "{}\n\n--- isolation outcome ---\n{}",
+                                    r.output, finalized.summary
                                 );
                             }
+                            merge_observed_evidence(
+                                &mut r.outcome,
+                                finalized.evidence,
+                                finalized.artifacts,
+                            );
                             return Ok(r);
                         }
                     }
-                    Err(e) => {
+                    Err(error) => {
                         tracing::warn!(
                             subagent = %agent_name,
-                            error = %e,
-                            "Data workspace finalize (file listing) failed; result preserved"
+                            error = %error,
+                            "Subagent isolation finalization failed; result preserved"
                         );
                     }
                 }
@@ -2445,41 +2287,72 @@ mod tests {
     #[test]
     fn merge_observed_evidence_keeps_latest_check_result() {
         let mut outcome = SubagentOutcome {
-            verification: vec![SubagentVerification {
-                check: "cargo test".to_string(),
-                status: SubagentVerificationStatus::Passed,
+            evidence: vec![SubagentEvidence {
+                kind: "verification".to_string(),
+                subject: "cargo test".to_string(),
+                outcome: Some("passed".to_string()),
                 details: "model claim".to_string(),
-                source: SubagentVerificationSource::Reported,
+                source: SubagentEvidenceSource::Reported,
+                attributes: serde_json::Value::Null,
             }],
             ..SubagentOutcome::default()
         };
         merge_observed_evidence(
             &mut outcome,
             vec![
-                SubagentVerification {
-                    check: "cargo test".to_string(),
-                    status: SubagentVerificationStatus::Failed,
+                SubagentEvidence {
+                    kind: "verification".to_string(),
+                    subject: "cargo test".to_string(),
+                    outcome: Some("failed".to_string()),
                     details: "first run failed".to_string(),
-                    source: SubagentVerificationSource::Observed,
+                    source: SubagentEvidenceSource::Observed,
+                    attributes: serde_json::Value::Null,
                 },
-                SubagentVerification {
-                    check: "cargo test".to_string(),
-                    status: SubagentVerificationStatus::Passed,
+                SubagentEvidence {
+                    kind: "verification".to_string(),
+                    subject: "cargo test".to_string(),
+                    outcome: Some("passed".to_string()),
                     details: "retry passed".to_string(),
-                    source: SubagentVerificationSource::Observed,
+                    source: SubagentEvidenceSource::Observed,
+                    attributes: serde_json::Value::Null,
                 },
             ],
-            SubagentTouchedFiles::default(),
             Vec::new(),
         );
         assert!(matches!(
-            outcome.verification.as_slice(),
-            [SubagentVerification {
-                status: SubagentVerificationStatus::Passed,
-                source: SubagentVerificationSource::Observed,
+            outcome.evidence.as_slice(),
+            [SubagentEvidence {
+                source: SubagentEvidenceSource::Observed,
                 ..
             }]
         ));
+        assert_eq!(
+            outcome
+                .evidence
+                .first()
+                .and_then(|item| item.outcome.as_deref()),
+            Some("passed")
+        );
+    }
+
+    #[test]
+    fn merge_observed_evidence_preserves_distinct_tool_arguments() {
+        let mut outcome = SubagentOutcome::default();
+        let evidence = ["src/a.rs", "src/b.rs"]
+            .into_iter()
+            .map(|path| SubagentEvidence {
+                kind: "tool_result".to_string(),
+                subject: "write_file".to_string(),
+                outcome: Some("succeeded".to_string()),
+                details: String::new(),
+                source: SubagentEvidenceSource::Observed,
+                attributes: serde_json::json!({ "args": { "path": path } }),
+            })
+            .collect();
+
+        merge_observed_evidence(&mut outcome, evidence, Vec::new());
+
+        assert_eq!(outcome.evidence.len(), 2);
     }
 
     #[tokio::test]
@@ -3583,29 +3456,40 @@ mod tests {
         Ok(())
     }
 
-    // ── Sprint 8: Fork worktree isolation ──────────────────────────────────
+    // ── Generic Fork isolation ─────────────────────────────────────────────
 
-    use crate::agent::subagent::worktree::{WorktreeError, WorktreeFactory, WorktreeHandle};
+    use crate::agent::subagent::{
+        IsolationError, IsolationHandle, IsolationOutcome, IsolationProvider, IsolationRequest,
+    };
     use std::sync::Mutex as StdMutex;
 
     /// A mock factory whose `create` always succeeds, records the label, and
     /// whose `finalize` returns a canned diff. `should_fail` toggles hard-fail.
-    struct MockWorktreeFactory {
+    struct MockIsolationProvider {
         labels: StdMutex<Vec<String>>,
         should_fail: bool,
     }
 
-    impl WorktreeFactory for MockWorktreeFactory {
-        fn create(&self, label: &str) -> std::result::Result<WorktreeHandle, WorktreeError> {
+    impl IsolationProvider for MockIsolationProvider {
+        fn isolate(
+            &self,
+            request: &IsolationRequest,
+        ) -> std::result::Result<IsolationHandle, IsolationError> {
             if self.should_fail {
-                return Err(WorktreeError::new("mock worktree create failed"));
+                return Err(IsolationError::new("mock isolation failed"));
             }
+            let label = &request.label;
             self.labels.lock().unwrap().push(label.to_string());
             let path = std::path::PathBuf::from(format!("/tmp/mock-wt-{label}"));
-            Ok(WorktreeHandle {
+            Ok(IsolationHandle {
                 path,
+                observed: ObservedIsolation::new(&request.kind),
                 finalize: Box::new(|| {
-                    Ok::<String, WorktreeError>("=== mock diff ===\nfoo.rs | 1 +".to_string())
+                    Ok(IsolationOutcome {
+                        summary: "=== mock diff ===\nfoo.rs | 1 +".to_string(),
+                        artifacts: Vec::new(),
+                        evidence: Vec::new(),
+                    })
                 }),
             })
         }
@@ -3613,13 +3497,13 @@ mod tests {
 
     /// Build an executor with a worktree factory wired into its config.
     fn make_executor_with_factory(
-        factory: Arc<dyn WorktreeFactory>,
+        provider: Arc<dyn IsolationProvider>,
     ) -> (Arc<SubagentRegistry>, SubagentExecutor) {
         let registry = Arc::new(SubagentRegistry::new());
         let executor = SubagentExecutor::new(
             registry.clone(),
             SubagentExecutorConfig {
-                worktree_factory: Some(factory),
+                isolation_provider: Some(provider),
                 ..SubagentExecutorConfig::default()
             },
         );
@@ -3627,20 +3511,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_isolate_worktree_binds_path_and_appends_diff() {
-        // A writer subagent declaring isolate_worktree should observe Worktree
-        // isolation for this invocation and append the finalized diff.
-        let factory = Arc::new(MockWorktreeFactory {
+    async fn fork_provider_binds_path_and_appends_outcome() {
+        let factory = Arc::new(MockIsolationProvider {
             labels: StdMutex::new(Vec::new()),
             should_fail: false,
         });
-        let factory_obs: Arc<dyn WorktreeFactory> = factory.clone();
+        let factory_obs: Arc<dyn IsolationProvider> = factory.clone();
         let (registry, executor) = make_executor_with_factory(factory_obs);
 
         let agent = MockAgent::new("writer").with_response("done");
         let def = super::super::types::SubagentDefinition {
             execution_mode: ExecutionMode::Fork,
-            isolate_worktree: true,
+            isolation: Some("sandbox".to_string()),
             ..super::super::types::SubagentDefinition::new("writer", "Writer")
         };
         registry.register(def, Box::new(agent.clone())).await;
@@ -3673,16 +3555,16 @@ mod tests {
 
     #[tokio::test]
     async fn fork_worktree_prefers_stable_isolation_identity() -> std::result::Result<(), String> {
-        let factory = Arc::new(MockWorktreeFactory {
+        let factory = Arc::new(MockIsolationProvider {
             labels: StdMutex::new(Vec::new()),
             should_fail: false,
         });
-        let factory_for_executor: Arc<dyn WorktreeFactory> = factory.clone();
+        let factory_for_executor: Arc<dyn IsolationProvider> = factory.clone();
         let (registry, executor) = make_executor_with_factory(factory_for_executor);
         let agent = MockAgent::new("writer").with_response("done");
         let definition = super::super::types::SubagentDefinition {
             execution_mode: ExecutionMode::Fork,
-            isolate_worktree: true,
+            isolation: Some("sandbox".to_string()),
             ..super::super::types::SubagentDefinition::new("writer", "Writer")
         };
         registry.register(definition, Box::new(agent)).await;
@@ -3729,16 +3611,16 @@ mod tests {
     #[tokio::test]
     async fn fork_worktree_observation_precedes_subagent_completion()
     -> std::result::Result<(), String> {
-        let factory = Arc::new(MockWorktreeFactory {
+        let factory = Arc::new(MockIsolationProvider {
             labels: StdMutex::new(Vec::new()),
             should_fail: false,
         });
-        let factory_obs: Arc<dyn WorktreeFactory> = factory;
+        let factory_obs: Arc<dyn IsolationProvider> = factory;
         let (registry, executor) = make_executor_with_factory(factory_obs);
         let agent = MockAgent::new("writer").with_response("done");
         let def = super::super::types::SubagentDefinition {
             execution_mode: ExecutionMode::Fork,
-            isolate_worktree: true,
+            isolation: Some("sandbox".to_string()),
             ..super::super::types::SubagentDefinition::new("writer", "Writer")
         };
         registry.register(def, Box::new(agent)).await;
@@ -3762,7 +3644,7 @@ mod tests {
             .dispatch(req)
             .await
             .map_err(|error| error.to_string())?;
-        if result.isolation_observed != ObservedIsolation::Worktree {
+        if result.isolation_observed != ObservedIsolation::new("sandbox") {
             return Err(format!(
                 "expected worktree result observation, got {:?}",
                 result.isolation_observed
@@ -3776,10 +3658,8 @@ mod tests {
         }
         if !matches!(
             observed.as_ref(),
-            SubagentEvent::DispatchIsolationObserved {
-                isolation: ObservedIsolation::Worktree,
-                ..
-            }
+            SubagentEvent::DispatchIsolationObserved { isolation, .. }
+                if isolation.as_str() == "sandbox"
         ) {
             return Err(format!(
                 "second event was not worktree observation: {observed:?}"
@@ -3794,16 +3674,16 @@ mod tests {
     #[tokio::test]
     async fn concurrent_forks_carry_distinct_worktree_invocations()
     -> std::result::Result<(), String> {
-        let factory = Arc::new(MockWorktreeFactory {
+        let factory = Arc::new(MockIsolationProvider {
             labels: StdMutex::new(Vec::new()),
             should_fail: false,
         });
-        let factory_obs: Arc<dyn WorktreeFactory> = factory;
+        let factory_obs: Arc<dyn IsolationProvider> = factory;
         let (registry, executor) = make_executor_with_factory(factory_obs);
         let agent = MockAgent::new("writer").with_responses(["done-a", "done-b"]);
         let def = super::super::types::SubagentDefinition {
             execution_mode: ExecutionMode::Fork,
-            isolate_worktree: true,
+            isolation: Some("sandbox".to_string()),
             ..super::super::types::SubagentDefinition::new("writer", "Writer")
         };
         registry.register(def, Box::new(agent.clone())).await;
@@ -3873,58 +3753,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_isolate_worktree_create_failure_fails_dispatch() {
+    async fn fork_isolation_provider_failure_fails_dispatch() {
         // A factory that hard-fails → dispatch must fail, never run unisolated.
-        let factory = Arc::new(MockWorktreeFactory {
+        let factory = Arc::new(MockIsolationProvider {
             labels: StdMutex::new(Vec::new()),
             should_fail: true,
         });
-        let factory_obs: Arc<dyn WorktreeFactory> = factory;
+        let factory_obs: Arc<dyn IsolationProvider> = factory;
         let (registry, executor) = make_executor_with_factory(factory_obs);
 
         let agent = MockAgent::new("writer").with_response("done");
         let def = super::super::types::SubagentDefinition {
             execution_mode: ExecutionMode::Fork,
-            isolate_worktree: true,
-            ..super::super::types::SubagentDefinition::new("writer", "Writer")
-        };
-        registry.register(def, Box::new(agent.clone())).await;
-
-        let req = DispatchRequest {
-            agent_name: "writer".into(),
-            task: "edit foo".into(),
-            mode_override: None,
-            cancel: CancellationToken::new(),
-            parent_agent: "parent".into(),
-            parent_context: None,
-            delegation_policy: DispatchRequest::policy_from_depth(0),
-            runtime_context: None,
-            message: None,
-            prompt_payload: None,
-            constraints: Vec::new(),
-            background: false,
-        };
-
-        let err = executor.dispatch(req).await.unwrap_err();
-        assert!(err.to_string().contains("Worktree isolation"), "got: {err}");
-        // The dispatch hard-failed (the safety gate) — never silently continued
-        // without isolation. The error message itself is the proof; we don't
-        // assert on MockAgent's recorded working_dir_calls because the registry
-        // stores the agent behind an Arc<dyn Agent> and the recorded-state
-        // sharing across the clone boundary is not reliably observable here.
-        let _ = agent; // suppress unused warning
-    }
-
-    #[tokio::test]
-    async fn fork_isolate_without_factory_hard_fails() {
-        // isolate_worktree=true but NO factory configured → hard-fail
-        // (must not silently share the main tree with other writers).
-        let (registry, executor) = make_executor().await; // default config, no factory
-
-        let agent = MockAgent::new("writer").with_response("done");
-        let def = super::super::types::SubagentDefinition {
-            execution_mode: ExecutionMode::Fork,
-            isolate_worktree: true,
+            isolation: Some("sandbox".to_string()),
             ..super::super::types::SubagentDefinition::new("writer", "Writer")
         };
         registry.register(def, Box::new(agent.clone())).await;
@@ -3946,7 +3787,48 @@ mod tests {
 
         let err = executor.dispatch(req).await.unwrap_err();
         assert!(
-            err.to_string().contains("no WorktreeFactory")
+            err.to_string().contains("Isolation 'sandbox'"),
+            "got: {err}"
+        );
+        // The dispatch hard-failed (the safety gate) — never silently continued
+        // without isolation. The error message itself is the proof; we don't
+        // assert on MockAgent's recorded working_dir_calls because the registry
+        // stores the agent behind an Arc<dyn Agent> and the recorded-state
+        // sharing across the clone boundary is not reliably observable here.
+        let _ = agent; // suppress unused warning
+    }
+
+    #[tokio::test]
+    async fn fork_isolate_without_factory_hard_fails() {
+        // A requested boundary with no provider must hard-fail.
+        let (registry, executor) = make_executor().await; // default config, no factory
+
+        let agent = MockAgent::new("writer").with_response("done");
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolation: Some("sandbox".to_string()),
+            ..super::super::types::SubagentDefinition::new("writer", "Writer")
+        };
+        registry.register(def, Box::new(agent.clone())).await;
+
+        let req = DispatchRequest {
+            agent_name: "writer".into(),
+            task: "edit foo".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            prompt_payload: None,
+            constraints: Vec::new(),
+            background: false,
+        };
+
+        let err = executor.dispatch(req).await.unwrap_err();
+        assert!(
+            err.to_string().contains("no IsolationProvider")
                 || err
                     .to_string()
                     .contains("refusing to run without isolation"),
@@ -3956,20 +3838,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_no_isolate_does_not_touch_worktree() {
-        // A readonly subagent (isolate_worktree=false) never creates a worktree
-        // even when a factory is configured.
-        let factory = Arc::new(MockWorktreeFactory {
+    async fn fork_without_isolation_does_not_invoke_provider() {
+        // A subagent with no isolation request never invokes the provider.
+        let factory = Arc::new(MockIsolationProvider {
             labels: StdMutex::new(Vec::new()),
             should_fail: false,
         });
-        let factory_obs: Arc<dyn WorktreeFactory> = factory.clone();
+        let factory_obs: Arc<dyn IsolationProvider> = factory.clone();
         let (registry, executor) = make_executor_with_factory(factory_obs);
 
         let agent = MockAgent::new("reader").with_response("ok");
         let def = super::super::types::SubagentDefinition {
             execution_mode: ExecutionMode::Fork,
-            isolate_worktree: false, // readonly
             ..super::super::types::SubagentDefinition::new("reader", "Reader")
         };
         registry.register(def, Box::new(agent.clone())).await;
@@ -3991,36 +3871,39 @@ mod tests {
 
         let result = executor.dispatch(req).await.unwrap();
         assert_eq!(result.output, "ok");
-        assert_eq!(result.isolation_observed, ObservedIsolation::Context);
+        assert_eq!(result.isolation_observed, ObservedIsolation::new("context"));
         // Factory never invoked — readonly subagents don't request isolation.
         assert!(factory.labels.lock().unwrap().is_empty());
         let _ = agent;
     }
 
-    // ── Sprint 10: Fork data-workspace isolation ───────────────────────────
+    // A second provider proves the framework treats isolation kinds opaquely.
 
-    use crate::agent::subagent::workspace::{
-        DataWorkspaceFactory, DataWorkspaceHandle, WorkspaceError,
-    };
-
-    /// A mock data-workspace factory mirroring MockWorktreeFactory.
+    /// A second mock provider used with a different opaque isolation kind.
     struct MockWorkspaceFactory {
         labels: StdMutex<Vec<String>>,
         should_fail: bool,
     }
 
-    impl DataWorkspaceFactory for MockWorkspaceFactory {
-        fn create(&self, label: &str) -> std::result::Result<DataWorkspaceHandle, WorkspaceError> {
+    impl IsolationProvider for MockWorkspaceFactory {
+        fn isolate(
+            &self,
+            request: &IsolationRequest,
+        ) -> std::result::Result<IsolationHandle, IsolationError> {
             if self.should_fail {
-                return Err(WorkspaceError::new("mock workspace create failed"));
+                return Err(IsolationError::new("mock workspace create failed"));
             }
+            let label = &request.label;
             self.labels.lock().unwrap().push(label.to_string());
-            Ok(DataWorkspaceHandle {
+            Ok(IsolationHandle {
                 path: std::path::PathBuf::from(format!("/tmp/mock-ws-{label}")),
+                observed: ObservedIsolation::new(&request.kind),
                 finalize: Box::new(|| {
-                    Ok::<String, WorkspaceError>(
-                        "run_001_clean.parquet\nrun_001_stats.json".to_string(),
-                    )
+                    Ok(IsolationOutcome {
+                        summary: "run_001_clean.parquet\nrun_001_stats.json".to_string(),
+                        artifacts: Vec::new(),
+                        evidence: Vec::new(),
+                    })
                 }),
             })
         }
@@ -4028,13 +3911,13 @@ mod tests {
 
     /// Build an executor with a data-workspace factory wired into its config.
     fn make_executor_with_workspace_factory(
-        factory: Arc<dyn DataWorkspaceFactory>,
+        provider: Arc<dyn IsolationProvider>,
     ) -> (Arc<SubagentRegistry>, SubagentExecutor) {
         let registry = Arc::new(SubagentRegistry::new());
         let executor = SubagentExecutor::new(
             registry.clone(),
             SubagentExecutorConfig {
-                data_workspace_factory: Some(factory),
+                isolation_provider: Some(provider),
                 ..SubagentExecutorConfig::default()
             },
         );
@@ -4042,21 +3925,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_isolate_workspace_appends_file_listing() {
-        // A data subagent declaring isolate_workspace, dispatched in Fork mode
-        // with a configured factory: the workspace is created and the finalize
-        // file listing is appended to the output (proof of creation+finalize).
+    async fn fork_arbitrary_isolation_kind_appends_provider_summary() {
         let factory = Arc::new(MockWorkspaceFactory {
             labels: StdMutex::new(Vec::new()),
             should_fail: false,
         });
-        let factory_obs: Arc<dyn DataWorkspaceFactory> = factory.clone();
+        let factory_obs: Arc<dyn IsolationProvider> = factory.clone();
         let (registry, executor) = make_executor_with_workspace_factory(factory_obs);
 
         let agent = MockAgent::new("analyst").with_response("analysis done");
         let def = super::super::types::SubagentDefinition {
             execution_mode: ExecutionMode::Fork,
-            isolate_workspace: true,
+            isolation: Some("workspace".to_string()),
             ..super::super::types::SubagentDefinition::new("analyst", "Analyst")
         };
         registry.register(def, Box::new(agent)).await;
@@ -4079,8 +3959,11 @@ mod tests {
         let result = executor.dispatch(req).await.unwrap();
         assert!(result.output.contains("analysis done"));
         assert!(result.output.contains("run_001_clean.parquet"));
-        assert!(result.output.contains("--- workspace outputs ---"));
-        assert_eq!(result.isolation_observed, ObservedIsolation::Workspace);
+        assert!(result.output.contains("--- isolation outcome ---"));
+        assert_eq!(
+            result.isolation_observed,
+            ObservedIsolation::new("workspace")
+        );
         // Factory invoked once with a label derived from the agent name.
         let labels = factory.labels.lock().unwrap().clone();
         assert_eq!(labels.len(), 1);
@@ -4088,19 +3971,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_isolate_workspace_create_failure_fails_dispatch() {
+    async fn fork_arbitrary_isolation_kind_propagates_provider_failure() {
         // Workspace factory hard-fails → dispatch fails (safety gate).
         let factory = Arc::new(MockWorkspaceFactory {
             labels: StdMutex::new(Vec::new()),
             should_fail: true,
         });
-        let factory_obs: Arc<dyn DataWorkspaceFactory> = factory;
+        let factory_obs: Arc<dyn IsolationProvider> = factory;
         let (registry, executor) = make_executor_with_workspace_factory(factory_obs);
 
         let agent = MockAgent::new("analyst").with_response("ok");
         let def = super::super::types::SubagentDefinition {
             execution_mode: ExecutionMode::Fork,
-            isolate_workspace: true,
+            isolation: Some("workspace".to_string()),
             ..super::super::types::SubagentDefinition::new("analyst", "Analyst")
         };
         registry.register(def, Box::new(agent)).await;
@@ -4121,19 +4004,19 @@ mod tests {
         };
 
         let err = executor.dispatch(req).await.unwrap_err();
-        assert!(err.to_string().contains("Data workspace"), "got: {err}");
+        assert!(
+            err.to_string().contains("Isolation 'workspace'"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
-    async fn fork_worktree_takes_precedence_over_workspace() {
-        // If a subagent declares BOTH isolate_worktree and isolate_workspace,
-        // worktree wins (it also provides disjoint FS) — workspace factory is
-        // not invoked. Guards against double-isolation.
+    async fn fork_uses_only_the_configured_provider() {
         let ws_factory = Arc::new(MockWorkspaceFactory {
             labels: StdMutex::new(Vec::new()),
             should_fail: false,
         });
-        let wt_factory = Arc::new(MockWorktreeFactory {
+        let wt_factory = Arc::new(MockIsolationProvider {
             labels: StdMutex::new(Vec::new()),
             should_fail: false,
         });
@@ -4141,8 +4024,7 @@ mod tests {
         let executor = SubagentExecutor::new(
             registry.clone(),
             SubagentExecutorConfig {
-                worktree_factory: Some(wt_factory.clone()),
-                data_workspace_factory: Some(ws_factory.clone()),
+                isolation_provider: Some(wt_factory.clone()),
                 ..SubagentExecutorConfig::default()
             },
         );
@@ -4150,8 +4032,7 @@ mod tests {
         let agent = MockAgent::new("w").with_response("done");
         let def = super::super::types::SubagentDefinition {
             execution_mode: ExecutionMode::Fork,
-            isolate_worktree: true,
-            isolate_workspace: true, // both — worktree should win
+            isolation: Some("sandbox".to_string()),
             ..super::super::types::SubagentDefinition::new("w", "Writer")
         };
         registry.register(def, Box::new(agent)).await;

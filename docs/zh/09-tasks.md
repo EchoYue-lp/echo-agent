@@ -7,8 +7,8 @@ echo-agent 将单任务、Todo 风格列表和依赖 DAG 统一表示为一个�
 
 - `TaskRevisionService` 是唯一的 CRUD、关系、校验和版本权威。
 - `RuntimeDagExecutor` 是唯一的依赖执行内核。
-- `ManagedTask` 是包含丰富字段的序列化与展示 DTO；转换或修改它不会提交任务图。
 - `TaskSpawner` 只追踪进程内后台 Future，不拥有持久任务关系。
+- Plan 是任务图之上的可编辑、版本化 artifact，不进入审批状态机。
 
 ## 任务模型
 
@@ -21,9 +21,10 @@ pub struct Task {
 }
 ```
 
-`TaskSpec` 包含任务 ID、标题、描述、类型、Subagent 角色、依赖、文件范围、
-工具约束、验证要求和重试上限。`TaskExecution` 包含状态、重试计数、失败指纹
-以及可选的 attempt 级 claim。
+`TaskSpec` 只包含任务 ID、标题、描述、依赖、重试上限和 opaque 产品 extension。
+`TaskExecution` 包含状态、重试计数、失败指纹以及可选的 attempt 级 claim。
+coding 类型、Subagent 选择、文件、工具、checks、review 和 UI 投影都由应用层
+typed extension 持有。
 
 共享生命周期包含 `Pending`、`Running`、`Blocked`、`Retrying`、`Paused`、
 `Completed`、`Failed`、`TimedOut`、`Skipped` 和 `Cancelled`，所有迁移由
@@ -62,7 +63,7 @@ let agent = ReactAgentBuilder::new()
     .build()?;
 ```
 
-策略适配器可以解析 scope 并附加产品 metadata，但通用 patch 语义和 DAG 校验
+策略适配器可以解析 scope 并附加无损产品 extension，但通用 patch 语义和 DAG 校验
 始终由框架负责。
 
 ## 运行时执行
@@ -85,8 +86,8 @@ controller 是持久化、Subagent 调度、review 和产品资源策略的薄�
 
 ## 投影与进度
 
-`ManagedTask`、`TaskEvent` 和 `TaskProgress` 是面向消费者的投影，可携带更丰富
-的展示、证据和进度数据；下一步运行时决策始终基于通过单一服务/controller
+`TaskEvent` 和 `TaskProgress` 是面向消费者的投影。应用可从已提交 extension
+派生 Todo、证据和 UI 数据；下一步运行时决策始终基于通过单一 service/controller
 边界加载的已提交版本。
 
 直接服务用法见 `demo48_personal_assistant`，确定性 controller 用法见

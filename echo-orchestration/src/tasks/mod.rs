@@ -8,10 +8,8 @@ mod events;
 pub mod revisioned;
 pub mod runtime;
 pub mod runtime_executor;
-mod task;
 pub mod task_tools;
 mod time;
-pub mod verifier;
 
 pub mod background_task;
 pub mod command_cell;
@@ -40,7 +38,7 @@ pub use revisioned::{
 };
 pub use runtime::{
     DagExecutionState, DagRefresh, NestedDelegationPolicy, SuggestedTask, Task, TaskClaim,
-    TaskExecution, TaskExecutionSummary, TaskId, TaskKind, TaskSpec, TaskStatus, TaskSubagent,
+    TaskExecution, TaskExecutionSummary, TaskId, TaskSpec, TaskStatus, TaskSubagent,
     TaskSubagentContext,
 };
 pub use runtime_executor::{
@@ -48,17 +46,7 @@ pub use runtime_executor::{
     RuntimeDagOutcome, RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskClaimOutcome,
     RuntimeTaskResolution,
 };
-pub use task::{
-    Artifact, ArtifactType, AttemptStatus, ChangeType, CheckpointPolicy, CommandRecord,
-    ContextScope, Evidence, EvidenceType, FallbackStrategy, FileChange, InputType, ManagedTask,
-    OutputType, RiskLevel, TaskAttempt, TaskInput, TaskOutput, TaskState, TaskType,
-    VerificationResult, VerificationSpec, VerificationType,
-};
 pub use task_tools::{
     TaskCreateTool, TaskListTool, TaskUpdateTool, build_task_create_tool, build_task_list_tool,
     build_task_tools, build_task_update_tool,
-};
-pub use verifier::{
-    CommandVerifier, DiffCheckVerifier, FileExistsVerifier, HumanReviewVerifier, LlmReviewVerifier,
-    NoopVerifier, TestVerifier, Verifier, VerifierFactory,
 };

@@ -11,13 +11,12 @@ pub mod control;
 pub mod events;
 pub mod executor;
 pub mod hooks;
+pub mod isolation;
 pub mod prompt;
 pub mod registry;
 pub mod team;
 pub mod types;
 pub mod usage;
-pub mod workspace;
-pub mod worktree;
 
 // Re-export the most commonly used types
 pub use builder::SubagentBuilder;
@@ -32,6 +31,10 @@ pub use executor::{
     TeammateHandle, merge_observed_evidence, subagent_status_from_error,
 };
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
+pub use isolation::{
+    IsolationError, IsolationHandle, IsolationOutcome, IsolationProvider, IsolationRequest,
+    SharedIsolationProvider,
+};
 pub use prompt::{
     CompiledSubagentInvocation, CompiledSubagentSystemPrompt, ContextTransferPolicy,
     DefaultSubagentPromptCompiler, PromptDiagnostics, PromptSectionDiagnostic,
@@ -45,14 +48,6 @@ pub use team::{
 };
 pub use types::{
     ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentArtifact, SubagentDefinition,
-    SubagentKind, SubagentOutcome, SubagentResult, SubagentStatus, SubagentTouchedFiles,
-    SubagentVerification, SubagentVerificationSource, SubagentVerificationStatus,
-    parse_subagent_outcome, render_result_contract, split_subagent_output,
-};
-pub use workspace::{
-    DataWorkspaceFactory, DataWorkspaceHandle, NoWorkspaceFactory, SharedDataWorkspaceFactory,
-    WorkspaceError,
-};
-pub use worktree::{
-    NoWorktreeFactory, SharedWorktreeFactory, WorktreeError, WorktreeFactory, WorktreeHandle,
+    SubagentEvidence, SubagentEvidenceSource, SubagentKind, SubagentOutcome, SubagentResult,
+    SubagentStatus, parse_subagent_outcome, render_result_contract, split_subagent_output,
 };

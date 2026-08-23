@@ -24,8 +24,7 @@ use echo_agent::memory::SqliteStore;
 use echo_agent::prelude::*;
 use echo_agent::tasks::{
     DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, TaskCreateInput, TaskDraft,
-    TaskGraphExecutionMode, TaskKind, TaskPlanPatchInputOp, TaskRevisionService, TaskStatus,
-    TaskUpdateInput,
+    TaskGraphExecutionMode, TaskPlanPatchInputOp, TaskRevisionService, TaskStatus, TaskUpdateInput,
 };
 use echo_agent::tools::ToolContext;
 use serde_json::json;
@@ -402,16 +401,9 @@ fn task_draft(id: &str, description: &str) -> TaskDraft {
         id: id.to_string(),
         title: description.to_string(),
         description: description.to_string(),
-        kind: TaskKind::Implementation,
-        subagent: None,
         depends_on: Vec::new(),
-        files: Vec::new(),
-        allowed_tools: Vec::new(),
-        required_artifacts: Vec::new(),
-        execution_checks: Vec::new(),
-        acceptance_criteria: Vec::new(),
         max_retries: 0,
-        extensions: serde_json::Value::Null,
+        extension: serde_json::json!({ "kind": "implementation" }),
     }
 }
 

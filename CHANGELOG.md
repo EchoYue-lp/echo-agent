@@ -52,8 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Task graph mutation and execution now have one authority:
   `TaskRevisionService` owns CRUD and relation commits, while
   `RuntimeDagExecutor` owns ready-frontier, retry, cancellation, and terminal
-  settlement. `ManagedTask` remains a rich projection DTO rather than a
-  mutable graph.
+  settlement. The legacy `ManagedTask`/`PlanSpec`/`Verifier` parallel model was
+  removed; product fields round-trip through `TaskSpec::extension`.
 - `TaskToolPolicy` implementations must now provide the idempotent
   `abort_scope_preparation` hook. `TaskRevisionService::create_from_tool`
   invokes it after any post-`ensure_scope` preparation, validation, load, or

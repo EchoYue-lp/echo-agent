@@ -235,7 +235,7 @@ impl AgentDispatchTool {
                 .clone()
                 .unwrap_or_else(|| registered.definition.execution_mode.clone());
             let def = &registered.definition;
-            let isolation_forces_fork = def.isolate_worktree || def.isolate_workspace;
+            let isolation_forces_fork = def.isolation.is_some();
             if isolation_forces_fork {
                 exec_mode = ExecutionMode::Fork;
             }
@@ -366,8 +366,8 @@ impl Tool for AgentDispatchTool {
          completion arrives via events / chat note). One call delegates one bounded \
          task. When the host provides a formal task planner, use that planner for \
          coordinated, dependent, or parallel multi-task work. Synchronous completion returns a \
-         JSON result with status, summary, artifacts, verification, remaining_work, \
-         and touched_files. Use only agent_name values listed in the schema.\n\
+         JSON result with status, summary, artifacts, evidence, remaining_work, \
+         and evidence. Use only agent_name values listed in the schema.\n\
          The Subagent's result is not visible to the user — summarize it in your reply to the user.\n\
          Tell the Subagent clearly whether to write code or only do research, and the expected result format.\n\
          Do not duplicate work the Subagent is already doing (same searches, edits, or checks).\n\
@@ -470,16 +470,19 @@ mod tests {
     #[test]
     fn synchronous_parent_result_preserves_structured_contract() -> Result<(), String> {
         let outcome = SubagentOutcome {
-            contract_version: 1,
+            contract_version: 2,
             status: crate::agent::subagent::SubagentStatus::TimedOut,
             summary: "partial result".to_string(),
             artifacts: Vec::new(),
-            verification: Vec::new(),
+            evidence: vec![crate::agent::subagent::SubagentEvidence {
+                kind: "file_read".to_string(),
+                subject: "src/lib.rs".to_string(),
+                outcome: Some("succeeded".to_string()),
+                details: String::new(),
+                source: crate::agent::subagent::SubagentEvidenceSource::Observed,
+                attributes: serde_json::Value::Null,
+            }],
             remaining_work: vec!["finish verification".to_string()],
-            touched_files: crate::agent::subagent::SubagentTouchedFiles {
-                read: vec!["src/lib.rs".to_string()],
-                written: Vec::new(),
-            },
         };
         let serialized = serialize_parent_result(&outcome).map_err(|error| error.to_string())?;
         let decoded: SubagentOutcome =
