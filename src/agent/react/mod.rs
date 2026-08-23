@@ -2921,6 +2921,52 @@ impl Agent for ReactAgent {
         )
     }
 
+    fn chat_stream_message_with_cancel<'a>(
+        &'a self,
+        message: crate::llm::types::Message,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        let invocation = echo_core::agent::AgentInvocationContext {
+            cancel: Some(cancel),
+            ..Default::default()
+        };
+        Box::pin(
+            async move {
+                self.run_stream_message_entry(message, run::StreamMode::Chat, Some(invocation))
+                    .await
+            }
+            .instrument(info_span!(
+                "agent_chat_stream_message_with_cancel",
+                agent.name = %agent,
+                agent.model = %model
+            )),
+        )
+    }
+
+    fn chat_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: crate::llm::types::Message,
+        cancel: CancellationToken,
+        mut invocation: echo_core::agent::AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        invocation.cancel = Some(cancel);
+        Box::pin(
+            async move {
+                self.run_stream_message_entry(message, run::StreamMode::Chat, Some(invocation))
+                    .await
+            }
+            .instrument(info_span!(
+                "agent_chat_stream_message_with_invocation_context",
+                agent.name = %agent,
+                agent.model = %model
+            )),
+        )
+    }
+
     fn execute_stream_with_cancel<'a>(
         &'a self,
         task: &'a str,

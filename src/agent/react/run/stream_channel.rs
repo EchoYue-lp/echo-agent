@@ -1424,6 +1424,50 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn sequential_structured_chat_calls_preserve_prior_turn_messages() -> Result<()> {
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .with_response("first answer")
+                .with_response("second answer"),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("You are a test assistant.")
+            .build()?;
+
+        let first = agent
+            .chat_stream_message_with_invocation_context(
+                Message::user("first question".to_string()),
+                crate::agent::CancellationToken::new(),
+                echo_core::agent::AgentInvocationContext::default(),
+            )
+            .await?;
+        let _: Vec<_> = first.collect().await;
+        let second = agent
+            .chat_stream_message_with_invocation_context(
+                Message::user("second question".to_string()),
+                crate::agent::CancellationToken::new(),
+                echo_core::agent::AgentInvocationContext::default(),
+            )
+            .await?;
+        let _: Vec<_> = second.collect().await;
+
+        let calls = llm.all_calls();
+        let second_messages = calls.get(1).ok_or_else(|| {
+            crate::error::ReactError::Other("missing second LLM call".to_string())
+        })?;
+        for expected in ["first question", "first answer", "second question"] {
+            assert!(second_messages.iter().any(|message| {
+                message
+                    .content
+                    .as_text()
+                    .is_some_and(|text| text.contains(expected))
+            }));
+        }
+        Ok(())
+    }
+
     /// Collect the AgentEvents emitted by one streaming turn.
     async fn collect_events(agent: &ReactAgent, text: &str) -> Vec<AgentEvent> {
         let stream = agent

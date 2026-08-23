@@ -7,7 +7,8 @@
 pub mod turn_driver;
 
 pub use turn_driver::{
-    AgentTurnDriver, EventSink, TurnMode, TurnOutcome, TurnReceipt, TurnRequest,
+    AgentTurnDriver, EventSink, SinkControl, TurnInput, TurnMode, TurnOutcome, TurnReceipt,
+    TurnRequest,
 };
 
 /// Re-exported transport identity types used to build a [`turn_driver::TurnRequest`].

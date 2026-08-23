@@ -709,6 +709,38 @@ pub trait Agent: Send + Sync {
         })
     }
 
+    /// Multi-turn chat streaming with a structured multimodal message.
+    ///
+    /// Implementations must preserve the same conversational semantics as
+    /// [`Self::chat_stream_with_cancel`]: append to the existing context rather
+    /// than resetting it. The default is unsupported because extracting a
+    /// borrowed text fallback from an owned message would not be lifetime-safe.
+    fn chat_stream_message_with_cancel<'a>(
+        &'a self,
+        _message: Message,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            Err(crate::error::ReactError::Other(
+                "this agent does not implement multimodal streaming (chat_stream_message_with_cancel)"
+                    .to_string(),
+            ))
+        })
+    }
+
+    /// Structured multi-turn chat with value-scoped invocation metadata.
+    ///
+    /// The default delegates to the existing structured chat method so
+    /// third-party agents can opt into metadata without changing semantics.
+    fn chat_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        _invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.chat_stream_message_with_cancel(message, cancel)
+    }
+
     /// Streaming task execution with cancellation (multimodal version).
     ///
     /// Accepts a pre-built [`Message`] so subagents dispatched via subagent
@@ -934,6 +966,23 @@ impl Agent for Box<dyn Agent> {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         self.as_ref().chat_stream_with_cancel(message, cancel)
+    }
+    fn chat_stream_message_with_cancel<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.as_ref()
+            .chat_stream_message_with_cancel(message, cancel)
+    }
+    fn chat_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.as_ref()
+            .chat_stream_message_with_invocation_context(message, cancel, invocation)
     }
     fn execute_stream_message_with_cancel<'a>(
         &'a self,

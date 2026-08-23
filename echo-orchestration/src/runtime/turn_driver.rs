@@ -33,7 +33,9 @@
 //!
 //! ```
 //! use echo_core::agent::{Agent, EventIdentity};
-//! use echo_orchestration::runtime::turn_driver::{AgentTurnDriver, EventSink, TurnMode, TurnRequest};
+//! use echo_orchestration::runtime::turn_driver::{
+//!     AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnRequest,
+//! };
 //! use std::sync::Arc;
 //!
 //! # struct MyAgent;
@@ -62,8 +64,9 @@
 //! # }
 //! # struct PrintSink;
 //! # impl EventSink for PrintSink {
-//! #     fn on_event(&self, _envelope: &echo_core::agent::EventEnvelope) -> bool {
-//! #         true
+//! #     fn on_event(&self, _envelope: &echo_core::agent::EventEnvelope)
+//! #         -> echo_core::error::Result<SinkControl> {
+//! #         Ok(SinkControl::Continue)
 //! #     }
 //! # }
 //! # async fn run() -> echo_core::error::Result<()> {
@@ -78,10 +81,11 @@
 //! ```
 
 use echo_core::agent::{
-    Agent, AgentEvent, CancellationToken, EventEnvelope, EventIdentity, TurnId,
-    envelope_event_stream_after,
+    Agent, AgentEvent, AgentInvocationContext, CancellationToken, EventEnvelope, EventIdentity,
+    TurnId, envelope_event_stream_after,
 };
 use echo_core::error::{AgentFailure, ReactError};
+use echo_core::llm::Message;
 use futures::StreamExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -99,8 +103,8 @@ pub enum TurnMode {
 /// One finite Agent invocation to drive.
 #[derive(Debug, Clone)]
 pub struct TurnRequest {
-    /// User-visible instruction or task text.
-    pub message: String,
+    /// Text or structured multimodal input.
+    pub input: TurnInput,
     /// Transport identity stamped onto every emitted envelope.
     pub identity: EventIdentity,
     /// Chat vs execute stream flavor.
@@ -111,16 +115,38 @@ pub struct TurnRequest {
     /// Last durably persisted envelope sequence; the wrapped stream resumes
     /// sequencing at `last_persisted_sequence + 1`.
     pub last_persisted_sequence: u64,
+    /// Value-scoped run, tool visibility, working-directory, and history
+    /// metadata. Structured message callers use the invocation-aware Agent API.
+    pub invocation: Option<AgentInvocationContext>,
+}
+
+/// Input accepted by one driven turn.
+#[derive(Debug, Clone)]
+pub enum TurnInput {
+    Text(String),
+    Message(Message),
 }
 
 impl TurnRequest {
     pub fn new(identity: EventIdentity, message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
+            input: TurnInput::Text(message.into()),
             identity,
             mode: TurnMode::Chat,
             cancel: None,
             last_persisted_sequence: 0,
+            invocation: None,
+        }
+    }
+
+    pub fn from_message(identity: EventIdentity, message: Message) -> Self {
+        Self {
+            input: TurnInput::Message(message),
+            identity,
+            mode: TurnMode::Chat,
+            cancel: None,
+            last_persisted_sequence: 0,
+            invocation: None,
         }
     }
 
@@ -136,6 +162,11 @@ impl TurnRequest {
 
     pub fn last_persisted_sequence(mut self, sequence: u64) -> Self {
         self.last_persisted_sequence = sequence;
+        self
+    }
+
+    pub fn invocation(mut self, invocation: AgentInvocationContext) -> Self {
+        self.invocation = Some(invocation);
         self
     }
 }
@@ -210,7 +241,12 @@ impl TurnReceipt {
         self.outcome.status()
     }
 
-    fn failed(turn_id: TurnId, failure: AgentFailure, started: Instant) -> Self {
+    fn failed(
+        turn_id: TurnId,
+        failure: AgentFailure,
+        last_event_sequence: u64,
+        started: Instant,
+    ) -> Self {
         Self {
             turn_id,
             outcome: TurnOutcome::Failed(failure),
@@ -218,7 +254,7 @@ impl TurnReceipt {
             prompt_tokens: 0,
             completion_tokens: 0,
             llm_calls: 0,
-            last_event_sequence: 0,
+            last_event_sequence,
             elapsed: started.elapsed(),
         }
     }
@@ -227,10 +263,16 @@ impl TurnReceipt {
 /// Per-consumer event handler for one driven turn.
 ///
 /// `on_event` receives every envelope in order, including the terminal one.
-/// Returning `false` declares the consumer closed: the driver cancels the
-/// invocation and still produces a typed terminal receipt.
+/// `Closed` is an intentional consumer disconnect; `Err` is a delivery or
+/// persistence failure and produces a failed receipt rather than a cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkControl {
+    Continue,
+    Closed,
+}
+
 pub trait EventSink: Send + Sync {
-    fn on_event(&self, envelope: &EventEnvelope) -> bool;
+    fn on_event(&self, envelope: &EventEnvelope) -> echo_core::error::Result<SinkControl>;
 }
 
 /// Drives one finite Agent invocation through one sink.
@@ -252,26 +294,68 @@ impl AgentTurnDriver {
         let turn_id = request.identity.turn_id.clone();
         let token = request.cancel.clone().unwrap_or_default();
 
-        let raw = match request.mode {
-            TurnMode::Chat => {
+        let input = request.input;
+        let raw = match (&input, request.mode, request.invocation) {
+            (TurnInput::Text(message), TurnMode::Chat, None) => {
+                agent.chat_stream_with_cancel(message, token.clone()).await
+            }
+            (TurnInput::Text(message), TurnMode::Execute, None) => {
                 agent
-                    .chat_stream_with_cancel(&request.message, token.clone())
+                    .execute_stream_with_cancel(message, token.clone())
                     .await
             }
-            TurnMode::Execute => {
+            (TurnInput::Text(message), TurnMode::Execute, Some(invocation)) => {
                 agent
-                    .execute_stream_with_cancel(&request.message, token.clone())
+                    .execute_stream_with_invocation_context(message, token.clone(), invocation)
+                    .await
+            }
+            (TurnInput::Text(_), TurnMode::Chat, Some(_)) => Err(ReactError::Other(
+                "chat text with invocation context requires TurnInput::Message".to_string(),
+            )),
+            (TurnInput::Message(message), TurnMode::Chat, invocation) => {
+                agent
+                    .chat_stream_message_with_invocation_context(
+                        message.clone(),
+                        token.clone(),
+                        invocation.unwrap_or_default(),
+                    )
+                    .await
+            }
+            (TurnInput::Message(message), TurnMode::Execute, invocation) => {
+                agent
+                    .execute_stream_message_with_invocation_context(
+                        message.clone(),
+                        token.clone(),
+                        invocation.unwrap_or_default(),
+                    )
                     .await
             }
         };
         let raw = match raw {
             Ok(stream) => stream,
             Err(error) => {
-                return TurnReceipt::failed(
-                    turn_id,
-                    AgentFailure::from_react_error(&error),
-                    started,
-                );
+                let failure = AgentFailure::from_react_error(&error);
+                let next_sequence = request.last_persisted_sequence.checked_add(1);
+                let mut last_event_sequence = request.last_persisted_sequence;
+                if let Some(sequence) = next_sequence
+                    && let Ok(envelope) = EventEnvelope::new(
+                        &request.identity,
+                        sequence,
+                        request.identity.parent_event_id.clone(),
+                        AgentEvent::from_error("turn_driver", &error),
+                    )
+                {
+                    last_event_sequence = envelope.sequence;
+                    if let Err(sink_error) = sink.on_event(&envelope) {
+                        return TurnReceipt::failed(
+                            turn_id,
+                            AgentFailure::from_react_error(&sink_error),
+                            last_event_sequence,
+                            started,
+                        );
+                    }
+                }
+                return TurnReceipt::failed(turn_id, failure, last_event_sequence, started);
             }
         };
 
@@ -281,8 +365,6 @@ impl AgentTurnDriver {
         let mut completion_tokens: u64 = 0;
         let mut llm_calls: u64 = 0;
         let mut last_event_sequence = request.last_persisted_sequence;
-        let mut sink_closed = false;
-
         let mut stream =
             envelope_event_stream_after(raw, request.identity, request.last_persisted_sequence);
         while let Some(item) = stream.next().await {
@@ -296,16 +378,13 @@ impl AgentTurnDriver {
                 }
             };
             last_event_sequence = envelope.sequence;
-            if !sink_closed && !sink.on_event(&envelope) {
-                sink_closed = true;
-                token.cancel();
-            }
             match &envelope.payload {
                 AgentEvent::LlmUsage {
                     prompt_tokens: prompt,
                     completion_tokens: completion,
+                    usage_reported,
                     ..
-                } => {
+                } if *usage_reported => {
                     llm_calls = llm_calls.saturating_add(1);
                     prompt_tokens =
                         prompt_tokens.saturating_add(u64::try_from(*prompt).unwrap_or(u64::MAX));
@@ -331,6 +410,22 @@ impl AgentTurnDriver {
                     );
                 }
                 _ => {}
+            }
+            match sink.on_event(&envelope) {
+                Ok(SinkControl::Continue) => {}
+                Ok(SinkControl::Closed) => {
+                    token.cancel();
+                    if outcome.is_none() {
+                        outcome = Some(TurnOutcome::Cancelled);
+                    }
+                    break;
+                }
+                Err(error) => {
+                    token.cancel();
+                    outcome = Some(TurnOutcome::Failed(AgentFailure::from_react_error(&error)));
+                    final_answer = None;
+                    break;
+                }
             }
         }
 
@@ -437,16 +532,16 @@ mod tests {
     }
 
     impl EventSink for RecordingSink {
-        fn on_event(&self, envelope: &EventEnvelope) -> bool {
+        fn on_event(&self, envelope: &EventEnvelope) -> echo_core::error::Result<SinkControl> {
             let mut events = self
                 .events
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             events.push(envelope.sequence);
-            match self.close_after {
-                Some(limit) => events.len() < limit,
-                None => true,
-            }
+            Ok(match self.close_after {
+                Some(limit) if events.len() >= limit => SinkControl::Closed,
+                _ => SinkControl::Continue,
+            })
         }
     }
 
@@ -615,11 +710,138 @@ mod tests {
     async fn stream_start_failure_maps_to_failed_receipt() {
         let agent: Arc<dyn Agent> = Arc::new(FailingAgent);
         let request = TurnRequest::new(identity("startfail"), "hello");
-        let receipt = AgentTurnDriver
-            .drive(agent, request, &RecordingSink::default())
-            .await;
+        let sink = RecordingSink::default();
+        let receipt = AgentTurnDriver.drive(agent, request, &sink).await;
         assert_eq!(receipt.outcome.status(), "failed");
-        assert_eq!(receipt.last_event_sequence, 0);
+        assert_eq!(receipt.last_event_sequence, 1);
+        assert_eq!(
+            *sink
+                .events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![1]
+        );
+    }
+
+    struct FailingSink;
+
+    impl EventSink for FailingSink {
+        fn on_event(&self, _envelope: &EventEnvelope) -> echo_core::error::Result<SinkControl> {
+            Err(ReactError::Other(
+                "injected durable sink failure".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn sink_failure_is_failed_not_cancelled() {
+        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
+            vec![
+                AgentEvent::Token("partial".to_string()),
+                AgentEvent::FinalAnswer("must not win".to_string()),
+            ]
+        }));
+        let receipt = AgentTurnDriver
+            .drive(
+                agent,
+                TurnRequest::new(identity("sink-failure"), "hello"),
+                &FailingSink,
+            )
+            .await;
+        assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+        assert!(receipt.final_answer.is_none());
+        assert_eq!(receipt.last_event_sequence, 1);
+    }
+
+    #[derive(Default)]
+    struct InvocationRecordingAgent {
+        working_dir: Mutex<Option<std::path::PathBuf>>,
+    }
+
+    impl Agent for InvocationRecordingAgent {
+        fn name(&self) -> &str {
+            "invocation-recording"
+        }
+
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
+            Box::pin(async { Ok(String::new()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async {
+                Err(ReactError::Other(
+                    "text path should not be selected".to_string(),
+                ))
+            })
+        }
+
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                *self
+                    .working_dir
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = invocation.working_dir;
+                Ok(
+                    futures::stream::iter([Ok(AgentEvent::FinalAnswer("message-ok".to_string()))])
+                        .boxed(),
+                )
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_chat_message_preserves_invocation_context() {
+        let agent = Arc::new(InvocationRecordingAgent::default());
+        let expected = std::path::PathBuf::from("/tmp/eko-turn-driver-test");
+        let request = TurnRequest::from_message(
+            identity("message-invocation"),
+            Message::user("hello".to_string()),
+        )
+        .invocation(AgentInvocationContext {
+            working_dir: Some(expected.clone()),
+            ..AgentInvocationContext::default()
+        });
+        let receipt = AgentTurnDriver
+            .drive(
+                Arc::clone(&agent) as Arc<dyn Agent>,
+                request,
+                &RecordingSink::default(),
+            )
+            .await;
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(receipt.final_answer.as_deref(), Some("message-ok"));
+        assert_eq!(
+            *agent
+                .working_dir
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            Some(expected)
+        );
     }
 
     #[tokio::test]
@@ -641,11 +863,11 @@ mod tests {
             count: &'a AtomicUsize,
         }
         impl EventSink for TerminalCountingSink<'_> {
-            fn on_event(&self, envelope: &EventEnvelope) -> bool {
+            fn on_event(&self, envelope: &EventEnvelope) -> echo_core::error::Result<SinkControl> {
                 if TurnOutcome::from_agent_event(&envelope.payload).is_some() {
                     self.count.fetch_add(1, Ordering::SeqCst);
                 }
-                true
+                Ok(SinkControl::Continue)
             }
         }
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {

@@ -26,10 +26,23 @@
 //! ```
 
 use crate::agent::Agent;
-use crate::agent::AgentEvent;
 use crate::agent::react::builder::ReactAgentBuilder;
-use futures::StreamExt;
+use echo_orchestration::runtime::{
+    AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnOutcome, TurnRequest,
+};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+struct HeadlessEventSink;
+
+impl EventSink for HeadlessEventSink {
+    fn on_event(
+        &self,
+        _envelope: &crate::agent::EventEnvelope,
+    ) -> crate::error::Result<SinkControl> {
+        Ok(SinkControl::Continue)
+    }
+}
 
 /// Configuration for headless (non-interactive) agent execution.
 pub struct HeadlessConfig {
@@ -160,11 +173,9 @@ where
     let model = agent.model_name().to_string();
 
     let cancel = config.cancel_token.unwrap_or_default();
-    let stream = match agent
-        .execute_stream_with_cancel(&config.prompt, cancel)
-        .await
-    {
-        Ok(stream) => stream,
+    let identity_value = format!("headless-{}", uuid::Uuid::new_v4());
+    let identity = match crate::agent::EventIdentity::new(&identity_value, &identity_value) {
+        Ok(identity) => identity,
         Err(error) => {
             return HeadlessResult {
                 output: format!("Error: {error}"),
@@ -175,54 +186,31 @@ where
             };
         }
     };
-    futures::pin_mut!(stream);
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(AgentEvent::FinalAnswer(output)) => {
-                return HeadlessResult {
-                    output,
-                    success: true,
-                    model,
-                    format: config.output_format,
-                    exit_on_error,
-                };
-            }
-            Ok(AgentEvent::Cancelled) => {
-                return HeadlessResult {
-                    output: "Cancelled".to_string(),
-                    success: false,
-                    model,
-                    format: config.output_format,
-                    exit_on_error,
-                };
-            }
-            Ok(AgentEvent::Error {
-                source, message, ..
-            }) => {
-                return HeadlessResult {
-                    output: format!("Error ({source}): {message}"),
-                    success: false,
-                    model,
-                    format: config.output_format,
-                    exit_on_error,
-                };
-            }
-            Err(error) => {
-                return HeadlessResult {
-                    output: format!("Error: {error}"),
-                    success: false,
-                    model,
-                    format: config.output_format,
-                    exit_on_error,
-                };
-            }
-            Ok(_) => {}
-        }
-    }
-
+    let request = TurnRequest::new(identity, config.prompt)
+        .mode(TurnMode::Execute)
+        .cancel(cancel);
+    let receipt = AgentTurnDriver
+        .drive(
+            Arc::new(agent) as Arc<dyn Agent>,
+            request,
+            &HeadlessEventSink,
+        )
+        .await;
+    let (output, success) = match (receipt.outcome, receipt.final_answer) {
+        (TurnOutcome::Completed, Some(output)) => (output, true),
+        (TurnOutcome::Completed, None) => (
+            "Error: completed turn did not include a final answer".to_string(),
+            false,
+        ),
+        (TurnOutcome::Cancelled, _) => ("Cancelled".to_string(), false),
+        (TurnOutcome::Failed(failure), _) => (
+            format!("Error ({}): {}", failure.code, failure.message),
+            false,
+        ),
+    };
     HeadlessResult {
-        output: "Error: agent event stream ended without a terminal event".to_string(),
-        success: false,
+        output,
+        success,
         model,
         format: config.output_format,
         exit_on_error,
@@ -232,6 +220,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::MockLlmClient;
 
     #[test]
     fn test_headless_config_default() {
@@ -298,5 +287,22 @@ mod tests {
             exit_on_error: true,
         };
         assert_eq!(result.format_output(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn run_headless_uses_shared_turn_driver_terminal_contract() {
+        let llm = Arc::new(MockLlmClient::new().with_response("driver result"));
+        let result = run_headless(
+            HeadlessConfig {
+                prompt: "run through the shared driver".to_string(),
+                ..HeadlessConfig::default()
+            },
+            |builder| builder.llm_client(llm).system_prompt("test"),
+        )
+        .await;
+
+        assert!(result.success);
+        assert_eq!(result.output, "driver result");
+        assert_eq!(result.exit_code(), 0);
     }
 }
