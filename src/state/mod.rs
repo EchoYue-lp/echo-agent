@@ -19,6 +19,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Sequenced event journal and checkpoint-reducer primitives.
+pub mod journal {
+    pub use echo_state::journal::*;
+}
+
 // ── AgentCheckpoint ────────────────────────────────────────────────────
 
 /// A full checkpoint of agent runtime state, suitable for serialization

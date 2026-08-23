@@ -27,9 +27,7 @@
 
 use crate::agent::Agent;
 use crate::agent::react::builder::ReactAgentBuilder;
-use echo_orchestration::runtime::{
-    AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnOutcome, TurnRequest,
-};
+use crate::runtime::{AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnOutcome, TurnRequest};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 

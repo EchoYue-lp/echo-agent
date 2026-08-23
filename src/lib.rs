@@ -56,6 +56,7 @@ pub mod memory_promoter;
 pub mod paths;
 pub mod plugin;
 pub mod retry;
+pub mod runtime;
 pub mod sandbox;
 pub mod scheduler;
 pub mod security;
@@ -298,7 +299,9 @@ pub mod advanced {
 
     #[cfg(feature = "mcp")]
     #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
-    pub use crate::mcp::{McpManager, McpServerConfig, McpTool, TransportConfig};
+    pub use crate::mcp::{
+        McpManager, McpServerConfig, McpTargetChange, McpTargetReceipt, McpTool, TransportConfig,
+    };
 
     #[cfg(feature = "channels")]
     #[cfg_attr(docsrs, doc(cfg(feature = "channels")))]
