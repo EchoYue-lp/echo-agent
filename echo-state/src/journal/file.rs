@@ -8,7 +8,7 @@
 
 use super::{
     CheckpointFrame, CheckpointStore, EventJournal, JournalAppendReceipt, JournalDurabilityStatus,
-    JournalEvent, JournalRecord, WeakRegistry, acquire_file_lease_with_closing_retry,
+    JournalEvent, JournalRecord, WeakRegistry,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
@@ -17,6 +17,7 @@ use echo_core::utils::fs::{
     append_existing_matching, atomic_write, create_dir_all_durable, matching_existing_regular_len,
     open_existing_regular_guard, read_existing, read_existing_from_matching,
     read_existing_lines_from_matching, read_existing_matching, truncate_existing_matching,
+    try_exclusive_file_lease,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -193,7 +194,7 @@ fn ensure_journal_file(path: &Path, parent: &Path, context: &str) -> Result<()> 
 pub struct FileEventJournal<E> {
     path: PathBuf,
     durability: FileDurability,
-    shared: Arc<SharedFileJournalState>,
+    shared: Option<Arc<SharedFileJournalState>>,
     #[cfg(test)]
     append_fault: Mutex<Option<AppendFault>>,
     #[cfg(test)]
@@ -203,13 +204,17 @@ pub struct FileEventJournal<E> {
 
 impl<E> Drop for FileEventJournal<E> {
     fn drop(&mut self) {
+        let Some(shared) = self.shared.take() else {
+            return;
+        };
         let mut registry = file_journal_registry()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        registry.remove_if_last(&self.path, &self.shared);
+        registry.release_handle(&self.path, &shared);
+        // Drop every handle Arc, including the last lease owner, while opens
+        // are excluded by the registry lock.
+        drop(shared);
         drop(registry);
-        // The registry lock is released before `shared` drops and releases the
-        // file identity guard and process lease.
     }
 }
 
@@ -222,6 +227,18 @@ enum AppendFault {
 }
 
 impl<E: JournalEvent> FileEventJournal<E> {
+    fn shared(&self) -> Result<&Arc<SharedFileJournalState>> {
+        self.shared
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("file journal handle is already closing".to_string()))
+    }
+
+    fn shared_io(&self) -> std::io::Result<&Arc<SharedFileJournalState>> {
+        self.shared
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("file journal handle is already closing"))
+    }
+
     /// Open (or create) the journal at `path`.
     ///
     /// A torn trailing record from an interrupted append is truncated; gaps
@@ -281,12 +298,17 @@ impl<E: JournalEvent> FileEventJournal<E> {
                     "{context}: disk prefix diverged from the live authority; close it before verified reopen"
                 )));
             }
+            if !registry.add_handle(&path, &shared) {
+                return Err(ReactError::Other(format!(
+                    "{context}: failed to register shared journal handle"
+                )));
+            }
             state.poison = None;
             drop(state);
             return Ok(Self {
                 path,
                 durability,
-                shared,
+                shared: Some(shared),
                 #[cfg(test)]
                 append_fault: Mutex::new(None),
                 #[cfg(test)]
@@ -294,8 +316,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 _event: PhantomData,
             });
         }
-        let lease = acquire_file_lease_with_closing_retry(&path)
-            .map_err(|error| io_error(&context, error))?;
+        let lease = try_exclusive_file_lease(&path).map_err(|error| io_error(&context, error))?;
         // Only a lease-owning new authority may create the data file. A live
         // in-process authority was resolved above without touching the path.
         ensure_journal_file(&path, &canonical_parent, &context)?;
@@ -318,7 +339,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
         Ok(Self {
             path,
             durability,
-            shared,
+            shared: Some(shared),
             #[cfg(test)]
             append_fault: Mutex::new(None),
             #[cfg(test)]
@@ -341,8 +362,8 @@ impl<E: JournalEvent> FileEventJournal<E> {
     /// does not write an event or advance the sequence, and refuses a poisoned
     /// authority until it is reopened and repaired.
     pub fn sync_data(&self) -> Result<()> {
-        let state = self
-            .shared
+        let shared = self.shared()?;
+        let state = shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -359,7 +380,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
     }
 
     fn verify_current_file(&self, state: &FileJournalState, context: &str) -> Result<()> {
-        let observed_len = matching_existing_regular_len(&self.path, &self.shared.file_guard)
+        let observed_len = matching_existing_regular_len(&self.path, &self.shared()?.file_guard)
             .map_err(|error| io_error(context, error))?;
         if observed_len != state.valid_len {
             return Err(ReactError::Other(format!(
@@ -371,6 +392,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
     }
 
     fn sync_journal_data(&self, expected_len: u64) -> std::io::Result<()> {
+        let shared = self.shared_io()?;
         #[cfg(test)]
         {
             let mut fail = self
@@ -383,7 +405,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
         }
         append_existing_matching(
             &self.path,
-            &self.shared.file_guard,
+            &shared.file_guard,
             expected_len,
             b"",
             FileDurability::SyncData,
@@ -391,6 +413,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
     }
 
     fn append_line(&self, expected_len: u64, line: &[u8]) -> std::io::Result<()> {
+        let shared = self.shared_io()?;
         #[cfg(test)]
         if let Some(fault) = self
             .append_fault
@@ -407,7 +430,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
             };
             append_existing_matching(
                 &self.path,
-                &self.shared.file_guard,
+                &shared.file_guard,
                 expected_len,
                 bytes,
                 FileDurability::Flush,
@@ -417,7 +440,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
 
         append_existing_matching(
             &self.path,
-            &self.shared.file_guard,
+            &shared.file_guard,
             expected_len,
             line,
             self.durability,
@@ -434,9 +457,9 @@ impl<E: JournalEvent> FileEventJournal<E> {
         context: &str,
         append_error: &std::io::Error,
     ) -> Result<Option<JournalDurabilityStatus>> {
-        let suffix =
-            read_existing_from_matching(&self.path, &self.shared.file_guard, state.valid_len)
-                .map_err(|error| io_error(context, error))?;
+        let shared = self.shared()?;
+        let suffix = read_existing_from_matching(&self.path, &shared.file_guard, state.valid_len)
+            .map_err(|error| io_error(context, error))?;
         if suffix == line {
             return Ok(Some(JournalDurabilityStatus::Degraded {
                 error: append_error.to_string(),
@@ -452,7 +475,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 })?;
                 truncate_existing_matching(
                     &self.path,
-                    &self.shared.file_guard,
+                    &shared.file_guard,
                     current_len,
                     state.valid_len,
                     self.durability,
@@ -472,8 +495,8 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
     fn append(&self, event: E) -> Result<JournalAppendReceipt<E>> {
         // The lock spans encoding + write + advance so concurrent appends
         // cannot observe or reuse an in-flight sequence.
-        let mut state = self
-            .shared
+        let shared = self.shared()?;
+        let mut state = shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -510,7 +533,7 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
                 Ok(Some(status)) => status,
                 Ok(None) => return Err(io_error(&context, error)),
                 Err(repair_error) => {
-                    if matching_existing_regular_len(&self.path, &self.shared.file_guard).is_err() {
+                    if matching_existing_regular_len(&self.path, &shared.file_guard).is_err() {
                         return Err(ReactError::Other(format!(
                             "{context}: append failed ({error}); authority verification failed during reconciliation ({repair_error}); verified reopen required"
                         )));
@@ -533,10 +556,15 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
 
     fn next_sequence(&self) -> u64 {
         self.shared
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .next_sequence
+            .as_ref()
+            .map(|shared| {
+                shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .next_sequence
+            })
+            .unwrap_or(1)
     }
 
     fn last_sequence(&self) -> u64 {
@@ -551,8 +579,8 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
         // The state lock serializes replay with append and gives O(1) access to
         // the first byte after `after_sequence`. Open already validated the
         // complete prefix, so replay only decodes the requested suffix.
-        let state = self
-            .shared
+        let shared = self.shared()?;
+        let state = shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -574,7 +602,7 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
             })?;
         let bytes = read_existing_lines_from_matching(
             &self.path,
-            &self.shared.file_guard,
+            &shared.file_guard,
             state.valid_len,
             start_offset,
             limit,
@@ -773,6 +801,10 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
 
+    fn shared<E>(journal: &FileEventJournal<E>) -> &Arc<SharedFileJournalState> {
+        journal.shared.as_ref().expect("live file journal handle")
+    }
+
     #[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
     struct LensReducer {
         applied: u64,
@@ -890,7 +922,7 @@ mod tests {
             FileEventJournal::<String>::open(second_path, FileDurability::Flush)
                 .expect("open second handle"),
         );
-        assert!(std::sync::Arc::ptr_eq(&first.shared, &second.shared));
+        assert!(std::sync::Arc::ptr_eq(shared(&first), shared(&second)));
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let mut handles = Vec::new();
         for (label, journal) in [("a", first.clone()), ("b", second.clone())] {
@@ -1122,8 +1154,7 @@ mod tests {
         assert!(second_open.to_string().contains("identity changed"));
         assert_eq!(journal.next_sequence(), 2);
         assert!(
-            journal
-                .shared
+            shared(&journal)
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -1169,7 +1200,7 @@ mod tests {
         assert_eq!(journal.next_sequence(), 2);
         let repaired = FileEventJournal::<String>::open(&path, FileDurability::Flush)
             .expect("verified live reopen repairs torn suffix");
-        assert!(Arc::ptr_eq(&journal.shared, &repaired.shared));
+        assert!(Arc::ptr_eq(shared(&journal), shared(&repaired)));
         assert_eq!(
             read_existing(&path).expect("read repaired journal").len(),
             committed_len
@@ -1626,7 +1657,7 @@ mod tests {
             FileDurability::Flush,
         )
         .expect("open shared journal");
-        assert!(Arc::ptr_eq(&first.shared, &second.shared));
+        assert!(Arc::ptr_eq(shared(&first), shared(&second)));
         let type_error = FileEventJournal::<u64>::open(&path, FileDurability::Flush)
             .expect_err("mismatched event type must reject");
         assert!(type_error.to_string().contains("different event type"));
@@ -1664,7 +1695,7 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner());
             assert_eq!(registry.paths_beneath(&canonical_root), per_wave + 1);
             let retained = registry.upgrade(&live_path).expect("live registry entry");
-            assert!(Arc::ptr_eq(&retained, &live.shared));
+            assert!(Arc::ptr_eq(&retained, shared(&live)));
             drop(retained);
             drop(registry);
             drop(journals);
@@ -1679,7 +1710,7 @@ mod tests {
 
         let alias = FileEventJournal::<String>::open(&live_path, FileDurability::Flush)
             .expect("reopen live authority");
-        assert!(Arc::ptr_eq(&live.shared, &alias.shared));
+        assert!(Arc::ptr_eq(shared(&live), shared(&alias)));
         drop(live);
         drop(alias);
         assert_eq!(
@@ -1712,23 +1743,31 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_last_drop_and_immediate_reopen_remains_available() {
+    fn concurrent_two_alias_drop_and_immediate_reopen_remains_available() {
         let root = temp_root();
         let canonical_root = std::fs::canonicalize(&root).expect("canonical test root");
         let path = canonical_root.join("events.jsonl");
         for _ in 0..64 {
-            let journal = FileEventJournal::<String>::open(&path, FileDurability::Flush)
-                .expect("open journal");
-            let barrier = Arc::new(std::sync::Barrier::new(2));
-            let drop_barrier = Arc::clone(&barrier);
-            let dropping = std::thread::spawn(move || {
-                drop_barrier.wait();
-                drop(journal);
+            let first = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+                .expect("open first alias");
+            let second = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+                .expect("open second alias");
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let first_barrier = Arc::clone(&barrier);
+            let first_drop = std::thread::spawn(move || {
+                first_barrier.wait();
+                drop(first);
+            });
+            let second_barrier = Arc::clone(&barrier);
+            let second_drop = std::thread::spawn(move || {
+                second_barrier.wait();
+                drop(second);
             });
             barrier.wait();
             let reopened = FileEventJournal::<String>::open(&path, FileDurability::Flush)
-                .expect("immediate reopen during last drop");
-            dropping.join().expect("join dropping handle");
+                .expect("immediate reopen during alias drops");
+            first_drop.join().expect("join first dropping handle");
+            second_drop.join().expect("join second dropping handle");
             assert_eq!(
                 file_journal_registry()
                     .lock()
@@ -1757,7 +1796,7 @@ mod tests {
             .expect("open bare journal path");
         let second = FileEventJournal::<String>::open(&dotted, FileDurability::Flush)
             .expect("open dotted journal path");
-        assert!(Arc::ptr_eq(&first.shared, &second.shared));
+        assert!(Arc::ptr_eq(shared(&first), shared(&second)));
         assert_eq!(first.path(), second.path());
         drop(first);
         drop(second);

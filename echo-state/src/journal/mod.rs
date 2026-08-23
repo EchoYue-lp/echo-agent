@@ -100,7 +100,6 @@ pub use segmented::{
 };
 
 use echo_core::error::{ReactError, Result};
-use echo_core::utils::fs::{ExclusiveFileLease, try_exclusive_file_lease};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -108,17 +107,21 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
-// File-backed runtime caches normally keep far fewer authorities live. Above
-// this headroom, scan at a fixed cadence so dead paths stay bounded without an
-// O(n) registry walk on every open. This is lifecycle hygiene, not an eviction
-// policy: live authorities are never removed.
+// File-backed runtime caches normally keep far fewer authorities live. The
+// soft range scans at a fixed cadence; the hard limit scans immediately to
+// bound dead paths. This is lifecycle hygiene, not an eviction policy: live
+// authorities are never removed.
 pub(super) const WEAK_REGISTRY_PRUNE_THRESHOLD: usize = 128;
 pub(super) const WEAK_REGISTRY_PRUNE_INTERVAL: usize = 32;
 pub(super) const WEAK_REGISTRY_HARD_LIMIT: usize = 256;
-const CLOSING_LEASE_RETRY_LIMIT: usize = 64;
+
+struct WeakRegistryEntry<T> {
+    authority: Weak<T>,
+    journal_handle_count: usize,
+}
 
 pub(super) struct WeakRegistry<T> {
-    entries: HashMap<PathBuf, Weak<T>>,
+    entries: HashMap<PathBuf, WeakRegistryEntry<T>>,
     opens_since_prune: usize,
 }
 
@@ -140,30 +143,57 @@ impl<T> WeakRegistry<T> {
             return;
         }
         self.entries
-            .retain(|_, authority| authority.strong_count() > 0);
+            .retain(|_, entry| entry.authority.strong_count() > 0);
         self.opens_since_prune = 0;
     }
 
     pub(super) fn upgrade(&self, path: &Path) -> Option<Arc<T>> {
-        self.entries.get(path).and_then(Weak::upgrade)
+        self.entries
+            .get(path)
+            .and_then(|entry| entry.authority.upgrade())
     }
 
     pub(super) fn insert(&mut self, path: PathBuf, authority: &Arc<T>) {
-        self.entries.insert(path, Arc::downgrade(authority));
+        self.entries.insert(
+            path,
+            WeakRegistryEntry {
+                authority: Arc::downgrade(authority),
+                journal_handle_count: 1,
+            },
+        );
     }
 
-    pub(super) fn remove_if_last(&mut self, path: &Path, authority: &Arc<T>) {
-        if Arc::strong_count(authority) != 1 {
-            return;
-        }
+    pub(super) fn add_handle(&mut self, path: &Path, authority: &Arc<T>) -> bool {
         let authority = Arc::downgrade(authority);
-        let matches = self
-            .entries
-            .get(path)
-            .is_some_and(|registered| registered.ptr_eq(&authority));
-        if matches {
-            self.entries.remove(path);
+        let Some(entry) = self.entries.get_mut(path) else {
+            return false;
+        };
+        if !entry.authority.ptr_eq(&authority) {
+            return false;
         }
+        let Some(next) = entry.journal_handle_count.checked_add(1) else {
+            return false;
+        };
+        entry.journal_handle_count = next;
+        true
+    }
+
+    /// Release one successfully returned journal handle. `true` means the
+    /// exact registry entry reached zero and was removed.
+    pub(super) fn release_handle(&mut self, path: &Path, authority: &Arc<T>) -> bool {
+        let authority = Arc::downgrade(authority);
+        let Some(entry) = self.entries.get_mut(path) else {
+            return false;
+        };
+        if !entry.authority.ptr_eq(&authority) || entry.journal_handle_count == 0 {
+            return false;
+        }
+        entry.journal_handle_count = entry.journal_handle_count.saturating_sub(1);
+        if entry.journal_handle_count != 0 {
+            return false;
+        }
+        self.entries.remove(path);
+        true
     }
 
     #[cfg(test)]
@@ -173,29 +203,6 @@ impl<T> WeakRegistry<T> {
             .filter(|path| path.starts_with(root))
             .count()
     }
-}
-
-/// Acquire a new authority lease across the brief interval after its registry
-/// entry was removed but before the closing handle's final `Arc` released the
-/// lease. Persistent contention from another process still fails boundedly.
-pub(super) fn acquire_file_lease_with_closing_retry(
-    authority_path: &Path,
-) -> std::io::Result<ExclusiveFileLease> {
-    for attempt in 0..=CLOSING_LEASE_RETRY_LIMIT {
-        match try_exclusive_file_lease(authority_path) {
-            Ok(lease) => return Ok(lease),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    && attempt < CLOSING_LEASE_RETRY_LIMIT =>
-            {
-                std::thread::yield_now();
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(std::io::Error::other(
-        "file authority lease retry limit exhausted",
-    ))
 }
 
 /// Event payload accepted by an [`EventJournal`].

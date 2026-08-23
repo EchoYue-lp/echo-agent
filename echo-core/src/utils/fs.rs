@@ -323,6 +323,13 @@ pub struct ExistingRegularFileGuard {
     identity: ExistingFileIdentity,
 }
 
+/// Open descriptor that keeps one existing directory identity alive.
+#[derive(Debug)]
+pub struct ExistingDirectoryGuard {
+    _directory: std::fs::File,
+    identity: ExistingFileIdentity,
+}
+
 impl ExistingRegularFileGuard {
     /// Current length of the guarded file descriptor.
     pub fn len(&self) -> std::io::Result<u64> {
@@ -423,6 +430,56 @@ fn open_existing_regular(
     Ok(file)
 }
 
+fn open_existing_directory(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(
+            windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS
+                | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+        );
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic no-follow existing-directory access is unavailable on this platform",
+        ));
+    }
+    let directory = options.open(path)?;
+    let metadata = directory.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to open a directory reparse point: {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("directory authority is not a directory: {}", path.display()),
+        ));
+    }
+    Ok(directory)
+}
+
 fn verify_open_file_matches(
     path: &Path,
     file: &std::fs::File,
@@ -460,6 +517,55 @@ pub fn open_existing_regular_guard(path: &Path) -> std::io::Result<ExistingRegul
     let file = open_existing_regular(path, ExistingFileAccess::Read)?;
     let identity = existing_file_identity(&file.metadata()?)?;
     Ok(ExistingRegularFileGuard { file, identity })
+}
+
+/// Open an existing no-follow directory and retain its stable identity.
+pub fn open_existing_directory_guard(path: &Path) -> std::io::Result<ExistingDirectoryGuard> {
+    let directory = open_existing_directory(path)?;
+    let identity = existing_file_identity(&directory.metadata()?)?;
+    Ok(ExistingDirectoryGuard {
+        _directory: directory,
+        identity,
+    })
+}
+
+/// Verify that `path` still names the guarded directory.
+pub fn verify_existing_directory(
+    path: &Path,
+    guard: &ExistingDirectoryGuard,
+) -> std::io::Result<()> {
+    let directory = open_existing_directory(path)?;
+    let identity = existing_file_identity(&directory.metadata()?)?;
+    if identity != guard.identity {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "existing directory identity changed; verified reopen required: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Sync the guarded directory through the same descriptor used for identity
+/// verification.
+pub fn sync_existing_directory_matching(
+    path: &Path,
+    guard: &ExistingDirectoryGuard,
+) -> std::io::Result<()> {
+    let directory = open_existing_directory(path)?;
+    let identity = existing_file_identity(&directory.metadata()?)?;
+    if identity != guard.identity {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "existing directory identity changed; verified reopen required: {}",
+                path.display()
+            ),
+        ));
+    }
+    directory.sync_all()
 }
 
 /// Return the current length only when `path` still names `guard`'s file.
@@ -862,6 +968,28 @@ mod tests {
         assert!(read_existing_lines_from_matching(&path, &guard, 4, 0, 1).is_err());
         assert!(append_existing_matching(&path, &guard, 4, b"x", FileDurability::Flush).is_err());
         assert!(truncate_existing_matching(&path, &guard, 4, 0, FileDurability::Flush).is_err());
+
+        drop(guard);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_directory_rejects_missing_and_replacement_path() -> std::io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("echo-core-directory-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("authority");
+        let displaced = root.join("displaced");
+        std::fs::create_dir_all(&directory)?;
+        let guard = open_existing_directory_guard(&directory)?;
+        verify_existing_directory(&directory, &guard)?;
+
+        std::fs::rename(&directory, &displaced)?;
+        assert!(verify_existing_directory(&directory, &guard).is_err());
+        std::fs::create_dir(&directory)?;
+        assert!(verify_existing_directory(&directory, &guard).is_err());
+        assert!(sync_existing_directory_matching(&directory, &guard).is_err());
 
         drop(guard);
         std::fs::remove_dir_all(root)?;

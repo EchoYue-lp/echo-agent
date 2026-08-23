@@ -13,13 +13,17 @@
 
 use super::{
     EventJournal, JournalAppendReceipt, JournalDurabilityStatus, JournalEvent, JournalRecord,
-    WeakRegistry, acquire_file_lease_with_closing_retry,
+    WeakRegistry,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
 use echo_core::utils::fs::{
-    ExclusiveFileLease, FileDurability, append_existing, atomic_write, create_dir_all_durable,
-    read_existing, read_existing_from, read_existing_lines_from, truncate_existing,
+    ExclusiveFileLease, ExistingDirectoryGuard, ExistingRegularFileGuard, FileDurability,
+    append_existing_matching, atomic_write, create_dir_all_durable, matching_existing_regular_len,
+    open_existing_directory_guard, open_existing_regular_guard, read_existing,
+    read_existing_from_matching, read_existing_lines_from, read_existing_lines_from_matching,
+    read_existing_matching, sync_existing_directory_matching, truncate_existing_matching,
+    try_exclusive_file_lease, verify_existing_directory,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -227,9 +231,10 @@ struct SegmentState {
     end_sequence: u64,
     bytes: u64,
     record_offsets: Vec<u64>,
+    active_file_guard: Option<Arc<ExistingRegularFileGuard>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct OpaqueSegmentState {
     path: PathBuf,
     start_sequence: u64,
@@ -271,7 +276,18 @@ fn scan_segment<E: JournalEvent>(
     durability: FileDurability,
     context: &str,
 ) -> Result<SegmentState> {
-    let bytes = read_existing(path).map_err(|error| io_error(context, error))?;
+    let active_file_guard = if active {
+        Some(Arc::new(
+            open_existing_regular_guard(path).map_err(|error| io_error(context, error))?,
+        ))
+    } else {
+        None
+    };
+    let bytes = match &active_file_guard {
+        Some(file_guard) => read_existing_matching(path, file_guard),
+        None => read_existing(path),
+    }
+    .map_err(|error| io_error(context, error))?;
     let mut expected = start_sequence;
     let mut valid_len = 0_u64;
     let mut offset = 0_usize;
@@ -321,7 +337,13 @@ fn scan_segment<E: JournalEvent>(
                 "{context}: closed segment has a torn tail"
             )));
         }
-        truncate_existing(path, valid_len, durability).map_err(|error| io_error(context, error))?;
+        let file_guard = active_file_guard.as_ref().ok_or_else(|| {
+            journal_error(format!(
+                "{context}: active segment identity guard is missing"
+            ))
+        })?;
+        truncate_existing_matching(path, file_guard, file_len, valid_len, durability)
+            .map_err(|error| io_error(context, error))?;
     }
     if !active && record_offsets.is_empty() {
         return Err(journal_error(format!("{context}: closed segment is empty")));
@@ -332,23 +354,15 @@ fn scan_segment<E: JournalEvent>(
         end_sequence: expected.saturating_sub(1),
         bytes: valid_len,
         record_offsets,
+        active_file_guard,
     })
-}
-
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> std::io::Result<()> {
-    std::fs::File::open(directory)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_directory: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 fn ensure_journal_directory(directory: &Path, context: &str) -> Result<()> {
     create_dir_all_durable(directory).map_err(|error| io_error(context, error))?;
-    let metadata = std::fs::metadata(directory).map_err(|error| io_error(context, error))?;
-    if !metadata.is_dir() {
+    let metadata =
+        std::fs::symlink_metadata(directory).map_err(|error| io_error(context, error))?;
+    if !metadata.file_type().is_dir() {
         return Err(journal_error(format!(
             "{context}: journal root is not a directory"
         )));
@@ -356,7 +370,12 @@ fn ensure_journal_directory(directory: &Path, context: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_segment(directory: &Path, start_sequence: u64, context: &str) -> Result<SegmentState> {
+fn create_segment(
+    directory: &Path,
+    directory_guard: &ExistingDirectoryGuard,
+    start_sequence: u64,
+    context: &str,
+) -> Result<SegmentState> {
     let path = segment_path(directory, start_sequence);
     let file = match std::fs::OpenOptions::new()
         .write(true)
@@ -382,20 +401,26 @@ fn create_segment(directory: &Path, start_sequence: u64, context: &str) -> Resul
         Err(error) => return Err(io_error(context, error)),
     };
     file.sync_data().map_err(|error| io_error(context, error))?;
-    sync_directory(directory).map_err(|error| io_error(context, error))?;
+    sync_existing_directory_matching(directory, directory_guard)
+        .map_err(|error| io_error(context, error))?;
+    let active_file_guard =
+        Arc::new(open_existing_regular_guard(&path).map_err(|error| io_error(context, error))?);
     Ok(SegmentState {
         path,
         start_sequence,
         end_sequence: start_sequence.saturating_sub(1),
         bytes: 0,
         record_offsets: Vec::new(),
+        active_file_guard: Some(active_file_guard),
     })
 }
 
 fn scan_directory<E: JournalEvent>(
     directory: &Path,
+    directory_guard: &ExistingDirectoryGuard,
     durability: FileDurability,
     context: &str,
+    create_if_empty: bool,
 ) -> Result<SegmentedJournalState> {
     let listed = list_segment_paths(directory, context)?;
     let marker = load_retention_marker(directory, context)?;
@@ -405,7 +430,12 @@ fn scan_directory<E: JournalEvent>(
                 "{context}: retained-floor marker exists but every journal segment is missing"
             )));
         }
-        let active = create_segment(directory, 1, context)?;
+        if !create_if_empty {
+            return Err(journal_error(format!(
+                "{context}: live journal has no segment files; close the authority before verified repair"
+            )));
+        }
+        let active = create_segment(directory, directory_guard, 1, context)?;
         return Ok(SegmentedJournalState {
             next_sequence: 1,
             segments: vec![active],
@@ -584,7 +614,73 @@ struct SharedSegmentedJournalState {
     max_active_segment_bytes: u64,
     durability: FileDurability,
     state: Mutex<SegmentedJournalState>,
+    directory_guard: ExistingDirectoryGuard,
     _lease: ExclusiveFileLease,
+}
+
+fn segment_layout_matches(left: &[SegmentState], right: &[SegmentState]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.path == right.path
+                && left.start_sequence == right.start_sequence
+                && left.end_sequence == right.end_sequence
+                && left.bytes == right.bytes
+                && left.record_offsets == right.record_offsets
+        })
+}
+
+fn opaque_layout_matches(left: &[OpaqueSegmentState], right: &[OpaqueSegmentState]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.path == right.path
+                && left.start_sequence == right.start_sequence
+                && left.bytes == right.bytes
+        })
+}
+
+fn verify_active_segment_identity(state: &SegmentedJournalState, context: &str) -> Result<()> {
+    let active = state
+        .segments
+        .last()
+        .ok_or_else(|| journal_error(format!("{context}: active segment is missing")))?;
+    let file_guard = active.active_file_guard.as_ref().ok_or_else(|| {
+        journal_error(format!(
+            "{context}: active segment identity guard is missing"
+        ))
+    })?;
+    let len = matching_existing_regular_len(&active.path, file_guard)
+        .map_err(|error| io_error(context, error))?;
+    if len != active.bytes {
+        return Err(journal_error(format!(
+            "{context}: active segment length changed from {} to {len}; verified reopen required",
+            active.bytes
+        )));
+    }
+    Ok(())
+}
+
+fn verify_live_active_segment_for_repair(
+    state: &SegmentedJournalState,
+    context: &str,
+) -> Result<()> {
+    let active = state
+        .segments
+        .last()
+        .ok_or_else(|| journal_error(format!("{context}: active segment is missing")))?;
+    let file_guard = active.active_file_guard.as_ref().ok_or_else(|| {
+        journal_error(format!(
+            "{context}: active segment identity guard is missing"
+        ))
+    })?;
+    let len = matching_existing_regular_len(&active.path, file_guard)
+        .map_err(|error| io_error(context, error))?;
+    if len < active.bytes {
+        return Err(journal_error(format!(
+            "{context}: active segment shrank from {} to {len}; close the authority before verified repair",
+            active.bytes
+        )));
+    }
+    Ok(())
 }
 
 fn segmented_registry() -> &'static Mutex<WeakRegistry<SharedSegmentedJournalState>> {
@@ -602,7 +698,7 @@ fn segmented_registry() -> &'static Mutex<WeakRegistry<SharedSegmentedJournalSta
 #[derive(Debug)]
 pub struct SegmentedFileEventJournal<E> {
     directory: PathBuf,
-    shared: Arc<SharedSegmentedJournalState>,
+    shared: Option<Arc<SharedSegmentedJournalState>>,
     #[cfg(test)]
     append_fault: Mutex<Option<AppendFault>>,
     #[cfg(test)]
@@ -626,12 +722,15 @@ pub struct SegmentedFileEventJournal<E> {
 
 impl<E> Drop for SegmentedFileEventJournal<E> {
     fn drop(&mut self) {
+        let Some(shared) = self.shared.take() else {
+            return;
+        };
         let mut registry = segmented_registry()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        registry.remove_if_last(&self.directory, &self.shared);
+        registry.release_handle(&self.directory, &shared);
+        drop(shared);
         drop(registry);
-        // `shared` releases its lease only after the registry lock is gone.
     }
 }
 
@@ -644,6 +743,49 @@ enum AppendFault {
 }
 
 impl<E: JournalEvent> SegmentedFileEventJournal<E> {
+    fn from_shared(directory: PathBuf, shared: Arc<SharedSegmentedJournalState>) -> Self {
+        Self {
+            directory,
+            shared: Some(shared),
+            #[cfg(test)]
+            append_fault: Mutex::new(None),
+            #[cfg(test)]
+            append_durabilities: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            sync_fault: Mutex::new(false),
+            #[cfg(test)]
+            create_fault: Mutex::new(false),
+            #[cfg(test)]
+            marker_write_fault_after: Mutex::new(None),
+            #[cfg(test)]
+            marker_full_write_fault: Mutex::new(false),
+            #[cfg(test)]
+            delete_fault_after: Mutex::new(None),
+            #[cfg(test)]
+            directory_sync_fault: Mutex::new(false),
+            #[cfg(test)]
+            directory_sync_attempts: std::sync::atomic::AtomicUsize::new(0),
+            _event: PhantomData,
+        }
+    }
+
+    fn shared(&self) -> Result<&Arc<SharedSegmentedJournalState>> {
+        self.shared
+            .as_ref()
+            .ok_or_else(|| journal_error("segmented journal handle is already closing"))
+    }
+
+    fn shared_io(&self) -> std::io::Result<&Arc<SharedSegmentedJournalState>> {
+        self.shared
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("segmented journal handle is already closing"))
+    }
+
+    fn verify_directory_identity(&self, context: &str) -> Result<()> {
+        verify_existing_directory(&self.directory, &self.shared()?.directory_guard)
+            .map_err(|error| io_error(context, error))
+    }
+
     /// Open or create a segmented journal directory.
     pub fn open(
         directory: impl Into<PathBuf>,
@@ -655,11 +797,19 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 "segmented journal max active segment bytes must be positive",
             ));
         }
-        let directory = directory.into();
-        let context = format!("segmented journal open {}", directory.display());
-        ensure_journal_directory(&directory, &context)?;
-        let directory =
-            std::fs::canonicalize(&directory).map_err(|error| io_error(&context, error))?;
+        let requested = directory.into();
+        let context = format!("segmented journal open {}", requested.display());
+        let parent = requested
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        create_dir_all_durable(parent).map_err(|error| io_error(&context, error))?;
+        let canonical_parent =
+            std::fs::canonicalize(parent).map_err(|error| io_error(&context, error))?;
+        let name = requested.file_name().ok_or_else(|| {
+            journal_error(format!("{context}: journal directory has no final name"))
+        })?;
+        let directory = canonical_parent.join(name);
         let context = format!("segmented journal open {}", directory.display());
         let mut registry = segmented_registry().lock().map_err(|error| {
             journal_error(format!("segmented journal registry lock poisoned: {error}"))
@@ -682,70 +832,60 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            verify_existing_directory(&directory, &shared.directory_guard)
+                .map_err(|error| io_error(&context, error))?;
+            verify_live_active_segment_for_repair(&state, &context)?;
             let marker_barrier_pending = state.marker_barrier_pending;
-            let mut rescanned = scan_directory::<E>(&directory, durability, &context)?;
+            let mut rescanned = scan_directory::<E>(
+                &directory,
+                &shared.directory_guard,
+                durability,
+                &context,
+                false,
+            )?;
+            verify_existing_directory(&directory, &shared.directory_guard)
+                .map_err(|error| io_error(&context, error))?;
             rescanned.marker_barrier_pending |= marker_barrier_pending;
             rescanned.cleanup_pending |= marker_barrier_pending;
-            *state = rescanned;
+            if rescanned.next_sequence != state.next_sequence
+                || rescanned.retained_floor != state.retained_floor
+                || rescanned.cleanup_pending != state.cleanup_pending
+                || !segment_layout_matches(&rescanned.segments, &state.segments)
+                || !opaque_layout_matches(&rescanned.obsolete_segments, &state.obsolete_segments)
+            {
+                return Err(journal_error(format!(
+                    "{context}: disk layout diverged from the live authority; close it before verified reopen"
+                )));
+            }
+            if !registry.add_handle(&directory, &shared) {
+                return Err(journal_error(format!(
+                    "{context}: failed to register shared journal handle"
+                )));
+            }
+            state.poison = None;
             drop(state);
-            return Ok(Self {
-                directory,
-                shared,
-                #[cfg(test)]
-                append_fault: Mutex::new(None),
-                #[cfg(test)]
-                append_durabilities: Mutex::new(Vec::new()),
-                #[cfg(test)]
-                sync_fault: Mutex::new(false),
-                #[cfg(test)]
-                create_fault: Mutex::new(false),
-                #[cfg(test)]
-                marker_write_fault_after: Mutex::new(None),
-                #[cfg(test)]
-                marker_full_write_fault: Mutex::new(false),
-                #[cfg(test)]
-                delete_fault_after: Mutex::new(None),
-                #[cfg(test)]
-                directory_sync_fault: Mutex::new(false),
-                #[cfg(test)]
-                directory_sync_attempts: std::sync::atomic::AtomicUsize::new(0),
-                _event: PhantomData,
-            });
+            return Ok(Self::from_shared(directory, shared));
         }
-        let lease = acquire_file_lease_with_closing_retry(&directory.join(LEASE_AUTHORITY))
+        ensure_journal_directory(&directory, &context)?;
+        let directory_guard =
+            open_existing_directory_guard(&directory).map_err(|error| io_error(&context, error))?;
+        let lease = try_exclusive_file_lease(&directory.join(LEASE_AUTHORITY))
             .map_err(|error| io_error(&context, error))?;
-        let state = scan_directory::<E>(&directory, durability, &context)?;
+        verify_existing_directory(&directory, &directory_guard)
+            .map_err(|error| io_error(&context, error))?;
+        let state = scan_directory::<E>(&directory, &directory_guard, durability, &context, true)?;
+        verify_existing_directory(&directory, &directory_guard)
+            .map_err(|error| io_error(&context, error))?;
         let shared = Arc::new(SharedSegmentedJournalState {
             event_type: TypeId::of::<E>(),
             max_active_segment_bytes,
             durability,
             state: Mutex::new(state),
+            directory_guard,
             _lease: lease,
         });
         registry.insert(directory.clone(), &shared);
-        Ok(Self {
-            directory,
-            shared,
-            #[cfg(test)]
-            append_fault: Mutex::new(None),
-            #[cfg(test)]
-            append_durabilities: Mutex::new(Vec::new()),
-            #[cfg(test)]
-            sync_fault: Mutex::new(false),
-            #[cfg(test)]
-            create_fault: Mutex::new(false),
-            #[cfg(test)]
-            marker_write_fault_after: Mutex::new(None),
-            #[cfg(test)]
-            marker_full_write_fault: Mutex::new(false),
-            #[cfg(test)]
-            delete_fault_after: Mutex::new(None),
-            #[cfg(test)]
-            directory_sync_fault: Mutex::new(false),
-            #[cfg(test)]
-            directory_sync_attempts: std::sync::atomic::AtomicUsize::new(0),
-            _event: PhantomData,
-        })
+        Ok(Self::from_shared(directory, shared))
     }
 
     /// Canonical journal directory.
@@ -755,8 +895,10 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
 
     /// Snapshot retained segment ranges and sizes.
     pub fn segments(&self) -> Vec<JournalSegmentMetadata> {
-        let state = self
-            .shared
+        let Some(shared) = self.shared.as_ref() else {
+            return Vec::new();
+        };
+        let state = shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -772,8 +914,13 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
 
     /// Read the durable logical replay floor and pending cleanup state.
     pub fn retention_metadata(&self) -> JournalRetentionMetadata {
-        let state = self
-            .shared
+        let Some(shared) = self.shared.as_ref() else {
+            return JournalRetentionMetadata {
+                retained_floor: 1,
+                cleanup_pending: false,
+            };
+        };
+        let state = shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -785,17 +932,19 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
 
     /// Force a data durability barrier and finish pending prune cleanup.
     pub fn sync_data(&self) -> Result<()> {
-        let mut state = self
-            .shared
+        let shared = self.shared()?;
+        let mut state = shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        self.verify_directory_identity("segmented journal sync_data")?;
+        verify_active_segment_identity(&state, "segmented journal sync_data")?;
         let active = state
             .segments
             .last()
             .ok_or_else(|| journal_error("segmented journal has no active segment"))?;
         let context = format!("segmented journal sync_data {}", active.path.display());
-        self.sync_active(&active.path)
+        self.sync_active(active)
             .map_err(|error| io_error(&context, error))?;
         if state.marker_barrier_pending {
             self.confirm_marker_barrier(&mut state)?;
@@ -823,11 +972,13 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         &self,
         keep_from_sequence: u64,
     ) -> Result<JournalPruneReceipt> {
-        let mut state = self
-            .shared
+        let shared = self.shared()?;
+        let mut state = shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        self.verify_directory_identity("segmented journal prune")?;
+        verify_active_segment_identity(&state, "segmented journal prune")?;
         if state.marker_barrier_pending
             && let Err(error) = self.confirm_marker_barrier(&mut state)
         {
@@ -1094,6 +1245,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
     }
 
     fn sync_segment_directory(&self) -> std::io::Result<()> {
+        let shared = self.shared_io()?;
         #[cfg(test)]
         {
             use std::sync::atomic::Ordering;
@@ -1109,16 +1261,17 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 ));
             }
         }
-        sync_directory(&self.directory)
+        sync_existing_directory_matching(&self.directory, &shared.directory_guard)
     }
 
     fn roll_segment(&self, state: &mut SegmentedJournalState) -> Result<()> {
         let active = state
             .segments
             .last()
+            .cloned()
             .ok_or_else(|| journal_error("segmented journal has no active segment"))?;
         let context = format!("segmented journal rollover {}", active.path.display());
-        self.sync_active(&active.path)
+        self.sync_active(&active)
             .map_err(|error| io_error(&context, error))?;
         #[cfg(test)]
         {
@@ -1140,12 +1293,20 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 )));
             }
         }
-        let next = create_segment(&self.directory, state.next_sequence, &context)?;
+        let next = create_segment(
+            &self.directory,
+            &self.shared()?.directory_guard,
+            state.next_sequence,
+            &context,
+        )?;
+        if let Some(previous) = state.segments.last_mut() {
+            previous.active_file_guard = None;
+        }
         state.segments.push(next);
         Ok(())
     }
 
-    fn sync_active(&self, path: &Path) -> std::io::Result<()> {
+    fn sync_active(&self, active: &SegmentState) -> std::io::Result<()> {
         #[cfg(test)]
         {
             let mut fail = self
@@ -1158,15 +1319,29 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 ));
             }
         }
-        append_existing(path, b"", FileDurability::SyncData)
+        let file_guard = active
+            .active_file_guard
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("active segment identity guard is missing"))?;
+        append_existing_matching(
+            &active.path,
+            file_guard,
+            active.bytes,
+            b"",
+            FileDurability::SyncData,
+        )
     }
 
     fn append_line(
         &self,
-        path: &Path,
+        active: &SegmentState,
         line: &[u8],
         durability: FileDurability,
     ) -> std::io::Result<()> {
+        let file_guard = active
+            .active_file_guard
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("active segment identity guard is missing"))?;
         #[cfg(test)]
         self.append_durabilities
             .lock()
@@ -1179,23 +1354,25 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             .unwrap_or_else(|error| error.into_inner())
             .take()
         {
-            use std::io::Write;
-
-            let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-            match fault {
-                AppendFault::FullWrite => file.write_all(line)?,
+            let bytes = match fault {
+                AppendFault::FullWrite => line,
                 AppendFault::PartialWrite { bytes } => {
-                    let prefix = line.get(..bytes.min(line.len())).unwrap_or(line);
-                    file.write_all(prefix)?;
+                    line.get(..bytes.min(line.len())).unwrap_or(line)
                 }
-                AppendFault::UnrecognizedSuffix => file.write_all(b"x")?,
-            }
-            file.flush()?;
+                AppendFault::UnrecognizedSuffix => b"x",
+            };
+            append_existing_matching(
+                &active.path,
+                file_guard,
+                active.bytes,
+                bytes,
+                FileDurability::Flush,
+            )?;
             return Err(std::io::Error::other(
                 "injected segmented append durability failure",
             ));
         }
-        append_existing(path, line, durability)
+        append_existing_matching(&active.path, file_guard, active.bytes, line, durability)
     }
 
     fn reconcile_failed_append(
@@ -1206,7 +1383,12 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         append_error: &std::io::Error,
         durability: FileDurability,
     ) -> Result<Option<JournalDurabilityStatus>> {
-        let suffix = read_existing_from(&active.path, active.bytes)
+        let file_guard = active.active_file_guard.as_ref().ok_or_else(|| {
+            journal_error(format!(
+                "{context}: active segment identity guard is missing"
+            ))
+        })?;
+        let suffix = read_existing_from_matching(&active.path, file_guard, active.bytes)
             .map_err(|error| io_error(context, error))?;
         if suffix == line {
             return Ok(Some(JournalDurabilityStatus::Degraded {
@@ -1215,8 +1397,20 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         }
         if line.starts_with(&suffix) {
             if !suffix.is_empty() {
-                truncate_existing(&active.path, active.bytes, durability)
-                    .map_err(|error| io_error(context, error))?;
+                let suffix_len = u64::try_from(suffix.len()).map_err(|_| {
+                    journal_error(format!("{context}: segment suffix exceeds supported size"))
+                })?;
+                let current_len = active.bytes.checked_add(suffix_len).ok_or_else(|| {
+                    journal_error(format!("{context}: segment byte length exhausted"))
+                })?;
+                truncate_existing_matching(
+                    &active.path,
+                    file_guard,
+                    current_len,
+                    active.bytes,
+                    durability,
+                )
+                .map_err(|error| io_error(context, error))?;
             }
             return Ok(None);
         }
@@ -1236,8 +1430,8 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         event: E,
         durability: FileDurability,
     ) -> Result<JournalAppendReceipt<E>> {
-        let mut state = self
-            .shared
+        let shared = self.shared()?;
+        let mut state = shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1247,8 +1441,10 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 self.directory.display()
             )));
         }
+        self.verify_directory_identity("segmented journal append")?;
+        verify_active_segment_identity(&state, "segmented journal append")?;
         let should_roll = state.segments.last().is_some_and(|active| {
-            active.has_records() && active.bytes >= self.shared.max_active_segment_bytes
+            active.has_records() && active.bytes >= shared.max_active_segment_bytes
         });
         if should_roll {
             self.roll_segment(&mut state)?;
@@ -1284,8 +1480,11 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             journal_error("segmented journal byte length exhausted before append")
         })?;
         let context = format!("segmented journal append {}", active.path.display());
-        let durability_status = match self.append_line(&active.path, &line, durability) {
+        let durability_status = match self.append_line(&active, &line, durability) {
             Ok(()) => JournalDurabilityStatus::Confirmed,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(io_error(&context, error));
+            }
             Err(error) => match self
                 .reconcile_failed_append(&active, &line, &context, &error, durability)
             {
@@ -1318,15 +1517,20 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
 
 impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
     fn append(&self, event: E) -> Result<JournalAppendReceipt<E>> {
-        self.append_with_durability(event, self.shared.durability)
+        self.append_with_durability(event, self.shared()?.durability)
     }
 
     fn next_sequence(&self) -> u64 {
         self.shared
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .next_sequence
+            .as_ref()
+            .map(|shared| {
+                shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .next_sequence
+            })
+            .unwrap_or(1)
     }
 
     fn last_sequence(&self) -> u64 {
@@ -1335,19 +1539,26 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
 
     fn retained_floor(&self) -> u64 {
         self.shared
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .retained_floor
+            .as_ref()
+            .map(|shared| {
+                shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .retained_floor
+            })
+            .unwrap_or(1)
     }
 
     fn replay_after(&self, after_sequence: u64, limit: usize) -> Result<Vec<JournalRecord<E>>> {
         let context = format!("segmented journal replay {}", self.directory.display());
-        let state = self
-            .shared
+        let shared = self.shared()?;
+        let state = shared
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        self.verify_directory_identity(&context)?;
+        verify_active_segment_identity(&state, &context)?;
         let requested_sequence = after_sequence.saturating_add(1);
         if requested_sequence < state.retained_floor {
             return Err(journal_error(format!(
@@ -1385,8 +1596,17 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
                     ))
                 })?;
             let remaining = limit.saturating_sub(records.len());
-            let bytes = read_existing_lines_from(&segment.path, start_offset, remaining)
-                .map_err(|error| io_error(&context, error))?;
+            let bytes = match &segment.active_file_guard {
+                Some(file_guard) => read_existing_lines_from_matching(
+                    &segment.path,
+                    file_guard,
+                    segment.bytes,
+                    start_offset,
+                    remaining,
+                ),
+                None => read_existing_lines_from(&segment.path, start_offset, remaining),
+            }
+            .map_err(|error| io_error(&context, error))?;
             let mut expected = first_sequence;
             for line in bytes
                 .split(|byte| *byte == b'\n')
@@ -1417,6 +1637,13 @@ mod tests {
     use super::super::{CheckpointStore, CheckpointedReducer, EventReducer, FileCheckpointStore};
     use super::*;
     use std::sync::Barrier;
+
+    fn shared<E>(journal: &SegmentedFileEventJournal<E>) -> &Arc<SharedSegmentedJournalState> {
+        journal
+            .shared
+            .as_ref()
+            .expect("live segmented journal handle")
+    }
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -1573,8 +1800,12 @@ mod tests {
             .expect("active segment");
         let good_len = active.bytes;
         drop(journal);
-        append_existing(&active.path, b"{\"sequence\":3", FileDurability::Flush)
-            .expect("write torn active tail");
+        echo_core::utils::fs::append_existing(
+            &active.path,
+            b"{\"sequence\":3",
+            FileDurability::Flush,
+        )
+        .expect("write torn active tail");
 
         let reopened = open_strings(&root, 1, FileDurability::Flush);
         assert_eq!(
@@ -1935,7 +2166,7 @@ mod tests {
             .expect_err("poisoned handle must reject append");
         assert!(poisoned.to_string().contains("handle is poisoned"));
         let reopened = open_strings(&root, 4096, FileDurability::Flush);
-        assert!(Arc::ptr_eq(&journal.shared, &reopened.shared));
+        assert!(Arc::ptr_eq(shared(&journal), shared(&reopened)));
         assert_eq!(
             reopened
                 .append("recovered".to_string())
@@ -2267,7 +2498,7 @@ mod tests {
         assert!(journal.retention_metadata().cleanup_pending);
 
         let reopened = open_strings(&root, 1, FileDurability::Flush);
-        assert!(Arc::ptr_eq(&journal.shared, &reopened.shared));
+        assert!(Arc::ptr_eq(shared(&journal), shared(&reopened)));
         assert_eq!(
             list_segment_paths(&root, "test reopen list")
                 .expect("physical segments after reopen")
@@ -2431,7 +2662,7 @@ mod tests {
         let first = open_strings(&root, 4096, FileDurability::Flush);
         let alias = root.join(".");
         let second = open_strings(&alias, 4096, FileDurability::Flush);
-        assert!(Arc::ptr_eq(&first.shared, &second.shared));
+        assert!(Arc::ptr_eq(shared(&first), shared(&second)));
         let type_error = SegmentedFileEventJournal::<u64>::open(&root, 4096, FileDurability::Flush)
             .expect_err("mismatched event type must reject");
         assert!(type_error.to_string().contains("different event type"));
@@ -2449,6 +2680,145 @@ mod tests {
         );
         drop(first);
         drop(second);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn live_directory_missing_and_replacement_fail_without_reset() {
+        let parent = temp_root("directory-replacement-parent");
+        let root = parent.join("journal");
+        let displaced = parent.join("displaced");
+        let journal = open_strings(&root, 4096, FileDurability::Flush);
+        journal.append("one".to_string()).expect("append original");
+        let active = journal
+            .segments()
+            .into_iter()
+            .find(|segment| segment.active)
+            .expect("active segment");
+        std::fs::rename(&root, &displaced).expect("displace live directory");
+
+        let missing = SegmentedFileEventJournal::<String>::open(&root, 4096, FileDurability::Flush)
+            .expect_err("live missing directory must not be recreated");
+        assert!(missing.to_string().contains("segmented journal open"));
+        assert!(!root.exists());
+        assert_eq!(journal.next_sequence(), 2);
+
+        std::fs::create_dir(&root).expect("create replacement directory");
+        let segment_name = active.path.file_name().expect("active segment name");
+        std::fs::copy(displaced.join(segment_name), root.join(segment_name))
+            .expect("copy valid replacement segment");
+        let replay_error = journal
+            .replay_after(0, usize::MAX)
+            .expect_err("replacement directory must reject replay");
+        assert!(
+            replay_error
+                .to_string()
+                .contains("directory identity changed")
+        );
+        let append_error = journal
+            .append("blocked".to_string())
+            .expect_err("replacement directory must reject append");
+        assert!(
+            append_error
+                .to_string()
+                .contains("directory identity changed")
+        );
+        let sync_error = journal
+            .sync_data()
+            .expect_err("replacement directory must reject sync");
+        assert!(
+            sync_error
+                .to_string()
+                .contains("directory identity changed")
+        );
+        let second_open =
+            SegmentedFileEventJournal::<String>::open(&root, 4096, FileDurability::Flush)
+                .expect_err("live replacement directory must reject second open");
+        assert!(
+            second_open
+                .to_string()
+                .contains("directory identity changed")
+        );
+        assert_eq!(journal.next_sequence(), 2);
+
+        drop(journal);
+        let reopened = open_strings(&root, 4096, FileDurability::Flush);
+        assert_eq!(reopened.last_sequence(), 1);
+        assert_eq!(
+            reopened
+                .replay_after(0, 1)
+                .expect("replay verified replacement")
+                .first()
+                .map(|record| record.event.as_str()),
+            Some("one")
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(parent).ok();
+    }
+
+    #[test]
+    fn active_segment_same_length_replacement_fails_all_live_io() {
+        let root = temp_root("active-replacement");
+        let journal = open_strings(&root, 4096, FileDurability::Flush);
+        journal.append("one".to_string()).expect("append original");
+        let active = journal
+            .segments()
+            .into_iter()
+            .find(|segment| segment.active)
+            .expect("active segment");
+        let bytes = std::fs::read(&active.path).expect("read active segment");
+        assert_eq!(u64::try_from(bytes.len()).unwrap_or(u64::MAX), active.bytes);
+        std::fs::remove_file(&active.path).expect("remove active segment");
+        std::fs::write(&active.path, &bytes).expect("write same-length replacement");
+
+        assert!(journal.replay_after(0, usize::MAX).is_err());
+        assert!(journal.append("blocked".to_string()).is_err());
+        assert!(journal.sync_data().is_err());
+        assert!(
+            SegmentedFileEventJournal::<String>::open(&root, 4096, FileDurability::Flush,).is_err()
+        );
+        assert_eq!(journal.next_sequence(), 2);
+
+        drop(journal);
+        let reopened = open_strings(&root, 4096, FileDurability::Flush);
+        assert_eq!(reopened.last_sequence(), 1);
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn closed_segment_same_length_replacement_still_verifies_digest() {
+        let root = temp_root("closed-replacement");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        journal.append("one".to_string()).expect("append one");
+        journal.append("two".to_string()).expect("append two");
+        let closed = journal
+            .segments()
+            .into_iter()
+            .find(|segment| !segment.active)
+            .expect("closed segment");
+        let bytes = std::fs::read(&closed.path).expect("read closed segment");
+        let line = bytes
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .expect("closed record");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(line).expect("decode closed record");
+        value.as_object_mut().expect("closed record object").insert(
+            "digest".to_string(),
+            serde_json::Value::String("0".repeat(64)),
+        );
+        let mut replacement = serde_json::to_vec(&value).expect("encode replacement");
+        replacement.push(b'\n');
+        assert_eq!(replacement.len(), bytes.len());
+        std::fs::remove_file(&closed.path).expect("remove closed segment");
+        std::fs::write(&closed.path, replacement).expect("write closed replacement");
+
+        let error = journal
+            .replay_after(0, usize::MAX)
+            .expect_err("closed replacement must fail digest validation");
+        assert!(error.to_string().contains("digest mismatch"));
+        drop(journal);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -2473,7 +2843,7 @@ mod tests {
             let retained = registry
                 .upgrade(&live_directory)
                 .expect("live registry entry");
-            assert!(Arc::ptr_eq(&retained, &live.shared));
+            assert!(Arc::ptr_eq(&retained, shared(&live)));
             drop(retained);
             drop(registry);
             drop(journals);
@@ -2487,7 +2857,7 @@ mod tests {
         }
 
         let alias = open_strings(&live_directory, 4096, FileDurability::Flush);
-        assert!(Arc::ptr_eq(&live.shared, &alias.shared));
+        assert!(Arc::ptr_eq(shared(&live), shared(&alias)));
         drop(live);
         drop(alias);
         assert_eq!(
@@ -2519,20 +2889,27 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_last_drop_and_immediate_reopen_remains_available() {
+    fn concurrent_two_alias_drop_and_immediate_reopen_remains_available() {
         let root = temp_root("concurrent-close-reopen");
         let canonical_root = std::fs::canonicalize(&root).expect("canonical test root");
         for _ in 0..64 {
-            let journal = open_strings(&canonical_root, 4096, FileDurability::Flush);
-            let barrier = Arc::new(Barrier::new(2));
-            let drop_barrier = Arc::clone(&barrier);
-            let dropping = std::thread::spawn(move || {
-                drop_barrier.wait();
-                drop(journal);
+            let first = open_strings(&canonical_root, 4096, FileDurability::Flush);
+            let second = open_strings(&canonical_root, 4096, FileDurability::Flush);
+            let barrier = Arc::new(Barrier::new(3));
+            let first_barrier = Arc::clone(&barrier);
+            let first_drop = std::thread::spawn(move || {
+                first_barrier.wait();
+                drop(first);
+            });
+            let second_barrier = Arc::clone(&barrier);
+            let second_drop = std::thread::spawn(move || {
+                second_barrier.wait();
+                drop(second);
             });
             barrier.wait();
             let reopened = open_strings(&canonical_root, 4096, FileDurability::Flush);
-            dropping.join().expect("join dropping handle");
+            first_drop.join().expect("join first dropping handle");
+            second_drop.join().expect("join second dropping handle");
             assert_eq!(
                 segmented_registry()
                     .lock()
