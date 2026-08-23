@@ -53,7 +53,10 @@ fn segmented_journal_is_available_from_the_public_facade() {
     )
     .expect("open segmented journal through facade");
     let receipt = journal
-        .append("facade-segmented-event".to_string())
+        .append_with_durability(
+            "facade-segmented-event".to_string(),
+            echo_agent::utils::fs::FileDurability::SyncData,
+        )
         .expect("append segmented facade event");
     assert_eq!(receipt.record.sequence, 1);
     assert_eq!(journal.segments().len(), 1);

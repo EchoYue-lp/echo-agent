@@ -6,6 +6,8 @@
 //! and only the active segment may repair a crash-torn tail. LangGraph-style
 //! checkpoints remain derived state above this authoritative event history;
 //! callers choose retention and pin policy by passing a keep cursor to prune.
+//! Each append may select `Flush` or `SyncData` without opening a second
+//! authority; event classification remains a caller policy.
 //! Product stream identities, retention counts, and UI projections do not live
 //! in this module.
 
@@ -606,6 +608,8 @@ pub struct SegmentedFileEventJournal<E> {
     #[cfg(test)]
     append_fault: Mutex<Option<AppendFault>>,
     #[cfg(test)]
+    append_durabilities: Mutex<Vec<FileDurability>>,
+    #[cfg(test)]
     sync_fault: Mutex<bool>,
     #[cfg(test)]
     create_fault: Mutex<bool>,
@@ -680,6 +684,8 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 #[cfg(test)]
                 append_fault: Mutex::new(None),
                 #[cfg(test)]
+                append_durabilities: Mutex::new(Vec::new()),
+                #[cfg(test)]
                 sync_fault: Mutex::new(false),
                 #[cfg(test)]
                 create_fault: Mutex::new(false),
@@ -712,6 +718,8 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             shared,
             #[cfg(test)]
             append_fault: Mutex::new(None),
+            #[cfg(test)]
+            append_durabilities: Mutex::new(Vec::new()),
             #[cfg(test)]
             sync_fault: Mutex::new(false),
             #[cfg(test)]
@@ -1143,7 +1151,17 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         append_existing(path, b"", FileDurability::SyncData)
     }
 
-    fn append_line(&self, path: &Path, line: &[u8]) -> std::io::Result<()> {
+    fn append_line(
+        &self,
+        path: &Path,
+        line: &[u8],
+        durability: FileDurability,
+    ) -> std::io::Result<()> {
+        #[cfg(test)]
+        self.append_durabilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(durability);
         #[cfg(test)]
         if let Some(fault) = self
             .append_fault
@@ -1167,7 +1185,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 "injected segmented append durability failure",
             ));
         }
-        append_existing(path, line, self.shared.durability)
+        append_existing(path, line, durability)
     }
 
     fn reconcile_failed_append(
@@ -1176,6 +1194,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         line: &[u8],
         context: &str,
         append_error: &std::io::Error,
+        durability: FileDurability,
     ) -> Result<Option<JournalDurabilityStatus>> {
         let suffix = read_existing_from(&active.path, active.bytes)
             .map_err(|error| io_error(context, error))?;
@@ -1186,7 +1205,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         }
         if line.starts_with(&suffix) {
             if !suffix.is_empty() {
-                truncate_existing(&active.path, active.bytes, self.shared.durability)
+                truncate_existing(&active.path, active.bytes, durability)
                     .map_err(|error| io_error(context, error))?;
             }
             return Ok(None);
@@ -1196,10 +1215,17 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             suffix.len()
         )))
     }
-}
-
-impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
-    fn append(&self, event: E) -> Result<JournalAppendReceipt<E>> {
+    /// Append one event using an event-specific durability policy.
+    ///
+    /// This uses the same serialized sequence authority as [`EventJournal::append`].
+    /// A full write whose requested barrier fails returns a degraded committed
+    /// receipt and must not be retried. Partial writes are truncated using the
+    /// requested durability before the sequence can be reused.
+    pub fn append_with_durability(
+        &self,
+        event: E,
+        durability: FileDurability,
+    ) -> Result<JournalAppendReceipt<E>> {
         let mut state = self
             .shared
             .state
@@ -1248,9 +1274,11 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
             journal_error("segmented journal byte length exhausted before append")
         })?;
         let context = format!("segmented journal append {}", active.path.display());
-        let durability = match self.append_line(&active.path, &line) {
+        let durability_status = match self.append_line(&active.path, &line, durability) {
             Ok(()) => JournalDurabilityStatus::Confirmed,
-            Err(error) => match self.reconcile_failed_append(&active, &line, &context, &error) {
+            Err(error) => match self
+                .reconcile_failed_append(&active, &line, &context, &error, durability)
+            {
                 Ok(Some(status)) => status,
                 Ok(None) => return Err(io_error(&context, error)),
                 Err(repair_error) => {
@@ -1271,7 +1299,16 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
         active.bytes = new_bytes;
         active.end_sequence = record.sequence;
         state.next_sequence = next_sequence;
-        Ok(JournalAppendReceipt { record, durability })
+        Ok(JournalAppendReceipt {
+            record,
+            durability: durability_status,
+        })
+    }
+}
+
+impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
+    fn append(&self, event: E) -> Result<JournalAppendReceipt<E>> {
+        self.append_with_durability(event, self.shared.durability)
     }
 
     fn next_sequence(&self) -> u64 {
@@ -1666,6 +1703,100 @@ mod tests {
             drop(reopened);
             std::fs::remove_dir_all(root).ok();
         }
+    }
+
+    #[test]
+    fn one_handle_alternates_event_durability_across_rollovers() {
+        let root = temp_root("mixed-durability");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        let first = journal
+            .append_with_durability("delta-1".to_string(), FileDurability::Flush)
+            .expect("append flush delta");
+        let second = journal
+            .append_with_durability("safe-point".to_string(), FileDurability::SyncData)
+            .expect("append sync safe point");
+        let third = journal
+            .append("delta-2".to_string())
+            .expect("append default flush");
+        assert_eq!(first.record.sequence, 1);
+        assert_eq!(second.record.sequence, 2);
+        assert_eq!(third.record.sequence, 3);
+        assert_eq!(journal.segments().len(), 3);
+        assert_eq!(
+            *journal
+                .append_durabilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![
+                FileDurability::Flush,
+                FileDurability::SyncData,
+                FileDurability::Flush,
+            ]
+        );
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn per_event_full_write_degraded_receipt_owns_sequence_without_retry() {
+        let root = temp_root("mixed-full-write");
+        let journal = open_strings(&root, 4096, FileDurability::Flush);
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWrite);
+        let committed = journal
+            .append_with_durability("terminal".to_string(), FileDurability::SyncData)
+            .expect("full write returns committed receipt");
+        assert_eq!(committed.record.sequence, 1);
+        assert!(matches!(
+            committed.durability,
+            JournalDurabilityStatus::Degraded { .. }
+        ));
+        let next = journal
+            .append_with_durability("next-delta".to_string(), FileDurability::Flush)
+            .expect("next event does not retry terminal");
+        assert_eq!(next.record.sequence, 2);
+        assert_eq!(
+            journal.replay_after(0, usize::MAX).expect("replay").len(),
+            2
+        );
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn per_event_partial_write_repairs_with_requested_durability() {
+        let root = temp_root("mixed-partial-write");
+        let journal = open_strings(&root, 4096, FileDurability::Flush);
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::PartialWrite { bytes: 13 });
+        assert!(
+            journal
+                .append_with_durability("safe-point".to_string(), FileDurability::SyncData)
+                .is_err()
+        );
+        assert_eq!(journal.next_sequence(), 1);
+        assert_eq!(
+            journal
+                .append_with_durability("retry".to_string(), FileDurability::Flush)
+                .expect("sequence can be reused after durable repair")
+                .record
+                .sequence,
+            1
+        );
+        assert_eq!(
+            *journal
+                .append_durabilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![FileDurability::SyncData, FileDurability::Flush]
+        );
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
