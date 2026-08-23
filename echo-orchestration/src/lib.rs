@@ -11,6 +11,7 @@
 //! | [`tasks`] | Revisioned task graphs, DAG execution, scheduling, and progress events |
 //! | [`scheduler`] | Cron-based task scheduling — `CronTask`, `SchedulerRunner` |
 //! | [`planning`] | Structured task planning — `PlanSpec`, `PlanValidator` |
+//! | [`runtime`] | Generic turn driver — `AgentTurnDriver`, `TurnRequest`, `TurnOutcome` |
 //!
 //! ## Feature Flags
 //!
@@ -21,6 +22,7 @@
 
 pub mod human_loop;
 pub mod planning;
+pub mod runtime;
 pub mod scheduler;
 pub mod tasks;
 pub mod workflow;

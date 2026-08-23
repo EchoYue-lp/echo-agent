@@ -349,3 +349,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "agent_bench"
 harness = false
+
+[[bench]]
+name = "journal_bench"
+harness = false
