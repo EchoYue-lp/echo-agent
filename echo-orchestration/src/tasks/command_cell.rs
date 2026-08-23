@@ -179,6 +179,14 @@ pub struct CommandCellHandle {
     _tracked_permit: Mutex<Option<OwnedSemaphorePermit>>,
     /// Monotonic registration order for bounded terminal retention.
     sequence: u64,
+    #[cfg(test)]
+    artifact_finalize_hook: Mutex<Option<Arc<TestArtifactFinalizeHook>>>,
+}
+
+#[cfg(test)]
+struct TestArtifactFinalizeHook {
+    entered: Notify,
+    release: Notify,
 }
 
 impl CommandCellHandle {
@@ -524,6 +532,8 @@ impl BackgroundCommandManager {
             observation_leases: AtomicU64::new(0),
             _tracked_permit: Mutex::new(Some(tracked_permit)),
             sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+            #[cfg(test)]
+            artifact_finalize_hook: Mutex::new(None),
         });
         let receipt = CommandCellLaunchReceipt {
             cell_id: cell_id.clone(),
@@ -941,13 +951,24 @@ async fn supervise_prepared_cell(
         },
     };
 
-    if deadline <= Instant::now() && outcome.cause == CommandCellTerminalCause::Exited {
-        outcome = CellOutcome::timed_out();
+    let finalization = if deadline <= Instant::now() {
+        mark_artifact_finalize_interrupted(&handle, ArtifactFinalizeOutcome::DeadlineElapsed);
+        ArtifactFinalizeOutcome::DeadlineElapsed
     } else {
-        finish_output_artifact(&handle);
-        if deadline <= Instant::now() && outcome.cause == CommandCellTerminalCause::Exited {
+        finish_output_artifact(&handle, deadline, &shutdown).await
+    };
+    match finalization {
+        ArtifactFinalizeOutcome::DeadlineElapsed
+            if outcome.cause == CommandCellTerminalCause::Exited =>
+        {
             outcome = CellOutcome::timed_out();
         }
+        ArtifactFinalizeOutcome::Shutdown if outcome.cause == CommandCellTerminalCause::Exited => {
+            outcome = CellOutcome::cancelled();
+        }
+        ArtifactFinalizeOutcome::Finished
+        | ArtifactFinalizeOutcome::DeadlineElapsed
+        | ArtifactFinalizeOutcome::Shutdown => {}
     }
     *handle.state.write().await = CellState {
         phase: outcome.phase,
@@ -1433,32 +1454,83 @@ fn append_output(
     handle.notify.notify_waiters();
 }
 
-fn finish_output_artifact(handle: &CommandCellHandle) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactFinalizeOutcome {
+    Finished,
+    DeadlineElapsed,
+    Shutdown,
+}
+
+async fn finish_output_artifact(
+    handle: &CommandCellHandle,
+    deadline: Instant,
+    shutdown: &CancellationToken,
+) -> ArtifactFinalizeOutcome {
+    let writer = {
+        let mut artifact = handle
+            .artifact
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(text) = artifact.stdout_decoder.finish() {
+            push_artifact_text(
+                &mut artifact,
+                ToolOutputChannel::Stdout,
+                &text,
+                &handle.cell_id,
+            );
+        }
+        if let Some(text) = artifact.stderr_decoder.finish() {
+            push_artifact_text(
+                &mut artifact,
+                ToolOutputChannel::Stderr,
+                &text,
+                &handle.cell_id,
+            );
+        }
+        artifact.writer.take()
+    };
+    let Some(writer) = writer else {
+        return ArtifactFinalizeOutcome::Finished;
+    };
+
+    #[cfg(test)]
+    let finalize_hook = handle
+        .artifact_finalize_hook
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    #[cfg(test)]
+    if let Some(hook) = finalize_hook {
+        hook.entered.notify_one();
+        let interrupted = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => Some(ArtifactFinalizeOutcome::Shutdown),
+            _ = tokio::time::sleep_until(deadline) => Some(ArtifactFinalizeOutcome::DeadlineElapsed),
+            _ = hook.release.notified() => None,
+        };
+        if let Some(outcome) = interrupted {
+            mark_artifact_finalize_interrupted(handle, outcome);
+            return outcome;
+        }
+    }
+
+    let result = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => {
+            mark_artifact_finalize_interrupted(handle, ArtifactFinalizeOutcome::Shutdown);
+            return ArtifactFinalizeOutcome::Shutdown;
+        }
+        _ = tokio::time::sleep_until(deadline) => {
+            mark_artifact_finalize_interrupted(handle, ArtifactFinalizeOutcome::DeadlineElapsed);
+            return ArtifactFinalizeOutcome::DeadlineElapsed;
+        }
+        result = writer.finish_async() => result,
+    };
     let mut artifact = handle
         .artifact
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(text) = artifact.stdout_decoder.finish() {
-        push_artifact_text(
-            &mut artifact,
-            ToolOutputChannel::Stdout,
-            &text,
-            &handle.cell_id,
-        );
-    }
-    if let Some(text) = artifact.stderr_decoder.finish() {
-        push_artifact_text(
-            &mut artifact,
-            ToolOutputChannel::Stderr,
-            &text,
-            &handle.cell_id,
-        );
-    }
-    let writer = artifact.writer.take();
-    let Some(writer) = writer else {
-        return;
-    };
-    match writer.finish() {
+    match result {
         Ok(Some(reference)) => {
             artifact.reference = Some(reference);
             artifact.status = CommandCellArtifactStatus::Available;
@@ -1474,6 +1546,30 @@ fn finish_output_artifact(handle: &CommandCellHandle) {
             artifact.message = Some(error.to_string());
         }
     }
+    ArtifactFinalizeOutcome::Finished
+}
+
+fn mark_artifact_finalize_interrupted(
+    handle: &CommandCellHandle,
+    outcome: ArtifactFinalizeOutcome,
+) {
+    let mut artifact = handle
+        .artifact
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if artifact.status != CommandCellArtifactStatus::Writing {
+        return;
+    }
+    artifact.status = CommandCellArtifactStatus::Failed;
+    artifact.message = Some(match outcome {
+        ArtifactFinalizeOutcome::DeadlineElapsed => {
+            "artifact finalization exceeded the command-cell deadline".to_string()
+        }
+        ArtifactFinalizeOutcome::Shutdown => {
+            "artifact finalization cancelled during command-cell shutdown".to_string()
+        }
+        ArtifactFinalizeOutcome::Finished => "artifact finalization failed".to_string(),
+    });
 }
 
 fn push_artifact_text(
@@ -1643,6 +1739,7 @@ mod tests {
             observation_leases: AtomicU64::new(0),
             _tracked_permit: Mutex::new(None),
             sequence,
+            artifact_finalize_hook: Mutex::new(None),
         })
     }
 
@@ -1709,6 +1806,26 @@ mod tests {
         );
         assert!(combined.contains("hello-cell"), "got: {combined}");
         assert!(delta.next_cursor > 0);
+    }
+
+    #[tokio::test]
+    async fn launch_publishes_handle_before_fast_terminal_settlement()
+    -> std::result::Result<(), String> {
+        let manager = manager();
+        let reservation = manager
+            .prepare_launch(request("printf fast-terminal"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let cell_id = reservation.receipt().cell_id.clone();
+        assert!(manager.cells.contains_key(&cell_id));
+        let _receipt = manager
+            .start_prepared(reservation)
+            .await
+            .map_err(|error| error.to_string())?;
+        let (output, terminal) = drain_to_terminal(&manager, &cell_id).await;
+        assert_eq!(terminal.snapshot.phase, CommandCellPhase::Succeeded);
+        assert!(output.contains("fast-terminal"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -2204,7 +2321,15 @@ mod tests {
 
         append_output(&handle, &[0xe4, 0xb8], 1024, ToolOutputChannel::Stdout);
         append_output(&handle, &[0xad], 1024, ToolOutputChannel::Stdout);
-        finish_output_artifact(&handle);
+        assert_eq!(
+            finish_output_artifact(
+                &handle,
+                Instant::now() + Duration::from_secs(5),
+                &CancellationToken::new(),
+            )
+            .await,
+            ArtifactFinalizeOutcome::Finished
+        );
         let snapshot = handle.snapshot().await;
         let artifact = snapshot
             .output_artifact
@@ -2472,6 +2597,77 @@ mod tests {
             Err(CommandCellError::Shutdown)
         ));
         assert!(manager.start_prepared(prepared).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_blocking_artifact_finalizer_at_deadline()
+    -> std::result::Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let manager = BackgroundCommandManager::default();
+        let mut launch = request("printf finalizer-output");
+        launch.timeout_secs = Some(30);
+        launch.output_artifacts = Some(
+            echo_core::tools::artifact::ToolOutputArtifactConfig::new(root.path(), "test")
+                .threshold_bytes(1),
+        );
+        launch.artifact_identity = Some(echo_core::tools::artifact::ToolOutputArtifactIdentity {
+            conversation_id: Some("conversation".to_string()),
+            run_id: Some("run".to_string()),
+            call_id: "call".to_string(),
+            tool_name: "shell".to_string(),
+        });
+        let reservation = manager
+            .prepare_launch(launch)
+            .await
+            .map_err(|error| error.to_string())?;
+        let cell_id = reservation.receipt().cell_id.clone();
+        let hook = Arc::new(TestArtifactFinalizeHook {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let entry = manager
+            .cells
+            .get(&cell_id)
+            .ok_or_else(|| "prepared cell was not published".to_string())?;
+        *entry
+            .artifact_finalize_hook
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(hook.clone());
+        drop(entry);
+        let _receipt = manager
+            .start_prepared(reservation)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(Duration::from_secs(2), hook.entered.notified())
+            .await
+            .map_err(|_| "artifact finalizer did not enter the injected wait".to_string())?;
+
+        tokio::time::timeout(Duration::from_secs(2), manager.shutdown())
+            .await
+            .map_err(|_| "shutdown waited for the blocked artifact finalizer".to_string())?
+            .map_err(|error| error.to_string())?;
+        let terminal = manager
+            .wait(&cell_id, 0, 0)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(terminal.snapshot.phase, CommandCellPhase::Cancelled);
+        assert_eq!(
+            terminal.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::Cancelled)
+        );
+        assert_eq!(
+            terminal.snapshot.artifact_status,
+            CommandCellArtifactStatus::Failed
+        );
+        assert!(
+            terminal
+                .snapshot
+                .artifact_message
+                .as_deref()
+                .is_some_and(|message| message.contains("shutdown"))
+        );
+        assert_eq!(manager.tasks.len(), 0);
         Ok(())
     }
 

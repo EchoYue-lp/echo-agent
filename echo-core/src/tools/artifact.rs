@@ -235,6 +235,34 @@ impl ToolOutputArtifactWriter {
         }))
     }
 
+    /// Finalize without blocking the async runtime thread on flush, sync, or rename.
+    ///
+    /// If the future is cancelled before publication, `Drop` removes the
+    /// partial file and releases the artifact scope.
+    pub async fn finish_async(mut self) -> io::Result<Option<ToolOutputArtifactRef>> {
+        use tokio::io::AsyncWriteExt;
+
+        if self.payload_bytes < u64::try_from(self.config.threshold_bytes).unwrap_or(u64::MAX) {
+            self.completed = true;
+            return Ok(None);
+        }
+        self.ensure_file()?;
+        if let Some(file) = self.file.take() {
+            let mut file = tokio::fs::File::from_std(file);
+            file.flush().await?;
+            file.sync_all().await?;
+        }
+        tokio::fs::rename(&self.partial_path, &self.final_path).await?;
+        self.completed = true;
+        Ok(Some(ToolOutputArtifactRef {
+            path: self.final_path.clone(),
+            artifact_bytes: self.artifact_bytes,
+            payload_bytes: self.payload_bytes,
+            sha256: format!("{:x}", self.hasher.clone().finalize()),
+            retention: self.config.retention.clone(),
+        }))
+    }
+
     fn write_artifact_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.artifact_bytes = self
             .artifact_bytes
