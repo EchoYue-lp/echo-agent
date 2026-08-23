@@ -94,8 +94,9 @@ pub mod segmented;
 
 pub use file::{FileCheckpointStore, FileEventJournal};
 pub use segmented::{
-    JournalPhysicalCleanupStatus, JournalPruneCommitStatus, JournalPruneReceipt,
-    JournalRetentionMetadata, JournalSegmentMetadata, SegmentedFileEventJournal,
+    JournalPhysicalCleanupStatus, JournalPhysicalSegmentMetadata, JournalPruneCommitStatus,
+    JournalPruneReceipt, JournalRetentionMetadata, JournalSegmentMetadata,
+    SegmentedFileEventJournal,
 };
 
 use echo_core::error::{ReactError, Result};

@@ -232,18 +232,17 @@ struct SegmentState {
 struct OpaqueSegmentState {
     path: PathBuf,
     start_sequence: u64,
-    end_sequence: u64,
+    end_sequence: Option<u64>,
     bytes: u64,
 }
 
 impl OpaqueSegmentState {
-    fn metadata(&self) -> JournalSegmentMetadata {
-        JournalSegmentMetadata {
+    fn metadata(&self) -> JournalPhysicalSegmentMetadata {
+        JournalPhysicalSegmentMetadata {
             path: self.path.clone(),
             start_sequence: self.start_sequence,
             end_sequence: self.end_sequence,
-            bytes: self.bytes,
-            active: false,
+            observed_bytes: self.bytes,
         }
     }
 }
@@ -454,15 +453,11 @@ fn scan_directory<E: JournalEvent>(
         return Err(journal_error(format!("{context}: {marker_context}")));
     }
     let mut obsolete_segments = Vec::with_capacity(obsolete_paths.len());
-    for (index, (start, path)) in obsolete_paths.iter().enumerate() {
-        let next_start = obsolete_paths
-            .get(index.saturating_add(1))
-            .map(|(next, _)| *next)
-            .unwrap_or(retained_floor);
+    for (start, path) in &obsolete_paths {
         obsolete_segments.push(OpaqueSegmentState {
             path: path.clone(),
             start_sequence: *start,
-            end_sequence: next_start.saturating_sub(1),
+            end_sequence: None,
             bytes: std::fs::symlink_metadata(path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
@@ -516,6 +511,19 @@ pub struct JournalSegmentMetadata {
     pub active: bool,
 }
 
+/// Observed filesystem metadata for one physically removed opaque segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalPhysicalSegmentMetadata {
+    /// Removed path.
+    pub path: PathBuf,
+    /// Start sequence encoded by the validated file name.
+    pub start_sequence: u64,
+    /// Exact end only when this process previously validated the segment.
+    pub end_sequence: Option<u64>,
+    /// File size observed before physical deletion.
+    pub observed_bytes: u64,
+}
+
 /// Durable logical retention state for a segmented journal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JournalRetentionMetadata {
@@ -553,7 +561,7 @@ pub struct JournalPruneReceipt {
     /// Segments newly excluded from logical replay by this call.
     pub logically_pruned: Vec<JournalSegmentMetadata>,
     /// Segment files physically removed by this call.
-    pub physically_removed: Vec<JournalSegmentMetadata>,
+    pub physically_removed: Vec<JournalPhysicalSegmentMetadata>,
     /// Whether physical deletion and its directory barrier completed.
     pub cleanup: JournalPhysicalCleanupStatus,
 }
@@ -892,7 +900,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 state.obsolete_segments.push(OpaqueSegmentState {
                     path: segment.path,
                     start_sequence: segment.start_sequence,
-                    end_sequence: segment.end_sequence,
+                    end_sequence: Some(segment.end_sequence),
                     bytes: segment.bytes,
                 });
             } else {
@@ -993,7 +1001,10 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
     fn finish_pending_cleanup(
         &self,
         state: &mut SegmentedJournalState,
-    ) -> (Vec<JournalSegmentMetadata>, JournalPhysicalCleanupStatus) {
+    ) -> (
+        Vec<JournalPhysicalSegmentMetadata>,
+        JournalPhysicalCleanupStatus,
+    ) {
         let candidates = state.obsolete_segments.clone();
         let mut removed = Vec::new();
         let mut deletion_error = None;
@@ -1835,6 +1846,12 @@ mod tests {
         assert_eq!(receipt.commit, JournalPruneCommitStatus::Confirmed);
         assert_eq!(receipt.logically_pruned.len(), 2);
         assert_eq!(receipt.physically_removed.len(), 2);
+        assert!(
+            receipt
+                .physically_removed
+                .iter()
+                .all(|segment| segment.end_sequence.is_some())
+        );
         assert_eq!(receipt.cleanup, JournalPhysicalCleanupStatus::Confirmed);
         assert!(active_path.exists());
         let remaining = journal.segments();
@@ -2170,6 +2187,12 @@ mod tests {
             .prune_closed_segments_before(4)
             .expect("remove opaque leftovers");
         assert_eq!(cleanup.physically_removed.len(), 2);
+        assert!(
+            cleanup
+                .physically_removed
+                .iter()
+                .all(|segment| segment.end_sequence.is_none())
+        );
         assert_eq!(cleanup.cleanup, JournalPhysicalCleanupStatus::Confirmed);
         assert!(!segment_path(&root, 1).exists());
         assert!(!segment_path(&root, 3).exists());
