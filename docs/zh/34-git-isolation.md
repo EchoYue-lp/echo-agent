@@ -17,7 +17,7 @@ echo-agent 利用 git 原语为文件操作提供两层安全保障：
 
 ```toml
 [dependencies]
-echo_tools = { version = "0.2", features = ["git"] }
+echo_agent = { version = "0.2", features = ["git"] }
 ```
 
 ### 用途

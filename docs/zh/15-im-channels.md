@@ -38,7 +38,6 @@ echo-agent 支持将 Agent 接入主流 IM 平台（QQ Bot、飞书等），通�
 ```toml
 [dependencies]
 echo_agent = { path = "echo-agent", features = ["channels"] }
-echo_channels = { path = "echo-agent/echo-channels" }
 ```
 
 ### 2. 配置环境变量
@@ -61,48 +60,74 @@ export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
 ### 3. 启动
 
 ```rust
-use echo_agent::agent::Agent;
-use echo_agent::llm::LlmClient;
-use echo_agent::prelude::*;
-use echo_channels::prelude::*;
-use echo_providers::LlmConfig;
 use std::sync::Arc;
+use echo_agent::channels::{
+    AgentChannelHandler, ChannelManager, FeishuChannel, FeishuConfig, MessageHandler,
+    QqChannel, QqConfig, SessionConfig, SessionHandler,
+};
+use echo_agent::prelude::{AgentConfig, LlmApiProtocol, LlmClient, LlmConfig};
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    let llm_client = create_llm_client()?;
+    let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+        echo_agent::error::ReactError::Other(
+            "OPENAI_API_KEY is required for the IM channel provider".to_string(),
+        )
+    })?;
+    let llm_config = LlmConfig::for_provider(
+        "openai",
+        std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+        api_key,
+        "gpt-5.5",
+        LlmApiProtocol::Responses,
+    )?;
+
+    // 单个通道可直接使用显式 provider 配置构造 handler。
+    let _standalone_handler = AgentChannelHandler::from_config(
+        AgentConfig::standard("gpt-5.5", "im-assistant", "请清晰回答用户。"),
+        llm_config.clone(),
+    )?;
+
+    // Session factory 共享 provider transport，但每个会话保留独立 Agent 状态。
+    let llm_client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
 
     let mut manager = ChannelManager::new();
 
-    // 注册 QQ Bot
-    let qq_config = QqConfig {
-        app_id: std::env::var("QQ_APP_ID")?,
-        client_secret: std::env::var("QQ_CLIENT_SECRET")?,
-    };
-    manager.register(Box::new(QqChannel::new(qq_config)?));
+    if let (Ok(app_id), Ok(secret)) = (
+        std::env::var("QQ_APP_ID"),
+        std::env::var("QQ_CLIENT_SECRET"),
+    ) {
+        manager.register(Box::new(QqChannel::new(QqConfig::new(app_id, secret))?))?;
+    }
+    if let (Ok(app_id), Ok(secret)) = (
+        std::env::var("FEISHU_APP_ID"),
+        std::env::var("FEISHU_APP_SECRET"),
+    ) {
+        manager.register(Box::new(FeishuChannel::new(FeishuConfig::new_long_poll(
+            app_id, secret,
+        ))?))?;
+    }
 
-    // 注册飞书
-    let feishu_config = FeishuConfig {
-        app_id: std::env::var("FEISHU_APP_ID")?,
-        app_secret: std::env::var("FEISHU_APP_SECRET")?,
-        webhook_bind: "0.0.0.0:8080".to_string(),
-        webhook_path: "/webhook".to_string(),
-        verification_token: None,
+    let session_config = SessionConfig::default().with_timeout_minutes(60);
+    let handler_factory = move |_channel_id: &str| -> Arc<dyn MessageHandler> {
+        let llm_client = Arc::clone(&llm_client);
+        Arc::new(SessionHandler::new(
+            session_config.clone(),
+            move || -> Box<dyn MessageHandler> {
+                Box::new(AgentChannelHandler::from_config_with_client(
+                    AgentConfig::standard("gpt-5.5", "im-assistant", "请清晰回答用户。"),
+                    Arc::clone(&llm_client),
+                ))
+            },
+        ))
     };
-    manager.register(Box::new(FeishuChannel::new(feishu_config)?));
+    for started in manager.start_all(handler_factory).await {
+        started.result?;
+    }
 
-    // 启动所有通道
-    let llm_ref = llm_client.clone();
-    let handler_factory = move |_id: &str| -> Arc<dyn MessageHandler> {
-        Arc::new(MyHandler::new(llm_ref.clone()))
-    };
-    manager.start_all(handler_factory).await?;
-
-    // 等待 Ctrl+C
     tokio::signal::ctrl_c().await.ok();
-    manager.stop_all().await?;
-
-    Ok(())
+    manager.stop_all().await
 }
 ```
 

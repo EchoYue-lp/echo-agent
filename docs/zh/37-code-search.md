@@ -52,7 +52,7 @@ CodeSearchTool                        ← 实现 Tool trait
 
 ```toml
 [dependencies]
-echo_tools = { version = "0.2", features = ["files"] }
+echo_agent = { version = "0.2", features = ["files"] }
 ```
 
 注册由 `echo_agent::tools::register_all_tools` 自动完成：

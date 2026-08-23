@@ -130,3 +130,44 @@ fn framework_docs_do_not_publish_product_paths() -> Result<(), Box<dyn std::erro
     }
     Ok(())
 }
+
+#[test]
+fn facade_consumer_guides_do_not_depend_on_split_crates() -> Result<(), Box<dyn std::error::Error>>
+{
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let guides = [
+        ("docs/en/15-im-channels.md", "channels"),
+        ("docs/zh/15-im-channels.md", "channels"),
+        ("docs/en/34-git-isolation.md", "git"),
+        ("docs/zh/34-git-isolation.md", "git"),
+        ("docs/en/37-code-search.md", "files"),
+        ("docs/zh/37-code-search.md", "files"),
+    ];
+
+    for (relative, feature) in guides {
+        let content = std::fs::read_to_string(root.join(relative))?;
+        assert!(!content.contains("echo_channels"), "{relative}");
+        assert!(!content.contains("echo_providers"), "{relative}");
+        assert!(
+            !content
+                .lines()
+                .any(|line| line.trim_start().starts_with("echo_tools =")),
+            "{relative}"
+        );
+        assert!(
+            content.contains(&format!("features = [\"{feature}\"]")),
+            "{relative}"
+        );
+        if feature == "channels" {
+            assert!(
+                !content.contains("OPENAI_API_KEY\").unwrap_or_default()"),
+                "{relative}"
+            );
+            assert!(
+                content.contains("OPENAI_API_KEY is required for the IM channel provider"),
+                "{relative}"
+            );
+        }
+    }
+    Ok(())
+}

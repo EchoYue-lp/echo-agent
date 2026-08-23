@@ -52,7 +52,7 @@ Output protection:
 
 ```toml
 [dependencies]
-echo_tools = { version = "0.2", features = ["files"] }
+echo_agent = { version = "0.2", features = ["files"] }
 ```
 
 Registration is handled automatically by `echo_agent::tools::register_all_tools`:

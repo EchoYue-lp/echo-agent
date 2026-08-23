@@ -17,7 +17,7 @@ Both features are built on standard `git` commands, requiring no additional depe
 
 ```toml
 [dependencies]
-echo_tools = { version = "0.2", features = ["git"] }
+echo_agent = { version = "0.2", features = ["git"] }
 ```
 
 ### Purpose
