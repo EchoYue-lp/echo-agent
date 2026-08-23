@@ -8,6 +8,7 @@ mod events;
 pub mod revisioned;
 pub mod runtime;
 pub mod runtime_executor;
+pub mod runtime_service;
 pub mod task_tools;
 mod time;
 
@@ -45,6 +46,10 @@ pub use runtime_executor::{
     RuntimeClaimAbandonment, RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig,
     RuntimeDagOutcome, RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskClaimOutcome,
     RuntimeTaskResolution,
+};
+pub use runtime_service::{
+    RuntimeTaskMutationError, RuntimeTaskRequeueOutcome, RuntimeTaskService, block_runtime_task,
+    claim_runtime_task, requeue_runtime_claim, runtime_claim_is_current, settle_runtime_claim,
 };
 pub use task_tools::{
     TaskCreateTool, TaskListTool, TaskUpdateTool, build_task_create_tool, build_task_list_tool,

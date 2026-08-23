@@ -447,31 +447,10 @@ impl InMemoryRevisionedTaskStore {
                 scope_id: scope_id.to_string(),
             });
         };
-        if graph.snapshot.revision != expected_revision {
-            return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
-        }
-        let Some(current) = graph
-            .snapshot
-            .tasks
-            .iter_mut()
-            .find(|current| current.spec.id == task.spec.id)
-        else {
-            return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
-        };
-        if current.spec != task.spec || current.execution.status != TaskStatus::Pending {
-            return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
-        }
-        let claim = TaskClaim::new(
-            expected_revision,
-            current.execution.retry_count.saturating_add(1),
-            current
-                .spec
-                .stable_hash()
-                .map_err(|message| RevisionedTaskStoreError::Rejected { message })?,
-        );
-        current.execution.status = TaskStatus::Running;
-        current.execution.claim = Some(claim.clone());
-        Ok(RuntimeTaskClaimOutcome::Claimed(claim))
+        super::runtime_service::claim_runtime_task(&mut graph.snapshot, task, expected_revision)
+            .map_err(|error| RevisionedTaskStoreError::Rejected {
+                message: error.to_string(),
+            })
     }
 
     /// Atomically settle the exact physical claim. `false` means the claim was
@@ -489,24 +468,10 @@ impl InMemoryRevisionedTaskStore {
                 scope_id: scope_id.to_string(),
             });
         };
-        let Some(task) = graph
-            .snapshot
-            .tasks
-            .iter_mut()
-            .find(|task| task.spec.id == task_id)
-        else {
-            return Ok(false);
-        };
-        if task.execution.claim.as_ref() != Some(claim) {
-            return Ok(false);
-        }
-        task.execution.status = task
-            .execution
-            .status
-            .transition_to(status)
-            .map_err(|message| RevisionedTaskStoreError::Rejected { message })?;
-        task.execution.claim = None;
-        Ok(true)
+        super::runtime_service::settle_runtime_claim(&mut graph.snapshot, task_id, claim, status)
+            .map_err(|error| RevisionedTaskStoreError::Rejected {
+                message: error.to_string(),
+            })
     }
 
     /// Block an unclaimed pending task in the authoritative runtime snapshot.
@@ -522,18 +487,54 @@ impl InMemoryRevisionedTaskStore {
                 scope_id: scope_id.to_string(),
             });
         };
-        let Some(task) = graph
-            .snapshot
-            .tasks
-            .iter_mut()
-            .find(|task| task.spec.id == task_id)
-        else {
-            return Ok(());
-        };
-        if task.execution.status == TaskStatus::Pending && task.execution.claim.is_none() {
-            task.execution.status = TaskStatus::Blocked(reason.to_string());
-        }
+        super::runtime_service::block_runtime_task(&mut graph.snapshot, task_id, reason);
         Ok(())
+    }
+
+    /// Atomically requeue one exact claim using the canonical runtime mutation.
+    pub async fn requeue_runtime_claim(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        failure_fingerprint: Option<String>,
+        error: String,
+    ) -> Result<super::RuntimeTaskRequeueOutcome, RevisionedTaskStoreError> {
+        let mut graphs = self.graphs.write().await;
+        let Some(graph) = graphs.get_mut(scope_id) else {
+            return Err(RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        super::runtime_service::requeue_runtime_claim(
+            &mut graph.snapshot,
+            task_id,
+            claim,
+            failure_fingerprint,
+            error,
+        )
+        .map_err(|error| RevisionedTaskStoreError::Rejected {
+            message: error.to_string(),
+        })
+    }
+
+    pub async fn runtime_claim_is_current(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> Result<bool, RevisionedTaskStoreError> {
+        let graphs = self.graphs.read().await;
+        let Some(graph) = graphs.get(scope_id) else {
+            return Err(RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        Ok(super::runtime_service::runtime_claim_is_current(
+            &graph.snapshot,
+            task_id,
+            claim,
+        ))
     }
 }
 
