@@ -22,6 +22,81 @@ impl Drop for ExclusiveFileLease {
     }
 }
 
+/// Create a directory tree and durably publish every newly created ancestor.
+///
+/// Creation proceeds from the nearest existing ancestor toward `path`. Each
+/// directory and its parent are synced before the next child is created. A
+/// retry first syncs the nearest existing ancestor, which reconciles a prior
+/// failure that happened after `mkdir` but before its directory-entry barrier.
+pub fn create_dir_all_durable(path: &Path) -> std::io::Result<()> {
+    create_dir_all_durable_with(path, sync_parent_directory)
+}
+
+fn create_dir_all_durable_with(
+    path: &Path,
+    mut sync_directory: impl FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if path.as_os_str().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "durable directory path must not be empty",
+        ));
+    }
+    let mut missing = Vec::new();
+    let mut nearest = path.to_path_buf();
+    loop {
+        match std::fs::metadata(&nearest) {
+            Ok(metadata) if metadata.is_dir() => break,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("directory path is not a directory: {}", nearest.display()),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(nearest.clone());
+                nearest = nearest
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    sync_directory(&nearest)?;
+    if let Some(parent) = nearest.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        sync_directory(parent)?;
+    }
+    for directory in missing.into_iter().rev() {
+        match std::fs::create_dir(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !std::fs::metadata(&directory)?.is_dir() {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        sync_directory(&directory)?;
+        if let Some(parent) = directory.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            sync_directory(parent)?;
+        }
+    }
+    Ok(())
+}
+
 /// Acquire a non-blocking exclusive sidecar lease for `authority_path`.
 ///
 /// One process owns the lease for the authority lifetime. Additional handles
@@ -391,6 +466,65 @@ fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_nested_creation_stops_at_failed_barrier_and_retries() -> std::io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("echo-core-durable-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let target = root.join("missing-a").join("missing-b").join("journal");
+        let failed_directory = root.join("missing-a").join("missing-b");
+        let mut visited = Vec::new();
+        let error = create_dir_all_durable_with(&target, |directory| {
+            visited.push(directory.to_path_buf());
+            if directory == failed_directory {
+                Err(std::io::Error::other(
+                    "injected nested directory barrier failure",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("nested barrier failure must surface");
+        assert!(
+            error
+                .to_string()
+                .contains("nested directory barrier failure")
+        );
+        assert!(failed_directory.is_dir());
+        assert!(!target.is_dir());
+        assert!(visited.contains(&root.join("missing-a")));
+        assert!(visited.contains(&failed_directory));
+
+        create_dir_all_durable(&target)?;
+        assert!(target.is_dir());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn durable_relative_creation_syncs_dot_for_top_level_entry() -> std::io::Result<()> {
+        let top = PathBuf::from(format!(
+            "echo-core-relative-durable-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let nested = top.join("a").join("b");
+        let mut visited = Vec::new();
+        create_dir_all_durable_with(&nested, |directory| {
+            visited.push(directory.to_path_buf());
+            Ok(())
+        })?;
+        let top_barrier = visited
+            .windows(2)
+            .any(|pair| pair.first() == Some(&top) && pair.get(1) == Some(&PathBuf::from(".")));
+        let nested_barrier = visited
+            .windows(2)
+            .any(|pair| pair.first() == Some(&top.join("a")) && pair.get(1) == Some(&top));
+        assert!(top_barrier);
+        assert!(nested_barrier);
+        std::fs::remove_dir_all(top)?;
+        Ok(())
+    }
 
     #[test]
     fn path_segment_rejects_escape_and_separators() {

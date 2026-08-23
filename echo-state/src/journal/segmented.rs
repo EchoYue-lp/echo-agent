@@ -15,8 +15,9 @@ use super::{
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
 use echo_core::utils::fs::{
-    ExclusiveFileLease, FileDurability, append_existing, atomic_write, read_existing,
-    read_existing_from, read_existing_lines_from, truncate_existing, try_exclusive_file_lease,
+    ExclusiveFileLease, FileDurability, append_existing, atomic_write, create_dir_all_durable,
+    read_existing, read_existing_from, read_existing_lines_from, truncate_existing,
+    try_exclusive_file_lease,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -197,18 +198,10 @@ fn list_segment_paths(directory: &Path, context: &str) -> Result<Vec<(u64, PathB
     let entries = std::fs::read_dir(directory).map_err(|error| io_error(context, error))?;
     for entry in entries {
         let entry = entry.map_err(|error| io_error(context, error))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| io_error(context, error))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if !name.ends_with(SEGMENT_SUFFIX) {
             continue;
-        }
-        if !file_type.is_file() {
-            return Err(journal_error(format!(
-                "{context}: segmented journal entry {name:?} is not a regular file"
-            )));
         }
         let start = parse_segment_name(&name).ok_or_else(|| {
             journal_error(format!(
@@ -233,6 +226,26 @@ struct SegmentState {
     end_sequence: u64,
     bytes: u64,
     record_offsets: Vec<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct OpaqueSegmentState {
+    path: PathBuf,
+    start_sequence: u64,
+    end_sequence: u64,
+    bytes: u64,
+}
+
+impl OpaqueSegmentState {
+    fn metadata(&self) -> JournalSegmentMetadata {
+        JournalSegmentMetadata {
+            path: self.path.clone(),
+            start_sequence: self.start_sequence,
+            end_sequence: self.end_sequence,
+            bytes: self.bytes,
+            active: false,
+        }
+    }
 }
 
 impl SegmentState {
@@ -332,27 +345,15 @@ fn sync_directory(_directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn ensure_journal_directory(
-    directory: &Path,
-    context: &str,
-    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> Result<()> {
-    std::fs::create_dir_all(directory).map_err(|error| io_error(context, error))?;
+fn ensure_journal_directory(directory: &Path, context: &str) -> Result<()> {
+    create_dir_all_durable(directory).map_err(|error| io_error(context, error))?;
     let metadata = std::fs::metadata(directory).map_err(|error| io_error(context, error))?;
     if !metadata.is_dir() {
         return Err(journal_error(format!(
             "{context}: journal root is not a directory"
         )));
     }
-    sync_parent(directory).map_err(|error| io_error(context, error))
-}
-
-fn sync_parent_directory_entry(directory: &Path) -> std::io::Result<()> {
-    let parent = directory
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    sync_directory(parent)
+    Ok(())
 }
 
 fn create_segment(directory: &Path, start_sequence: u64, context: &str) -> Result<SegmentState> {
@@ -397,8 +398,9 @@ fn scan_directory<E: JournalEvent>(
     context: &str,
 ) -> Result<SegmentedJournalState> {
     let listed = list_segment_paths(directory, context)?;
+    let marker = load_retention_marker(directory, context)?;
     if listed.is_empty() {
-        if load_retention_marker(directory, context)?.is_some() {
+        if marker.is_some() {
             return Err(journal_error(format!(
                 "{context}: retained-floor marker exists but every journal segment is missing"
             )));
@@ -407,16 +409,69 @@ fn scan_directory<E: JournalEvent>(
         return Ok(SegmentedJournalState {
             next_sequence: 1,
             segments: vec![active],
+            obsolete_segments: Vec::new(),
             retained_floor: 1,
             cleanup_pending: false,
             marker_barrier_pending: false,
             poison: None,
         });
     }
-    let mut segments = Vec::with_capacity(listed.len());
-    let last_index = listed.len().saturating_sub(1);
+    let (retained_floor, cleanup_pending) = marker
+        .as_ref()
+        .map(|marker| (marker.retained_floor, marker.cleanup_pending))
+        .unwrap_or((1, false));
+    let mut obsolete_paths = Vec::new();
+    let mut logical_paths = Vec::new();
+    for (start, path) in listed {
+        if start < retained_floor {
+            obsolete_paths.push((start, path));
+        } else {
+            logical_paths.push((start, path));
+        }
+    }
+    if !cleanup_pending && !obsolete_paths.is_empty() {
+        let first_start = obsolete_paths.first().map(|(start, _)| *start).unwrap_or(0);
+        return Err(journal_error(format!(
+            "{context}: retained-floor cleanup is confirmed but prefix segment {first_start} remains"
+        )));
+    }
+    let first_logical = logical_paths
+        .first()
+        .map(|(start, _)| *start)
+        .ok_or_else(|| {
+            journal_error(format!(
+                "{context}: no segment starts at retained floor {retained_floor}"
+            ))
+        })?;
+    if first_logical != retained_floor {
+        let marker_context = if marker.is_some() {
+            format!("missing segment at retained floor {retained_floor}, found {first_logical}")
+        } else {
+            format!(
+                "journal prefix starts at {first_logical} without an authorized retained-floor marker"
+            )
+        };
+        return Err(journal_error(format!("{context}: {marker_context}")));
+    }
+    let mut obsolete_segments = Vec::with_capacity(obsolete_paths.len());
+    for (index, (start, path)) in obsolete_paths.iter().enumerate() {
+        let next_start = obsolete_paths
+            .get(index.saturating_add(1))
+            .map(|(next, _)| *next)
+            .unwrap_or(retained_floor);
+        obsolete_segments.push(OpaqueSegmentState {
+            path: path.clone(),
+            start_sequence: *start,
+            end_sequence: next_start.saturating_sub(1),
+            bytes: std::fs::symlink_metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        });
+    }
+    let mut segments = Vec::with_capacity(logical_paths.len());
+    let last_index = logical_paths.len().saturating_sub(1);
     let mut expected_start = None;
-    for (index, (start, path)) in listed.into_iter().enumerate() {
+    for (index, (start, path)) in logical_paths.into_iter().enumerate() {
         if let Some(expected) = expected_start
             && start != expected
         {
@@ -434,57 +489,10 @@ fn scan_directory<E: JournalEvent>(
         .last()
         .and_then(|segment| segment.end_sequence.checked_add(1))
         .ok_or_else(|| journal_error(format!("{context}: journal sequence exhausted")))?;
-    let marker = load_retention_marker(directory, context)?;
-    let (retained_floor, cleanup_pending) = match marker {
-        Some(marker) => {
-            if marker.retained_floor > next_sequence {
-                return Err(journal_error(format!(
-                    "{context}: retained floor {} is ahead of next journal sequence {next_sequence}",
-                    marker.retained_floor
-                )));
-            }
-            let logical = segments
-                .iter()
-                .find(|segment| segment.start_sequence >= marker.retained_floor)
-                .ok_or_else(|| {
-                    journal_error(format!(
-                        "{context}: no segment starts at retained floor {}",
-                        marker.retained_floor
-                    ))
-                })?;
-            if logical.start_sequence != marker.retained_floor {
-                return Err(journal_error(format!(
-                    "{context}: missing segment at retained floor {}, found {}",
-                    marker.retained_floor, logical.start_sequence
-                )));
-            }
-            let first_start = segments
-                .first()
-                .map(|segment| segment.start_sequence)
-                .ok_or_else(|| journal_error(format!("{context}: journal has no segments")))?;
-            if !marker.cleanup_pending && first_start != marker.retained_floor {
-                return Err(journal_error(format!(
-                    "{context}: retained-floor cleanup is confirmed but prefix segment {first_start} remains"
-                )));
-            }
-            (marker.retained_floor, marker.cleanup_pending)
-        }
-        None => {
-            let first_start = segments
-                .first()
-                .map(|segment| segment.start_sequence)
-                .ok_or_else(|| journal_error(format!("{context}: journal has no segments")))?;
-            if first_start != 1 {
-                return Err(journal_error(format!(
-                    "{context}: journal prefix starts at {first_start} without an authorized retained-floor marker"
-                )));
-            }
-            (1, false)
-        }
-    };
     Ok(SegmentedJournalState {
         next_sequence,
         segments,
+        obsolete_segments,
         retained_floor,
         cleanup_pending,
         marker_barrier_pending: false,
@@ -554,6 +562,7 @@ pub struct JournalPruneReceipt {
 struct SegmentedJournalState {
     next_sequence: u64,
     segments: Vec<SegmentState>,
+    obsolete_segments: Vec<OpaqueSegmentState>,
     retained_floor: u64,
     cleanup_pending: bool,
     marker_barrier_pending: bool,
@@ -627,7 +636,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         }
         let directory = directory.into();
         let context = format!("segmented journal open {}", directory.display());
-        ensure_journal_directory(&directory, &context, sync_parent_directory_entry)?;
+        ensure_journal_directory(&directory, &context)?;
         let directory =
             std::fs::canonicalize(&directory).map_err(|error| io_error(&context, error))?;
         let context = format!("segmented journal open {}", directory.display());
@@ -836,12 +845,14 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 MarkerWriteStatus::Confirmed => {
                     state.retained_floor = target_floor;
                     state.cleanup_pending = true;
+                    Self::move_logical_prefix_to_obsolete(&mut state);
                     JournalPruneCommitStatus::Confirmed
                 }
                 MarkerWriteStatus::Degraded { error } => {
                     state.retained_floor = target_floor;
                     state.cleanup_pending = true;
                     state.marker_barrier_pending = true;
+                    Self::move_logical_prefix_to_obsolete(&mut state);
                     return Ok(JournalPruneReceipt {
                         retained_floor: target_floor,
                         commit: JournalPruneCommitStatus::Degraded {
@@ -872,6 +883,26 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             physically_removed,
             cleanup,
         })
+    }
+
+    fn move_logical_prefix_to_obsolete(state: &mut SegmentedJournalState) {
+        let mut retained = Vec::with_capacity(state.segments.len());
+        for segment in std::mem::take(&mut state.segments) {
+            if segment.start_sequence < state.retained_floor {
+                state.obsolete_segments.push(OpaqueSegmentState {
+                    path: segment.path,
+                    start_sequence: segment.start_sequence,
+                    end_sequence: segment.end_sequence,
+                    bytes: segment.bytes,
+                });
+            } else {
+                retained.push(segment);
+            }
+        }
+        state
+            .obsolete_segments
+            .sort_by_key(|segment| segment.start_sequence);
+        state.segments = retained;
     }
 
     fn write_retention_marker(
@@ -963,12 +994,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         &self,
         state: &mut SegmentedJournalState,
     ) -> (Vec<JournalSegmentMetadata>, JournalPhysicalCleanupStatus) {
-        let candidates = state
-            .segments
-            .iter()
-            .filter(|segment| segment.start_sequence < state.retained_floor)
-            .cloned()
-            .collect::<Vec<_>>();
+        let candidates = state.obsolete_segments.clone();
         let mut removed = Vec::new();
         let mut deletion_error = None;
         for candidate in candidates {
@@ -980,9 +1006,9 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 break;
             }
             state
-                .segments
+                .obsolete_segments
                 .retain(|segment| segment.path != candidate.path);
-            removed.push(candidate.metadata(false));
+            removed.push(candidate.metadata());
         }
         let sync_error = self
             .sync_segment_directory()
@@ -1435,25 +1461,15 @@ mod tests {
     }
 
     #[test]
-    fn fresh_directory_requires_parent_entry_barrier() {
+    fn fresh_nested_directory_uses_durable_creation() {
         let root = temp_root("fresh-parent-sync");
-        let directory = root.join("journal");
-        let called = std::cell::Cell::new(false);
-        let error = ensure_journal_directory(&directory, "fresh journal", |_| {
-            called.set(true);
-            Err(std::io::Error::other("injected parent sync failure"))
-        })
-        .expect_err("parent sync failure must fail fresh open");
-        assert!(called.get());
+        let directory = root.join("missing-a").join("missing-b").join("journal");
+        let journal = open_strings(&directory, 4096, FileDurability::SyncData);
         assert!(directory.is_dir());
-        assert!(error.to_string().contains("parent sync failure"));
-
-        ensure_journal_directory(
-            &directory,
-            "fresh journal retry",
-            sync_parent_directory_entry,
-        )
-        .expect("retry parent entry barrier");
+        journal
+            .append("durable nested".to_string())
+            .expect("append nested journal");
+        drop(journal);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -2108,6 +2124,75 @@ mod tests {
         assert!(!reopened.retention_metadata().cleanup_pending);
         drop(journal);
         drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn pending_obsolete_prefix_is_opaque_across_crash_recovery() {
+        let root = temp_root("opaque-obsolete-prefix");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three", "four"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        *journal
+            .marker_full_write_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let receipt = journal
+            .prune_closed_segments_before(4)
+            .expect("logical marker visible");
+        assert!(matches!(
+            receipt.commit,
+            JournalPruneCommitStatus::Degraded { .. }
+        ));
+        drop(journal);
+
+        std::fs::remove_file(segment_path(&root, 2)).expect("obsolete segment 2 missing");
+        std::fs::write(segment_path(&root, 3), b"corrupt obsolete bytes")
+            .expect("obsolete segment 3 corrupt");
+        let reopened = open_strings(&root, 1, FileDurability::Flush);
+        assert_eq!(
+            reopened
+                .segments()
+                .iter()
+                .map(|segment| segment.start_sequence)
+                .collect::<Vec<_>>(),
+            vec![4]
+        );
+        assert_eq!(
+            reopened
+                .replay_after(3, usize::MAX)
+                .expect("floor replay")
+                .len(),
+            1
+        );
+        let cleanup = reopened
+            .prune_closed_segments_before(4)
+            .expect("remove opaque leftovers");
+        assert_eq!(cleanup.physically_removed.len(), 2);
+        assert_eq!(cleanup.cleanup, JournalPhysicalCleanupStatus::Confirmed);
+        assert!(!segment_path(&root, 1).exists());
+        assert!(!segment_path(&root, 3).exists());
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn confirmed_cleanup_rejects_reappearing_obsolete_prefix() {
+        let root = temp_root("confirmed-obsolete-prefix");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        journal
+            .prune_closed_segments_before(3)
+            .expect("confirmed prune");
+        drop(journal);
+        std::fs::write(segment_path(&root, 1), b"reappeared obsolete prefix")
+            .expect("restore obsolete prefix");
+        let error = SegmentedFileEventJournal::<String>::open(&root, 1, FileDurability::Flush)
+            .expect_err("confirmed marker rejects obsolete prefix");
+        assert!(error.to_string().contains("cleanup is confirmed"));
         std::fs::remove_dir_all(root).ok();
     }
 

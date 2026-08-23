@@ -12,8 +12,9 @@ use super::{
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::fs::{
-    ExclusiveFileLease, FileDurability, append_existing, atomic_write, read_existing,
-    read_existing_from, read_existing_lines_from, truncate_existing, try_exclusive_file_lease,
+    ExclusiveFileLease, FileDurability, append_existing, atomic_write, create_dir_all_durable,
+    read_existing, read_existing_from, read_existing_lines_from, truncate_existing,
+    try_exclusive_file_lease,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -195,7 +196,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent).map_err(|error| io_error(&context, error))?;
+        create_dir_all_durable(parent).map_err(|error| io_error(&context, error))?;
         let canonical_parent =
             std::fs::canonicalize(parent).map_err(|error| io_error(&context, error))?;
         let file_name = path.file_name().ok_or_else(|| {
