@@ -43,10 +43,16 @@ async fn add(a: f64, b: f64) -> Result<ToolResult> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+        echo_agent::error::ConfigError::MissingConfig(
+            "quickstart".to_string(),
+            "OPENAI_API_KEY".to_string(),
+        )
+    })?;
     let llm_config = LlmConfig::for_provider(
         "openai",
         "https://api.openai.com/v1",
-        std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+        api_key,
         "qwen3.7-max",
         LlmApiProtocol::ChatCompletions,
     )?;
@@ -206,7 +212,7 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 | **Guard System** | Rule-based / LLM-powered content filtering | `#[guard(name = "safety")] async fn ...` |
 | **Permission Model** | Declarative tool permissions with unified permission service | `PermissionService::from_provider(...)` |
 | **Audit Logging** | Structured events with pluggable backends | `agent.set_audit_logger(...)` |
-| **Macro System** | 11 macros: `#[tool]`, `agent!{}`, `messages![]`, ... | `agent! { model: "..", tools: [...] }` |
+| **Macro System** | 11 macros: `#[tool]`, `agent!{}`, `messages![]`, ... | `agent! { llm_config: config, tools: [...] }` |
 
 ### Multi-Agent & Orchestration
 

@@ -3,8 +3,15 @@
 //! 展示 echo-agent 提供的所有便捷宏，覆盖从工具定义、Agent 构建到消息组装等场景。
 //!
 //! ```bash
-//! cargo run --example demo25_macros
+//! ECHO_AGENT_PROVIDER=openai \
+//! ECHO_AGENT_BASE_URL=https://api.openai.com/v1 \
+//! ECHO_AGENT_API_PROTOCOL=responses \
+//! ECHO_AGENT_MODEL=gpt-5.5 \
+//! ECHO_AGENT_API_KEY=sk-... \
+//! cargo run --example demo25_macros --locked
 //! ```
+
+mod support;
 
 use echo_agent::error::Result;
 use echo_agent::prelude::*;
@@ -80,6 +87,9 @@ async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardR
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+    require_api_key("demo25_macros")?;
+    let llm_config = support::llm_config(None)?;
     println!("═══════════════════════════════════════════════════════════════");
     println!("      Echo Agent × 宏系统综合演示 (demo25)");
     println!("═══════════════════════════════════════════════════════════════\n");
@@ -128,7 +138,7 @@ async fn main() -> Result<()> {
     println!("\n── agent! 宏 ──────────────────────────────────────────────────");
 
     let agent = agent! {
-        model: "qwen3-max",
+        llm_config: llm_config,
         system_prompt: "你是一个计算助手，必须通过工具完成所有计算。",
         name: "macro_demo_agent",
         tools: [AddTool, MultiplyTool, GreetTool],
@@ -151,4 +161,18 @@ async fn main() -> Result<()> {
     println!("═══════════════════════════════════════════════════════════════");
 
     Ok(())
+}
+
+fn require_api_key(example: &str) -> Result<()> {
+    std::env::var("ECHO_AGENT_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(drop)
+        .ok_or_else(|| {
+            echo_agent::error::ConfigError::MissingConfig(
+                example.to_string(),
+                "ECHO_AGENT_API_KEY".to_string(),
+            )
+            .into()
+        })
 }

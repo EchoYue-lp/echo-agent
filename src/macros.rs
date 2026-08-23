@@ -12,14 +12,27 @@
 /// use echo_agent::prelude::*;
 ///
 /// # fn example() -> echo_agent::error::Result<()> {
+/// let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+///     echo_agent::error::ConfigError::MissingConfig(
+///         "agent macro example".to_string(),
+///         "OPENAI_API_KEY".to_string(),
+///     )
+/// })?;
+/// let llm_config = LlmConfig::for_provider(
+///     "openai",
+///     "https://api.openai.com/v1",
+///     api_key,
+///     "gpt-5.5",
+///     LlmApiProtocol::Responses,
+/// )?;
 /// let mut agent = echo_agent::agent! {
-///     model: "qwen3-max",
+///     llm_config: llm_config.clone(),
 ///     system_prompt: "You are a helpful assistant",
 /// }?;
 ///
 /// // With tools (use any type implementing Tool, e.g. echo_tools builtins)
 /// let mut agent = echo_agent::agent! {
-///     model: "qwen3-max",
+///     llm_config: llm_config,
 ///     system_prompt: "You are an assistant",
 ///     // tools: [my_calculator_tool, my_weather_tool],
 ///     max_iterations: 15,

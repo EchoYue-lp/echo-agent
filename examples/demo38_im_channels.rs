@@ -4,6 +4,8 @@
 //! framework example reads explicit environment values and constructs channel
 //! configs directly.
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,11 +13,14 @@ use echo_agent::channels::{
     AgentChannelHandler, ChannelManager, FeishuChannel, FeishuConfig, MessageHandler, QqChannel,
     QqConfig, SessionConfig, SessionHandler,
 };
-use echo_agent::prelude::AgentConfig;
+use echo_agent::prelude::{AgentConfig, LlmClient};
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    let model = required_env("ECHO_AGENT_MODEL")?;
+    dotenvy::dotenv().ok();
+    let llm_config = support::llm_config(None)?;
+    let model = llm_config.model.clone();
+    let llm_client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
     let mut manager = ChannelManager::new();
 
     if let (Ok(app_id), Ok(secret)) = (
@@ -43,14 +48,14 @@ async fn main() -> echo_agent::error::Result<()> {
     let session_config = SessionConfig::default().with_timeout_minutes(60);
     let handler_factory = move |_channel_id: &str| -> Arc<dyn MessageHandler> {
         let model = model.clone();
+        let llm_client = Arc::clone(&llm_client);
         Arc::new(SessionHandler::new(
             session_config.clone(),
             move || -> Box<dyn MessageHandler> {
-                Box::new(AgentChannelHandler::from_config(AgentConfig::standard(
-                    &model,
-                    "im-assistant",
-                    "Answer the user clearly.",
-                )))
+                Box::new(AgentChannelHandler::from_config_with_client(
+                    AgentConfig::standard(&model, "im-assistant", "Answer the user clearly."),
+                    Arc::clone(&llm_client),
+                ))
             },
         ))
     };
@@ -60,14 +65,4 @@ async fn main() -> echo_agent::error::Result<()> {
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     manager.stop_all().await
-}
-
-fn required_env(name: &str) -> echo_agent::error::Result<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            echo_agent::error::ConfigError::MissingConfig("demo38".to_string(), name.to_string())
-                .into()
-        })
 }

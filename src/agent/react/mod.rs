@@ -879,7 +879,8 @@ impl ReactAgent {
                     model = %config.model,
                     "LLM client built from LlmConfig, credential injection active"
                 );
-                self.llm_client = Some(Arc::from(client));
+                self.install_llm_config(config, Arc::from(client));
+                return;
             }
             Err(e) => {
                 tracing::warn!(
@@ -889,6 +890,16 @@ impl ReactAgent {
                 );
             }
         }
+        self.llm_config = Some(config);
+    }
+
+    pub(crate) fn install_llm_config(
+        &mut self,
+        config: LlmConfig,
+        client: Arc<dyn crate::llm::LlmClient>,
+    ) {
+        self.config.model_name = config.model.clone();
+        self.llm_client = Some(client);
         self.llm_config = Some(config);
     }
 

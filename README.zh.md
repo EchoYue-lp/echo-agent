@@ -43,10 +43,16 @@ async fn add(a: f64, b: f64) -> Result<ToolResult> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+        echo_agent::error::ConfigError::MissingConfig(
+            "quickstart".to_string(),
+            "OPENAI_API_KEY".to_string(),
+        )
+    })?;
     let llm_config = LlmConfig::for_provider(
         "openai",
         "https://api.openai.com/v1",
-        std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+        api_key,
         "qwen3.7-max",
         LlmApiProtocol::ChatCompletions,
     )?;
@@ -162,7 +168,7 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 | **护栏系统** | 规则 / LLM 内容过滤 | `#[guard(name = "safety")] async fn ...` |
 | **权限模型** | 声明式工具权限 + 统一权限服务 | `PermissionService::from_provider(...)` |
 | **审计日志** | 结构化事件 + 可插拔后端 | `agent.set_audit_logger(...)` |
-| **宏系统** | 11 个宏：`#[tool]`、`agent!{}`、`messages![]`... | `agent! { model: "..", tools: [...] }` |
+| **宏系统** | 11 个宏：`#[tool]`、`agent!{}`、`messages![]`... | `agent! { llm_config: config, tools: [...] }` |
 
 ### 多 Agent 与编排
 
