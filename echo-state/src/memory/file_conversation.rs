@@ -33,7 +33,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use echo_core::error::{MemoryError, Result};
 use echo_core::memory::conversation::{
@@ -224,9 +224,10 @@ struct StoreState {
 /// All operations are serialized by an in-process `Mutex`. Suitable for a
 /// single-process local agent (the typical echo-agent consumer). For multi-
 /// process concurrency, use the SQLite backend.
+#[derive(Clone)]
 pub struct FileConversationStore {
     base: PathBuf,
-    lock: Mutex<StoreState>,
+    lock: Arc<Mutex<StoreState>>,
 }
 
 impl FileConversationStore {
@@ -239,10 +240,27 @@ impl FileConversationStore {
         Self::cleanup_orphaned_message_logs(&base)?;
         Ok(Self {
             base,
-            lock: Mutex::new(StoreState {
+            lock: Arc::new(Mutex::new(StoreState {
                 meta,
                 conversations: HashMap::new(),
-            }),
+            })),
+        })
+    }
+
+    fn run_blocking<'a, T, F>(&'a self, operation: F) -> BoxFut<'a, T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Self) -> Result<T> + Send + 'static,
+    {
+        let store = self.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || operation(store))
+                .await
+                .map_err(|error| {
+                    MemoryError::IoError(format!(
+                        "FileConversationStore blocking task failed: {error}"
+                    ))
+                })?
         })
     }
 
@@ -735,9 +753,9 @@ fn poison<T>(_: std::sync::PoisonError<T>) -> MemoryError {
 
 impl ConversationStore for FileConversationStore {
     fn create_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
-        Box::pin(async move {
-            let mut state = self.lock.lock().map_err(poison)?;
-            self.create_conversation_locked(conv, &mut state.meta)
+        self.run_blocking(move |store| {
+            let mut state = store.lock.lock().map_err(poison)?;
+            store.create_conversation_locked(conv, &mut state.meta)
         })
     }
 
@@ -745,10 +763,11 @@ impl ConversationStore for FileConversationStore {
         &'a self,
         conversation_id: &'a str,
     ) -> BoxFut<'a, Option<Conversation>> {
-        Box::pin(async move {
-            let _guard = self.lock.lock().map_err(poison)?;
-            Ok(self
-                .read_manifest(conversation_id)?
+        let conversation_id = conversation_id.to_string();
+        self.run_blocking(move |store| {
+            let _guard = store.lock.lock().map_err(poison)?;
+            Ok(store
+                .read_manifest(&conversation_id)?
                 .map(|record| record.conversation))
         })
     }
@@ -757,9 +776,9 @@ impl ConversationStore for FileConversationStore {
         &'a self,
         filter: ConversationFilter,
     ) -> BoxFut<'a, Vec<ConversationMeta>> {
-        Box::pin(async move {
-            let _g = self.lock.lock().map_err(poison)?;
-            let mut metas: Vec<ConversationMeta> = self
+        self.run_blocking(move |store| {
+            let _g = store.lock.lock().map_err(poison)?;
+            let mut metas: Vec<ConversationMeta> = store
                 .read_all_manifests()?
                 .into_iter()
                 .filter(|r| {
@@ -806,37 +825,41 @@ impl ConversationStore for FileConversationStore {
         summary: Option<&'a str>,
         compressed_before_id: Option<i64>,
     ) -> BoxFut<'a, ()> {
-        Box::pin(async move {
-            let _guard = self.lock.lock().map_err(poison)?;
-            let mut record = match self.read_manifest(conversation_id)? {
+        let conversation_id = conversation_id.to_string();
+        let title = title.map(str::to_string);
+        let summary = summary.map(str::to_string);
+        self.run_blocking(move |store| {
+            let _guard = store.lock.lock().map_err(poison)?;
+            let mut record = match store.read_manifest(&conversation_id)? {
                 Some(r) => r,
                 None => return Ok(()), // matches SQL UPDATE on 0 rows.
             };
             if title.is_some() || summary.is_some() || compressed_before_id.is_some() {
                 if let Some(t) = title {
-                    record.conversation.title = Some(t.to_string());
+                    record.conversation.title = Some(t.clone());
                     if let Some(filter) = record.search_filter.as_mut() {
-                        filter.insert_text(t);
+                        filter.insert_text(&t);
                     }
                 }
                 if let Some(s) = summary {
-                    record.conversation.summary = Some(s.to_string());
+                    record.conversation.summary = Some(s);
                 }
                 if let Some(cbid) = compressed_before_id {
                     record.conversation.compressed_before_id = Some(cbid);
                 }
                 record.conversation.updated_at = now_rfc3339();
-                self.write_manifest(&record)?;
+                store.write_manifest(&record)?;
             }
             Ok(())
         })
     }
 
     fn delete_conversation<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, ()> {
-        Box::pin(async move {
-            let mut state = self.lock.lock().map_err(poison)?;
-            let manifest = self.read_manifest(conversation_id)?;
-            let path = self.conv_path(conversation_id)?;
+        let conversation_id = conversation_id.to_string();
+        self.run_blocking(move |store| {
+            let mut state = store.lock.lock().map_err(poison)?;
+            let manifest = store.read_manifest(&conversation_id)?;
+            let path = store.conv_path(&conversation_id)?;
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -844,9 +867,9 @@ impl ConversationStore for FileConversationStore {
                     return Err(MemoryError::IoError(format!("delete conversation: {e}")).into());
                 }
             }
-            state.conversations.remove(conversation_id);
-            self.remove_replaced_log(
-                conversation_id,
+            state.conversations.remove(&conversation_id);
+            store.remove_replaced_log(
+                &conversation_id,
                 manifest
                     .as_ref()
                     .and_then(|record| record.message_log.as_ref()),
@@ -860,16 +883,18 @@ impl ConversationStore for FileConversationStore {
         conversation_id: &'a str,
         messages: &'a [StoredMessage],
     ) -> BoxFut<'a, ()> {
-        Box::pin(async move {
-            let mut state = self.lock.lock().map_err(poison)?;
-            let mut record = self
-                .read_manifest(conversation_id)?
+        let conversation_id = conversation_id.to_string();
+        let messages = messages.to_vec();
+        self.run_blocking(move |store| {
+            let mut state = store.lock.lock().map_err(poison)?;
+            let mut record = store
+                .read_manifest(&conversation_id)?
                 .ok_or_else(|| MemoryError::NotFound(format!("conversation: {conversation_id}")))?;
-            let cache = match state.conversations.remove(conversation_id) {
+            let cache = match state.conversations.remove(&conversation_id) {
                 Some(cache) if cache.log == record.message_log => cache,
                 _ => {
                     if let Some(log) = record.message_log.as_ref() {
-                        record.messages = self.read_message_log(conversation_id, log)?;
+                        record.messages = store.read_message_log(&conversation_id, log)?;
                     }
                     Self::cache_from_record(&record)?
                 }
@@ -879,7 +904,7 @@ impl ConversationStore for FileConversationStore {
                 .map(Self::semantic_digest)
                 .collect::<Result<Vec<_>>>()?;
             let append_suffix =
-                record.message_log.is_some() && Self::prefix_matches(&cache, messages, &digests);
+                record.message_log.is_some() && Self::prefix_matches(&cache, &messages, &digests);
             record.conversation.updated_at = now_rfc3339();
 
             let updated_cache = if append_suffix {
@@ -891,7 +916,8 @@ impl ConversationStore for FileConversationStore {
                     .skip(updated_cache.messages.len())
                     .zip(digests.iter().skip(updated_cache.messages.len()))
                 {
-                    let assigned = Self::assign_message(conversation_id, incoming, &mut state.meta);
+                    let assigned =
+                        Self::assign_message(&conversation_id, incoming, &mut state.meta);
                     cached_suffix.push(Self::cached_message(&assigned, *digest));
                     suffix.push(assigned);
                 }
@@ -901,7 +927,7 @@ impl ConversationStore for FileConversationStore {
                         "append path is missing its message-log manifest".into(),
                     )
                 })?;
-                let path = self.prepare_log_for_append(conversation_id, &log)?;
+                let path = store.prepare_log_for_append(&conversation_id, &log)?;
                 if !bytes.is_empty() {
                     echo_core::utils::fs::append_existing(
                         &path,
@@ -932,7 +958,7 @@ impl ConversationStore for FileConversationStore {
                     .max(suffix.iter().filter_map(|message| message.id).max());
                 let had_search_filter = record.search_filter.is_some();
                 let mut search_filter = record.search_filter.take().unwrap_or_else(|| {
-                    SearchFilter::from_conversation(&record.conversation, messages)
+                    SearchFilter::from_conversation(&record.conversation, &messages)
                 });
                 if had_search_filter {
                     for message in &suffix {
@@ -944,21 +970,21 @@ impl ConversationStore for FileConversationStore {
                 record.message_log = Some(log);
                 record.search_filter = Some(search_filter);
                 record.messages.clear();
-                self.persist_meta(&state.meta)?;
-                self.write_manifest(&record)?;
+                store.persist_meta(&state.meta)?;
+                store.write_manifest(&record)?;
                 updated_cache
             } else {
                 let mut assigned = Vec::with_capacity(messages.len());
-                for incoming in messages {
+                for incoming in &messages {
                     assigned.push(Self::assign_message(
-                        conversation_id,
+                        &conversation_id,
                         incoming,
                         &mut state.meta,
                     ));
                 }
                 let generation = Self::next_generation(record.message_log.as_ref())?;
                 let bytes = Self::serialize_message_log(&assigned)?;
-                let path = self.message_log_path(conversation_id, generation)?;
+                let path = store.message_log_path(&conversation_id, generation)?;
                 echo_core::utils::fs::atomic_write(&path, &bytes).map_err(|error| {
                     MemoryError::IoError(format!(
                         "replace conversation message log {}: {error}",
@@ -981,16 +1007,16 @@ impl ConversationStore for FileConversationStore {
                     &record.conversation,
                     &assigned,
                 ));
-                self.persist_meta(&state.meta)?;
-                self.write_manifest(&record)?;
-                self.remove_replaced_log(conversation_id, replaced.as_ref());
+                store.persist_meta(&state.meta)?;
+                store.write_manifest(&record)?;
+                store.remove_replaced_log(&conversation_id, replaced.as_ref());
                 let cached_messages = assigned
                     .iter()
                     .zip(digests.iter())
                     .map(|(message, digest)| Self::cached_message(message, *digest))
                     .collect();
                 state.conversations.insert(
-                    conversation_id.to_string(),
+                    conversation_id.clone(),
                     ConversationCache {
                         log: Some(log),
                         messages: cached_messages,
@@ -999,22 +1025,20 @@ impl ConversationStore for FileConversationStore {
                 return Ok(());
             };
 
-            state
-                .conversations
-                .insert(conversation_id.to_string(), updated_cache);
+            state.conversations.insert(conversation_id, updated_cache);
             Ok(())
         })
     }
 
     fn get_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, Vec<StoredMessage>> {
-        Box::pin(async move {
-            let mut state = self.lock.lock().map_err(poison)?;
-            let record = self.read_record(conversation_id)?;
+        let conversation_id = conversation_id.to_string();
+        self.run_blocking(move |store| {
+            let mut state = store.lock.lock().map_err(poison)?;
+            let record = store.read_record(&conversation_id)?;
             if let Some(record) = record {
-                state.conversations.insert(
-                    conversation_id.to_string(),
-                    Self::cache_from_record(&record)?,
-                );
+                state
+                    .conversations
+                    .insert(conversation_id, Self::cache_from_record(&record)?);
                 Ok(record.messages)
             } else {
                 Ok(Vec::new())
@@ -1023,10 +1047,11 @@ impl ConversationStore for FileConversationStore {
     }
 
     fn count_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, usize> {
-        Box::pin(async move {
-            let _guard = self.lock.lock().map_err(poison)?;
-            Ok(self
-                .read_manifest(conversation_id)?
+        let conversation_id = conversation_id.to_string();
+        self.run_blocking(move |store| {
+            let _guard = store.lock.lock().map_err(poison)?;
+            Ok(store
+                .read_manifest(&conversation_id)?
                 .map(|record| {
                     record
                         .message_log
@@ -1042,11 +1067,12 @@ impl ConversationStore for FileConversationStore {
         query: &'a str,
         limit: usize,
     ) -> BoxFut<'a, Vec<ConversationMeta>> {
-        Box::pin(async move {
-            let _guard = self.lock.lock().map_err(poison)?;
+        let query = query.to_string();
+        self.run_blocking(move |store| {
+            let _guard = store.lock.lock().map_err(poison)?;
             let needle = query.to_lowercase();
             let mut results = Vec::new();
-            for mut record in self.read_all_manifests()? {
+            for mut record in store.read_all_manifests()? {
                 let title_hit = record
                     .conversation
                     .title
@@ -1056,14 +1082,14 @@ impl ConversationStore for FileConversationStore {
                     || record
                         .search_filter
                         .as_ref()
-                        .is_none_or(|filter| filter.might_contain(query));
+                        .is_none_or(|filter| filter.might_contain(&query));
                 if !candidate {
                     continue;
                 }
                 if !title_hit {
                     if let Some(log) = record.message_log.as_ref() {
                         record.messages =
-                            self.read_message_log(&record.conversation.conversation_id, log)?;
+                            store.read_message_log(&record.conversation.conversation_id, log)?;
                     }
                     let message_hit = record.messages.iter().any(|message| {
                         message
@@ -1097,12 +1123,12 @@ impl ConversationStore for FileConversationStore {
     }
 
     fn ensure_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
-        Box::pin(async move {
-            let mut state = self.lock.lock().map_err(poison)?;
-            if let Some(existing) = self.read_manifest(&conv.conversation_id)? {
+        self.run_blocking(move |store| {
+            let mut state = store.lock.lock().map_err(poison)?;
+            if let Some(existing) = store.read_manifest(&conv.conversation_id)? {
                 return Ok(existing.conversation);
             }
-            self.create_conversation_locked(conv, &mut state.meta)
+            store.create_conversation_locked(conv, &mut state.meta)
         })
     }
 }
@@ -1209,6 +1235,20 @@ mod tests {
 
     fn unblock_meta_writes(path: &Path) -> std::io::Result<()> {
         std::fs::remove_dir(path)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn file_operations_run_outside_the_tokio_runtime_thread() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let runtime_thread = std::thread::current().id();
+        let io_thread = store
+            .run_blocking(|_| Ok(std::thread::current().id()))
+            .await?;
+
+        assert_ne!(io_thread, runtime_thread);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
     }
 
     #[tokio::test]

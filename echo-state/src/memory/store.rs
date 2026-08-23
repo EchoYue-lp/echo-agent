@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tracing::{debug, info};
 
 // ── InMemoryStore ─────────────────────────────────────────────────────────────
@@ -224,13 +224,16 @@ impl Store for InMemoryStore {
 /// JSON file-based persistent Store
 pub struct FileStore {
     path: PathBuf,
-    data: Arc<RwLock<HashMap<String, HashMap<String, StoreItem>>>>,
+    authority: Arc<FileStoreAuthority>,
 }
 
-type FileStoreData = RwLock<HashMap<String, HashMap<String, StoreItem>>>;
+struct FileStoreAuthority {
+    data: RwLock<HashMap<String, HashMap<String, StoreItem>>>,
+    flush: AsyncMutex<()>,
+}
 
-fn file_store_registry() -> &'static Mutex<HashMap<PathBuf, Weak<FileStoreData>>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<FileStoreData>>>> = OnceLock::new();
+fn file_store_registry() -> &'static Mutex<HashMap<PathBuf, Weak<FileStoreAuthority>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<FileStoreAuthority>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -249,8 +252,8 @@ impl FileStore {
         let mut registry = file_store_registry().lock().map_err(|error| {
             MemoryError::IoError(format!("FileStore registry poisoned: {error}"))
         })?;
-        if let Some(data) = registry.get(&path).and_then(Weak::upgrade) {
-            return Ok(Self { path, data });
+        if let Some(authority) = registry.get(&path).and_then(Weak::upgrade) {
+            return Ok(Self { path, authority });
         }
         let data = if path.exists() {
             let raw =
@@ -267,18 +270,34 @@ impl FileStore {
             .map(|b: &HashMap<String, StoreItem>| b.len())
             .sum();
         info!(path = %path.display(), namespaces = ns_count, items = item_count, "FileStore initialized");
-        let data = Arc::new(RwLock::new(data));
-        registry.insert(path.clone(), Arc::downgrade(&data));
-        Ok(Self { path, data })
+        let authority = Arc::new(FileStoreAuthority {
+            data: RwLock::new(data),
+            flush: AsyncMutex::new(()),
+        });
+        registry.insert(path.clone(), Arc::downgrade(&authority));
+        Ok(Self { path, authority })
     }
 
     async fn flush(&self) -> Result<()> {
-        let data = self.data.read().await;
-        let json = serde_json::to_string_pretty(&*data)
-            .map_err(|e| MemoryError::SerializationError(e.to_string()))?;
-        echo_core::utils::fs::atomic_write(&self.path, json.as_bytes())
-            .map_err(|e| MemoryError::IoError(e.to_string()))?;
-        debug!(path = %self.path.display(), "Store persisted");
+        let _flush = self.authority.flush.lock().await;
+        let snapshot = {
+            let data = self.authority.data.read().await;
+            data.clone()
+        };
+        let path = self.path.clone();
+        let persisted_path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let json = serde_json::to_vec_pretty(&snapshot)
+                .map_err(|error| MemoryError::SerializationError(error.to_string()))?;
+            echo_core::utils::fs::atomic_write(&path, &json)
+                .map_err(|error| MemoryError::IoError(error.to_string()))?;
+            Ok::<(), MemoryError>(())
+        })
+        .await
+        .map_err(|error| {
+            MemoryError::IoError(format!("FileStore persistence task failed: {error}"))
+        })??;
+        debug!(path = %persisted_path.display(), "Store persisted");
         Ok(())
     }
 
@@ -288,7 +307,7 @@ impl FileStore {
         entries: impl IntoIterator<Item = (Vec<&str>, &str, Value)>,
     ) -> Result<()> {
         {
-            let mut data = self.data.write().await;
+            let mut data = self.authority.data.write().await;
             for (namespace, key, value) in entries {
                 let ns_key = namespace_key(&namespace);
                 let ns_vec: Vec<String> = namespace.iter().map(|s| s.to_string()).collect();
@@ -322,7 +341,7 @@ impl Store for FileStore {
             let ns_key = namespace_key(namespace);
             let ns_vec: Vec<String> = namespace.iter().map(|s| s.to_string()).collect();
             {
-                let mut data = self.data.write().await;
+                let mut data = self.authority.data.write().await;
                 let bucket = data.entry(ns_key).or_default();
                 bucket
                     .entry(key.to_string())
@@ -343,7 +362,7 @@ impl Store for FileStore {
     ) -> BoxFuture<'a, Result<Option<StoreItem>>> {
         Box::pin(async move {
             let ns_key = namespace_key(namespace);
-            let data = self.data.read().await;
+            let data = self.authority.data.read().await;
             Ok(data.get(&ns_key).and_then(|b| b.get(key)).cloned())
         })
     }
@@ -356,7 +375,7 @@ impl Store for FileStore {
     ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
             let ns_key = namespace_key(namespace);
-            let data = self.data.read().await;
+            let data = self.authority.data.read().await;
             let Some(bucket) = data.get(&ns_key) else {
                 return Ok(vec![]);
             };
@@ -389,7 +408,7 @@ impl Store for FileStore {
         Box::pin(async move {
             let ns_key = namespace_key(namespace);
             let found = {
-                let mut data = self.data.write().await;
+                let mut data = self.authority.data.write().await;
                 data.get_mut(&ns_key)
                     .map(|b| b.remove(key).is_some())
                     .unwrap_or(false)
@@ -406,7 +425,7 @@ impl Store for FileStore {
         prefix: Option<&'a [&'a str]>,
     ) -> BoxFuture<'a, Result<Vec<Vec<String>>>> {
         Box::pin(async move {
-            let data = self.data.read().await;
+            let data = self.authority.data.read().await;
             let prefix = prefix.map(|values| {
                 values
                     .iter()
@@ -428,7 +447,7 @@ impl Store for FileStore {
     fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
             let ns_key = namespace_key(namespace);
-            let data = self.data.read().await;
+            let data = self.authority.data.read().await;
             Ok(data
                 .get(&ns_key)
                 .map(|bucket| bucket.values().cloned().collect())
@@ -440,7 +459,7 @@ impl Store for FileStore {
         let ns_key = namespace_key(namespace);
         Box::pin(async move {
             let removed = {
-                let mut data = self.data.write().await;
+                let mut data = self.authority.data.write().await;
                 let Some(bucket) = data.get_mut(&ns_key) else {
                     return Ok(0);
                 };
@@ -460,7 +479,7 @@ impl Store for FileStore {
         let ns_key = namespace_key(namespace);
         Box::pin(async move {
             let removed = {
-                let mut data = self.data.write().await;
+                let mut data = self.authority.data.write().await;
                 let Some(bucket) = data.get_mut(&ns_key) else {
                     return Ok(0);
                 };
@@ -788,6 +807,81 @@ mod tests {
         let reopened = FileStore::new(&path)?;
         assert!(reopened.get(&["one"], "a").await?.is_some());
         assert!(reopened.get(&["two"], "b").await?.is_some());
+        std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_flushes_cannot_persist_an_older_snapshot_last() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("echo-store-flush-order-{}", uuid::Uuid::new_v4()));
+        let path = root.join("store.json");
+        let first = Arc::new(FileStore::new(&path)?);
+        let second = Arc::new(FileStore::new(&path)?);
+        assert!(Arc::ptr_eq(&first.authority, &second.authority));
+
+        // Park both public mutations after their in-memory write but before
+        // either snapshot is captured for disk persistence.
+        let flush_guard = first.authority.flush.lock().await;
+        let old_store = Arc::clone(&first);
+        let old_write =
+            tokio::spawn(async move { old_store.put(&["order"], "key", json!("old")).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if first
+                    .get(&["order"], "key")
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|item| item.value == json!("old"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|error| MemoryError::IoError(format!("old mutation did not park: {error}")))?;
+
+        let new_store = Arc::clone(&second);
+        let new_write =
+            tokio::spawn(async move { new_store.put(&["order"], "key", json!("new")).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if second
+                    .get(&["order"], "key")
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|item| item.value == json!("new"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|error| MemoryError::IoError(format!("new mutation did not park: {error}")))?;
+
+        drop(flush_guard);
+        old_write
+            .await
+            .map_err(|error| MemoryError::IoError(format!("old write task failed: {error}")))??;
+        new_write
+            .await
+            .map_err(|error| MemoryError::IoError(format!("new write task failed: {error}")))??;
+        drop(first);
+        drop(second);
+
+        let reopened = FileStore::new(&path)?;
+        assert_eq!(
+            reopened
+                .get(&["order"], "key")
+                .await?
+                .map(|item| item.value),
+            Some(json!("new"))
+        );
+        drop(reopened);
         std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
         Ok(())
     }
