@@ -21,9 +21,9 @@ use echo_core::utils::fs::{
     ExclusiveFileLease, ExistingDirectoryGuard, ExistingRegularFileGuard, FileDurability,
     append_existing_matching, atomic_write, create_dir_all_durable, matching_existing_regular_len,
     open_existing_directory_guard, open_existing_regular_guard, read_existing,
-    read_existing_from_matching, read_existing_lines_from, read_existing_lines_from_matching,
-    read_existing_matching, sync_existing_directory_matching, truncate_existing_matching,
-    try_exclusive_file_lease, verify_existing_directory,
+    read_existing_from_matching, read_existing_lines_from_exact_len,
+    read_existing_lines_from_matching, read_existing_matching, sync_existing_directory_matching,
+    truncate_existing_matching, try_exclusive_file_lease, verify_existing_directory,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1596,18 +1596,31 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
                     ))
                 })?;
             let remaining = limit.saturating_sub(records.len());
+            let available = segment.record_offsets.len().saturating_sub(offset_index);
+            let expected_records = remaining.min(available);
+            if expected_records == 0 {
+                return Err(journal_error(format!(
+                    "{context}: segment metadata has no record at sequence {first_sequence}"
+                )));
+            }
             let bytes = match &segment.active_file_guard {
                 Some(file_guard) => read_existing_lines_from_matching(
                     &segment.path,
                     file_guard,
                     segment.bytes,
                     start_offset,
-                    remaining,
+                    expected_records,
                 ),
-                None => read_existing_lines_from(&segment.path, start_offset, remaining),
+                None => read_existing_lines_from_exact_len(
+                    &segment.path,
+                    segment.bytes,
+                    start_offset,
+                    expected_records,
+                ),
             }
             .map_err(|error| io_error(&context, error))?;
             let mut expected = first_sequence;
+            let records_before_segment = records.len();
             for line in bytes
                 .split(|byte| *byte == b'\n')
                 .filter(|line| !line.is_empty())
@@ -1626,6 +1639,12 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
                 if records.len() >= limit {
                     return Ok(records);
                 }
+            }
+            let decoded_records = records.len().saturating_sub(records_before_segment);
+            if decoded_records != expected_records {
+                return Err(journal_error(format!(
+                    "{context}: segment returned {decoded_records} records but metadata requires {expected_records}"
+                )));
             }
         }
         Ok(records)
@@ -2818,6 +2837,67 @@ mod tests {
             .replay_after(0, usize::MAX)
             .expect_err("closed replacement must fail digest validation");
         assert!(error.to_string().contains("digest mismatch"));
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn closed_segment_fixture(
+        label: &str,
+    ) -> (
+        PathBuf,
+        SegmentedFileEventJournal<String>,
+        JournalSegmentMetadata,
+    ) {
+        let root = temp_root(label);
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        journal.append("one".to_string()).expect("append one");
+        journal.append("two".to_string()).expect("append two");
+        let closed = journal
+            .segments()
+            .into_iter()
+            .find(|segment| !segment.active)
+            .expect("closed segment");
+        (root, journal, closed)
+    }
+
+    #[test]
+    fn empty_closed_segment_fails_replay() {
+        let (root, journal, closed) = closed_segment_fixture("closed-empty");
+        std::fs::File::create(&closed.path).expect("empty closed segment");
+        let error = journal
+            .replay_after(0, usize::MAX)
+            .expect_err("empty closed segment must fail");
+        assert!(error.to_string().contains("length changed"));
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn truncated_closed_segment_fails_replay() {
+        let (root, journal, closed) = closed_segment_fixture("closed-truncated");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&closed.path)
+            .expect("open closed segment")
+            .set_len(closed.bytes.saturating_sub(1))
+            .expect("truncate closed segment");
+        let error = journal
+            .replay_after(0, usize::MAX)
+            .expect_err("truncated closed segment must fail");
+        assert!(error.to_string().contains("length changed"));
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn closed_segment_extra_suffix_fails_replay() {
+        let (root, journal, closed) = closed_segment_fixture("closed-extra");
+        echo_core::utils::fs::append_existing(&closed.path, b"x", FileDurability::Flush)
+            .expect("append closed suffix");
+        let error = journal
+            .replay_after(0, usize::MAX)
+            .expect_err("closed segment suffix must fail");
+        assert!(error.to_string().contains("length changed"));
         drop(journal);
         std::fs::remove_dir_all(root).ok();
     }

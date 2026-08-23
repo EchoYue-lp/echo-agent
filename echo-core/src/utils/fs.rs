@@ -565,7 +565,20 @@ pub fn sync_existing_directory_matching(
             ),
         ));
     }
+    sync_verified_directory_handle(&directory)
+}
+
+#[cfg(unix)]
+fn sync_verified_directory_handle(directory: &std::fs::File) -> std::io::Result<()> {
     directory.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_verified_directory_handle(_directory: &std::fs::File) -> std::io::Result<()> {
+    // Windows directory handles opened for stable identity do not reliably
+    // support FlushFileBuffers. Identity is still verified above; directory
+    // entry barriers remain a best-effort no-op on this platform.
+    Ok(())
 }
 
 /// Return the current length only when `path` still names `guard`'s file.
@@ -642,6 +655,55 @@ pub fn read_existing_lines_from_matching(
     }
     let mut file = open_existing_regular(path, ExistingFileAccess::Read)?;
     verify_open_file_matches(path, &file, guard, Some(expected_len))?;
+    if offset > expected_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "read offset {offset} exceeds file length {expected_len}: {}",
+                path.display()
+            ),
+        ));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::new();
+    for _ in 0..limit {
+        let read = reader.read_until(b'\n', &mut bytes)?;
+        if read == 0 {
+            break;
+        }
+        if bytes.last() != Some(&b'\n') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("incomplete newline-terminated record in {}", path.display()),
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
+/// Read bounded complete records from a no-follow regular file only when its
+/// total length exactly matches the caller's immutable metadata.
+pub fn read_existing_lines_from_exact_len(
+    path: &Path,
+    expected_len: u64,
+    offset: u64,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut file = open_existing_regular(path, ExistingFileAccess::Read)?;
+    let len = file.metadata()?.len();
+    if len != expected_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "existing regular file length changed from {expected_len} to {len}; verified reopen required: {}",
+                path.display()
+            ),
+        ));
+    }
     if offset > expected_len {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -941,6 +1003,15 @@ mod tests {
         let bounded = read_existing_lines_from(&path, 0, 2)?;
         assert_eq!(bounded, b"record-00000\nrecord-00001\n");
         assert!(bounded.len() < contents.len());
+        assert_eq!(
+            read_existing_lines_from_exact_len(
+                &path,
+                u64::try_from(contents.len()).unwrap_or(u64::MAX),
+                0,
+                2,
+            )?,
+            bounded
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -984,6 +1055,7 @@ mod tests {
         std::fs::create_dir_all(&directory)?;
         let guard = open_existing_directory_guard(&directory)?;
         verify_existing_directory(&directory, &guard)?;
+        sync_existing_directory_matching(&directory, &guard)?;
 
         std::fs::rename(&directory, &displaced)?;
         assert!(verify_existing_directory(&directory, &guard).is_err());
