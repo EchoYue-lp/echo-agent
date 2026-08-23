@@ -9,13 +9,16 @@
 use super::{CheckpointFrame, CheckpointStore, EventJournal, JournalEvent, JournalRecord};
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::fs::{
-    FileDurability, append_existing, atomic_write, read_existing, truncate_existing,
+    FileDurability, append_existing, atomic_write, read_existing, read_existing_from,
+    truncate_existing,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::any::TypeId;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 fn io_error(context: &str, error: std::io::Error) -> ReactError {
     ReactError::Other(format!("{context}: {error}"))
@@ -27,6 +30,8 @@ struct ScannedJournal {
     valid_len: u64,
     /// Next sequence a fresh append should assign.
     next_sequence: u64,
+    /// Byte offset of every record, indexed by `sequence - 1`.
+    record_offsets: Vec<u64>,
 }
 
 /// Parse the journal bytes and validate sequencing.
@@ -39,13 +44,16 @@ fn scan_journal<E: JournalEvent>(context: &str, bytes: &[u8]) -> Result<ScannedJ
     let mut valid_len: u64 = 0;
     let mut next_sequence: u64 = 1;
     let mut offset: usize = 0;
+    let mut record_offsets = Vec::new();
     while offset < bytes.len() {
         let Some(newline) = bytes[offset..].iter().position(|byte| *byte == b'\n') else {
             // Trailing chunk without a newline: a torn write. It is only
             // tolerated as the final record; drop it.
             break;
         };
-        let line_end = offset + newline;
+        let line_end = offset
+            .checked_add(newline)
+            .ok_or_else(|| ReactError::Other(format!("{context}: journal byte offset overflow")))?;
         let line = &bytes[offset..line_end];
         let record: JournalRecord<E> = serde_json::from_slice(line).map_err(|error| {
             ReactError::Other(format!(
@@ -58,28 +66,83 @@ fn scan_journal<E: JournalEvent>(context: &str, bytes: &[u8]) -> Result<ScannedJ
                 record.sequence
             )));
         }
-        next_sequence = record.sequence + 1;
-        valid_len = u64::try_from(line_end + 1)
+        record_offsets.push(u64::try_from(offset).map_err(|_| {
+            ReactError::Other(format!("{context}: journal exceeds supported size"))
+        })?);
+        next_sequence = record
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| ReactError::Other(format!("{context}: journal sequence exhausted")))?;
+        let next_offset = line_end
+            .checked_add(1)
+            .ok_or_else(|| ReactError::Other(format!("{context}: journal byte offset overflow")))?;
+        valid_len = u64::try_from(next_offset)
             .map_err(|_| ReactError::Other(format!("{context}: journal exceeds supported size")))?;
-        offset = line_end + 1;
+        offset = next_offset;
     }
     Ok(ScannedJournal {
         valid_len,
         next_sequence,
+        record_offsets,
     })
+}
+
+#[derive(Debug)]
+struct FileJournalState {
+    next_sequence: u64,
+    valid_len: u64,
+    record_offsets: Vec<u64>,
+}
+
+#[derive(Debug)]
+struct SharedFileJournalState {
+    event_type: TypeId,
+    state: Mutex<FileJournalState>,
+}
+
+fn file_journal_registry() -> &'static Mutex<HashMap<PathBuf, Weak<SharedFileJournalState>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<SharedFileJournalState>>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn scan_and_repair_journal<E: JournalEvent>(
+    path: &Path,
+    context: &str,
+    durability: FileDurability,
+) -> Result<ScannedJournal> {
+    match read_existing(path) {
+        Ok(bytes) => {
+            let scanned = scan_journal::<E>(context, &bytes)?;
+            let file_len = u64::try_from(bytes.len()).map_err(|_| {
+                ReactError::Other(format!("{context}: journal exceeds supported size"))
+            })?;
+            if scanned.valid_len < file_len {
+                truncate_existing(path, scanned.valid_len, durability)
+                    .map_err(|error| io_error(context, error))?;
+            }
+            Ok(scanned)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ScannedJournal {
+            valid_len: 0,
+            next_sequence: 1,
+            record_offsets: Vec::new(),
+        }),
+        Err(error) => Err(io_error(context, error)),
+    }
 }
 
 /// JSONL-backed [`EventJournal`].
 ///
 /// Appends serialize one [`JournalRecord`] per line with the caller-selected
 /// durability policy; `Flush` survives process crashes, `SyncData` additionally
-/// survives power loss. Replay re-reads the file, so pair it with a
-/// [`super::CheckpointedReducer`] to bound hot-path reads.
+/// survives power loss. Open validates the complete file once and records byte
+/// offsets; replay then seeks directly to the requested sequence suffix.
 #[derive(Debug)]
 pub struct FileEventJournal<E> {
     path: PathBuf,
     durability: FileDurability,
-    next_sequence: Mutex<u64>,
+    shared: Arc<SharedFileJournalState>,
     _event: PhantomData<fn() -> E>,
 }
 
@@ -105,28 +168,54 @@ impl<E: JournalEvent> FileEventJournal<E> {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(io_error(&context, error)),
         }
-        let scanned = match read_existing(&path) {
-            Ok(bytes) => {
-                let scanned = scan_journal::<E>(&context, &bytes)?;
-                let file_len = u64::try_from(bytes.len()).map_err(|_| {
-                    ReactError::Other(format!("{context}: journal exceeds supported size"))
-                })?;
-                if scanned.valid_len < file_len {
-                    truncate_existing(&path, scanned.valid_len, durability)
-                        .map_err(|error| io_error(&context, error))?;
-                }
-                scanned
+        let path = path
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+            .unwrap_or(path);
+        let context = format!("journal open {}", path.display());
+        let mut registry = file_journal_registry().lock().map_err(|error| {
+            ReactError::Other(format!("journal registry lock poisoned: {error}"))
+        })?;
+        if let Some(shared) = registry.get(&path).and_then(Weak::upgrade) {
+            if shared.event_type != TypeId::of::<E>() {
+                return Err(ReactError::Other(format!(
+                    "{context}: journal is already open with a different event type"
+                )));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ScannedJournal {
-                valid_len: 0,
-                next_sequence: 1,
-            },
-            Err(error) => return Err(io_error(&context, error)),
-        };
+            // Reopening is also an integrity boundary. Scan while holding the
+            // shared append lock so a second handle cannot miss or race a torn
+            // write, including one caused outside this process.
+            let mut state = shared
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let scanned = scan_and_repair_journal::<E>(&path, &context, durability)?;
+            state.next_sequence = scanned.next_sequence;
+            state.valid_len = scanned.valid_len;
+            state.record_offsets = scanned.record_offsets;
+            drop(state);
+            return Ok(Self {
+                path,
+                durability,
+                shared,
+                _event: PhantomData,
+            });
+        }
+        let scanned = scan_and_repair_journal::<E>(&path, &context, durability)?;
+        let shared = Arc::new(SharedFileJournalState {
+            event_type: TypeId::of::<E>(),
+            state: Mutex::new(FileJournalState {
+                next_sequence: scanned.next_sequence,
+                valid_len: scanned.valid_len,
+                record_offsets: scanned.record_offsets,
+            }),
+        });
+        registry.insert(path.clone(), Arc::downgrade(&shared));
         Ok(Self {
             path,
             durability,
-            next_sequence: Mutex::new(scanned.next_sequence),
+            shared,
             _event: PhantomData,
         })
     }
@@ -141,30 +230,43 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
     fn append(&self, event: &E) -> Result<JournalRecord<E>> {
         // The lock spans encoding + write + advance so concurrent appends
         // cannot observe or reuse an in-flight sequence.
-        let mut next = self
-            .next_sequence
+        let mut state = self
+            .shared
+            .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let next_sequence = state.next_sequence.checked_add(1).ok_or_else(|| {
+            ReactError::Other("journal sequence exhausted before append".to_string())
+        })?;
         let record = JournalRecord {
-            sequence: *next,
+            sequence: state.next_sequence,
             event: event.clone(),
         };
         let mut line = serde_json::to_vec(&record).map_err(|error| {
             ReactError::Other(format!("failed to encode journal record: {error}"))
         })?;
         line.push(b'\n');
+        let line_len = u64::try_from(line.len())
+            .map_err(|_| ReactError::Other("journal record exceeds supported size".to_string()))?;
+        let valid_len = state.valid_len.checked_add(line_len).ok_or_else(|| {
+            ReactError::Other("journal byte length exhausted before append".to_string())
+        })?;
         let context = format!("journal append {}", self.path.display());
         append_existing(&self.path, &line, self.durability)
             .map_err(|error| io_error(&context, error))?;
-        *next = record.sequence + 1;
+        let record_offset = state.valid_len;
+        state.record_offsets.push(record_offset);
+        state.valid_len = valid_len;
+        state.next_sequence = next_sequence;
         Ok(record)
     }
 
     fn next_sequence(&self) -> u64 {
-        *self
-            .next_sequence
+        self.shared
+            .state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+            .next_sequence
     }
 
     fn last_sequence(&self) -> u64 {
@@ -172,29 +274,62 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
     }
 
     fn replay_after(&self, after_sequence: u64, limit: usize) -> Result<Vec<JournalRecord<E>>> {
-        let context = format!("journal replay {}", self.path.display());
-        let bytes = read_existing(&self.path).map_err(|error| io_error(&context, error))?;
-        // A concurrent append may have exposed a torn final line; scanning the
-        // complete prefix is still sound because sequences are validated.
-        let scanned = scan_journal::<E>(&context, &bytes)?;
-        if scanned.valid_len == 0 {
+        if limit == 0 {
             return Ok(Vec::new());
         }
-        let valid_prefix = usize::try_from(scanned.valid_len)
-            .map_err(|_| ReactError::Other(format!("{context}: journal exceeds supported size")))?;
-        let records: Vec<JournalRecord<E>> = bytes[..valid_prefix]
+        let context = format!("journal replay {}", self.path.display());
+        // The state lock serializes replay with append and gives O(1) access to
+        // the first byte after `after_sequence`. Open already validated the
+        // complete prefix, so replay only decodes the requested suffix.
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let last_sequence = state.next_sequence.saturating_sub(1);
+        if after_sequence >= last_sequence {
+            return Ok(Vec::new());
+        }
+        let offset_index = usize::try_from(after_sequence).map_err(|_| {
+            ReactError::Other(format!("{context}: sequence exceeds supported index"))
+        })?;
+        let start_offset = state
+            .record_offsets
+            .get(offset_index)
+            .copied()
+            .ok_or_else(|| {
+                ReactError::Other(format!(
+                    "{context}: missing byte offset after sequence {after_sequence}"
+                ))
+            })?;
+        let bytes = read_existing_from(&self.path, start_offset)
+            .map_err(|error| io_error(&context, error))?;
+        let mut expected = after_sequence
+            .checked_add(1)
+            .ok_or_else(|| ReactError::Other(format!("{context}: journal sequence exhausted")))?;
+        let mut records = Vec::new();
+        for line in bytes
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
-            .map(serde_json::from_slice)
-            .collect::<std::result::Result<_, _>>()
-            .map_err(|error| {
+        {
+            let record: JournalRecord<E> = serde_json::from_slice(line).map_err(|error| {
                 ReactError::Other(format!("{context}: corrupt journal record: {error}"))
             })?;
-        Ok(records
-            .into_iter()
-            .filter(|record| record.sequence > after_sequence)
-            .take(limit)
-            .collect())
+            if record.sequence != expected {
+                return Err(ReactError::Other(format!(
+                    "{context}: journal sequence gap, expected {expected} but found {}",
+                    record.sequence
+                )));
+            }
+            expected = expected.checked_add(1).ok_or_else(|| {
+                ReactError::Other(format!("{context}: journal sequence exhausted"))
+            })?;
+            records.push(record);
+            if records.len() >= limit {
+                break;
+            }
+        }
+        Ok(records)
     }
 }
 
@@ -276,9 +411,8 @@ mod tests {
     impl super::super::EventReducer for LensReducer {
         type Event = String;
 
-        fn apply(&mut self, _event: &String) -> Result<()> {
-            self.applied += 1;
-            Ok(())
+        fn apply(&mut self, _event: &String) {
+            self.applied = self.applied.saturating_add(1);
         }
     }
 
@@ -309,6 +443,65 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].event, "one");
         assert_eq!(records[1].sequence, 2);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn independent_handles_share_canonical_sequence_state_under_concurrent_append() {
+        const APPENDS_PER_HANDLE: usize = 32;
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let first = std::sync::Arc::new(
+            FileEventJournal::<String>::open(&path, FileDurability::Flush)
+                .expect("open first handle"),
+        );
+        let second_path = root.join(".").join("events.jsonl");
+        let second = std::sync::Arc::new(
+            FileEventJournal::<String>::open(second_path, FileDurability::Flush)
+                .expect("open second handle"),
+        );
+        assert!(std::sync::Arc::ptr_eq(&first.shared, &second.shared));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for (label, journal) in [("a", first.clone()), ("b", second.clone())] {
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let mut sequences = Vec::new();
+                for index in 0..APPENDS_PER_HANDLE {
+                    let record = journal.append(&format!("{label}-{index}"))?;
+                    sequences.push(record.sequence);
+                }
+                Ok::<Vec<u64>, ReactError>(sequences)
+            }));
+        }
+        let mut assigned = Vec::new();
+        for handle in handles {
+            assigned.extend(
+                handle
+                    .join()
+                    .expect("append thread")
+                    .expect("concurrent append"),
+            );
+        }
+        assigned.sort_unstable();
+        let expected_count = APPENDS_PER_HANDLE.saturating_mul(2);
+        let expected = (1..=u64::try_from(expected_count).unwrap_or(u64::MAX)).collect::<Vec<_>>();
+        assert_eq!(assigned, expected);
+
+        drop(first);
+        drop(second);
+        let reopened =
+            FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("reopen journal");
+        assert_eq!(
+            reopened.last_sequence(),
+            u64::try_from(expected_count).unwrap_or(u64::MAX)
+        );
+        let records = reopened
+            .replay_after(0, usize::MAX)
+            .expect("replay reopened journal");
+        assert_eq!(records.len(), expected_count);
+        drop(reopened);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -400,7 +593,10 @@ mod tests {
             )),
             2,
         );
-        assert_eq!(recovered.recover().expect("recover"), 5);
+        assert_eq!(
+            recovered.recover().expect("recover").last_applied_sequence,
+            5
+        );
         recovered.with_state(|state| assert_eq!(state.applied, 5));
         std::fs::remove_dir_all(root).ok();
     }
@@ -412,6 +608,39 @@ mod tests {
         std::fs::write(root.join("checkpoint.json"), b"{partial").expect("write corrupt");
         let error = store.load().expect_err("corrupt checkpoint must fail");
         assert!(error.to_string().contains("corrupt checkpoint"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reducer_discards_and_repairs_corrupt_checkpoint() {
+        let root = temp_root();
+        let journal = std::sync::Arc::new(
+            FileEventJournal::<String>::open(root.join("events.jsonl"), FileDurability::Flush)
+                .expect("open journal"),
+        );
+        for value in ["one", "two", "three"] {
+            journal.append(&value.to_string()).expect("append");
+        }
+        let checkpoint_path = root.join("checkpoint.json");
+        std::fs::write(&checkpoint_path, b"{partial").expect("write corrupt checkpoint");
+        let reducer = CheckpointedReducer::new(
+            journal,
+            std::sync::Arc::new(FileCheckpointStore::<LensReducer>::open(&checkpoint_path)),
+            2,
+        );
+
+        let receipt = reducer.recover().expect("journal recovery");
+        assert_eq!(receipt.last_applied_sequence, 3);
+        assert!(matches!(
+            receipt.checkpoint,
+            super::super::CheckpointRecoveryStatus::Rebuilt { .. }
+        ));
+        reducer.with_state(|state| assert_eq!(state.applied, 3));
+        let repaired = FileCheckpointStore::<LensReducer>::open(&checkpoint_path)
+            .load()
+            .expect("load repaired checkpoint")
+            .expect("repaired checkpoint exists");
+        assert_eq!(repaired.sequence, 3);
         std::fs::remove_dir_all(root).ok();
     }
 }

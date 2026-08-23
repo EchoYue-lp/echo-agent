@@ -39,9 +39,11 @@
 //! - A torn trailing record (partial write followed by a crash) is tolerated
 //!   and truncated on the next open. Corruption before the trailing record is
 //!   an error.
-//! - [`EventReducer::apply`] must be total over events this reducer produced;
-//!   an apply failure after a durable append means the projection diverged
-//!   from the journal and recovery would fail the same way.
+//! - [`EventReducer::apply`] is infallible: journal events are validated before
+//!   append, and projection code must remain total over its own event type.
+//! - One [`CheckpointedReducer`] is the single projection owner for its journal.
+//!   It serializes append, fold, checkpoint, and recovery as one transaction so
+//!   concurrent callers cannot reorder committed sequences.
 //!
 //! # Example
 //!
@@ -50,7 +52,6 @@
 //!     CheckpointStore, CheckpointedReducer, EventReducer, MemoryCheckpointStore,
 //!     MemoryEventJournal,
 //! };
-//! use echo_core::error::Result;
 //! use std::sync::Arc;
 //!
 //! #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -60,9 +61,8 @@
 //!
 //! impl EventReducer for CountingReducer {
 //!     type Event = String;
-//!     fn apply(&mut self, _event: &String) -> Result<()> {
-//!         self.applied += 1;
-//!         Ok(())
+//!     fn apply(&mut self, _event: &String) {
+//!         self.applied = self.applied.saturating_add(1);
 //!     }
 //! }
 //!
@@ -79,7 +79,7 @@
 //!
 //! // Recovery loads the checkpoint and replays only the tail.
 //! let recovered = CheckpointedReducer::new(journal, checkpoints, 2);
-//! assert_eq!(recovered.recover()?, 3);
+//! assert_eq!(recovered.recover()?.last_applied_sequence, 3);
 //! recovered.with_state(|state| assert_eq!(state.applied, 3));
 //! # Ok(())
 //! }
@@ -167,11 +167,14 @@ impl<E: JournalEvent> MemoryEventJournal<E> {
 impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
     fn append(&self, event: &E) -> Result<JournalRecord<E>> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let next_sequence = inner.next_sequence.checked_add(1).ok_or_else(|| {
+            ReactError::Other("journal sequence exhausted before append".to_string())
+        })?;
         let record = JournalRecord {
             sequence: inner.next_sequence,
             event: event.clone(),
         };
-        inner.next_sequence = record.sequence + 1;
+        inner.next_sequence = next_sequence;
         inner.records.push(record.clone());
         Ok(record)
     }
@@ -193,13 +196,11 @@ impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
 
     fn replay_after(&self, after_sequence: u64, limit: usize) -> Result<Vec<JournalRecord<E>>> {
         let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        Ok(inner
-            .records
-            .iter()
-            .filter(|record| record.sequence > after_sequence)
-            .take(limit)
-            .cloned()
-            .collect())
+        let start = usize::try_from(after_sequence).map_err(|_| {
+            ReactError::Other("journal sequence exceeds supported memory index".to_string())
+        })?;
+        let suffix = inner.records.get(start..).unwrap_or(&[]);
+        Ok(suffix.iter().take(limit).cloned().collect())
     }
 }
 
@@ -210,7 +211,52 @@ impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
 pub trait EventReducer: Default + Serialize + DeserializeOwned + Send + Sync + 'static {
     type Event: JournalEvent;
 
-    fn apply(&mut self, event: &Self::Event) -> Result<()>;
+    fn apply(&mut self, event: &Self::Event);
+}
+
+/// Result of automatic checkpoint compounding after an append.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointApplyStatus {
+    /// The configured cadence has not been reached.
+    NotDue,
+    /// The projection was checkpointed through this append.
+    Saved,
+    /// The event and projection committed, but the derived checkpoint did not.
+    /// Callers must not retry the event; a later append or recovery retries the
+    /// discardable checkpoint.
+    Degraded { error: String },
+}
+
+/// Commit receipt for one journaled projection update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyReceipt {
+    /// Sequence durably assigned to the event.
+    pub sequence: u64,
+    /// Outcome of optional checkpoint compounding.
+    pub checkpoint: CheckpointApplyStatus,
+}
+
+/// How recovery obtained and repaired its derived checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointRecoveryStatus {
+    /// A valid checkpoint was loaded and no repair was needed.
+    Loaded,
+    /// No checkpoint existed and the replay tail did not reach the cadence.
+    Missing,
+    /// A missing, corrupt, stale, or behind checkpoint was rebuilt from the
+    /// authoritative journal.
+    Rebuilt { reason: String },
+    /// Journal recovery succeeded, but repairing the derived checkpoint failed.
+    Degraded { reason: String, error: String },
+}
+
+/// Recovery result for a checkpointed projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryReceipt {
+    /// Last journal sequence folded into the recovered state.
+    pub last_applied_sequence: u64,
+    /// Checkpoint load/repair outcome.
+    pub checkpoint: CheckpointRecoveryStatus,
 }
 
 /// Persisted checkpoint pairing a reducer state with its applied sequence.
@@ -303,9 +349,6 @@ struct ReducerInner<R> {
     since_checkpoint: u64,
 }
 
-/// Batch size used by [`CheckpointedReducer::recover`] when replaying a tail.
-const RECOVER_BATCH: usize = 512;
-
 /// Folds journal events into a reducer state and compounds checkpoints.
 ///
 /// `apply` appends to the journal first (durability before projection), then
@@ -345,17 +388,30 @@ where
     /// Append one event, fold it, and maybe compound a checkpoint.
     ///
     /// Returns the journal sequence assigned to the event.
-    pub fn apply(&self, event: &R::Event) -> Result<u64> {
-        let record = self.journal.append(event)?;
+    pub fn apply(&self, event: &R::Event) -> Result<ApplyReceipt> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        inner.state.apply(&record.event)?;
+        let record = self.journal.append(event)?;
+        inner.state.apply(&record.event);
         inner.last_applied = record.sequence;
-        inner.since_checkpoint += 1;
-        if self.checkpoint_every != 0 && inner.since_checkpoint >= self.checkpoint_every {
-            self.checkpoints.save(&inner.state, inner.last_applied)?;
-            inner.since_checkpoint = 0;
-        }
-        Ok(record.sequence)
+        inner.since_checkpoint = inner.since_checkpoint.saturating_add(1);
+        let checkpoint =
+            if self.checkpoint_every != 0 && inner.since_checkpoint >= self.checkpoint_every {
+                match self.checkpoints.save(&inner.state, inner.last_applied) {
+                    Ok(()) => {
+                        inner.since_checkpoint = 0;
+                        CheckpointApplyStatus::Saved
+                    }
+                    Err(error) => CheckpointApplyStatus::Degraded {
+                        error: error.to_string(),
+                    },
+                }
+            } else {
+                CheckpointApplyStatus::NotDue
+            };
+        Ok(ApplyReceipt {
+            sequence: record.sequence,
+            checkpoint,
+        })
     }
 
     /// Persist the current state as a checkpoint through the applied sequence.
@@ -368,28 +424,69 @@ where
 
     /// Load the latest checkpoint (or a default state) and replay the tail.
     ///
-    /// Returns the last applied sequence after recovery.
-    pub fn recover(&self) -> Result<u64> {
-        let frame = self.checkpoints.load()?;
-        let (mut state, mut last_applied) = match frame {
-            Some(frame) => (frame.state, frame.sequence),
-            None => (R::default(), 0),
-        };
-        loop {
-            let batch = self.journal.replay_after(last_applied, RECOVER_BATCH)?;
-            if batch.is_empty() {
-                break;
-            }
-            for record in batch {
-                state.apply(&record.event)?;
-                last_applied = record.sequence;
-            }
-        }
+    /// Returns the last applied sequence and checkpoint repair status.
+    pub fn recover(&self) -> Result<RecoveryReceipt> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let journal_last = self.journal.last_sequence();
+        let loaded = self.checkpoints.load();
+        let (mut state, mut last_applied, mut checkpoint_sequence, mut repair_reason) = match loaded
+        {
+            Ok(Some(frame)) if frame.sequence <= journal_last => {
+                (frame.state, frame.sequence, frame.sequence, None)
+            }
+            Ok(Some(frame)) => (
+                R::default(),
+                0,
+                0,
+                Some(format!(
+                    "checkpoint sequence {} is ahead of journal sequence {journal_last}",
+                    frame.sequence
+                )),
+            ),
+            Ok(None) => (R::default(), 0, 0, None),
+            Err(error) => (
+                R::default(),
+                0,
+                0,
+                Some(format!("checkpoint load failed: {error}")),
+            ),
+        };
+        let records = self.journal.replay_after(last_applied, usize::MAX)?;
+        for record in records {
+            state.apply(&record.event);
+            last_applied = record.sequence;
+        }
+        let replayed_since_checkpoint = last_applied.saturating_sub(checkpoint_sequence);
+        let checkpoint_due =
+            self.checkpoint_every != 0 && replayed_since_checkpoint >= self.checkpoint_every;
+        let checkpoint = if repair_reason.is_some() || checkpoint_due {
+            let reason = repair_reason.take().unwrap_or_else(|| {
+                format!(
+                    "replayed {replayed_since_checkpoint} events after checkpoint sequence {checkpoint_sequence}"
+                )
+            });
+            match self.checkpoints.save(&state, last_applied) {
+                Ok(()) => {
+                    checkpoint_sequence = last_applied;
+                    CheckpointRecoveryStatus::Rebuilt { reason }
+                }
+                Err(error) => CheckpointRecoveryStatus::Degraded {
+                    reason,
+                    error: error.to_string(),
+                },
+            }
+        } else if checkpoint_sequence == 0 {
+            CheckpointRecoveryStatus::Missing
+        } else {
+            CheckpointRecoveryStatus::Loaded
+        };
         inner.state = state;
         inner.last_applied = last_applied;
-        inner.since_checkpoint = 0;
-        Ok(last_applied)
+        inner.since_checkpoint = last_applied.saturating_sub(checkpoint_sequence);
+        Ok(RecoveryReceipt {
+            last_applied_sequence: last_applied,
+            checkpoint,
+        })
     }
 
     /// Last journal sequence folded into the current state.
@@ -410,6 +507,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default, Serialize, Deserialize, Debug)]
     struct SumReducer {
@@ -420,13 +519,9 @@ mod tests {
     impl EventReducer for SumReducer {
         type Event = i32;
 
-        fn apply(&mut self, event: &i32) -> Result<()> {
-            self.total = self
-                .total
-                .checked_add(i64::from(*event))
-                .ok_or_else(|| ReactError::Other("sum reducer overflow".to_string()))?;
+        fn apply(&mut self, event: &i32) {
+            self.total = self.total.saturating_add(i64::from(*event));
             self.events.push(*event);
-            Ok(())
         }
     }
 
@@ -486,8 +581,8 @@ mod tests {
     #[test]
     fn apply_folds_state_and_returns_sequence() {
         let fixture = reducer_with(0);
-        assert_eq!(fixture.reducer.apply(&5).expect("apply"), 1);
-        assert_eq!(fixture.reducer.apply(&7).expect("apply"), 2);
+        assert_eq!(fixture.reducer.apply(&5).expect("apply").sequence, 1);
+        assert_eq!(fixture.reducer.apply(&7).expect("apply").sequence, 2);
         assert_eq!(fixture.journal.last_sequence(), 2);
         fixture.reducer.with_state(|state| {
             assert_eq!(state.total, 12);
@@ -525,7 +620,7 @@ mod tests {
             fixture.checkpoints as Arc<dyn CheckpointStore<SumReducer>>,
             2,
         );
-        assert_eq!(second.recover().expect("recover"), 5);
+        assert_eq!(second.recover().expect("recover").last_applied_sequence, 5);
         second.with_state(|state| {
             assert_eq!(state.total, 15);
             assert_eq!(state.events, (1..=5).collect::<Vec<_>>());
@@ -543,7 +638,7 @@ mod tests {
             Arc::new(MemoryCheckpointStore::<SumReducer>::new()),
             0,
         );
-        assert_eq!(second.recover().expect("recover"), 4);
+        assert_eq!(second.recover().expect("recover").last_applied_sequence, 4);
         second.with_state(|state| assert_eq!(state.total, 10));
     }
 
@@ -561,5 +656,145 @@ mod tests {
             .expect("checkpoint present");
         assert_eq!(frame.sequence, 3);
         assert_eq!(frame.state.total, 6);
+    }
+
+    struct FailOnceCheckpointStore {
+        remaining_failures: AtomicUsize,
+        inner: MemoryCheckpointStore<SumReducer>,
+    }
+
+    impl FailOnceCheckpointStore {
+        fn new() -> Self {
+            Self {
+                remaining_failures: AtomicUsize::new(1),
+                inner: MemoryCheckpointStore::new(),
+            }
+        }
+    }
+
+    impl CheckpointStore<SumReducer> for FailOnceCheckpointStore {
+        fn save(&self, state: &SumReducer, through_sequence: u64) -> Result<()> {
+            if self
+                .remaining_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(ReactError::Other("injected checkpoint failure".to_string()));
+            }
+            self.inner.save(state, through_sequence)
+        }
+
+        fn load(&self) -> Result<Option<CheckpointFrame<SumReducer>>> {
+            self.inner.load()
+        }
+    }
+
+    #[test]
+    fn checkpoint_failure_returns_committed_degraded_receipt_without_retrying_event() {
+        let journal = Arc::new(MemoryEventJournal::new());
+        let checkpoints = Arc::new(FailOnceCheckpointStore::new());
+        let reducer = CheckpointedReducer::new(
+            Arc::clone(&journal),
+            Arc::clone(&checkpoints) as Arc<dyn CheckpointStore<SumReducer>>,
+            1,
+        );
+
+        let first = reducer.apply(&7).expect("event append must commit");
+        assert_eq!(first.sequence, 1);
+        assert!(matches!(
+            first.checkpoint,
+            CheckpointApplyStatus::Degraded { .. }
+        ));
+        assert_eq!(journal.last_sequence(), 1);
+        reducer.with_state(|state| assert_eq!(state.events, vec![7]));
+
+        let second = reducer.apply(&9).expect("later append retries checkpoint");
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.checkpoint, CheckpointApplyStatus::Saved);
+        let frame = checkpoints
+            .load()
+            .expect("checkpoint load")
+            .expect("checkpoint repaired");
+        assert_eq!(frame.sequence, 2);
+        assert_eq!(frame.state.events, vec![7, 9]);
+    }
+
+    #[test]
+    fn concurrent_apply_preserves_journal_order_in_projection() {
+        const THREADS: usize = 32;
+        let journal = Arc::new(MemoryEventJournal::new());
+        let reducer = Arc::new(CheckpointedReducer::<_, SumReducer>::new(
+            Arc::clone(&journal),
+            Arc::new(MemoryCheckpointStore::new()),
+            0,
+        ));
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for value in 0..THREADS {
+            let reducer = Arc::clone(&reducer);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let value = i32::try_from(value).unwrap_or(i32::MAX);
+                reducer.apply(&value).map(|receipt| receipt.sequence)
+            }));
+        }
+        for handle in handles {
+            assert!(handle.join().is_ok_and(|result| result.is_ok()));
+        }
+
+        let journal_events = journal
+            .replay_after(0, usize::MAX)
+            .expect("journal replay")
+            .into_iter()
+            .map(|record| record.event)
+            .collect::<Vec<_>>();
+        reducer.with_state(|state| assert_eq!(state.events, journal_events));
+        assert_eq!(
+            reducer.last_applied_sequence(),
+            u64::try_from(THREADS).unwrap_or(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn checkpoint_ahead_of_journal_is_rebuilt_from_authoritative_events() {
+        let journal = Arc::new(MemoryEventJournal::new());
+        journal.append(&3).expect("append");
+        let checkpoints = Arc::new(MemoryCheckpointStore::new());
+        checkpoints
+            .save(
+                &SumReducer {
+                    total: 999,
+                    events: vec![999],
+                },
+                99,
+            )
+            .expect("seed invalid checkpoint");
+        let reducer = CheckpointedReducer::new(
+            journal,
+            Arc::clone(&checkpoints) as Arc<dyn CheckpointStore<SumReducer>>,
+            10,
+        );
+
+        let receipt = reducer.recover().expect("recover from journal");
+        assert_eq!(receipt.last_applied_sequence, 1);
+        assert!(matches!(
+            receipt.checkpoint,
+            CheckpointRecoveryStatus::Rebuilt { .. }
+        ));
+        reducer.with_state(|state| {
+            assert_eq!(state.total, 3);
+            assert_eq!(state.events, vec![3]);
+        });
+        assert_eq!(
+            checkpoints
+                .load()
+                .expect("load")
+                .expect("repaired checkpoint")
+                .sequence,
+            1
+        );
     }
 }

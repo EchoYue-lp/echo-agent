@@ -1,6 +1,6 @@
 //! Filesystem safety primitives shared by framework crates.
 
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 /// Validate an external identifier before using it as one filesystem segment.
@@ -257,6 +257,29 @@ pub fn read_existing(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Read an existing regular file starting at an exact byte offset without
+/// following a final symlink.
+///
+/// Checkpointed journals use this to decode only the event suffix after a
+/// validated sequence instead of re-reading the complete log on every replay.
+pub fn read_existing_from(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
+    let mut file = open_existing_regular(path, ExistingFileAccess::Read)?;
+    let len = file.metadata()?.len();
+    if offset > len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "read offset {offset} exceeds file length {len}: {}",
+                path.display()
+            ),
+        ));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Truncate an existing regular file without following a final symlink.
 ///
 /// Recovery code uses this after it has validated the last complete record;
@@ -319,6 +342,19 @@ mod tests {
         atomic_write(&path, b"one")?;
         atomic_write(&path, b"two")?;
         assert_eq!(std::fs::read(&path)?, b"two");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_existing_from_returns_exact_suffix() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("echo-core-read-{}", uuid::Uuid::new_v4()));
+        let path = root.join("events.jsonl");
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(&path, b"prefix-suffix")?;
+
+        assert_eq!(read_existing_from(&path, 7)?, b"suffix");
+        assert!(read_existing_from(&path, 14).is_err());
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
