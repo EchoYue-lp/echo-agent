@@ -24,8 +24,8 @@ use echo_orchestration::tasks::{
     RevisionedTaskGraph, RevisionedTaskStore, RuntimeClaimAbandonment, RuntimeDagController,
     RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome, RuntimePlanSnapshot,
     RuntimeTaskClaimOutcome, RuntimeTaskResolution, Task, TaskClaim, TaskExecution,
-    TaskGraphContext, TaskGraphExecutionMode, TaskKind, TaskPlanPatch, TaskPlanPatchOp,
-    TaskRevisionError, TaskRevisionService, TaskSpec, TaskStatus, TaskSubagentContext,
+    TaskGraphContext, TaskGraphExecutionMode, TaskPlanPatch, TaskPlanPatchOp, TaskRevisionError,
+    TaskRevisionService, TaskSpec, TaskStatus, TaskSubagentContext,
 };
 
 use super::executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig};
@@ -104,6 +104,13 @@ pub struct TeamSpec {
     pub manager: String,
     pub subagents: Vec<String>,
     pub config: TeamConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TeamTaskExtension {
+    member: String,
+    #[serde(default)]
+    phase: Option<String>,
 }
 
 /// Role of a programmatically supplied Team member.
@@ -880,23 +887,23 @@ fn validate_team_graph_specs(
 }
 
 fn team_task_specs_match(stored: &TaskSpec, expected: &TaskSpec) -> bool {
-    let mut stored_without_metadata = stored.clone();
-    stored_without_metadata.metadata = serde_json::Value::Null;
-    let mut expected_without_metadata = expected.clone();
-    expected_without_metadata.metadata = serde_json::Value::Null;
-    if stored_without_metadata != expected_without_metadata {
+    let mut stored_without_extension = stored.clone();
+    stored_without_extension.extension = serde_json::Value::Null;
+    let mut expected_without_extension = expected.clone();
+    expected_without_extension.extension = serde_json::Value::Null;
+    if stored_without_extension != expected_without_extension {
         return false;
     }
-    match &expected.metadata {
+    match &expected.extension {
         serde_json::Value::Null => true,
         serde_json::Value::Object(expected_fields) => {
-            stored.metadata.as_object().is_some_and(|stored_fields| {
+            stored.extension.as_object().is_some_and(|stored_fields| {
                 expected_fields
                     .iter()
                     .all(|(key, value)| stored_fields.get(key) == Some(value))
             })
         }
-        expected_metadata => &stored.metadata == expected_metadata,
+        expected_extension => &stored.extension == expected_extension,
     }
 }
 
@@ -971,7 +978,7 @@ fn compile_team_graph(spec: &TeamSpec, objective: &str) -> Result<CompiledTeamGr
                     format!("Advance this pipeline objective:\n{objective}"),
                     dependencies,
                 );
-                task.spec.metadata = serde_json::json!({ "team_phase": "pipeline" });
+                set_team_task_phase(&mut task, "pipeline")?;
                 tasks.push(task);
                 previous = Some(id.clone());
                 terminal = id;
@@ -1116,25 +1123,33 @@ fn referenced_member_names(spec: &TeamSpec) -> Vec<&str> {
 }
 
 fn team_task(id: &str, member: &str, description: String, depends_on: Vec<String>) -> Task {
+    let extension = serde_json::to_value(TeamTaskExtension {
+        member: member.to_string(),
+        phase: None,
+    })
+    .unwrap_or(serde_json::Value::Null);
     let spec = TaskSpec {
         id: id.to_string(),
         title: description.clone(),
         description,
-        kind: TaskKind::Investigation,
-        agent_role: member.to_string(),
         depends_on,
-        files: Vec::new(),
-        allowed_tools: Vec::new(),
-        required_artifacts: Vec::new(),
-        execution_checks: Vec::new(),
-        acceptance_criteria: Vec::new(),
         max_retries: 0,
-        metadata: serde_json::Value::Null,
+        extension,
     };
     Task {
         execution: TaskExecution::pending(id),
         spec,
     }
+}
+
+fn set_team_task_phase(task: &mut Task, phase: &str) -> Result<()> {
+    let mut extension: TeamTaskExtension = serde_json::from_value(task.spec.extension.clone())
+        .map_err(|error| ReactError::Other(format!("Invalid Team task extension: {error}")))?;
+    extension.phase = Some(phase.to_string());
+    task.spec.extension = serde_json::to_value(extension).map_err(|error| {
+        ReactError::Other(format!("Failed to encode Team task extension: {error}"))
+    })?;
+    Ok(())
 }
 
 struct TeamRuntimeController {
@@ -1206,12 +1221,9 @@ impl RuntimeDagController for TeamRuntimeController {
                 })?;
             dependency_outputs.push((dependency, output));
         }
-        let pipeline_phase = task
-            .spec
-            .metadata
-            .get("team_phase")
-            .and_then(serde_json::Value::as_str)
-            == Some("pipeline");
+        let extension: TeamTaskExtension = serde_json::from_value(task.spec.extension.clone())
+            .map_err(|error| ReactError::Other(format!("Invalid Team task extension: {error}")))?;
+        let pipeline_phase = extension.phase.as_deref() == Some("pipeline");
         let mut prompt = if pipeline_phase && dependency_outputs.len() == 1 {
             dependency_outputs
                 .first()
@@ -1233,7 +1245,7 @@ impl RuntimeDagController for TeamRuntimeController {
         if pipeline_phase && task.spec.depends_on.is_empty() {
             prompt = task.spec.description.clone();
         }
-        (self.dispatch)(task.spec.agent_role, prompt, context.cancel)
+        (self.dispatch)(extension.member, prompt, context.cancel)
             .await
             .map_err(ReactError::Other)
     }
@@ -2053,7 +2065,7 @@ mod tests {
 ```
 ## Result
 ```json
-{"contract_version":1,"status":"completed","summary":"Created a typed Team plan","artifacts":[],"verification":[],"remaining_work":[],"touched_files":{"read":[],"written":[]}}
+{"contract_version":2,"status":"completed","summary":"Created a typed Team plan","artifacts":[],"evidence":[],"remaining_work":[]}
 ```"#;
         let expanded = manager_subagent::expand_graph(&spec, "review the repository", output)?;
         assert_eq!(expanded.tasks.len(), 2);
@@ -2098,26 +2110,29 @@ mod tests {
     }
 
     #[test]
-    fn team_identity_allows_product_metadata_extensions_but_not_rewrites() {
+    fn team_identity_allows_product_metadata_extensions_but_not_rewrites()
+    -> std::result::Result<(), String> {
         let mut expected = team_task(
             "pipeline-task",
             "researcher",
             "inspect implementation".to_string(),
             Vec::new(),
         );
-        expected.spec.metadata = serde_json::json!({ "team_phase": "pipeline" });
+        set_team_task_phase(&mut expected, "pipeline").map_err(|error| error.to_string())?;
         let mut extended = expected.spec.clone();
-        extended.metadata = serde_json::json!({
-            "team_phase": "pipeline",
-            "product_projection": { "card": "compact" }
-        });
+        if let Some(fields) = extended.extension.as_object_mut() {
+            fields.insert(
+                "product_projection".to_string(),
+                serde_json::json!({ "card": "compact" }),
+            );
+        }
         assert!(team_task_specs_match(&extended, &expected.spec));
 
-        extended.metadata = serde_json::json!({
-            "team_phase": "manager_member",
-            "product_projection": { "card": "compact" }
-        });
+        if let Some(fields) = extended.extension.as_object_mut() {
+            fields.insert("phase".to_string(), serde_json::json!("manager_member"));
+        }
         assert!(!team_task_specs_match(&extended, &expected.spec));
+        Ok(())
     }
 
     #[tokio::test]

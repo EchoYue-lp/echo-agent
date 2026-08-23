@@ -317,8 +317,8 @@ pub mod advanced {
     };
 
     pub use crate::tasks::{
-        ManagedTask, Task, TaskCreateTool, TaskExecution, TaskListTool, TaskRevisionService,
-        TaskSpec, TaskStatus, TaskUpdateTool,
+        Task, TaskCreateTool, TaskExecution, TaskListTool, TaskRevisionService, TaskSpec,
+        TaskStatus, TaskUpdateTool,
     };
 
     // Critic module — evaluation and feedback tools for agent outputs

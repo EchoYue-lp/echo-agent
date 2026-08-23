@@ -1,6 +1,5 @@
 //! Framework task relation tools backed by [`TaskRevisionService`].
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use echo_core::error::Result;
@@ -8,8 +7,8 @@ use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 
 use super::{
-    TaskCreateInput, TaskDraft, TaskGraphExecutionMode, TaskKind, TaskPlanPatchInputOp,
-    TaskRevisionError, TaskRevisionService, TaskStatus, TaskUpdateInput,
+    TaskCreateInput, TaskDraft, TaskGraphExecutionMode, TaskPlanPatchInputOp, TaskRevisionError,
+    TaskRevisionService, TaskSpecPatch, TaskStatus, TaskUpdateInput,
 };
 
 pub struct TaskCreateTool {
@@ -250,6 +249,7 @@ fn task_create_schema(service: &TaskRevisionService) -> serde_json::Value {
 
 fn task_update_schema(service: &TaskRevisionService) -> serde_json::Value {
     let task_schema = task_input_schema(service);
+    let task_patch_schema = task_patch_schema(service);
     let mut operation_schemas = vec![
         serde_json::json!({
             "type": "object",
@@ -267,23 +267,7 @@ fn task_update_schema(service: &TaskRevisionService) -> serde_json::Value {
             "properties": {
                 "op": { "const": "update" },
                 "task_id": { "type": "string" },
-                "patch": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "title": { "type": "string", "description": "User-visible task title in the user's current language" },
-                        "description": { "type": "string", "description": "Subagent brief in the user's current language" },
-                        "kind": task_kind_schema(),
-                        "agent_role": { "type": "string" },
-                        "depends_on": { "type": "array", "items": { "type": "string" } },
-                        "files": { "type": "array", "items": { "type": "string" } },
-                        "allowed_tools": { "type": "array", "items": { "type": "string" } },
-                        "required_artifacts": { "type": "array", "items": { "type": "string" } },
-                        "execution_checks": { "type": "array", "items": { "type": "string" } },
-                        "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
-                        "max_retries": { "type": "integer", "minimum": 0, "maximum": 10 }
-                    }
-                }
+                "patch": task_patch_schema
             },
             "required": ["op", "task_id", "patch"]
         }),
@@ -347,33 +331,44 @@ fn task_input_schema(service: &TaskRevisionService) -> serde_json::Value {
             "description".to_string(),
             serde_json::json!({ "type": "string", "description": "Subagent brief in the user's current language; keep code, paths, commands, and technical identifiers unchanged" }),
         ),
-        ("kind".to_string(), task_kind_schema()),
-        (
-            "subagent".to_string(),
-            serde_json::json!({ "type": "string", "description": "Registered Subagent role; omit for the domain default" }),
-        ),
         (
             "depends_on".to_string(),
             serde_json::json!({ "type": "array", "items": { "type": "string" } }),
         ),
         (
-            "files".to_string(),
-            serde_json::json!({ "type": "array", "items": { "type": "string" } }),
+            "max_retries".to_string(),
+            serde_json::json!({ "type": "integer", "minimum": 0, "maximum": 10 }),
+        ),
+    ]);
+    for (key, schema) in service.task_input_schema_extensions() {
+        properties.insert(key, schema);
+    }
+    let mut required = vec![
+        "id".to_string(),
+        "title".to_string(),
+        "description".to_string(),
+    ];
+    required.extend(service.required_task_input_extensions());
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": properties,
+        "required": required
+    })
+}
+
+fn task_patch_schema(service: &TaskRevisionService) -> serde_json::Value {
+    let mut properties = serde_json::Map::from_iter([
+        (
+            "title".to_string(),
+            serde_json::json!({ "type": "string", "description": "User-visible task title in the user's current language" }),
         ),
         (
-            "allowed_tools".to_string(),
-            serde_json::json!({ "type": "array", "items": { "type": "string" } }),
+            "description".to_string(),
+            serde_json::json!({ "type": "string", "description": "Subagent brief in the user's current language" }),
         ),
         (
-            "required_artifacts".to_string(),
-            serde_json::json!({ "type": "array", "items": { "type": "string" } }),
-        ),
-        (
-            "execution_checks".to_string(),
-            serde_json::json!({ "type": "array", "items": { "type": "string" } }),
-        ),
-        (
-            "acceptance_criteria".to_string(),
+            "depends_on".to_string(),
             serde_json::json!({ "type": "array", "items": { "type": "string" } }),
         ),
         (
@@ -387,15 +382,7 @@ fn task_input_schema(service: &TaskRevisionService) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "additionalProperties": false,
-        "properties": properties,
-        "required": ["id", "title", "description", "kind"]
-    })
-}
-
-fn task_kind_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "string",
-        "enum": ["implementation", "debugging", "verification", "review", "investigation", "test_plan", "summary", "read_only_review"]
+        "properties": properties
     })
 }
 
@@ -481,12 +468,8 @@ fn parse_task_update_input(
                 task_id: required_task_id(operation, index)?,
                 patch: operation
                     .get("patch")
-                    .cloned()
                     .ok_or_else(|| format!("operations[{index}].patch is required"))
-                    .and_then(|patch| {
-                        serde_json::from_value(patch)
-                            .map_err(|error| format!("operations[{index}].patch: {error}"))
-                    })?,
+                    .and_then(|patch| parse_task_spec_patch(patch, extension_schemas))?,
             },
             "skip" => TaskPlanPatchInputOp::Skip {
                 task_id: required_task_id(operation, index)?,
@@ -538,9 +521,6 @@ fn parse_task_draft(
             .map(str::to_string)
             .ok_or_else(|| format!("tasks[{index}].{key} is required"))
     };
-    let kind_name = field("kind")?;
-    let kind =
-        TaskKind::from_str(&kind_name).map_err(|_| format!("unknown task kind '{kind_name}'"))?;
     let max_retries = value
         .get("max_retries")
         .and_then(serde_json::Value::as_u64)
@@ -549,29 +529,69 @@ fn parse_task_draft(
     let mut extensions = serde_json::Map::new();
     for key in extension_schemas.keys() {
         if let Some(extension) = value.get(key) {
-            extensions.insert(key.clone(), extension.clone());
+            if key == "extension" {
+                let fields = extension
+                    .as_object()
+                    .ok_or_else(|| format!("tasks[{index}].extension must be an object"))?;
+                extensions.extend(fields.clone());
+            } else {
+                extensions.insert(key.clone(), extension.clone());
+            }
         }
     }
     Ok(TaskDraft {
         id: field("id")?,
         title: field("title")?,
         description: field("description")?,
-        kind,
-        subagent: value
-            .get("subagent")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(str::to_string),
         depends_on: string_array_in(value, "depends_on"),
-        files: string_array_in(value, "files"),
-        allowed_tools: string_array_in(value, "allowed_tools"),
-        required_artifacts: string_array_in(value, "required_artifacts"),
-        execution_checks: string_array_in(value, "execution_checks"),
-        acceptance_criteria: string_array_in(value, "acceptance_criteria"),
         max_retries,
-        extensions: serde_json::Value::Object(extensions),
+        extension: serde_json::Value::Object(extensions),
     })
+}
+
+fn parse_task_spec_patch(
+    value: &serde_json::Value,
+    extension_schemas: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<TaskSpecPatch, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "task patch must be an object".to_string())?;
+    let mut extension = serde_json::Map::new();
+    for key in extension_schemas.keys() {
+        if let Some(value) = object.get(key) {
+            if key == "extension" {
+                let fields = value
+                    .as_object()
+                    .ok_or_else(|| "task patch extension must be an object".to_string())?;
+                extension.extend(fields.clone());
+            } else {
+                extension.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(TaskSpecPatch {
+        title: optional_string_in(value, "title"),
+        description: optional_string_in(value, "description"),
+        depends_on: object
+            .contains_key("depends_on")
+            .then(|| string_array_in(value, "depends_on")),
+        max_retries: object
+            .get("max_retries")
+            .and_then(serde_json::Value::as_u64)
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| "max_retries exceeds u32".to_string())?,
+        extension: (!extension.is_empty()).then_some(serde_json::Value::Object(extension)),
+    })
+}
+
+fn optional_string_in(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn required_task_id(
@@ -659,9 +679,7 @@ mod tests {
                 "tasks": [{
                     "id": "分析",
                     "title": "分析问题",
-                    "description": "检查输入",
-                    "kind": "investigation",
-                    "acceptance_criteria": ["完成"]
+                    "description": "检查输入"
                 }]
             }))?)
             .await
@@ -697,6 +715,35 @@ mod tests {
     }
 
     #[test]
+    fn default_schema_exposes_product_neutral_extension() {
+        let schema = task_input_schema(&service());
+        assert!(
+            schema
+                .pointer("/properties/extension/type")
+                .is_some_and(|value| value == "object")
+        );
+    }
+
+    #[test]
+    fn default_parser_preserves_product_neutral_extension() -> std::result::Result<(), String> {
+        let service = service();
+        let input = parameters(serde_json::json!({
+            "tasks": [{
+                "id": "task-1",
+                "title": "Inspect",
+                "description": "Inspect the input",
+                "extension": { "domain": "research", "priority": 4 }
+            }]
+        }))?;
+        let parsed = parse_task_create_input(&input, &service.task_input_schema_extensions())?;
+        assert_eq!(
+            parsed.tasks.first().map(|task| &task.extension),
+            Some(&serde_json::json!({ "domain": "research", "priority": 4 }))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn task_create_schema_requires_one_atomic_tasks_array() {
         let tool = TaskCreateTool::new(service());
         let schema = tool.parameters();
@@ -718,8 +765,7 @@ mod tests {
             "task": {
                 "id": "analysis",
                 "title": "Analyze",
-                "description": "Inspect input",
-                "kind": "investigation"
+                "description": "Inspect input"
             }
         }))?;
         let result = parse_task_create_input(&input, &serde_json::Map::new());

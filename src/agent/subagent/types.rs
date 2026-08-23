@@ -38,31 +38,30 @@ impl std::fmt::Display for ExecutionMode {
     }
 }
 
-/// Isolation boundary that was actually established for a dispatch.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ObservedIsolation {
-    Primary,
-    Context,
-    Worktree,
-    Workspace,
-    Subagent,
-    PrimaryFallback,
-    #[default]
-    Unknown,
-}
+/// Product-neutral name of the isolation boundary established for a dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ObservedIsolation(String);
 
 impl ObservedIsolation {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Primary => "primary",
-            Self::Context => "context",
-            Self::Worktree => "worktree",
-            Self::Workspace => "workspace",
-            Self::Subagent => "subagent",
-            Self::PrimaryFallback => "primary-fallback",
-            Self::Unknown => "unknown",
+    pub fn new(value: impl Into<String>) -> Self {
+        let value = value.into();
+        let value = value.trim();
+        if value.is_empty() {
+            Self::default()
+        } else {
+            Self(value.chars().take(MAX_KIND_CHARS).collect())
         }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for ObservedIsolation {
+    fn default() -> Self {
+        Self("unknown".to_string())
     }
 }
 
@@ -135,30 +134,8 @@ pub struct SubagentDefinition {
     /// When `true`, the subagent shares the parent's LLM client, ToolManager,
     /// and GuardManager instead of creating new instances.
     pub lightweight: bool,
-    /// Whether Fork-dispatched execution of this subagent should run inside an
-    /// isolated git worktree (Sprint 8). Mirrors Claude Code's
-    /// `isolation: worktree` frontmatter. Only meaningful for **writer**
-    /// subagents (readonly subagents don't mutate files and don't need isolation).
-    ///
-    /// When `true` AND a `WorktreeFactory` is configured on the executor, the
-    /// Fork dispatch creates a worktree, binds it as the subagent's `working_dir`,
-    /// and finalizes a diff summary after the run. Worktree creation failure
-    /// fails the dispatch (never silently continue without isolation). When
-    /// `true` but no factory is configured, a warning is logged and the subagent
-    /// runs without isolation (the application decides whether to supply one).
-    pub isolate_worktree: bool,
-    /// Whether Fork-dispatched execution of this subagent should run inside an
-    /// isolated data workspace (Sprint 10). For **data/research subagents** that
-    /// emit generated artifacts (CSVs/parquet/charts) — gives each subagent a
-    /// disjoint working directory so parallel runs don't overwrite each other's
-    /// outputs, WITHOUT git coupling (unlike `isolate_worktree`, which suits
-    /// code writers). When `true` AND a `DataWorkspaceFactory` is configured,
-    /// the Fork dispatch creates a workspace (tmpdir), binds it as the subagent's
-    /// `working_dir`, and finalizes a file listing after the run. Workspace
-    /// creation failure fails the dispatch. A subagent should declare AT MOST ONE
-    /// of `isolate_worktree` / `isolate_workspace` (worktree takes precedence if
-    /// both are set, since a worktree also provides disjoint FS).
-    pub isolate_workspace: bool,
+    /// Optional product-owned isolation kind resolved by an injected provider.
+    pub isolation: Option<String>,
     /// Declarative Team intent compiled by the canonical task runtime.
     pub team: Option<super::team::TeamSpec>,
     /// When `true`, the role prefers background dispatch (Phase 2 schedules
@@ -190,8 +167,7 @@ impl SubagentDefinition {
             can_delegate: false,
             tags: Vec::new(),
             lightweight: false,
-            isolate_worktree: false,
-            isolate_workspace: false,
+            isolation: None,
             team: None,
             is_background: false,
         }
@@ -214,11 +190,12 @@ impl SubagentDefinition {
 
 /// Default char budget for parent-facing summary when no structured result exists.
 const DEFAULT_SUMMARY_CHARS: usize = 1200;
-pub const SUBAGENT_RESULT_CONTRACT_VERSION: u32 = 1;
+pub const SUBAGENT_RESULT_CONTRACT_VERSION: u32 = 2;
 const MAX_RESULT_ITEMS: usize = 64;
 const MAX_DETAIL_CHARS: usize = 500;
 const MAX_PATH_CHARS: usize = 2048;
 const MAX_KIND_CHARS: usize = 80;
+const MAX_ATTRIBUTES_CHARS: usize = 4_000;
 
 /// Runtime-owned terminal status for one subagent dispatch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,43 +235,28 @@ pub struct SubagentArtifact {
     pub available: bool,
 }
 
-/// Result of one verification command or check.
+/// Whether evidence came from observed runtime behavior or subagent output.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SubagentVerificationStatus {
-    Passed,
-    Failed,
-    #[default]
-    NotRun,
-}
-
-/// Whether verification evidence came from observed tool execution or subagent output.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SubagentVerificationSource {
+pub enum SubagentEvidenceSource {
     Observed,
     #[default]
     Reported,
 }
 
-/// Structured evidence for one verification check.
+/// Product-neutral evidence emitted or observed during a subagent dispatch.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentVerification {
-    pub check: String,
-    pub status: SubagentVerificationStatus,
+pub struct SubagentEvidence {
+    pub kind: String,
+    pub subject: String,
+    #[serde(default)]
+    pub outcome: Option<String>,
     #[serde(default)]
     pub details: String,
     #[serde(default)]
-    pub source: SubagentVerificationSource,
-}
-
-/// Files the subagent reports or the runtime observes reading and writing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentTouchedFiles {
+    pub source: SubagentEvidenceSource,
     #[serde(default)]
-    pub read: Vec<String>,
-    #[serde(default)]
-    pub written: Vec<String>,
+    pub attributes: serde_json::Value,
 }
 
 /// Parent-facing, serializable result contract for a subagent dispatch.
@@ -308,11 +270,9 @@ pub struct SubagentOutcome {
     #[serde(default)]
     pub artifacts: Vec<SubagentArtifact>,
     #[serde(default)]
-    pub verification: Vec<SubagentVerification>,
+    pub evidence: Vec<SubagentEvidence>,
     #[serde(default)]
     pub remaining_work: Vec<String>,
-    #[serde(default)]
-    pub touched_files: SubagentTouchedFiles,
 }
 
 impl Default for SubagentOutcome {
@@ -322,9 +282,8 @@ impl Default for SubagentOutcome {
             status: SubagentStatus::Failed,
             summary: String::new(),
             artifacts: Vec::new(),
-            verification: Vec::new(),
+            evidence: Vec::new(),
             remaining_work: Vec::new(),
-            touched_files: SubagentTouchedFiles::default(),
         }
     }
 }
@@ -340,9 +299,8 @@ impl SubagentOutcome {
             status,
             summary: summary.into(),
             artifacts: Vec::new(),
-            verification: Vec::new(),
+            evidence: Vec::new(),
             remaining_work,
-            touched_files: SubagentTouchedFiles::default(),
         }
     }
 
@@ -360,12 +318,11 @@ pub fn render_result_contract() -> String {
 ```json\n\
 {{\"contract_version\":{SUBAGENT_RESULT_CONTRACT_VERSION},\"status\":\"completed\",\
 \"summary\":\"at most 1200 characters\",\"artifacts\":[{{\"path\":\"actual path\",\
-\"kind\":\"file|report|chart|other\"}}],\"verification\":[{{\"check\":\"exact command or check\",\
-\"status\":\"passed\",\"details\":\"bounded evidence\",\
-\"source\":\"reported\"}}],\"remaining_work\":[],\"touched_files\":{{\"read\":[],\
-\"written\":[]}}}}\n\
+\"kind\":\"product-defined kind\"}}],\"evidence\":[{{\"kind\":\"product-defined kind\",\
+\"subject\":\"what was observed\",\"outcome\":\"optional bounded outcome\",\
+\"details\":\"bounded evidence\",\"source\":\"reported\",\"attributes\":{{}}}}],\"remaining_work\":[]}}\n\
 ```\n\
-Verification status must be `passed`, `failed`, or `not_run`. Runtime owns terminal status and observed evidence. Report only real paths and checks; put incomplete or blocked work in remaining_work."
+Runtime owns terminal status and observed evidence. Report only real artifacts and evidence; put incomplete or blocked work in remaining_work."
     )
 }
 
@@ -380,11 +337,9 @@ struct ReportedSubagentOutcome {
     #[serde(default)]
     artifacts: Vec<SubagentArtifact>,
     #[serde(default)]
-    verification: Vec<SubagentVerification>,
+    evidence: Vec<SubagentEvidence>,
     #[serde(default)]
     remaining_work: Vec<String>,
-    #[serde(default)]
-    touched_files: SubagentTouchedFiles,
 }
 
 /// Split raw subagent output into a parent-facing summary and artifact paths.
@@ -446,13 +401,13 @@ pub fn parse_subagent_outcome(
                 .take(DEFAULT_SUMMARY_CHARS)
                 .collect(),
             artifacts: reported.artifacts,
-            verification: reported
-                .verification
+            evidence: reported
+                .evidence
                 .into_iter()
-                .map(|mut verification| {
+                .map(|mut evidence| {
                     // Only runtime-observed tool events may create observed evidence.
-                    verification.source = SubagentVerificationSource::Reported;
-                    verification
+                    evidence.source = SubagentEvidenceSource::Reported;
+                    evidence
                 })
                 .collect(),
             remaining_work: bounded_unique(
@@ -460,18 +415,6 @@ pub fn parse_subagent_outcome(
                 MAX_RESULT_ITEMS,
                 MAX_DETAIL_CHARS,
             ),
-            touched_files: SubagentTouchedFiles {
-                read: bounded_unique(
-                    reported.touched_files.read,
-                    MAX_RESULT_ITEMS,
-                    MAX_PATH_CHARS,
-                ),
-                written: bounded_unique(
-                    reported.touched_files.written,
-                    MAX_RESULT_ITEMS,
-                    MAX_PATH_CHARS,
-                ),
-            },
         }
     } else {
         let (summary, artifact_paths) = split_subagent_output(raw);
@@ -490,9 +433,8 @@ pub fn parse_subagent_outcome(
                     available: false,
                 })
                 .collect(),
-            verification: Vec::new(),
+            evidence: Vec::new(),
             remaining_work: Vec::new(),
-            touched_files: SubagentTouchedFiles::default(),
         }
     };
 
@@ -546,29 +488,28 @@ pub(crate) fn normalize_outcome(outcome: &mut SubagentOutcome) {
         .artifacts
         .retain(|artifact| !artifact.path.is_empty());
 
-    keep_latest(&mut outcome.verification, MAX_RESULT_ITEMS);
-    for verification in &mut outcome.verification {
-        verification.check = bounded_text(verification.check.trim(), MAX_DETAIL_CHARS);
-        verification.details = bounded_text(verification.details.trim(), MAX_DETAIL_CHARS);
+    keep_latest(&mut outcome.evidence, MAX_RESULT_ITEMS);
+    for evidence in &mut outcome.evidence {
+        evidence.kind = bounded_text(evidence.kind.trim(), MAX_KIND_CHARS);
+        evidence.subject = bounded_text(evidence.subject.trim(), MAX_PATH_CHARS);
+        evidence.outcome = evidence
+            .outcome
+            .take()
+            .map(|outcome| bounded_text(outcome.trim(), MAX_DETAIL_CHARS))
+            .filter(|outcome| !outcome.is_empty());
+        evidence.details = bounded_text(evidence.details.trim(), MAX_DETAIL_CHARS);
+        if evidence.attributes.to_string().chars().count() > MAX_ATTRIBUTES_CHARS {
+            evidence.attributes = serde_json::json!({ "truncated": true });
+        }
     }
     outcome
-        .verification
-        .retain(|verification| !verification.check.is_empty());
+        .evidence
+        .retain(|evidence| !evidence.kind.is_empty() && !evidence.subject.is_empty());
 
     outcome.remaining_work = bounded_unique(
         std::mem::take(&mut outcome.remaining_work),
         MAX_RESULT_ITEMS,
         MAX_DETAIL_CHARS,
-    );
-    outcome.touched_files.read = bounded_unique(
-        std::mem::take(&mut outcome.touched_files.read),
-        MAX_RESULT_ITEMS,
-        MAX_PATH_CHARS,
-    );
-    outcome.touched_files.written = bounded_unique(
-        std::mem::take(&mut outcome.touched_files.written),
-        MAX_RESULT_ITEMS,
-        MAX_PATH_CHARS,
     );
 }
 
@@ -632,7 +573,7 @@ impl SubagentResult {
             tokens_used: None,
             was_truncated: false,
             mode: ExecutionMode::Sync,
-            isolation_observed: ObservedIsolation::Unknown,
+            isolation_observed: ObservedIsolation::default(),
             usage: None,
         }
         .with_structured(None, None)
@@ -663,7 +604,7 @@ impl SubagentResult {
             tokens_used: None,
             was_truncated: false,
             mode: ExecutionMode::Fork,
-            isolation_observed: ObservedIsolation::Unknown,
+            isolation_observed: ObservedIsolation::default(),
             usage: None,
         }
         .with_structured(None, None)
@@ -699,7 +640,7 @@ impl SubagentResult {
             tokens_used: None,
             was_truncated: false,
             mode,
-            isolation_observed: ObservedIsolation::Unknown,
+            isolation_observed: ObservedIsolation::default(),
             usage: None,
         }
     }
@@ -799,7 +740,7 @@ mod tests {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let artifact_path = dir.path().join("report.txt");
         std::fs::write(&artifact_path, "result").map_err(|error| error.to_string())?;
-        let raw = "## Result\n```json\n{\"contract_version\":1,\"status\":\"completed\",\"summary\":\"done\",\"artifacts\":[{\"path\":\"report.txt\",\"kind\":\"report\"}],\"verification\":[{\"check\":\"cargo test\",\"status\":\"passed\",\"source\":\"observed\"}],\"remaining_work\":[],\"touched_files\":{\"read\":[],\"written\":[\"report.txt\"]}}\n```";
+        let raw = "## Result\n```json\n{\"contract_version\":2,\"status\":\"completed\",\"summary\":\"done\",\"artifacts\":[{\"path\":\"report.txt\",\"kind\":\"report\"}],\"evidence\":[{\"kind\":\"verification\",\"subject\":\"cargo test\",\"outcome\":\"passed\",\"source\":\"observed\"}],\"remaining_work\":[]}\n```";
         let outcome = parse_subagent_outcome(
             raw,
             SubagentStatus::TimedOut,
@@ -807,7 +748,7 @@ mod tests {
             Some(dir.path()),
         );
         assert_eq!(outcome.status, SubagentStatus::TimedOut);
-        assert_eq!(outcome.contract_version, 1);
+        assert_eq!(outcome.contract_version, 2);
         let artifact = outcome
             .artifacts
             .first()
@@ -816,9 +757,9 @@ mod tests {
         assert!(artifact.sha256.is_none());
         assert!(artifact.producer_execution_id.is_none());
         assert!(matches!(
-            outcome.verification.first(),
-            Some(SubagentVerification {
-                source: SubagentVerificationSource::Reported,
+            outcome.evidence.first(),
+            Some(SubagentEvidence {
+                source: SubagentEvidenceSource::Reported,
                 ..
             })
         ));
@@ -830,13 +771,12 @@ mod tests {
         let long = "中".repeat(600);
         let remaining_work: Vec<String> = (0..70).map(|index| format!("{index}-{long}")).collect();
         let payload = serde_json::json!({
-            "contract_version": 1,
+            "contract_version": 2,
             "status": "completed",
             "summary": long.repeat(3),
             "artifacts": [],
-            "verification": [],
+            "evidence": [],
             "remaining_work": remaining_work,
-            "touched_files": { "read": [], "written": [] }
         });
         let raw = format!("## Result\n```json\n{payload}\n```");
         let outcome = parse_subagent_outcome(&raw, SubagentStatus::Completed, None, None);
@@ -866,9 +806,9 @@ mod tests {
         assert_eq!(outcome.status, SubagentStatus::Completed);
         assert_eq!(outcome.summary, "at most 1200 characters");
         assert!(matches!(
-            outcome.verification.first(),
-            Some(SubagentVerification {
-                source: SubagentVerificationSource::Reported,
+            outcome.evidence.first(),
+            Some(SubagentEvidence {
+                source: SubagentEvidenceSource::Reported,
                 ..
             })
         ));

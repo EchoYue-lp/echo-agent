@@ -50,8 +50,10 @@ mod tests {
                 "id": "replacement-task",
                 "title": "Use the replacement task store",
                 "description": "Prove ToolManager dispatches to the supplied service",
-                "kind": "investigation",
-                "acceptance_criteria": ["replacement graph is persisted"]
+                "extension": {
+                    "kind": "investigation",
+                    "acceptance_criteria": ["replacement graph is persisted"]
+                }
             }]
         }))
         .map_err(|error| error.to_string())?;
@@ -75,6 +77,13 @@ mod tests {
             .first()
             .ok_or_else(|| "replacement graph contains no tasks".to_string())?;
         assert_eq!(task.spec.id, "replacement-task");
+        assert_eq!(
+            task.spec
+                .extension
+                .get("kind")
+                .and_then(serde_json::Value::as_str),
+            Some("investigation")
+        );
         Ok(())
     }
 }

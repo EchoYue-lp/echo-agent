@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 
 use super::{
     PlanValidator, RuntimePlanSnapshot, RuntimeTaskClaimOutcome, Task, TaskClaim, TaskExecution,
-    TaskId, TaskKind, TaskSpec, TaskStatus,
+    TaskId, TaskSpec, TaskStatus,
 };
 
 /// How a task graph should be driven by a product adapter.
@@ -51,16 +51,9 @@ pub struct TaskDraft {
     pub id: String,
     pub title: String,
     pub description: String,
-    pub kind: TaskKind,
-    pub subagent: Option<String>,
     pub depends_on: Vec<TaskId>,
-    pub files: Vec<String>,
-    pub allowed_tools: Vec<String>,
-    pub required_artifacts: Vec<String>,
-    pub execution_checks: Vec<String>,
-    pub acceptance_criteria: Vec<String>,
     pub max_retries: u32,
-    pub extensions: serde_json::Value,
+    pub extension: serde_json::Value,
 }
 
 /// Parsed `task_create` input.
@@ -79,15 +72,11 @@ pub struct TaskCreateInput {
 pub struct TaskSpecPatch {
     pub title: Option<String>,
     pub description: Option<String>,
-    pub kind: Option<TaskKind>,
-    pub agent_role: Option<String>,
     pub depends_on: Option<Vec<TaskId>>,
-    pub files: Option<Vec<String>>,
-    pub allowed_tools: Option<Vec<String>>,
-    pub required_artifacts: Option<Vec<String>>,
-    pub execution_checks: Option<Vec<String>>,
-    pub acceptance_criteria: Option<Vec<String>>,
     pub max_retries: Option<u32>,
+    /// Product-owned partial extension. Object values are recursively merged;
+    /// non-object values replace the existing extension.
+    pub extension: Option<serde_json::Value>,
 }
 
 /// Canonical operation applied by the framework patch engine.
@@ -262,15 +251,24 @@ pub trait RevisionedTaskStore: Send + Sync {
 /// fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedTaskPolicy {
-    pub agent_role: String,
-    pub metadata: serde_json::Value,
+    pub extension: serde_json::Value,
 }
 
 /// Product policy boundary used by the task tools and revision service.
 #[async_trait]
 pub trait TaskToolPolicy: Send + Sync {
     fn task_input_schema_extensions(&self) -> serde_json::Map<String, serde_json::Value> {
-        serde_json::Map::new()
+        serde_json::Map::from_iter([(
+            "extension".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "description": "Product-owned task data ignored by framework scheduling"
+            }),
+        )])
+    }
+
+    fn required_task_input_extensions(&self) -> Vec<String> {
+        Vec::new()
     }
 
     fn allow_manual_progress_updates(&self) -> bool {
@@ -312,12 +310,12 @@ pub trait TaskToolPolicy: Send + Sync {
         input: &TaskCreateInput,
     ) -> Result<TaskGraphContext, TaskPolicyError>;
 
-    async fn finalize_task_metadata(
+    async fn finalize_task_extension(
         &self,
         scope_id: &str,
         task_id: &str,
         position: usize,
-        metadata: serde_json::Value,
+        extension: serde_json::Value,
     ) -> Result<serde_json::Value, TaskPolicyError>;
 
     async fn validate_candidate(
@@ -381,11 +379,7 @@ impl TaskToolPolicy for DefaultTaskToolPolicy {
         _position: usize,
     ) -> Result<PreparedTaskPolicy, TaskPolicyError> {
         Ok(PreparedTaskPolicy {
-            agent_role: draft
-                .subagent
-                .clone()
-                .unwrap_or_else(|| "default".to_string()),
-            metadata: draft.extensions.clone(),
+            extension: draft.extension.clone(),
         })
     }
 
@@ -408,14 +402,14 @@ impl TaskToolPolicy for DefaultTaskToolPolicy {
         })
     }
 
-    async fn finalize_task_metadata(
+    async fn finalize_task_extension(
         &self,
         _scope_id: &str,
         _task_id: &str,
         _position: usize,
-        metadata: serde_json::Value,
+        extension: serde_json::Value,
     ) -> Result<serde_json::Value, TaskPolicyError> {
-        Ok(metadata)
+        Ok(extension)
     }
 
     async fn validate_candidate(
@@ -783,32 +777,29 @@ fn apply_spec_patch(spec: &mut TaskSpec, patch: TaskSpecPatch) {
     if let Some(description) = patch.description {
         spec.description = description;
     }
-    if let Some(kind) = patch.kind {
-        spec.kind = kind;
-    }
-    if let Some(agent_role) = patch.agent_role {
-        spec.agent_role = agent_role;
-    }
     if let Some(depends_on) = patch.depends_on {
         spec.depends_on = depends_on;
     }
-    if let Some(files) = patch.files {
-        spec.files = files;
-    }
-    if let Some(allowed_tools) = patch.allowed_tools {
-        spec.allowed_tools = allowed_tools;
-    }
-    if let Some(required_artifacts) = patch.required_artifacts {
-        spec.required_artifacts = required_artifacts;
-    }
-    if let Some(execution_checks) = patch.execution_checks {
-        spec.execution_checks = execution_checks;
-    }
-    if let Some(acceptance_criteria) = patch.acceptance_criteria {
-        spec.acceptance_criteria = acceptance_criteria;
-    }
     if let Some(max_retries) = patch.max_retries {
         spec.max_retries = max_retries;
+    }
+    if let Some(extension) = patch.extension {
+        merge_extension(&mut spec.extension, extension);
+    }
+}
+
+fn merge_extension(current: &mut serde_json::Value, patch: serde_json::Value) {
+    match (current, patch) {
+        (serde_json::Value::Object(current), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                if let Some(existing) = current.get_mut(&key) {
+                    merge_extension(existing, value);
+                } else {
+                    current.insert(key, value);
+                }
+            }
+        }
+        (current, patch) => *current = patch,
     }
 }
 
@@ -842,6 +833,10 @@ impl TaskRevisionService {
 
     pub fn task_input_schema_extensions(&self) -> serde_json::Map<String, serde_json::Value> {
         self.policy.task_input_schema_extensions()
+    }
+
+    pub fn required_task_input_extensions(&self) -> Vec<String> {
+        self.policy.required_task_input_extensions()
     }
 
     pub fn allow_manual_progress_updates(&self) -> bool {
@@ -909,16 +904,9 @@ impl TaskRevisionService {
                 id: draft.id.clone(),
                 title: draft.title.clone(),
                 description: draft.description.clone(),
-                kind: draft.kind,
-                agent_role: prepared.agent_role,
                 depends_on: draft.depends_on.clone(),
-                files: draft.files.clone(),
-                allowed_tools: draft.allowed_tools.clone(),
-                required_artifacts: draft.required_artifacts.clone(),
-                execution_checks: draft.execution_checks.clone(),
-                acceptance_criteria: draft.acceptance_criteria.clone(),
                 max_retries: draft.max_retries,
-                metadata: prepared.metadata,
+                extension: prepared.extension,
             });
         }
 
@@ -1022,16 +1010,9 @@ impl TaskRevisionService {
                             id: task.id,
                             title: task.title,
                             description: task.description,
-                            kind: task.kind,
-                            agent_role: prepared.agent_role,
                             depends_on: task.depends_on,
-                            files: task.files,
-                            allowed_tools: task.allowed_tools,
-                            required_artifacts: task.required_artifacts,
-                            execution_checks: task.execution_checks,
-                            acceptance_criteria: task.acceptance_criteria,
                             max_retries: task.max_retries,
-                            metadata: prepared.metadata,
+                            extension: prepared.extension,
                         },
                     }
                 }
@@ -1160,10 +1141,10 @@ impl TaskRevisionService {
         mut tasks: Vec<Task>,
     ) -> Result<Vec<Task>, TaskRevisionError> {
         for (position, task) in tasks.iter_mut().enumerate() {
-            let metadata = std::mem::take(&mut task.spec.metadata);
-            task.spec.metadata = self
+            let extension = std::mem::take(&mut task.spec.extension);
+            task.spec.extension = self
                 .policy
-                .finalize_task_metadata(scope_id, &task.spec.id, position, metadata)
+                .finalize_task_extension(scope_id, &task.spec.id, position, extension)
                 .await
                 .map_err(TaskRevisionError::from)?;
         }
@@ -1189,16 +1170,9 @@ mod tests {
             id: id.to_string(),
             title: format!("Task {id}"),
             description: format!("Do {id}"),
-            kind: TaskKind::Implementation,
-            subagent: None,
             depends_on: depends_on.iter().map(|item| (*item).to_string()).collect(),
-            files: Vec::new(),
-            allowed_tools: Vec::new(),
-            required_artifacts: Vec::new(),
-            execution_checks: vec!["check".to_string()],
-            acceptance_criteria: vec!["accepted".to_string()],
             max_retries: 3,
-            extensions: serde_json::Value::Null,
+            extension: serde_json::json!({ "check": "accepted" }),
         }
     }
 
@@ -1218,6 +1192,43 @@ mod tests {
             Arc::new(InMemoryRevisionedTaskStore::new()),
             Arc::new(DefaultTaskToolPolicy::new("test-scope")),
         )
+    }
+
+    #[test]
+    fn extension_patch_merges_without_losing_product_fields() {
+        let mut spec = TaskSpec {
+            id: "task-1".to_string(),
+            title: "Task".to_string(),
+            description: "Do work".to_string(),
+            depends_on: Vec::new(),
+            max_retries: 3,
+            extension: serde_json::json!({
+                "kind": "implementation",
+                "review": { "required": true, "role": "reviewer" },
+            }),
+        };
+        apply_spec_patch(
+            &mut spec,
+            TaskSpecPatch {
+                extension: Some(serde_json::json!({
+                    "review": { "role": "senior-reviewer" },
+                })),
+                ..TaskSpecPatch::default()
+            },
+        );
+
+        assert_eq!(
+            spec.extension.get("kind"),
+            Some(&serde_json::json!("implementation"))
+        );
+        assert_eq!(
+            spec.extension.pointer("/review/required"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            spec.extension.pointer("/review/role"),
+            Some(&serde_json::json!("senior-reviewer"))
+        );
     }
 
     struct PreparationTrackingPolicy {
@@ -1280,15 +1291,15 @@ mod tests {
             self.delegate.prepare_initial_context(scope_id, input).await
         }
 
-        async fn finalize_task_metadata(
+        async fn finalize_task_extension(
             &self,
             scope_id: &str,
             task_id: &str,
             position: usize,
-            metadata: serde_json::Value,
+            extension: serde_json::Value,
         ) -> Result<serde_json::Value, TaskPolicyError> {
             self.delegate
-                .finalize_task_metadata(scope_id, task_id, position, metadata)
+                .finalize_task_extension(scope_id, task_id, position, extension)
                 .await
         }
 

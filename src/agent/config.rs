@@ -47,21 +47,10 @@ pub struct AgentConfig {
     /// on large projects routinely exceed the old 5-min/none limits.
     /// Per-subagent `SubagentDefinition.timeout_secs` (>0) overrides this.
     pub(crate) subagent_timeout_secs: u64,
-    /// Optional worktree-isolation factory for Fork-dispatched writer subagents
-    /// (Sprint 8). When set, subagents whose `SubagentDefinition.isolate_worktree`
-    /// is `true` run inside an isolated git worktree created by this factory.
-    /// `None` (default) = no isolation available. Application supplies a
-    /// git-backed impl; framework stays free of git deps.
+    /// Optional application-owned isolation provider for Fork dispatches.
     #[cfg(feature = "subagent")]
-    pub(crate) subagent_worktree_factory:
-        Option<std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>>,
-    /// Optional data-workspace factory for Fork-dispatched data/research subagents
-    /// (Sprint 10). When set, subagents whose `SubagentDefinition.isolate_workspace`
-    /// is `true` run inside an isolated per-subagent working directory (tmpdir)
-    /// created by this factory. `None` (default) = no workspace isolation.
-    #[cfg(feature = "subagent")]
-    pub(crate) subagent_data_workspace_factory:
-        Option<std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>>,
+    pub(crate) subagent_isolation_provider:
+        Option<std::sync::Arc<dyn crate::agent::subagent::IsolationProvider>>,
     /// Prompt compiler shared by direct tool dispatch and programmatic delegation.
     #[cfg(feature = "subagent")]
     pub(crate) subagent_prompt_compiler:
@@ -184,9 +173,7 @@ impl AgentConfig {
             enable_subagent: false,
             subagent_timeout_secs: 600,
             #[cfg(feature = "subagent")]
-            subagent_worktree_factory: None,
-            #[cfg(feature = "subagent")]
-            subagent_data_workspace_factory: None,
+            subagent_isolation_provider: None,
             #[cfg(feature = "subagent")]
             subagent_prompt_compiler: std::sync::Arc::new(
                 crate::agent::subagent::DefaultSubagentPromptCompiler,
@@ -351,31 +338,13 @@ impl AgentConfig {
         self
     }
 
-    /// Supply a worktree-isolation factory for Fork-dispatched writer subagents
-    /// (Sprint 8). Subagents whose `SubagentDefinition.isolate_worktree == true`
-    /// run inside a git worktree created by this factory. Default: `None`
-    /// (no isolation). The application constructs the factory (git-backed) and
-    /// injects it here; the framework stays free of git dependencies.
+    /// Supply the application-owned isolation provider for Fork dispatches.
     #[cfg(feature = "subagent")]
-    pub fn subagent_worktree_factory(
+    pub fn subagent_isolation_provider(
         mut self,
-        factory: std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>,
+        provider: std::sync::Arc<dyn crate::agent::subagent::IsolationProvider>,
     ) -> Self {
-        self.subagent_worktree_factory = Some(factory);
-        self
-    }
-
-    /// Supply a data-workspace factory for Fork-dispatched data/research subagents
-    /// (Sprint 10). Subagents whose `SubagentDefinition.isolate_workspace == true`
-    /// run inside a per-subagent tmpdir created by this factory (disjoint output
-    /// files). Default: `None`. The application constructs the tmpdir-backed
-    /// factory and injects it here.
-    #[cfg(feature = "subagent")]
-    pub fn subagent_data_workspace_factory(
-        mut self,
-        factory: std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>,
-    ) -> Self {
-        self.subagent_data_workspace_factory = Some(factory);
+        self.subagent_isolation_provider = Some(provider);
         self
     }
 

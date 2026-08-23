@@ -37,17 +37,10 @@ pub struct ReactAgentBuilder {
     enable_human_in_loop: bool,
     enable_subagent: bool,
     register_agent_dispatch_tool: bool,
-    /// Sprint 8: optional worktree-isolation factory for Fork-dispatched writer
-    /// subagents. Propagated to `AgentConfig.subagent_worktree_factory` on build.
+    /// Optional application-owned isolation provider for Fork dispatches.
     #[cfg(feature = "subagent")]
-    subagent_worktree_factory:
-        Option<std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>>,
-    /// Sprint 10: optional data-workspace factory for Fork-dispatched
-    /// data/research subagents. Propagated to
-    /// `AgentConfig.subagent_data_workspace_factory` on build.
-    #[cfg(feature = "subagent")]
-    subagent_data_workspace_factory:
-        Option<std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>>,
+    subagent_isolation_provider:
+        Option<std::sync::Arc<dyn crate::agent::subagent::IsolationProvider>>,
     #[cfg(feature = "subagent")]
     subagent_prompt_compiler:
         Option<std::sync::Arc<dyn crate::agent::subagent::SubagentPromptCompiler>>,
@@ -127,9 +120,7 @@ impl ReactAgentBuilder {
             enable_subagent: false,
             register_agent_dispatch_tool: false,
             #[cfg(feature = "subagent")]
-            subagent_worktree_factory: None,
-            #[cfg(feature = "subagent")]
-            subagent_data_workspace_factory: None,
+            subagent_isolation_provider: None,
             #[cfg(feature = "subagent")]
             subagent_prompt_compiler: None,
             #[cfg(feature = "subagent")]
@@ -328,28 +319,13 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// Sprint 8: supply a worktree-isolation factory for Fork-dispatched writer
-    /// subagents (those declaring `isolate_worktree: true`). The application
-    /// constructs the git-backed factory and injects it here; the framework
-    /// stays free of git deps. Default: no factory (no isolation).
+    /// Supply the application-owned isolation provider for Fork dispatches.
     #[cfg(feature = "subagent")]
-    pub fn subagent_worktree_factory(
+    pub fn subagent_isolation_provider(
         mut self,
-        factory: std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>,
+        provider: std::sync::Arc<dyn crate::agent::subagent::IsolationProvider>,
     ) -> Self {
-        self.subagent_worktree_factory = Some(factory);
-        self
-    }
-
-    /// Sprint 10: supply a data-workspace factory for Fork-dispatched
-    /// data/research subagents. The application constructs the tmpdir-backed
-    /// factory and injects it here. Default: no factory (no workspace isolation).
-    #[cfg(feature = "subagent")]
-    pub fn subagent_data_workspace_factory(
-        mut self,
-        factory: std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>,
-    ) -> Self {
-        self.subagent_data_workspace_factory = Some(factory);
+        self.subagent_isolation_provider = Some(provider);
         self
     }
 
@@ -839,15 +815,9 @@ impl ReactAgentBuilder {
             config = config.project_root(project_root);
         }
 
-        // Sprint 8: propagate the worktree factory (if any) into AgentConfig.
         #[cfg(feature = "subagent")]
-        if let Some(factory) = self.subagent_worktree_factory.clone() {
-            config = config.subagent_worktree_factory(factory);
-        }
-        // Sprint 10: propagate the data-workspace factory (if any).
-        #[cfg(feature = "subagent")]
-        if let Some(factory) = self.subagent_data_workspace_factory.clone() {
-            config = config.subagent_data_workspace_factory(factory);
+        if let Some(provider) = self.subagent_isolation_provider.clone() {
+            config = config.subagent_isolation_provider(provider);
         }
         #[cfg(feature = "subagent")]
         if let Some(compiler) = self.subagent_prompt_compiler.clone() {

@@ -10,79 +10,10 @@ pub use echo_core::tools::NestedDelegationPolicy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::str::FromStr;
 use tokio_util::sync::CancellationToken;
 
 /// Stable task identifier used by runtime DAG primitives.
 pub type TaskId = String;
-
-/// Operation class for a runtime task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskKind {
-    /// Read-only repository / data exploration or review.
-    ReadOnlyReview,
-    /// Read-only search, grep, file reads, hypothesis investigation.
-    Investigation,
-    /// Read-only verification plan.
-    TestPlan,
-    /// Scoped code or data change.
-    Implementation,
-    /// Focused root-cause investigation.
-    Debugging,
-    /// Spec / quality review of another task's output.
-    Review,
-    /// Final synthesis / report.
-    Summary,
-    /// Shell / build / test execution.
-    Verification,
-}
-
-impl TaskKind {
-    /// `true` when the task kind does not mutate workspace state.
-    pub fn is_read_only(&self) -> bool {
-        matches!(
-            self,
-            Self::ReadOnlyReview
-                | Self::Investigation
-                | Self::TestPlan
-                | Self::Review
-                | Self::Summary
-        )
-    }
-
-    /// Stable snake_case representation.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::ReadOnlyReview => "read_only_review",
-            Self::Investigation => "investigation",
-            Self::TestPlan => "test_plan",
-            Self::Implementation => "implementation",
-            Self::Debugging => "debugging",
-            Self::Review => "review",
-            Self::Summary => "summary",
-            Self::Verification => "verification",
-        }
-    }
-}
-
-impl FromStr for TaskKind {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        match value {
-            "read_only_review" => Ok(Self::ReadOnlyReview),
-            "investigation" => Ok(Self::Investigation),
-            "test_plan" => Ok(Self::TestPlan),
-            "implementation" => Ok(Self::Implementation),
-            "debugging" => Ok(Self::Debugging),
-            "review" => Ok(Self::Review),
-            "summary" => Ok(Self::Summary),
-            "verification" => Ok(Self::Verification),
-            other => Err(format!("unknown runtime task kind: {other}")),
-        }
-    }
-}
 
 /// Generic lifecycle state shared by task specifications and managed records.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -181,18 +112,11 @@ pub struct TaskSpec {
     pub id: TaskId,
     pub title: String,
     pub description: String,
-    pub kind: TaskKind,
-    pub agent_role: String,
     pub depends_on: Vec<TaskId>,
-    pub files: Vec<String>,
-    pub allowed_tools: Vec<String>,
-    pub required_artifacts: Vec<String>,
-    pub execution_checks: Vec<String>,
-    pub acceptance_criteria: Vec<String>,
     pub max_retries: u32,
-    /// Product metadata that does not participate in framework scheduling.
+    /// Product-owned data that does not participate in framework scheduling.
     #[serde(default)]
-    pub metadata: serde_json::Value,
+    pub extension: serde_json::Value,
 }
 
 impl TaskSpec {
@@ -312,12 +236,12 @@ impl TaskSubagentContext {
 pub struct SuggestedTask {
     pub title: String,
     pub description: String,
-    pub kind: TaskKind,
-    pub agent_role: String,
     #[serde(default)]
     pub dependencies: Vec<TaskId>,
     pub why_needed: String,
     pub risk: String,
+    #[serde(default)]
+    pub extension: serde_json::Value,
 }
 
 /// Compact per-task execution summary produced at task boundaries.
@@ -545,27 +469,8 @@ pub struct DagRefresh {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        NestedDelegationPolicy, TaskExecution, TaskKind, TaskSpec, TaskStatus, TaskSubagentContext,
-    };
+    use super::{NestedDelegationPolicy, TaskExecution, TaskSpec, TaskStatus, TaskSubagentContext};
     use crate::tasks::runtime::{DagExecutionState, Task};
-    use std::str::FromStr;
-
-    #[test]
-    fn runtime_task_kind_round_trips_snake_case() {
-        let kind = TaskKind::from_str("implementation").unwrap_or(TaskKind::Summary);
-
-        assert_eq!(kind, TaskKind::Implementation);
-        assert_eq!(kind.as_str(), "implementation");
-        assert!(TaskKind::from_str("not_real").is_err());
-    }
-
-    #[test]
-    fn read_only_kinds_are_classified() {
-        assert!(TaskKind::Investigation.is_read_only());
-        assert!(!TaskKind::Implementation.is_read_only());
-        assert!(!TaskKind::Verification.is_read_only());
-    }
 
     #[test]
     fn terminal_statuses_are_classified() {
@@ -614,16 +519,9 @@ mod tests {
                 id: id.to_string(),
                 title: id.to_string(),
                 description: format!("execute {id}"),
-                kind: TaskKind::Investigation,
-                agent_role: "explorer".to_string(),
                 depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
-                files: Vec::new(),
-                allowed_tools: Vec::new(),
-                required_artifacts: Vec::new(),
-                execution_checks: Vec::new(),
-                acceptance_criteria: Vec::new(),
                 max_retries: 3,
-                metadata: serde_json::Value::Null,
+                extension: serde_json::json!({ "role": "explorer" }),
             },
             execution: TaskExecution {
                 task_id: id.to_string(),
