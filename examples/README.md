@@ -2,6 +2,11 @@
 
 This directory is intentionally split into three contract levels.
 
+The independent [`echo-agent-examples`](../echo-agent-examples/) package is the
+facade boundary probe: it is not published and its only dependency is
+`echo_agent`. Files here are feature demonstrations owned by the facade package;
+acceptance and smoke assertions belong under [`tests/`](../tests/).
+
 - `Acceptance example`: should validate behavior locally and fail loudly on regressions.
 - `Conditional acceptance example`: still follows fail-fast validation, but depends on external services, feature flags, credentials, local runtimes, or system capabilities.
 - `Teaching example`: primarily explains APIs or interaction patterns. It may still contain assertions, but it is not the repository's primary acceptance surface.
@@ -36,7 +41,6 @@ These examples are expected to fail loudly when their prerequisites are missing.
 - `demo27_sqlite_memory.rs`
 - `demo29_sandbox.rs`
 - `demo33_retry_policy.rs`
-- `demo38_im_channels.rs`
 - `demo41_web_tools.rs`
 - `demo42_playwright_mcp.rs`
 - `demo43_data_tools.rs`
@@ -98,7 +102,6 @@ These examples stay focused on API understanding, interaction style, or walkthro
 - `demo67_progress.rs`
 - `demo68_human_gate.rs`
 - `demo70_scheduler.rs`
-- `smoke_usage_passthrough.rs`
 
 ## Maintenance Rules
 

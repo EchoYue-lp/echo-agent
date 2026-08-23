@@ -12,9 +12,9 @@
 /// Built-in skills provided by the Echo Agent framework (re-export from echo_execution).
 pub mod builtin {
     #[cfg(feature = "files")]
-    pub use echo_execution::skills::builtin::filesystem::FileSystemSkill;
+    pub use echo_tools::skills::FileSystemSkill;
     #[cfg(feature = "shell")]
-    pub use echo_execution::skills::builtin::shell::ShellSkill;
+    pub use echo_tools::skills::ShellSkill;
 }
 
 /// File-based external skill loading (re-export from echo_execution).

@@ -14,7 +14,7 @@ Tool:  单一原子操作（"读取文件"）
 Skill: 领域能力包（"文件系统操作" = read_file + write_file + list_dir + 使用说明提示词）
 ```
 
-框架契约（`Skill` trait + `SkillRegistry`）位于 `echo-core` 与 `echo-execution`。产品目录是该 API 的独立消费方。例如，EKO 当前把用户可见的目录放在 `~/.eko/skills/`；这项应用层行为应以 [EKO SkillsHub 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) 为准，不属于框架 API 契约。
+框架契约（`Skill` trait + `SkillRegistry`）位于 `echo-core` 与 `echo-execution`。产品目录是该 API 的独立消费方。例如，embedding application 当前把用户可见的目录放在 `<application-data>/skills/`；这项应用层行为应以 [embedding application SkillsHub 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) 为准，不属于框架 API 契约。
 
 ---
 
@@ -471,7 +471,7 @@ ctx.replace_projection(
 
 `SkillRegistry` 负责可复用运行时生命周期：发现、激活、依赖排序、资源访问和沙箱策略；它不负责安装或卸载市场包。
 
-应用可以另加产品目录。EKO 当前的 `SkillsHub` 扫描 `~/.eko/skills/`，服务其 UI 与安装流程，但不会取代框架 registry。产品细节可能独立于 echo-agent 演化，应以 [EKO SkillsHub 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) 为准。
+应用可以另加产品目录。embedding application 当前的 `SkillsHub` 扫描 `<application-data>/skills/`，服务其 UI 与安装流程，但不会取代框架 registry。产品细节可能独立于 echo-agent 演化，应以 [embedding application SkillsHub 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) 为准。
 
 ---
 

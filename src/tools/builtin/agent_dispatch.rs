@@ -109,7 +109,7 @@ impl AgentDispatchTool {
         }
     }
 
-    /// Build [`ExternalRunContext`] for GUI/TUI identity pinning.
+    /// Build [`ExternalRunContext`] for application UI identity pinning.
     ///
     /// Uses the formal run id when present and always preserves the chat turn id.
     /// `execution_id` has no `:` so the Tauri bridge uses the full string as

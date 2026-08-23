@@ -11,6 +11,7 @@
 //! ```bash
 //! cargo run --example demo27_sqlite_memory --features sqlite
 //! ```
+mod support;
 
 use echo_agent::memory::store::Store;
 use echo_agent::prelude::*;
@@ -526,15 +527,9 @@ fn cleanup_sqlite_files(path: &Path) {
 }
 
 fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<LlmConfig> {
-    let app_config = echo_agent::config::load_config(None);
-    preferred
-        .map(|selector| app_config.resolve_llm_config(Some(selector)))
-        .transpose()
-        .and_then(|preferred| preferred.map_or_else(|| app_config.resolve_llm_config(None), Ok))
-        .or_else(|_| app_config.resolve_llm_config(None))
-        .map_err(|error| {
-            echo_agent::error::ReactError::Other(format!(
-                "demo27 验收失败：缺少显式 provider/model 配置：{error}"
-            ))
-        })
+    support::llm_config(preferred).map_err(|error| {
+        echo_agent::error::ReactError::Other(format!(
+            "demo27 requires explicit provider/model environment settings: {error}"
+        ))
+    })
 }

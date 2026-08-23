@@ -14,9 +14,9 @@
 //! cargo run --example demo30_mcp_server
 //! ```
 
+use echo_agent::error::Result;
 use echo_agent::mcp::McpServer;
-use echo_core::error::Result;
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_agent::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -154,7 +154,7 @@ async fn main() -> Result<()> {
     .await?;
 
     let tools = resp["result"]["tools"].as_array().ok_or_else(|| {
-        echo_core::error::ReactError::Other(
+        echo_agent::error::ReactError::Other(
             "demo30 验收失败：tools/list 未返回 tools 数组".to_string(),
         )
     })?;
@@ -184,7 +184,7 @@ async fn main() -> Result<()> {
         .trim()
         .is_empty()
     {
-        return Err(echo_core::error::ReactError::Other(
+        return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：get_weather 返回空文本".to_string(),
         ));
     }
@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     if resp["result"]["content"][0]["text"].as_str().unwrap_or("") != "126" {
-        return Err(echo_core::error::ReactError::Other(
+        return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：calculate(42 * 3) 返回值不正确".to_string(),
         ));
     }
@@ -221,7 +221,7 @@ async fn main() -> Result<()> {
     .await?;
     let is_err = resp["result"]["isError"].as_bool().unwrap_or(false);
     if !is_err {
-        return Err(echo_core::error::ReactError::Other(
+        return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：calculate(10 / 0) 未标记 isError".to_string(),
         ));
     }
@@ -239,7 +239,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     if resp.get("error").is_some() {
-        return Err(echo_core::error::ReactError::Other(
+        return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：ping 返回 error".to_string(),
         ));
     }
@@ -266,7 +266,7 @@ async fn main() -> Result<()> {
         .trim()
         .is_empty()
     {
-        return Err(echo_core::error::ReactError::Other(
+        return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：调用不存在工具时未返回错误消息".to_string(),
         ));
     }
@@ -283,7 +283,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     if !resp["error"]["code"].is_number() {
-        return Err(echo_core::error::ReactError::Other(
+        return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：未知方法未返回错误码".to_string(),
         ));
     }
@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
     let resp_str = server.handle_json_rpc("not valid json").await;
     let resp: Value = serde_json::from_str(&resp_str)?;
     if !resp["error"]["code"].is_number() {
-        return Err(echo_core::error::ReactError::Other(
+        return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：非法 JSON 未返回 parse error".to_string(),
         ));
     }
@@ -325,7 +325,7 @@ async fn main() -> Result<()> {
         .map(|a| a.len())
         .unwrap_or(0);
     if count != 2 {
-        return Err(echo_core::error::ReactError::Other(format!(
+        return Err(echo_agent::error::ReactError::Other(format!(
             "demo30 验收失败：from_tools() 构建后的工具数错误: {count}"
         )));
     }

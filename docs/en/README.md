@@ -73,14 +73,6 @@ echo-agent is a composable Agent development framework written in Rust, providin
 |-----|--------|--------------|
 | [Security Guide](./security.md) | Security | Security model, sandbox config, secret management, MCP trust boundaries |
 
-### Knowledge Base
-
-See [Knowledge Base](../knowledge/en/README.md) for in-depth concept explanations:
-- [Agent Patterns](../knowledge/en/agent-patterns.md) — ReAct, Plan-and-Execute, Self-Reflection, Graph Workflow
-- [MCP Protocol](../knowledge/en/mcp-protocol.md) — Model Context Protocol specification
-- [Skill System Design](../knowledge/en/skill-system.md) — agentskills.io specification alignment
-- [A2A Protocol](../knowledge/en/a2a-protocol.md) — Agent-to-Agent communication
-
 ---
 
 ## Quick Start

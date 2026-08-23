@@ -471,7 +471,7 @@ pub struct AgentRunSnapshot {
     pub state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
     /// Conversation store for user-visible transcript projection. When both
     /// this and `config.conversation_id` are set, the run loop persists
-    /// projected messages at every finalization point so GUI/TUI history is
+    /// projected messages at every finalization point so application UI history is
     /// always in sync with the running context — without each entry point
     /// having to re-implement the save logic.
     pub conversation_store: Option<Arc<dyn crate::memory::ConversationStore>>,
@@ -746,10 +746,10 @@ impl AgentRunSnapshot {
     /// `Message` list (including internal/tool hand-offs) for resume, this
     /// projects messages to [`StoredMessage`](crate::memory::StoredMessage) records and persists
     /// them via `ConversationStore::save_messages` — the same shape that
-    /// the GUI/TUI history panes consume.
+    /// the application UI history panes consume.
     ///
     /// This consolidates transcript persistence in the framework: previously,
-    /// every product entry point (Tauri commands, TUI loop) had to call
+    /// every product entry point (Tauri commands, terminal UI loop) had to call
     /// `save_messages` on its own. Now `run_core_loop` invokes this helper at
     /// pre-model and finalization safe points, and the product layer only
     /// handles conversation metadata (title / pinned / agent_type).

@@ -89,7 +89,7 @@ name,age,salary,department,rating
     println!("Part 1：MissingValueAnalysisTool — 缺失值分析");
     println!("───────────────────────────────────────────────────────\n");
 
-    let missing_tool = echo_tools::data_quality::MissingValueAnalysisTool;
+    let missing_tool = echo_agent::tools::data_quality::MissingValueAnalysisTool;
     let output = run_tool(&missing_tool, json!({ "data_path": csv_path }))
         .await
         .unwrap_or_else(|e| format!("Error: {e}"));
@@ -102,7 +102,7 @@ name,age,salary,department,rating
     println!("Part 2：OutlierDetectionTool — IQR 异常值检测");
     println!("───────────────────────────────────────────────────────\n");
 
-    let outlier_tool = echo_tools::data_quality::OutlierDetectionTool;
+    let outlier_tool = echo_agent::tools::data_quality::OutlierDetectionTool;
     let output = run_tool(
         &outlier_tool,
         json!({
@@ -141,7 +141,7 @@ name,age,salary,department,rating
     println!("Part 4：ConsistencyCheckTool — 数据一致性校验");
     println!("───────────────────────────────────────────────────────\n");
 
-    let consistency_tool = echo_tools::data_quality::ConsistencyCheckTool;
+    let consistency_tool = echo_agent::tools::data_quality::ConsistencyCheckTool;
     let output = run_tool(
         &consistency_tool,
         json!({
@@ -164,7 +164,7 @@ name,age,salary,department,rating
     println!("Part 5：ExploratoryStatisticsTool — 描述性分布摘要");
     println!("───────────────────────────────────────────────────────\n");
 
-    let stats_tool = echo_tools::statistics::ExploratoryStatisticsTool::default();
+    let stats_tool = echo_agent::tools::statistics::ExploratoryStatisticsTool::default();
     let output = run_tool(
         &stats_tool,
         json!({

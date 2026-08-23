@@ -22,7 +22,6 @@
 //! Content from untrusted sources is never automatically promoted.
 
 pub mod audit;
-pub mod auto_memory;
 pub mod background_review;
 pub mod candidate;
 pub mod curator;
@@ -41,11 +40,6 @@ pub mod triggers;
 pub use audit::{
     ChangeEntry, ChangeEntryBuilder, ChangeFilter, ChangeLog, ChangeRecordOutcome, ChangeType,
     EntityType, JsonlChangeLog,
-};
-pub use auto_memory::{
-    AutoMemoryConfig, Observation, ObservationCategory, extract_observations,
-    format_observations_for_memory, observation_memory_key, observation_memory_type,
-    write_observations_to_memory_layer,
 };
 pub use background_review::{
     BackgroundReviewConfig, BackgroundReviewer, ReviewCandidate, ReviewCandidateKind, ReviewOutcome,

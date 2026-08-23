@@ -257,101 +257,20 @@ echo-agent/
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
 ├── echo-tools/          Domain tools: chart, data, database, git, media, web, rag
+├── echo-agent-examples/ Non-published external-consumer facade examples
 ├── echo-rust-learning/  Non-published Rust lessons and offline exercises
 ├── src/                 Agent engine, re-exports, and facade layer
 ├── examples/            Runnable framework feature examples
-├── docs/                Bilingual documentation (en + zh)
-└── echo-agent.example.yaml  Example configuration
+└── docs/                Framework consumer documentation (en + zh)
 ```
 
 > **Note:** `echo-agent` is a library framework. For a ready-to-use application with CLI, Web UI, and WebSocket, see [echo-agent-cli](https://github.com/EchoYue-lp/echo-agent-cli).
 
 ---
 
-## Configuration
+## Runtime Configuration
 
-Create `echo-agent.yaml` in your project root:
-
-```yaml
-# Provider connections are application-defined; no provider catalog is built in.
-model_providers:
-  openai:
-    name: OpenAI
-    base_url: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    default_api_protocol: responses
-    requires_api_key: true
-
-# Each model explicitly selects its provider, wire protocol, and input capabilities.
-configured_models:
-  - id: openai:gpt-5.6-sol
-    display_name: GPT-5.6 Sol
-    provider: openai
-    model: gpt-5.6-sol
-    api_protocol: responses
-    input_modalities: [text, image]
-    enabled: true
-
-# Runtime app config (used by examples such as IM channels)
-model:
-  default_model_id: openai:gpt-5.6-sol
-  provider: openai
-  name: gpt-5.6-sol
-  max_tokens: 4096
-  temperature: 0.7
-
-agent:
-  name: my-assistant
-  system_prompt: "You are a helpful assistant."
-  max_iterations: 10
-  enable_tools: true
-  enable_memory: true
-
-channels:
-  qq:
-    enabled: false
-    app_id: ${QQ_APP_ID}
-    client_secret: ${QQ_CLIENT_SECRET}
-  feishu:
-    enabled: false
-    app_id: ${FEISHU_APP_ID}
-    app_secret: ${FEISHU_APP_SECRET}
-    mode: long_poll
-  session:
-    timeout_minutes: 60
-    reset_keywords: ["重置对话", "新对话", "清除记忆"]
-    reset_commands: ["/reset", "/clear", "/new"]
-
-mcp:
-  config_path: ./mcp.json
-
-server:
-  host: 0.0.0.0
-  port: 3000
-
-logging:
-  level: info
-```
-
-Notes:
-
-- `model_providers:` owns connection and authentication settings.
-- `configured_models:` owns explicit model protocol and text/image/audio/video capabilities.
-- Thinking controls are resolved centrally from the provider endpoint, API protocol, and model id; they are not user-configured wire fields.
-- `model:` / `agent:` / `channels:` / `mcp:` / `server:` / `logging:` are the framework runtime settings loaded by `echo_agent::config`.
-
-Set secrets via environment variables:
-
-```bash
-export DASHSCOPE_API_KEY=sk-xxx      # Alibaba Qwen
-export DEEPSEEK_API_KEY=sk-xxx       # DeepSeek
-export OPENAI_API_KEY=sk-xxx         # OpenAI
-export ANTHROPIC_API_KEY=sk-ant-xxx  # Anthropic
-export QQ_APP_ID=your-qq-app-id
-export QQ_CLIENT_SECRET=your-qq-client-secret
-export FEISHU_APP_ID=your-feishu-app-id
-export FEISHU_APP_SECRET=your-feishu-app-secret
-```
+The framework accepts typed `FrameworkConfig`, `AgentConfig`, `LlmConfig`, `PermissionMode`, and explicit `DataRoot` values. It does not discover product YAML files or choose a home-directory data root. See [Runtime Configuration](docs/en/28-config-reference.md).
 
 ---
 
@@ -1135,7 +1054,7 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 
 | Topic | English | Chinese |
 |-------|---------|---------|
-| Rust for Contributors | — | [ZH](docs/zh/rust-learning/README.md) |
+| Rust for Contributors | — | [ZH](echo-rust-learning/docs/zh/README.md) |
 | ReAct Agent | [EN](docs/en/01-react-agent.md) | [ZH](docs/zh/01-react-agent.md) |
 | Tool System | [EN](docs/en/02-tools.md) | [ZH](docs/zh/02-tools.md) |
 | Memory System | [EN](docs/en/03-memory.md) | [ZH](docs/zh/03-memory.md) |

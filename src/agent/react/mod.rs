@@ -635,7 +635,7 @@ impl ReactAgent {
     }
 
     /// (stage4 F1) Access the shared layer manager so app-side write paths
-    /// (e.g. session-end auto-memory) route through the same instance the agent
+    /// (for example an application memory writer) route through the same instance the agent
     /// uses — shared security guard, audit log, and write observer
     /// (割裂点 6: previously app paths built a fresh per-call manager that
     /// bypassed the agent's shared instance).
@@ -662,19 +662,6 @@ impl ReactAgent {
     /// Set or clear the curator used to record skill usage lifecycle data.
     pub fn set_skill_curator(&mut self, curator: Option<crate::evolution::Curator>) {
         self.skill_curator = curator;
-    }
-
-    /// Create an Agent from a configuration file.
-    ///
-    /// Searches for `echo-agent.yaml` and loads the config.
-    ///
-    /// ```no_run
-    /// use echo_agent::agent::react::ReactAgent;
-    /// let agent = ReactAgent::from_config_file(None);
-    /// ```
-    pub fn from_config_file(path: Option<&str>) -> Self {
-        let app_config = crate::config::load_config(path);
-        Self::new(app_config.to_agent_config())
     }
 
     // ── Constructor helpers ───────────────────────────────────────────────────────
@@ -745,15 +732,18 @@ impl ReactAgent {
 
     fn register_feature_gated_tools(config: &AgentConfig, tool_manager: &mut ToolManager) {
         if config.enable_tool {
+            use echo_core::tools::ToolPack;
+            let pack = config.command_cells.as_ref().map_or_else(
+                echo_tools::StandardToolPack::new,
+                |cells| {
+                    echo_tools::StandardToolPack::new()
+                        .with_command_cells(std::sync::Arc::clone(cells))
+                },
+            );
             if config.readonly_tools {
-                echo_tools::register_readonly_tools(tool_manager);
+                pack.install_read_only(tool_manager);
             } else {
-                // The injected cell registry (if any) enables ShellTool's
-                // background=true mode alongside the regular tool surface.
-                echo_tools::register_all_tools_with_cells(
-                    tool_manager,
-                    config.command_cells.clone(),
-                );
+                pack.install(tool_manager);
             }
         }
     }
@@ -1652,7 +1642,7 @@ impl ReactAgent {
     #[cfg(feature = "human-loop")]
     /// Replace the HumanLoopProvider transport without clearing session approvals.
     ///
-    /// Desktop GUI installs a run-scoped provider for each message so approval
+    /// Desktop desktop UI installs a run-scoped provider for each message so approval
     /// responses can be routed back to the right window/conversation. That
     /// transport swap should not invalidate "approve for this session".
     pub fn set_human_loop_provider_preserving_approvals(
@@ -1990,40 +1980,27 @@ impl ReactAgent {
 
     /// Set the permission mode at runtime.
     ///
-    /// Accepted values: "default", "auto-edit", "full-auto", "strict".
-    /// Legacy aliases "plan" and "auto" normalize to "default"; read-only
-    /// planning and Auto routing are controlled by separate runtime modes.
     /// Read-only planning is controlled separately via `set_plan_mode`.
     /// Also propagates to `PermissionService` if wired (sync, non-blocking).
-    pub fn set_permission_mode(&mut self, mode: &str) {
-        let normalized_mode = match mode {
-            "plan" | "auto" => "default",
-            _ => mode,
-        };
-        self.config.permission_mode = normalized_mode.to_string();
+    pub fn set_permission_mode(&mut self, mode: crate::tools::permission::PermissionMode) {
+        self.config.permission_mode = mode;
 
         // Propagate to PermissionService (if wired)
         #[cfg(feature = "human-loop")]
         if let Some(ref service) = self.approval.permission_service {
-            use echo_core::tools::permission::PermissionMode;
-            let pm = match normalized_mode {
-                "full-auto" => PermissionMode::BypassPermissions,
-                "auto-edit" | "accept-edits" => PermissionMode::AcceptEdits,
-                "strict" | "strict-confirm" | "strict-confirmation" => {
-                    PermissionMode::StrictConfirm
-                }
-                _ => PermissionMode::Default,
-            };
             // Security: make bypass mode loud. BypassPermissions auto-allows every
             // tool (shell, write, MCP) with no per-action approval. Surface this in
             // the trace/audit log so it is never silently enabled via config or env.
-            if matches!(pm, PermissionMode::BypassPermissions) {
+            if matches!(
+                mode,
+                crate::tools::permission::PermissionMode::BypassPermissions
+            ) {
                 tracing::warn!(
                     agent = %self.config.agent_name,
                     "Permission mode set to full-auto/BypassPermissions: ALL tools                      (including shell and file writes) will be auto-approved without                      per-action confirmation. Use the admin bypass_disabled switch to                      deny this in shared/CI environments."
                 );
             }
-            service.set_mode_sync(pm);
+            service.set_mode_sync(mode);
             // F2 修复：切换权限模式时清除审批缓存。旧模式下的审批决策
             //（如 Default 模式批准的 shell）不应延续到新模式（如 Plan）。
             service.clear_cache();
@@ -2031,8 +2008,8 @@ impl ReactAgent {
     }
 
     /// Get the current permission mode.
-    pub fn get_permission_mode(&self) -> &str {
-        &self.config.permission_mode
+    pub fn get_permission_mode(&self) -> crate::tools::permission::PermissionMode {
+        self.config.permission_mode
     }
 
     /// Update the hard iteration ceiling.

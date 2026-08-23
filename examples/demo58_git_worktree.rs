@@ -14,8 +14,10 @@
 //! cargo run --example demo58_git_worktree --features git
 //! ```
 
-use echo_tools::git_checkpoint::{cleanup_old_checkpoints, create_checkpoint};
-use echo_tools::git_worktree::{WorktreeConfig, create_worktree, list_worktrees, remove_worktree};
+use echo_agent::tools::git_checkpoint::{cleanup_old_checkpoints, create_checkpoint};
+use echo_agent::tools::git_worktree::{
+    WorktreeConfig, create_worktree, list_worktrees, remove_worktree,
+};
 use std::path::Path;
 
 #[tokio::main]

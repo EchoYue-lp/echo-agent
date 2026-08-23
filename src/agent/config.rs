@@ -4,6 +4,7 @@ use crate::agent::AgentCallback;
 use crate::llm::ResponseFormat;
 use crate::tools::ToolExecutionConfig;
 use echo_core::budget::TokenBudgetConfig;
+use echo_core::tools::permission::PermissionMode;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -138,8 +139,8 @@ pub struct AgentConfig {
     pub(crate) working_dir: std::sync::Mutex<Option<PathBuf>>,
     /// Token budget configuration for fine-grained context window management
     pub(crate) token_budget_config: TokenBudgetConfig,
-    /// Permission mode for tool execution (default, auto-edit, full-auto, strict).
-    pub(crate) permission_mode: String,
+    /// Permission mode for tool execution.
+    pub(crate) permission_mode: PermissionMode,
     /// How often to checkpoint the React loop state (in iterations).
     /// 0 = only checkpoint at end of execution (default).
     /// 1 = checkpoint every iteration.
@@ -205,9 +206,7 @@ impl AgentConfig {
             _reasoning_effort: "medium".to_string(),
             tool_execution: ToolExecutionConfig::default(),
             enable_memory: false,
-            memory_path: crate::paths::user_data_path("store.json")
-                .to_string_lossy()
-                .into_owned(),
+            memory_path: String::new(),
             session_id: None,
             conversation_id: None,
             response_format: None,
@@ -222,7 +221,7 @@ impl AgentConfig {
             project_root: None,
             working_dir: std::sync::Mutex::new(None),
             token_budget_config: TokenBudgetConfig::default(),
-            permission_mode: "default".to_string(),
+            permission_mode: PermissionMode::Default,
             react_checkpoint_interval: 0,
             verifier_enabled: false,
             verifier_min_score: 7.0,
@@ -934,27 +933,20 @@ impl AgentConfig {
         self.max_tokens
     }
 
-    /// Set the permission mode (default, auto-edit, full-auto, strict).
-    pub fn permission_mode(mut self, mode: &str) -> Self {
-        self.permission_mode = normalize_permission_mode(mode).to_string();
+    /// Set the typed permission mode.
+    pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.permission_mode = mode;
         self
     }
 
     /// Get the current permission mode.
-    pub fn get_permission_mode(&self) -> &str {
-        &self.permission_mode
+    pub fn get_permission_mode(&self) -> PermissionMode {
+        self.permission_mode
     }
 
     /// Set the permission mode at runtime (mutable reference).
-    pub fn set_permission_mode(&mut self, mode: &str) {
-        self.permission_mode = normalize_permission_mode(mode).to_string();
-    }
-}
-
-fn normalize_permission_mode(mode: &str) -> &str {
-    match mode {
-        "plan" | "auto" => "default",
-        _ => mode,
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.permission_mode = mode;
     }
 }
 
@@ -1032,12 +1024,23 @@ mod tests {
     }
 
     #[test]
-    fn test_permission_mode_legacy_aliases_normalize_to_default() {
-        let mut config = AgentConfig::new("model", "agent", "prompt").permission_mode("auto");
-        assert_eq!(config.get_permission_mode(), "default");
-
-        config.set_permission_mode("plan");
-        assert_eq!(config.get_permission_mode(), "default");
+    fn permission_mode_round_trips_without_loss() {
+        let modes = [
+            PermissionMode::Default,
+            PermissionMode::Plan,
+            PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Auto,
+            PermissionMode::Bubble,
+            PermissionMode::DontAsk,
+            PermissionMode::StrictConfirm,
+        ];
+        for mode in modes {
+            let mut config = AgentConfig::new("model", "agent", "prompt").permission_mode(mode);
+            assert_eq!(config.get_permission_mode(), mode);
+            config.set_permission_mode(mode);
+            assert_eq!(config.get_permission_mode(), mode);
+        }
     }
 
     #[test]

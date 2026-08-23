@@ -195,7 +195,7 @@ impl PluginManifest {
         fields
     }
 
-    /// Validate portable metadata plus EKO's root configuration fields.
+    /// Validate portable metadata plus embedding application's root configuration fields.
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
         if self.schema != AGENT_PLUGIN_SCHEMA_V1 {

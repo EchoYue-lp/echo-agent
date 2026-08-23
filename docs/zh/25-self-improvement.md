@@ -323,12 +323,12 @@ let transitions = curator.apply_transitions()?; // 按闲置时间自动转换
 
    ```rust
    use echo_agent::evolution::SkillDraftGenerator;
-   let gen = SkillDraftGenerator::new(".eko".into(), &change_log);
+   let gen = SkillDraftGenerator::new("<application-data>".into(), &change_log);
    let result = gen.generate_from_candidate(&candidate).await?;
    // result.skill_md_path 指向生成的草稿
    ```
 
-   EKO 当前传入 `.eko`，因此草稿位于 `.eko/skills/_drafts/<name>/SKILL.md`。这一产品路径应以 [EKO app-core 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) 为准。
+   embedding application 当前传入 `<application-data>`，因此草稿位于 `<application-data>/skills/_drafts/<name>/SKILL.md`。这一产品路径应以 [embedding application app-core 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) 为准。
 
 3. 人工审查后通过 `/skill-promote <name>` 将 Draft 移至 Active，技能即出现在技能目录中。
 
@@ -356,7 +356,7 @@ for report in monitor.analyze_all_skills().await? {
 
 ### 规则晋升（产品层）
 
-`RulePromoter` 是 EKO 的产品策略，不是框架持久化契约。EKO 当前会先审查高置信度记忆提案，再把批准的规则写入 `.eko/learned-rules.md`；权威阈值与工作流应以 [EKO app-core 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) 为准。
+`RulePromoter` 是 embedding application 的产品策略，不是框架持久化契约。embedding application 当前会先审查高置信度记忆提案，再把批准的规则写入 `<application-data>/learned-rules.md`；权威阈值与工作流应以 [embedding application app-core 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) 为准。
 
 ### 安全加固 — `EvolutionSecurityGuard`
 
@@ -374,11 +374,11 @@ for report in monitor.analyze_all_skills().await? {
 | 系统 | 主要职责 | 不应承担 |
 |------|---------|---------|
 | `TriggerDetector`（运行时） | 在线轻量发现并附带精确来源摘录；框架默认可直接持久化，产品也可安装 `MemoryTriggerSink` 接管 | 会话归档总结、产品审阅策略 |
-| `AutoMemory`（框架+应用） | 会话结束/手动触发时提取观察；框架保留可选 typed-memory writer，EKO 则生成证据候选 | 压缩淘汰、运行时策略调度 |
+| 应用 observation policy | 应用可以提取观察，并通过 typed-memory API 提交已采纳事实 | 压缩淘汰、运行时策略调度 |
 | `memory_promoter`（压缩路径） | 因 token 压力被压缩/淘汰的消息的生命周期管理（长期化、淘汰、降级） | 新偏好发现、UI 触发的提取 |
 | `BackgroundReviewer`（显式/应用调度） | 从已完成 run 生成带证据 JSON 候选，默认只提案 | 自动长期写入或产品调度策略 |
 
-> 关键约束：任何被接受并进入运行时 recall 的 typed memory，**必须**统一走框架的 `MemoryLayerManager::write_memory`。EKO 会先把 TriggerDetector/AutoMemory/BackgroundReviewer 的推断结果放进 workspace JSONL Review Inbox，用户采纳后才写入。
+> 关键约束：任何被接受并进入运行时 recall 的 typed memory，**必须**统一走框架的 `MemoryLayerManager::write_memory`。提取与审阅策略归上层应用。
 
 ---
 
@@ -401,7 +401,7 @@ for report in monitor.analyze_all_skills().await? {
   curator_state.json               # Curator 状态
 ```
 
-框架复用方可以选择其它路径。EKO 注入 workspace scope，使用 `.eko/evolution/evidence-candidates.jsonl` 与 `.eko/evolution/curator-state.json`。
+框架复用方可以选择其它路径。embedding application 注入 workspace scope，使用 `<application-data>/evolution/evidence-candidates.jsonl` 与 `<application-data>/evolution/curator-state.json`。
 
 ## Store 命名空间
 

@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
-use super::curator::{Curator, CuratorConfig};
+use super::curator::Curator;
 use super::layer::EvolutionObserver;
 use crate::error::Result;
 
@@ -142,29 +142,27 @@ pub struct SkillCandidateDetector {
     observer: Option<Arc<dyn EvolutionObserver>>,
 }
 
-impl Default for SkillCandidateDetector {
-    fn default() -> Self {
+impl SkillCandidateDetector {
+    /// Create a detector with explicit lifecycle persistence.
+    pub fn new(curator: Curator) -> Self {
         Self {
             min_observations: 3,
             max_candidates_per_scan: 5,
-            curator: Curator::default_path(CuratorConfig::default()),
+            curator,
             observer: None,
         }
     }
-}
-
-impl SkillCandidateDetector {
-    /// Create a new detector with default settings.
-    pub fn new() -> Self {
-        Self::default()
-    }
 
     /// Create a detector with custom thresholds.
-    pub fn with_thresholds(min_observations: usize, max_candidates_per_scan: usize) -> Self {
+    pub fn with_thresholds(
+        curator: Curator,
+        min_observations: usize,
+        max_candidates_per_scan: usize,
+    ) -> Self {
         Self {
             min_observations,
             max_candidates_per_scan,
-            curator: Curator::default_path(CuratorConfig::default()),
+            curator,
             observer: None,
         }
     }
@@ -438,6 +436,7 @@ fn default_candidate_meta() -> echo_core::memory::types::MemoryMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evolution::curator::CuratorConfig;
     use echo_core::memory::store::StoreItem;
     use echo_core::memory::types::MemorySource;
     use echo_state::memory::store::InMemoryStore;
@@ -526,6 +525,14 @@ mod tests {
         .with_confidence(0.80)
     }
 
+    fn test_detector() -> SkillCandidateDetector {
+        let path = std::env::temp_dir().join(format!(
+            "echo-agent-candidate-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        SkillCandidateDetector::new(Curator::new(CuratorConfig::default(), path))
+    }
+
     #[tokio::test]
     async fn test_candidate_from_repeated_workflow() {
         let store = Arc::new(InMemoryStore::new());
@@ -549,10 +556,9 @@ mod tests {
         }
 
         let observed_names = Arc::new(Mutex::new(Vec::new()));
-        let detector =
-            SkillCandidateDetector::new().with_evolution_observer(Arc::new(CandidateObserver {
-                names: observed_names.clone(),
-            }));
+        let detector = test_detector().with_evolution_observer(Arc::new(CandidateObserver {
+            names: observed_names.clone(),
+        }));
         let report = detector.detect(&typed, &log).await.unwrap();
 
         assert_eq!(report.new_candidates.len(), 1);
@@ -589,7 +595,7 @@ mod tests {
                 .unwrap();
         }
 
-        let detector = SkillCandidateDetector::new();
+        let detector = test_detector();
         let report = detector.detect(&typed, &log).await.unwrap();
 
         assert!(report.new_candidates.is_empty());
@@ -614,7 +620,7 @@ mod tests {
                 .unwrap();
         }
 
-        let detector = SkillCandidateDetector::new();
+        let detector = test_detector();
         // First detection: should create candidate.
         let report1 = detector.detect(&typed, &log).await.unwrap();
         assert_eq!(report1.new_candidates.len(), 1);
@@ -655,7 +661,7 @@ mod tests {
                 .unwrap();
         }
 
-        let detector = SkillCandidateDetector::new();
+        let detector = test_detector();
         let report = detector.detect(&typed, &log).await.unwrap();
 
         assert_eq!(report.new_candidates.len(), 1);

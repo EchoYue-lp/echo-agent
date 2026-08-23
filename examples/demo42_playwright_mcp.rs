@@ -31,6 +31,8 @@
 //! cargo run --example demo42_browser_mcp --features mcp
 //! ```
 
+mod support;
+
 use echo_agent::mcp::McpConfigFile;
 use echo_agent::prelude::*;
 use futures::StreamExt;
@@ -195,15 +197,9 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────
 
 fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<LlmConfig> {
-    let app_config = echo_agent::config::load_config(None);
-    preferred
-        .map(|selector| app_config.resolve_llm_config(Some(selector)))
-        .transpose()
-        .and_then(|preferred| preferred.map_or_else(|| app_config.resolve_llm_config(None), Ok))
-        .or_else(|_| app_config.resolve_llm_config(None))
-        .map_err(|error| {
+    support::llm_config(preferred).map_err(|error| {
             echo_agent::error::ReactError::Other(format!(
-                "demo42 验收失败：请在 echo-agent.yaml 中配置可用的 model_providers/configured_models：{error}"
+                "demo42 requires explicit ECHO_AGENT_PROVIDER/BASE_URL/MODEL/API_PROTOCOL settings: {error}"
             ))
         })
 }

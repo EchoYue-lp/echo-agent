@@ -1,7 +1,7 @@
 //! OpenAI Responses API adapter.
 //!
 //! The adapter keeps the framework's provider-neutral `LlmClient` contract and
-//! translates full local conversation history into Responses input items. EKO
+//! translates full local conversation history into Responses input items. embedding application
 //! therefore remains file/local-history authoritative and does not depend on
 //! `previous_response_id`, hosted conversations, or server-side storage.
 

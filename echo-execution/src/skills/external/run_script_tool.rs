@@ -82,7 +82,7 @@ fn apply_sandbox_policy(cmd: &mut SandboxCommand, policy: &SkillSandboxPolicy) {
 /// When the policy declares network/path restrictions, they translate to
 /// sandbox resource limits enforced at the OS level (Seatbelt / Landlock).
 fn sandbox_limits_from_policy(policy: &SkillSandboxPolicy) -> ResourceLimits {
-    let mut limits = ResourceLimits::unrestricted(); // EKO local trust model
+    let mut limits = ResourceLimits::unrestricted(); // embedding application local trust model
     limits.network = policy.network.unwrap_or(true);
     if !policy.allowed_paths.is_empty() {
         limits.writable_paths = policy.allowed_paths.clone();

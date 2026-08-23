@@ -23,10 +23,10 @@
 use echo_agent::audit::AuditEvent;
 use echo_agent::guard::GuardDirection;
 use echo_agent::prelude::*;
+use echo_agent::retry::{RetryPolicy, with_retry};
 use echo_agent::sandbox::local::LocalConfig;
 use echo_agent::sandbox::{LocalSandbox, SandboxCommand};
 use echo_agent::tool;
-use echo_core::retry::{RetryPolicy, with_retry};
 use futures::StreamExt;
 use serde_json::json;
 use std::sync::Arc;

@@ -62,7 +62,7 @@
 
 | 文档 | 说明 |
 |------|------|
-| [Rust 学习指南](rust-learning/README.md) | 面向零基础贡献者的多章节教程与可运行教学 crate |
+| [Rust 学习指南](../../echo-rust-learning/docs/zh/README.md) | 面向零基础贡献者的多章节教程与可运行教学 crate |
 | [快速入门](getting-started.md) | 从零开始构建你的第一个 Agent |
 | [Skill 创作指南](skill-authoring.md) | 创建自定义 Code-based 和 File-based Skill |
 
@@ -71,14 +71,6 @@
 | 文档 | 功能模块 | 核心关键词 |
 |------|---------|-----------|
 | [安全指南](security.md) | Security | 安全模型、沙箱配置、密钥管理、MCP 信任边界 |
-
-### 知识库
-
-参见 [知识库](../knowledge/zh/README.md) 获取深入概念讲解：
-- [Agent 模式](../knowledge/zh/agent-patterns.md) — ReAct、Plan-and-Execute、Self-Reflection、Graph Workflow
-- [MCP 协议](../knowledge/zh/mcp-protocol.md) — Model Context Protocol 规范
-- [Skill 系统设计](../knowledge/zh/skill-system.md) — agentskills.io 规范对齐
-- [A2A 协议](../knowledge/zh/a2a-protocol.md) — Agent-to-Agent 通信
 
 ---
 

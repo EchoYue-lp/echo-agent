@@ -62,8 +62,8 @@ pub struct TrajectoryStats {
 
 /// Saves completed runs as ShareGPT-format JSONL for fine-tuning.
 ///
-/// Each trajectory is stored as a single JSON line in
-/// `~/.echo-agent/trajectories/YYYY-MM-DD.jsonl`.
+/// Each trajectory is stored as a single JSON line under the caller-supplied
+/// directory.
 pub struct TrajectorySaver {
     base_dir: PathBuf,
 }
@@ -74,12 +74,6 @@ impl TrajectorySaver {
         let base_dir = base_dir.into();
         std::fs::create_dir_all(&base_dir)?;
         Ok(Self { base_dir })
-    }
-
-    /// Create a saver with the default path (`~/.echo-agent/trajectories/`).
-    pub fn default_dir() -> Result<Self> {
-        let dir = crate::paths::user_data_path("trajectories");
-        Self::new(dir)
     }
 
     /// Convert a completed run into ShareGPT conversation format.

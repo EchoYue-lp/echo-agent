@@ -6,7 +6,7 @@ echo-agent 只有一套通用执行引擎：`ReactAgent`。应用通过 builder 
 skills 和 invocation policy 组装 agent。框架不存在 `ModeEngine`、`AgentMode`，也不存在内置的
 Coding/Research/Data/Writing 运行时状态机。
 
-EKO Chat/Task/Auto 等产品模式属于应用层。应用可以按模式选择提示词和 invocation 工具面，
+embedding application Chat/Task/Auto 等产品模式属于应用层。应用可以按模式选择提示词和 invocation 工具面，
 但不应把产品模式写成模型能力或框架运行状态。
 
 ## Agent Factory

@@ -104,15 +104,15 @@ EchoAgent 向 stdio 子进程提供 `PLUGIN_ROOT` 和 `PLUGIN_DATA`。`${PLUGIN_
 | `agents/*.md` | Subagent 适配器 |
 | `hooks/hooks.yaml` | Hook registry |
 | `lsp.yaml` | 宿主应用 LSP manager |
-| `monitors.yaml` | EKO 调度器 |
-| `themes/*.json` | EKO GUI/TUI 主题目录 |
-| `output-styles/*.md` | EKO system context 投影 |
+| `monitors.yaml` | embedding application 调度器 |
+| `themes/*.json` | embedding application GUI/TUI 主题目录 |
+| `output-styles/*.md` | embedding application system context 投影 |
 
 `scripts/` 和 `README.md` 是插件资源，不会自动执行；Skill 或 Hook 可以显式引用脚本。
 
 ## 框架与应用分层
 
-通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义和 LSP 适配输出。EKO 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 adapter 不重复拥有依赖排序、组件所有权或重载语义。
+通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义和 LSP 适配输出。embedding application 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 adapter 不重复拥有依赖排序、组件所有权或重载语义。
 
 ## 发现与生命周期
 
@@ -124,7 +124,7 @@ EchoAgent 向 stdio 子进程提供 `PLUGIN_ROOT` 和 `PLUGIN_DATA`。`${PLUGIN_
 | Project | `<project>/.echo-agent/plugins/<name>/plugin.json` |
 | Local | `<project>/.echo-agent/plugins.local/<name>/plugin.json` |
 
-应用可以覆盖插件数据根目录，EKO 会将其设为 `~/.eko`。
+应用可以覆盖插件数据根目录，embedding application 会将其设为 `<application-data>`。
 
 插件按依赖顺序加载。清单致命错误会跳过整个包；组件错误按最小可行边界隔离。运行时记录每个插件的组件所有权，因此 disable、uninstall 和 reload 能精确卸载对应组件。
 
@@ -149,4 +149,4 @@ registry.enable(&id)?;
 
 ## 设计依据
 
-本设计复用 Agent Plugins 1.0 官方的 [manifest](https://agent-plugins.org/plugin-authors/manifest)、[Skills](https://agent-plugins.org/plugin-authors/skills)、[MCP](https://agent-plugins.org/plugin-authors/mcp-servers) 和 [loading](https://agent-plugins.org/client-implementers/loading-and-discovery) 约定。EKO 作为本地个人助理，额外组件有意采用固定根位置，不引入客户端扩展 namespace。
+本设计复用 Agent Plugins 1.0 官方的 [manifest](https://agent-plugins.org/plugin-authors/manifest)、[Skills](https://agent-plugins.org/plugin-authors/skills)、[MCP](https://agent-plugins.org/plugin-authors/mcp-servers) 和 [loading](https://agent-plugins.org/client-implementers/loading-and-discovery) 约定。embedding application 作为本地个人助理，额外组件有意采用固定根位置，不引入客户端扩展 namespace。

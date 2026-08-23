@@ -104,15 +104,15 @@ The remaining components are discovered from fixed root locations:
 | `agents/*.md` | Subagent adapter |
 | `hooks/hooks.yaml` | Hook registry |
 | `lsp.yaml` | Embedding application's LSP manager |
-| `monitors.yaml` | EKO scheduler |
-| `themes/*.json` | EKO GUI/TUI theme catalogs |
-| `output-styles/*.md` | EKO system-context projection |
+| `monitors.yaml` | embedding application scheduler |
+| `themes/*.json` | embedding application GUI/TUI theme catalogs |
+| `output-styles/*.md` | embedding application system-context projection |
 
 `scripts/` and `README.md` are package resources rather than automatically executed components. Skills and Hooks may reference scripts explicitly.
 
 ## Framework and application boundary
 
-The reusable framework owns manifest parsing, Skills, MCP, plugin scopes/lifecycle, Hooks, Subagent definitions, and LSP adapter output. EKO discovers and converts only its product-specific `monitors.yaml`, `themes/`, and `output-styles/` files. The application adapter does not duplicate dependency ordering, component ownership, or reload semantics.
+The reusable framework owns manifest parsing, Skills, MCP, plugin scopes/lifecycle, Hooks, Subagent definitions, and LSP adapter output. embedding application discovers and converts only its product-specific `monitors.yaml`, `themes/`, and `output-styles/` files. The application adapter does not duplicate dependency ordering, component ownership, or reload semantics.
 
 ## Discovery and lifecycle
 
@@ -124,7 +124,7 @@ The registry scans these scopes:
 | Project | `<project>/.echo-agent/plugins/<name>/plugin.json` |
 | Local | `<project>/.echo-agent/plugins.local/<name>/plugin.json` |
 
-Applications can override the plugin data base directory. EKO sets it to `~/.eko`.
+Applications can override the plugin data base directory. embedding application sets it to `<application-data>`.
 
 Loading proceeds in dependency order. Fatal manifest errors skip the package. Component errors remain isolated at the smallest practical boundary. Runtime replacement records ownership so disable, uninstall, and reload remove exactly the components contributed by each plugin.
 
@@ -149,4 +149,4 @@ Use `PluginRegistry::validate_plugin_dir` before installation when a validation 
 
 ## Design references
 
-This design reuses the official Agent Plugins 1.0 [manifest](https://agent-plugins.org/plugin-authors/manifest), [Skills](https://agent-plugins.org/plugin-authors/skills), [MCP](https://agent-plugins.org/plugin-authors/mcp-servers), and [loading](https://agent-plugins.org/client-implementers/loading-and-discovery) contracts. EKO intentionally uses fixed root locations for its additional local-assistant components instead of introducing client-extension namespaces.
+This design reuses the official Agent Plugins 1.0 [manifest](https://agent-plugins.org/plugin-authors/manifest), [Skills](https://agent-plugins.org/plugin-authors/skills), [MCP](https://agent-plugins.org/plugin-authors/mcp-servers), and [loading](https://agent-plugins.org/client-implementers/loading-and-discovery) contracts. embedding application intentionally uses fixed root locations for its additional local-assistant components instead of introducing client-extension namespaces.

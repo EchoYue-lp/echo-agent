@@ -107,13 +107,14 @@ fn repository_markdown_has_resolvable_local_links() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn framework_docs_do_not_publish_stale_eko_paths() -> Result<(), Box<dyn std::error::Error>> {
+fn framework_docs_do_not_publish_product_paths() -> Result<(), Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for relative in ["docs/en/07-skills.md", "docs/zh/07-skills.md"] {
         let content = std::fs::read_to_string(root.join(relative))?;
         assert!(!content.contains("~/.echo-agent/skills/"));
         assert!(!content.contains("echo-agent-cli/docs/system-deep-dive"));
-        assert!(content.contains("~/.eko/skills/"));
+        assert!(!content.contains("~/.eko/skills/"));
+        assert!(content.contains("<application-data>/skills/"));
     }
 
     for relative in [
@@ -122,8 +123,10 @@ fn framework_docs_do_not_publish_stale_eko_paths() -> Result<(), Box<dyn std::er
     ] {
         let content = std::fs::read_to_string(root.join(relative))?;
         assert!(!content.contains(".echo-agent/AGENTS.md"));
-        assert!(content.contains(".eko/learned-rules.md"));
-        assert!(content.contains(".eko/skills/_drafts/"));
+        assert!(!content.contains(".eko/learned-rules.md"));
+        assert!(!content.contains(".eko/skills/_drafts/"));
+        assert!(content.contains("<application-data>/learned-rules.md"));
+        assert!(content.contains("<application-data>/skills/_drafts/"));
     }
     Ok(())
 }

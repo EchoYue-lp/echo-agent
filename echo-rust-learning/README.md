@@ -4,7 +4,7 @@
 贡献者阅读框架源码时会遇到的 Rust 概念，不参与生产运行路径。生产 crate 不依赖本 crate；教学
 crate 单向依赖 `echo_agent` 的公开 API。
 
-完整的 15 章中文课程从[学习指南首页](../docs/zh/rust-learning/README.md)开始。
+完整的 15 章中文课程从[学习指南首页](docs/zh/README.md)开始。
 
 ## 运行
 

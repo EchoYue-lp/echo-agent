@@ -14,7 +14,7 @@ Tool:  a single atomic operation ("read file")
 Skill: a domain capability pack ("filesystem" = read_file + write_file + list_dir + usage guidance)
 ```
 
-The framework contract (`Skill` trait + `SkillRegistry`) lives in `echo-core` and `echo-execution`. Product catalogues are separate consumers of this API. For example, EKO currently stores its user-facing catalogue under `~/.eko/skills/`; that application-owned behavior is documented by the [EKO SkillsHub source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub), not by this framework API.
+The framework contract (`Skill` trait + `SkillRegistry`) lives in `echo-core` and `echo-execution`. Product catalogues are separate consumers of this API. For example, embedding application currently stores its user-facing catalogue under `<application-data>/skills/`; that application-owned behavior is documented by the [embedding application SkillsHub source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub), not by this framework API.
 
 ---
 
@@ -482,7 +482,7 @@ ctx.replace_projection(
 
 `SkillRegistry` owns the reusable runtime lifecycle: discovery, activation, dependency ordering, resource access, and sandbox policy. It does not install or uninstall marketplace packages.
 
-Applications may add a separate catalogue. EKO's current `SkillsHub` scans `~/.eko/skills/` for its UI and installation workflow; it does not replace the framework registry. Treat the [EKO SkillsHub source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) as the authority for those product details because they can evolve independently from echo-agent.
+Applications may add a separate catalogue. embedding application's current `SkillsHub` scans `<application-data>/skills/` for its UI and installation workflow; it does not replace the framework registry. Treat the [embedding application SkillsHub source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) as the authority for those product details because they can evolve independently from echo-agent.
 
 ---
 

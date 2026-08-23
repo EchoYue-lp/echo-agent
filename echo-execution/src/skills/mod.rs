@@ -9,7 +9,6 @@
 //!
 //! File-based skills follow the [agentskills.io specification](https://agentskills.io/specification).
 
-pub mod builtin;
 pub mod dependency_probe;
 pub mod external;
 pub mod hooks;
