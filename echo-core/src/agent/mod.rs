@@ -592,7 +592,7 @@ pub trait Agent: Send + Sync {
     /// Execute a task and return the final answer.
     ///
     /// **Task-oriented**: resets/restores context, may run a planning phase
-    /// (if `tasks` feature is enabled), then enters the ReAct loop.
+    /// then enters the ReAct loop.
     /// Use this for standalone, single-round tasks where the agent starts fresh
     /// or resumes from a checkpoint.
     ///

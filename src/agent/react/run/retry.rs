@@ -1,6 +1,7 @@
 //! LLM retry logic + concurrent tool timeout calculation
 
 use crate::error::{AgentError, ReactError, Result};
+use echo_core::retry::RetryPolicy;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -30,24 +31,32 @@ where
         ),
         None => None,
     };
+    let policy = RetryPolicy::new(
+        u32::try_from(max_retries).unwrap_or(u32::MAX),
+        Duration::from_millis(retry_delay_ms),
+    )
+    .max_delay(Duration::from_secs(30))
+    // Cancellation tests and callers depend on a real safe point between
+    // attempts; provider-level jitter must not collapse that delay to zero.
+    .jitter(false);
     let mut result: Result<T> = Err(ReactError::Agent(Box::new(AgentError::NoResponse {
         model: "unknown".to_string(),
         agent: agent_name.to_string(),
     })));
-    for attempt in 0..=max_retries {
+    for attempt in 0..=policy.max_retries {
         if attempt > 0 {
-            // Exponential backoff with jitter: base * 2^(attempt-1) + rand(0..base/2)
-            let base_delay = retry_delay_ms.saturating_mul(1u64 << (attempt - 1).min(5));
-            let jitter = fastrand::u64(0..=base_delay / 2);
-            let delay_ms = base_delay.saturating_add(jitter);
+            let delay = policy.delay_for(attempt);
             warn!(
                 agent = %agent_name,
                 attempt = attempt,
-                max = max_retries,
-                delay_ms = delay_ms,
-                "⚠️ LLM request failed, retrying in {delay_ms}ms ({attempt}/{max_retries})"
+                max = policy.max_retries,
+                delay_ms = delay.as_millis() as u64,
+                "⚠️ LLM request failed, retrying in {}ms ({}/{})",
+                delay.as_millis(),
+                attempt,
+                policy.max_retries
             );
-            let delay = tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms));
+            let delay = tokio::time::sleep(delay);
             tokio::pin!(delay);
             if let Some(cancel) = cancel {
                 tokio::select! {
@@ -75,7 +84,7 @@ where
                 }
                 break;
             }
-            Err(e) if attempt < max_retries && is_retryable_llm_error(e) => {
+            Err(e) if attempt < policy.max_retries && is_retryable_llm_error(e) => {
                 warn!(agent = %agent_name, error = %e, "LLM retryable error");
             }
             Err(_) => break,

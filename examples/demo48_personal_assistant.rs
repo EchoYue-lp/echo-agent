@@ -16,7 +16,7 @@
 //!
 //! ```bash
 //! # 基础运行（需要 LLM API Key）
-//! QWEN_API_KEY=your_key cargo run --example demo48_personal_assistant --features sqlite,tasks,subagent
+//! QWEN_API_KEY=your_key cargo run --example demo48_personal_assistant --features sqlite,subagent
 //! ```
 mod support;
 

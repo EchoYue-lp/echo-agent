@@ -1133,6 +1133,7 @@ mod tests {
     use crate::agent::AgentEvent;
     use echo_core::tools::{Tool, ToolContext, ToolOutputChannel};
     use futures::Stream;
+    #[cfg(feature = "files")]
     use std::collections::HashMap;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -1145,7 +1146,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_path_params() {
+    fn test_extract_write_path_param() {
         let params = vec![("path".to_string(), Value::String("src/main.rs".to_string()))]
             .into_iter()
             .collect();
@@ -1153,7 +1154,11 @@ mod tests {
             extract_path_params("write_file", &params),
             vec!["src/main.rs".to_string()]
         );
+    }
 
+    #[cfg(feature = "files")]
+    #[test]
+    fn test_extract_apply_patch_paths() {
         let patch_params = HashMap::from([(
             "patch".to_string(),
             Value::String(

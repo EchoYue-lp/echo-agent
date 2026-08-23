@@ -43,8 +43,16 @@ async fn add(a: f64, b: f64) -> Result<ToolResult> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let llm_config = LlmConfig::for_provider(
+        "openai",
+        "https://api.openai.com/v1",
+        std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+        "qwen3.7-max",
+        LlmApiProtocol::ChatCompletions,
+    )?;
     let mut agent = agent! {
         model: "qwen3.7-max",
+        llm_config: llm_config,
         system_prompt: "You are a helpful math assistant",
         tools: [AddTool],
     }?;
@@ -303,7 +311,7 @@ async fn main() -> echo_agent::error::Result<()> {
 }
 ```
 
-Three builder presets for different needs:
+Three builder presets for different needs. Presets require an explicit LLM client or config; use the fluent builder's `build()` when an application intentionally injects the model later:
 
 ```rust,no_run
 use echo_agent::prelude::*;
@@ -602,7 +610,7 @@ Supports three transports: **stdio**, **SSE**, **HTTP**.
 ReactAgent exposes revisioned task-graph tools without a separate Agent type or
 parallel task state machine.
 
-> **Note**: Requires the `tasks` feature to be enabled.
+> Task APIs are part of the framework core and do not require a separate feature.
 
 ```rust,ignore
 use echo_agent::prelude::*;

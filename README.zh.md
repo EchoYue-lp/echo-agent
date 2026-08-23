@@ -43,8 +43,16 @@ async fn add(a: f64, b: f64) -> Result<ToolResult> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let llm_config = LlmConfig::for_provider(
+        "openai",
+        "https://api.openai.com/v1",
+        std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+        "qwen3.7-max",
+        LlmApiProtocol::ChatCompletions,
+    )?;
     let mut agent = agent! {
         model: "qwen3.7-max",
+        llm_config: llm_config,
         system_prompt: "你是一个计算助手",
         tools: [AddTool],
     }?;
@@ -292,7 +300,7 @@ let agent = ReactAgentBuilder::new()
 let answer = agent.execute("42 * 1337 等于多少？").await?;
 ```
 
-三种 Builder 预设：
+三种 Builder 预设（必须显式提供 LLM client 或 config；需要延迟注入模型时请使用流式 builder 的 `build()`）：
 
 ```rust
 // 最小化 — 无工具、无记忆，纯对话
@@ -451,7 +459,7 @@ agent.add_tools(tools);
 
 ReactAgent 提供 `task_create`、`task_update`、`task_list`，共同操作一个版本化任务图。Plan 是可编辑、可审阅的 artifact；产品特定的执行策略由应用层适配器提供。
 
-> **注意**: 需要启用 `tasks` feature。
+> 任务 API 属于框架核心，无需单独启用 feature。
 
 ```rust,ignore
 let agent = ReactAgentBuilder::new()
