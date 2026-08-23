@@ -8,7 +8,7 @@
 
 use super::{
     CheckpointFrame, CheckpointStore, EventJournal, JournalAppendReceipt, JournalDurabilityStatus,
-    JournalEvent, JournalRecord,
+    JournalEvent, JournalRecord, WeakRegistry,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
@@ -21,10 +21,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::any::TypeId;
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 
 fn io_error(context: &str, error: std::io::Error) -> ReactError {
     ReactError::Other(format!("{context}: {error}"))
@@ -128,10 +127,9 @@ struct SharedFileJournalState {
     _lease: ExclusiveFileLease,
 }
 
-fn file_journal_registry() -> &'static Mutex<HashMap<PathBuf, Weak<SharedFileJournalState>>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<SharedFileJournalState>>>> =
-        OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+fn file_journal_registry() -> &'static Mutex<WeakRegistry<SharedFileJournalState>> {
+    static REGISTRY: OnceLock<Mutex<WeakRegistry<SharedFileJournalState>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(WeakRegistry::new()))
 }
 
 fn scan_and_repair_journal<E: JournalEvent>(
@@ -175,6 +173,8 @@ pub struct FileEventJournal<E> {
     shared: Arc<SharedFileJournalState>,
     #[cfg(test)]
     append_fault: Mutex<Option<AppendFault>>,
+    #[cfg(test)]
+    sync_fault: Mutex<bool>,
     _event: PhantomData<fn() -> E>,
 }
 
@@ -230,7 +230,8 @@ impl<E: JournalEvent> FileEventJournal<E> {
         let mut registry = file_journal_registry().lock().map_err(|error| {
             ReactError::Other(format!("journal registry lock poisoned: {error}"))
         })?;
-        if let Some(shared) = registry.get(&path).and_then(Weak::upgrade) {
+        registry.prune_dead_if_due();
+        if let Some(shared) = registry.upgrade(&path) {
             if shared.event_type != TypeId::of::<E>() {
                 return Err(ReactError::Other(format!(
                     "{context}: journal is already open with a different event type"
@@ -260,6 +261,8 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 shared,
                 #[cfg(test)]
                 append_fault: Mutex::new(None),
+                #[cfg(test)]
+                sync_fault: Mutex::new(false),
                 _event: PhantomData,
             });
         }
@@ -276,13 +279,15 @@ impl<E: JournalEvent> FileEventJournal<E> {
             }),
             _lease: lease,
         });
-        registry.insert(path.clone(), Arc::downgrade(&shared));
+        registry.insert(path.clone(), &shared);
         Ok(Self {
             path,
             durability,
             shared,
             #[cfg(test)]
             append_fault: Mutex::new(None),
+            #[cfg(test)]
+            sync_fault: Mutex::new(false),
             _event: PhantomData,
         })
     }
@@ -290,6 +295,45 @@ impl<E: JournalEvent> FileEventJournal<E> {
     /// Journal file path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Force an idempotent data durability barrier on the current journal.
+    ///
+    /// Use this after an append returns
+    /// [`JournalDurabilityStatus::Degraded`]. The record in that receipt
+    /// already owns its sequence and must not be appended again; retry this
+    /// barrier instead. The operation is serialized with append and replay,
+    /// does not write an event or advance the sequence, and refuses a poisoned
+    /// authority until it is reopened and repaired.
+    pub fn sync_data(&self) -> Result<()> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = &state.poison {
+            return Err(ReactError::Other(format!(
+                "journal sync_data {} refused because the handle is poisoned: {reason}; reopen the journal to recover",
+                self.path.display()
+            )));
+        }
+        let context = format!("journal sync_data {}", self.path.display());
+        self.sync_journal_data()
+            .map_err(|error| io_error(&context, error))
+    }
+
+    fn sync_journal_data(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let mut fail = self
+                .sync_fault
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if std::mem::take(&mut *fail) {
+                return Err(std::io::Error::other("injected journal sync_data failure"));
+            }
+        }
+        append_existing(&self.path, b"", FileDurability::SyncData)
     }
 
     fn append_line(&self, line: &[u8]) -> std::io::Result<()> {
@@ -818,6 +862,19 @@ mod tests {
             JournalDurabilityStatus::Degraded { .. }
         ));
         assert_eq!(journal.next_sequence(), 2);
+        assert_eq!(
+            journal.replay_after(0, usize::MAX).expect("replay").len(),
+            1
+        );
+        journal
+            .sync_data()
+            .expect("confirm degraded append without retrying event");
+        journal.sync_data().expect("barrier is idempotent");
+        assert_eq!(journal.next_sequence(), 2);
+        assert_eq!(
+            journal.replay_after(0, usize::MAX).expect("replay").len(),
+            1
+        );
         let second = journal.append("two".to_string()).expect("second append");
         assert_eq!(second.record.sequence, 2);
         assert_eq!(second.durability, JournalDurabilityStatus::Confirmed);
@@ -851,6 +908,9 @@ mod tests {
         assert!(journal.append("partial".to_string()).is_err());
         assert_eq!(journal.next_sequence(), 1);
         assert!(read_existing(&path).expect("read repaired file").is_empty());
+        journal
+            .sync_data()
+            .expect("partial repair remains a valid empty journal");
         let committed = journal.append("committed".to_string()).expect("retry");
         assert_eq!(committed.record.sequence, 1);
 
@@ -885,6 +945,10 @@ mod tests {
             .append("second".to_string())
             .expect_err("poisoned handle must reject append");
         assert!(second_error.to_string().contains("handle is poisoned"));
+        let barrier_error = journal
+            .sync_data()
+            .expect_err("poisoned handle must reject durability barrier");
+        assert!(barrier_error.to_string().contains("handle is poisoned"));
 
         drop(journal);
         let reopened = FileEventJournal::<String>::open(&path, FileDurability::Flush)
@@ -892,6 +956,59 @@ mod tests {
         let committed = reopened.append("recovered".to_string()).expect("append");
         assert_eq!(committed.record.sequence, 1);
         drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sync_data_failure_is_retryable_without_advancing_sequence() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal =
+            FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
+        journal.append("one".to_string()).expect("append");
+        *journal
+            .sync_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+
+        let error = journal
+            .sync_data()
+            .expect_err("injected barrier failure must surface");
+        assert!(
+            error
+                .to_string()
+                .contains("injected journal sync_data failure")
+        );
+        assert_eq!(journal.next_sequence(), 2);
+        journal.sync_data().expect("retry durability barrier");
+        assert_eq!(journal.next_sequence(), 2);
+        assert_eq!(
+            journal.replay_after(0, usize::MAX).expect("replay").len(),
+            1
+        );
+
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sync_data_rejects_missing_journal_and_can_retry_after_repair() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal =
+            FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
+        std::fs::remove_file(&path).expect("remove journal fixture");
+
+        let error = journal
+            .sync_data()
+            .expect_err("missing journal must reject barrier");
+        assert!(error.to_string().contains("journal sync_data"));
+        assert_eq!(journal.next_sequence(), 1);
+        std::fs::File::create(&path).expect("restore empty journal fixture");
+        journal.sync_data().expect("retry repaired journal barrier");
+        assert_eq!(journal.next_sequence(), 1);
+
+        drop(journal);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1295,6 +1412,9 @@ mod tests {
         )
         .expect("open shared journal");
         assert!(Arc::ptr_eq(&first.shared, &second.shared));
+        let type_error = FileEventJournal::<u64>::open(&path, FileDurability::Flush)
+            .expect_err("mismatched event type must reject");
+        assert!(type_error.to_string().contains("different event type"));
         let error = FileEventJournal::<String>::open(&path, FileDurability::SyncData)
             .expect_err("mismatched durability must reject");
         assert!(
@@ -1304,6 +1424,58 @@ mod tests {
         );
         drop(first);
         drop(second);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn weak_registry_prunes_dead_paths_without_removing_live_authority() {
+        let root = temp_root();
+        let canonical_root = std::fs::canonicalize(&root).expect("canonical test root");
+        let live_path = canonical_root.join("live.jsonl");
+        let live = FileEventJournal::<String>::open(&live_path, FileDurability::Flush)
+            .expect("open live journal");
+        let created = super::super::WEAK_REGISTRY_PRUNE_THRESHOLD
+            .saturating_add(super::super::WEAK_REGISTRY_PRUNE_INTERVAL)
+            .saturating_add(8);
+        for index in 0..created {
+            let path = canonical_root.join(format!("dead-{index}.jsonl"));
+            let journal = FileEventJournal::<String>::open(path, FileDurability::Flush)
+                .expect("open transient journal");
+            drop(journal);
+        }
+
+        {
+            let registry = file_journal_registry()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert!(registry.paths_beneath(&canonical_root) < created.saturating_add(1));
+            assert!(
+                registry.dead_len()
+                    <= super::super::WEAK_REGISTRY_PRUNE_THRESHOLD
+                        .saturating_add(super::super::WEAK_REGISTRY_PRUNE_INTERVAL)
+            );
+            let retained = registry.upgrade(&live_path).expect("live registry entry");
+            assert!(Arc::ptr_eq(&retained, &live.shared));
+            assert!(registry.len() >= 1);
+        }
+
+        let alias = FileEventJournal::<String>::open(&live_path, FileDurability::Flush)
+            .expect("reopen live authority");
+        assert!(Arc::ptr_eq(&live.shared, &alias.shared));
+        drop(live);
+        drop(alias);
+
+        let reopened = FileEventJournal::<String>::open(&live_path, FileDurability::Flush)
+            .expect("reacquire authority and lease");
+        assert_eq!(
+            reopened
+                .append("after-reopen".to_string())
+                .expect("append through reacquired authority")
+                .record
+                .sequence,
+            1
+        );
+        drop(reopened);
         std::fs::remove_dir_all(root).ok();
     }
 

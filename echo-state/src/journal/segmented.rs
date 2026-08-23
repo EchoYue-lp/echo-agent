@@ -13,6 +13,7 @@
 
 use super::{
     EventJournal, JournalAppendReceipt, JournalDurabilityStatus, JournalEvent, JournalRecord,
+    WeakRegistry,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
@@ -24,10 +25,9 @@ use echo_core::utils::fs::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::any::TypeId;
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const SEGMENT_SUFFIX: &str = ".jsonl";
 const SEGMENT_DIGITS: usize = 20;
@@ -588,10 +588,9 @@ struct SharedSegmentedJournalState {
     _lease: ExclusiveFileLease,
 }
 
-fn segmented_registry() -> &'static Mutex<HashMap<PathBuf, Weak<SharedSegmentedJournalState>>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<SharedSegmentedJournalState>>>> =
-        OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+fn segmented_registry() -> &'static Mutex<WeakRegistry<SharedSegmentedJournalState>> {
+    static REGISTRY: OnceLock<Mutex<WeakRegistry<SharedSegmentedJournalState>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(WeakRegistry::new()))
 }
 
 /// Directory-backed segmented [`EventJournal`].
@@ -655,7 +654,8 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         let mut registry = segmented_registry().lock().map_err(|error| {
             journal_error(format!("segmented journal registry lock poisoned: {error}"))
         })?;
-        if let Some(shared) = registry.get(&directory).and_then(Weak::upgrade) {
+        registry.prune_dead_if_due();
+        if let Some(shared) = registry.upgrade(&directory) {
             if shared.event_type != TypeId::of::<E>() {
                 return Err(journal_error(format!(
                     "{context}: journal is already open with a different event type"
@@ -712,7 +712,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             state: Mutex::new(state),
             _lease: lease,
         });
-        registry.insert(directory.clone(), Arc::downgrade(&shared));
+        registry.insert(directory.clone(), &shared);
         Ok(Self {
             directory,
             shared,
@@ -2422,6 +2422,9 @@ mod tests {
         let alias = root.join(".");
         let second = open_strings(&alias, 4096, FileDurability::Flush);
         assert!(Arc::ptr_eq(&first.shared, &second.shared));
+        let type_error = SegmentedFileEventJournal::<u64>::open(&root, 4096, FileDurability::Flush)
+            .expect_err("mismatched event type must reject");
+        assert!(type_error.to_string().contains("different event type"));
         let max_error =
             SegmentedFileEventJournal::<String>::open(&root, 8192, FileDurability::Flush)
                 .expect_err("mismatched max bytes must reject");
@@ -2436,6 +2439,57 @@ mod tests {
         );
         drop(first);
         drop(second);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn weak_registry_prunes_dead_paths_without_removing_live_authority() {
+        let root = temp_root("weak-registry");
+        let canonical_root = std::fs::canonicalize(&root).expect("canonical test root");
+        let live_directory = canonical_root.join("live");
+        let live = open_strings(&live_directory, 4096, FileDurability::Flush);
+        let live_directory = live.directory().to_path_buf();
+        let created = super::super::WEAK_REGISTRY_PRUNE_THRESHOLD
+            .saturating_add(super::super::WEAK_REGISTRY_PRUNE_INTERVAL)
+            .saturating_add(8);
+        for index in 0..created {
+            let directory = canonical_root.join(format!("dead-{index}"));
+            let journal = open_strings(&directory, 4096, FileDurability::Flush);
+            drop(journal);
+        }
+
+        {
+            let registry = segmented_registry()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert!(registry.paths_beneath(&canonical_root) < created.saturating_add(1));
+            assert!(
+                registry.dead_len()
+                    <= super::super::WEAK_REGISTRY_PRUNE_THRESHOLD
+                        .saturating_add(super::super::WEAK_REGISTRY_PRUNE_INTERVAL)
+            );
+            let retained = registry
+                .upgrade(&live_directory)
+                .expect("live registry entry");
+            assert!(Arc::ptr_eq(&retained, &live.shared));
+            assert!(registry.len() >= 1);
+        }
+
+        let alias = open_strings(&live_directory, 4096, FileDurability::Flush);
+        assert!(Arc::ptr_eq(&live.shared, &alias.shared));
+        drop(live);
+        drop(alias);
+
+        let reopened = open_strings(&live_directory, 4096, FileDurability::Flush);
+        assert_eq!(
+            reopened
+                .append("after-reopen".to_string())
+                .expect("append through reacquired authority")
+                .record
+                .sequence,
+            1
+        );
+        drop(reopened);
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -102,8 +102,72 @@ pub use segmented::{
 use echo_core::error::{ReactError, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
+
+// File-backed runtime caches normally keep far fewer authorities live. Above
+// this headroom, scan at a fixed cadence so dead paths stay bounded without an
+// O(n) registry walk on every open. This is lifecycle hygiene, not an eviction
+// policy: live authorities are never removed.
+pub(super) const WEAK_REGISTRY_PRUNE_THRESHOLD: usize = 128;
+pub(super) const WEAK_REGISTRY_PRUNE_INTERVAL: usize = 32;
+
+pub(super) struct WeakRegistry<T> {
+    entries: HashMap<PathBuf, Weak<T>>,
+    opens_since_prune: usize,
+}
+
+impl<T> WeakRegistry<T> {
+    pub(super) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            opens_since_prune: 0,
+        }
+    }
+
+    pub(super) fn prune_dead_if_due(&mut self) {
+        self.opens_since_prune = self.opens_since_prune.saturating_add(1);
+        if self.entries.len() < WEAK_REGISTRY_PRUNE_THRESHOLD
+            || self.opens_since_prune < WEAK_REGISTRY_PRUNE_INTERVAL
+        {
+            return;
+        }
+        self.entries
+            .retain(|_, authority| authority.strong_count() > 0);
+        self.opens_since_prune = 0;
+    }
+
+    pub(super) fn upgrade(&self, path: &Path) -> Option<Arc<T>> {
+        self.entries.get(path).and_then(Weak::upgrade)
+    }
+
+    pub(super) fn insert(&mut self, path: PathBuf, authority: &Arc<T>) {
+        self.entries.insert(path, Arc::downgrade(authority));
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn dead_len(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|authority| authority.strong_count() == 0)
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn paths_beneath(&self, root: &Path) -> usize {
+        self.entries
+            .keys()
+            .filter(|path| path.starts_with(root))
+            .count()
+    }
+}
 
 /// Event payload accepted by an [`EventJournal`].
 ///
