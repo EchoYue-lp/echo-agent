@@ -518,6 +518,30 @@ impl InMemoryRevisionedTaskStore {
         })
     }
 
+    /// Atomically restart one exact unclaimed task using the canonical runtime
+    /// mutation. Product run/descendant policy remains outside this store.
+    pub async fn retry_runtime_task(
+        &self,
+        scope_id: &str,
+        expected_task: &Task,
+        expected_revision: u64,
+    ) -> Result<super::RuntimeTaskRetryOutcome, RevisionedTaskStoreError> {
+        let mut graphs = self.graphs.write().await;
+        let Some(graph) = graphs.get_mut(scope_id) else {
+            return Err(RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        super::runtime_service::retry_runtime_task(
+            &mut graph.snapshot,
+            expected_task,
+            expected_revision,
+        )
+        .map_err(|error| RevisionedTaskStoreError::Rejected {
+            message: error.to_string(),
+        })
+    }
+
     pub async fn runtime_claim_is_current(
         &self,
         scope_id: &str,
@@ -1511,6 +1535,91 @@ mod tests {
             .first()
             .ok_or_else(|| "completed graph lost its task".to_string())?;
         assert_eq!(task.execution.status, TaskStatus::Completed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_applies_explicit_retry_with_exact_snapshot_cas() -> Result<(), String>
+    {
+        let store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let service = TaskRevisionService::new(
+            store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new("retry-scope")),
+        );
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let pending = store
+            .load("retry-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "pending retry graph is missing".to_string())?;
+        let pending_task = pending
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "pending retry task is missing".to_string())?;
+        let claim = match store
+            .claim_runtime_task("retry-scope", pending_task, pending.snapshot.revision)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+            RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                return Err("pending retry task requested reload".to_string());
+            }
+        };
+        assert!(
+            store
+                .settle_runtime_claim(
+                    "retry-scope",
+                    "a",
+                    &claim,
+                    TaskStatus::Blocked("acceptance pending".to_string()),
+                )
+                .await
+                .map_err(|error| error.to_string())?
+        );
+        let blocked = store
+            .load("retry-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "retry graph is missing".to_string())?;
+        let expected = blocked
+            .snapshot
+            .tasks
+            .first()
+            .cloned()
+            .ok_or_else(|| "retry task is missing".to_string())?;
+
+        assert_eq!(
+            store
+                .retry_runtime_task("retry-scope", &expected, blocked.snapshot.revision)
+                .await
+                .map_err(|error| error.to_string())?,
+            crate::tasks::RuntimeTaskRetryOutcome::Retried { retry_count: 1 }
+        );
+        assert_eq!(
+            store
+                .retry_runtime_task("retry-scope", &expected, blocked.snapshot.revision)
+                .await
+                .map_err(|error| error.to_string())?,
+            crate::tasks::RuntimeTaskRetryOutcome::Superseded
+        );
+        let retried = store
+            .load("retry-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "retried graph is missing".to_string())?;
+        let task = retried
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "retried task is missing".to_string())?;
+        assert_eq!(task.execution.status, TaskStatus::Pending);
+        assert_eq!(task.execution.retry_count, 1);
+        assert!(task.execution.claim.is_none());
         Ok(())
     }
 

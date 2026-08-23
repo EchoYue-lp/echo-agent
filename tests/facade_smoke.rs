@@ -4,7 +4,10 @@ use echo_agent::runtime::{AgentTurnDriver, TurnMode};
 use echo_agent::state::journal::{
     EventJournal, JournalDurabilityStatus, MemoryEventJournal, SegmentedFileEventJournal,
 };
-use echo_agent::tasks::{RuntimeTaskMutationError, RuntimeTaskRequeueOutcome};
+use echo_agent::tasks::{
+    RuntimePlanSnapshot, RuntimeTaskMutationError, RuntimeTaskRequeueOutcome,
+    RuntimeTaskRetryOutcome, Task, retry_runtime_task,
+};
 use echo_agent::tools::{StandardToolPack, ToolPack};
 
 #[test]
@@ -32,6 +35,12 @@ fn runtime_state_and_task_primitives_are_available_from_the_facade() {
     let _mode = TurnMode::Chat;
     let _mutation_error: Option<RuntimeTaskMutationError> = None;
     let _requeue = RuntimeTaskRequeueOutcome::Superseded;
+    let _retry = RuntimeTaskRetryOutcome::Superseded;
+    let _retry_mutation: fn(
+        &mut RuntimePlanSnapshot,
+        &Task,
+        u64,
+    ) -> Result<RuntimeTaskRetryOutcome, RuntimeTaskMutationError> = retry_runtime_task;
 }
 
 #[test]

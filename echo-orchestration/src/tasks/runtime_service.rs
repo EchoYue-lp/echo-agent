@@ -28,6 +28,12 @@ pub enum RuntimeTaskMutationError {
         "Retrying cannot be settled directly; use requeue_runtime_claim to preserve claim atomicity"
     )]
     RetryingRequiresRequeue,
+    #[error("task '{task_id}' cannot be explicitly retried while it owns a runtime claim")]
+    ExplicitRetryRequiresUnclaimedTask { task_id: String },
+    #[error("task '{task_id}' in state {status:?} cannot be explicitly retried")]
+    ExplicitRetryRequiresRestartableStatus { task_id: String, status: TaskStatus },
+    #[error("task '{task_id}' retry counter overflowed")]
+    RetryCounterOverflow { task_id: String },
 }
 
 /// Result of atomically resolving one requested retry.
@@ -38,6 +44,22 @@ pub enum RuntimeTaskRequeueOutcome {
     /// The retry budget was already exhausted; the exact claim became Failed.
     Exhausted,
     /// The physical claim is no longer current, so no state changed.
+    Superseded,
+}
+
+/// Result of explicitly restarting one unclaimed task.
+///
+/// This differs from [`RuntimeTaskRequeueOutcome`]: requeue resolves a live
+/// claimed attempt, while explicit retry restarts a persisted failed, timed
+/// out, blocked, or paused task after an operator or product policy asks for
+/// another attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeTaskRetryOutcome {
+    /// The task returned to Pending and consumed one retry.
+    Retried { retry_count: u32 },
+    /// No retry budget remains; the existing state was preserved.
+    Exhausted { retry_count: u32, max_retries: u32 },
+    /// The revision or expected task changed, so no state changed.
     Superseded,
 }
 
@@ -162,6 +184,66 @@ pub fn requeue_runtime_claim(
     task.execution.failure_fingerprint = failure_fingerprint;
     task.execution.claim = None;
     Ok(RuntimeTaskRequeueOutcome::Requeued)
+}
+
+/// Explicitly retry one exact unclaimed task from a loaded relation revision.
+///
+/// The whole expected task participates in optimistic concurrency, including
+/// its failure fingerprint and retry counter. Products keep run restart,
+/// descendant unblocking, review, and other policy outside this mutation.
+pub fn retry_runtime_task(
+    snapshot: &mut RuntimePlanSnapshot,
+    expected_task: &Task,
+    expected_revision: u64,
+) -> std::result::Result<RuntimeTaskRetryOutcome, RuntimeTaskMutationError> {
+    if snapshot.revision != expected_revision {
+        return Ok(RuntimeTaskRetryOutcome::Superseded);
+    }
+    let Some(task) = snapshot
+        .tasks
+        .iter_mut()
+        .find(|task| task.spec.id == expected_task.spec.id)
+    else {
+        return Ok(RuntimeTaskRetryOutcome::Superseded);
+    };
+    if task != expected_task {
+        return Ok(RuntimeTaskRetryOutcome::Superseded);
+    }
+    if task.execution.claim.is_some() {
+        return Err(
+            RuntimeTaskMutationError::ExplicitRetryRequiresUnclaimedTask {
+                task_id: task.spec.id.clone(),
+            },
+        );
+    }
+    if !matches!(
+        task.execution.status,
+        TaskStatus::Failed(_)
+            | TaskStatus::TimedOut { .. }
+            | TaskStatus::Blocked(_)
+            | TaskStatus::Paused(_)
+    ) {
+        return Err(
+            RuntimeTaskMutationError::ExplicitRetryRequiresRestartableStatus {
+                task_id: task.spec.id.clone(),
+                status: task.execution.status.clone(),
+            },
+        );
+    }
+    if task.execution.retry_count >= task.spec.max_retries {
+        return Ok(RuntimeTaskRetryOutcome::Exhausted {
+            retry_count: task.execution.retry_count,
+            max_retries: task.spec.max_retries,
+        });
+    }
+    let retry_count = task.execution.retry_count.checked_add(1).ok_or_else(|| {
+        RuntimeTaskMutationError::RetryCounterOverflow {
+            task_id: task.spec.id.clone(),
+        }
+    })?;
+    task.execution.status = TaskStatus::Pending;
+    task.execution.retry_count = retry_count;
+    Ok(RuntimeTaskRetryOutcome::Retried { retry_count })
 }
 
 /// Block an unclaimed Pending task. Already-resolved or claimed tasks are left
@@ -486,6 +568,188 @@ mod tests {
         );
         assert_eq!(exhausted.execution.retry_count, 2);
         assert!(exhausted.execution.claim.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_retry_supports_each_restartable_state_and_preserves_failure_fingerprint()
+    -> std::result::Result<(), RuntimeTaskMutationError> {
+        let restartable = vec![
+            TaskStatus::Failed("failed".to_string()),
+            TaskStatus::TimedOut {
+                error: "timed out".to_string(),
+            },
+            TaskStatus::Blocked("blocked".to_string()),
+            TaskStatus::Paused("paused".to_string()),
+        ];
+        for status in restartable {
+            let mut expected = task("restartable");
+            expected.execution.status = status;
+            expected.execution.retry_count = 1;
+            expected.execution.failure_fingerprint = Some("stable-fingerprint".to_string());
+            let mut snapshot = RuntimePlanSnapshot {
+                revision: 8,
+                tasks: vec![expected.clone()],
+            };
+
+            assert_eq!(
+                retry_runtime_task(&mut snapshot, &expected, 8)?,
+                RuntimeTaskRetryOutcome::Retried { retry_count: 2 }
+            );
+            let retried = snapshot.tasks.first().ok_or_else(|| {
+                RuntimeTaskMutationError::InvalidTransition {
+                    message: "explicitly retried task is missing".to_string(),
+                }
+            })?;
+            assert_eq!(retried.execution.status, TaskStatus::Pending);
+            assert_eq!(retried.execution.retry_count, 2);
+            assert_eq!(
+                retried.execution.failure_fingerprint.as_deref(),
+                Some("stable-fingerprint")
+            );
+            assert!(retried.execution.claim.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_retry_budget_zero_and_n_boundary_are_exact()
+    -> std::result::Result<(), RuntimeTaskMutationError> {
+        let mut zero = task("zero");
+        zero.spec.max_retries = 0;
+        zero.execution.status = TaskStatus::Failed("failed".to_string());
+        let mut zero_snapshot = RuntimePlanSnapshot {
+            revision: 1,
+            tasks: vec![zero.clone()],
+        };
+        assert_eq!(
+            retry_runtime_task(&mut zero_snapshot, &zero, 1)?,
+            RuntimeTaskRetryOutcome::Exhausted {
+                retry_count: 0,
+                max_retries: 0,
+            }
+        );
+        assert_eq!(zero_snapshot.tasks, vec![zero]);
+
+        let mut expected = task("bounded");
+        expected.spec.max_retries = 2;
+        expected.execution.status = TaskStatus::Failed("attempt one".to_string());
+        let mut snapshot = RuntimePlanSnapshot {
+            revision: 5,
+            tasks: vec![expected.clone()],
+        };
+        assert_eq!(
+            retry_runtime_task(&mut snapshot, &expected, 5)?,
+            RuntimeTaskRetryOutcome::Retried { retry_count: 1 }
+        );
+        let current = snapshot.tasks.first_mut().ok_or_else(|| {
+            RuntimeTaskMutationError::InvalidTransition {
+                message: "first retry lost task".to_string(),
+            }
+        })?;
+        current.execution.status = TaskStatus::TimedOut {
+            error: "attempt two".to_string(),
+        };
+        current.execution.failure_fingerprint = Some("attempt-two".to_string());
+        let second_expected = current.clone();
+        assert_eq!(
+            retry_runtime_task(&mut snapshot, &second_expected, 5)?,
+            RuntimeTaskRetryOutcome::Retried { retry_count: 2 }
+        );
+        let current = snapshot.tasks.first_mut().ok_or_else(|| {
+            RuntimeTaskMutationError::InvalidTransition {
+                message: "second retry lost task".to_string(),
+            }
+        })?;
+        current.execution.status = TaskStatus::Blocked("attempt three".to_string());
+        let exhausted_expected = current.clone();
+        let before_exhaustion = snapshot.tasks.clone();
+        assert_eq!(
+            retry_runtime_task(&mut snapshot, &exhausted_expected, 5)?,
+            RuntimeTaskRetryOutcome::Exhausted {
+                retry_count: 2,
+                max_retries: 2,
+            }
+        );
+        assert_eq!(snapshot.tasks, before_exhaustion);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_retry_rejects_stale_invalid_and_claimed_tasks_without_mutation()
+    -> std::result::Result<(), RuntimeTaskMutationError> {
+        let mut expected = task("retry");
+        expected.execution.status = TaskStatus::Failed("failed".to_string());
+        expected.execution.failure_fingerprint = Some("current".to_string());
+        let mut snapshot = RuntimePlanSnapshot {
+            revision: 11,
+            tasks: vec![expected.clone()],
+        };
+        let before = snapshot.tasks.clone();
+        assert_eq!(
+            retry_runtime_task(&mut snapshot, &expected, 10)?,
+            RuntimeTaskRetryOutcome::Superseded
+        );
+        let mut stale_fingerprint = expected.clone();
+        stale_fingerprint.execution.failure_fingerprint = Some("stale".to_string());
+        assert_eq!(
+            retry_runtime_task(&mut snapshot, &stale_fingerprint, 11)?,
+            RuntimeTaskRetryOutcome::Superseded
+        );
+        assert_eq!(snapshot.tasks, before);
+
+        let invalid_statuses = vec![
+            TaskStatus::Pending,
+            TaskStatus::Running,
+            TaskStatus::Completed,
+            TaskStatus::Skipped,
+            TaskStatus::Cancelled,
+            TaskStatus::Retrying {
+                attempt: 1,
+                last_error: "retrying".to_string(),
+            },
+        ];
+        for status in invalid_statuses {
+            let mut invalid = task("invalid");
+            invalid.execution.status = status.clone();
+            let mut invalid_snapshot = RuntimePlanSnapshot {
+                revision: 12,
+                tasks: vec![invalid.clone()],
+            };
+            let error = retry_runtime_task(&mut invalid_snapshot, &invalid, 12)
+                .err()
+                .ok_or_else(|| RuntimeTaskMutationError::InvalidTransition {
+                    message: "invalid explicit retry unexpectedly succeeded".to_string(),
+                })?;
+            assert_eq!(
+                error,
+                RuntimeTaskMutationError::ExplicitRetryRequiresRestartableStatus {
+                    task_id: "invalid".to_string(),
+                    status,
+                }
+            );
+            assert_eq!(invalid_snapshot.tasks, vec![invalid]);
+        }
+
+        let mut claimed = task("claimed");
+        claimed.execution.status = TaskStatus::Blocked("blocked".to_string());
+        claimed.execution.claim = Some(TaskClaim::new(12, 1, "spec".to_string()));
+        let mut claimed_snapshot = RuntimePlanSnapshot {
+            revision: 12,
+            tasks: vec![claimed.clone()],
+        };
+        let error = retry_runtime_task(&mut claimed_snapshot, &claimed, 12)
+            .err()
+            .ok_or_else(|| RuntimeTaskMutationError::InvalidTransition {
+                message: "claimed explicit retry unexpectedly succeeded".to_string(),
+            })?;
+        assert_eq!(
+            error,
+            RuntimeTaskMutationError::ExplicitRetryRequiresUnclaimedTask {
+                task_id: "claimed".to_string(),
+            }
+        );
+        assert_eq!(claimed_snapshot.tasks, vec![claimed]);
         Ok(())
     }
 }
