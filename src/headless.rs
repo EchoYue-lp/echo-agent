@@ -35,8 +35,9 @@ use tokio_util::sync::CancellationToken;
 
 struct HeadlessEventSink;
 
+#[async_trait::async_trait]
 impl EventSink for HeadlessEventSink {
-    fn on_event(
+    async fn on_event(
         &self,
         _envelope: &crate::agent::EventEnvelope,
     ) -> crate::error::Result<SinkControl> {
