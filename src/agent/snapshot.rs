@@ -534,15 +534,13 @@ impl AgentRunSnapshot {
             client: agent.client().clone(),
             llm_client: agent.llm_client().cloned(),
             thinking: agent.thinking().cloned(),
-            cancel_token: if let Some(context) = invocation {
+            cancel_token: invocation.and_then(|context| {
                 context.cancel.clone().or_else(|| {
                     runtime
                         .and_then(|value| value.cancel.as_ref())
                         .map(|cancel| cancel.as_ref().clone())
                 })
-            } else {
-                agent.cancel_token.try_lock().ok().and_then(|g| g.clone())
-            },
+            }),
             turn_steer_mailbox: Arc::clone(&agent.turn_steer_mailbox),
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),

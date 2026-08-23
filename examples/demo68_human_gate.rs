@@ -5,7 +5,7 @@
 //! via the same HumanLoopProvider used for tool approvals.
 //!
 //! ```bash
-//! cargo run --example demo68_human_gate --features tasks,subagent,human-loop
+//! cargo run --example demo68_human_gate --features subagent,human-loop
 //! ```
 
 use echo_agent::human_loop::{

@@ -17,6 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+const TOOL_RESULT_CACHE_TTL: Duration = Duration::from_secs(60);
+const TOOL_RESULT_CACHE_CAPACITY: usize = 256;
+
 fn cancelled_error(tool_name: &str) -> ReactError {
     ReactError::Agent(Box::new(AgentError::Cancelled(format!(
         "tool '{tool_name}'"
@@ -118,6 +121,13 @@ fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32)
     let jitter_cap = base.saturating_div(4).max(1);
     base.saturating_add(hasher.finish() % jitter_cap)
         .min(30_000)
+}
+
+fn result_cache_key(tool_name: &str, parameters: &ToolParameters) -> (String, String) {
+    let params_json = echo_core::utils::canonical_json::canonical_json_bytes(parameters)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    (tool_name.to_string(), params_json)
 }
 
 fn validate_schema(tool: &dyn Tool) -> Result<()> {
@@ -865,16 +875,19 @@ impl ToolManager {
         // 并发控制：获取信号量许可（读/写分离）
         let is_read = tool.risk_level() == ToolRiskLevel::ReadOnly;
 
-        // Check result cache for read-only tools
-        if is_read {
-            let params_json = serde_json::to_string(&parameters).unwrap_or_default();
-            let cache_key = (tool_name.to_string(), params_json);
-            if let Some((result, ts)) = self.result_cache.read().get(&cache_key)
-                && ts.elapsed() < std::time::Duration::from_secs(60)
-            {
-                tracing::debug!("Tool result cache hit: {tool_name}");
-                return Ok(result.clone());
-            }
+        // A write can invalidate every cached read, even when the write later
+        // fails: tools may have partially applied an external side effect.
+        let cache_key = if is_read {
+            Some(result_cache_key(tool_name, &parameters))
+        } else {
+            self.result_cache.write().clear();
+            None
+        };
+        if let Some(cache_key) = cache_key.as_ref()
+            && let Some(result) = self.cached_result(cache_key)
+        {
+            tracing::debug!("Tool result cache hit: {tool_name}");
+            return Ok(result);
         }
 
         let _permit = if is_read {
@@ -930,7 +943,12 @@ impl ToolManager {
             let result = cancel_aware(execution, ctx, tool_name, drain_started).await;
 
             match result {
-                Ok(result) if result.success => return Ok(result),
+                Ok(result) if result.success => {
+                    if let Some(cache_key) = cache_key.as_ref() {
+                        self.store_cached_result(cache_key.clone(), result.clone());
+                    }
+                    return Ok(result);
+                }
                 Ok(result)
                     if attempt < max_retries
                         && result
@@ -1028,6 +1046,19 @@ impl ToolManager {
 
         let is_read = tool.risk_level() == ToolRiskLevel::ReadOnly;
 
+        let cache_key = if is_read {
+            Some(result_cache_key(tool_name, &parameters))
+        } else {
+            self.result_cache.write().clear();
+            None
+        };
+        if let Some(cache_key) = cache_key.as_ref()
+            && let Some(result) = self.cached_result(cache_key)
+        {
+            tracing::debug!("Tool result cache hit: {tool_name}");
+            return Ok(result);
+        }
+
         let _permit = if is_read {
             if let Some(sem) = &self.read_semaphore {
                 Some(acquire_permit(sem, ctx, tool_name).await?)
@@ -1120,7 +1151,12 @@ impl ToolManager {
             let result = cancel_aware(execution, ctx, tool_name, drain_started).await;
 
             match result {
-                Ok(result) if result.success => return Ok(result),
+                Ok(result) if result.success => {
+                    if let Some(cache_key) = cache_key.as_ref() {
+                        self.store_cached_result(cache_key.clone(), result.clone());
+                    }
+                    return Ok(result);
+                }
                 Ok(result)
                     if attempt < max_retries
                         && !output_forwarded
@@ -1155,6 +1191,26 @@ impl ToolManager {
             .into()
         }))
     }
+
+    fn cached_result(&self, key: &(String, String)) -> Option<ToolResult> {
+        let mut cache = self.result_cache.write();
+        cache.retain(|_, (_, created)| created.elapsed() < TOOL_RESULT_CACHE_TTL);
+        cache.get(key).map(|(result, _)| result.clone())
+    }
+
+    fn store_cached_result(&self, key: (String, String), result: ToolResult) {
+        let mut cache = self.result_cache.write();
+        cache.retain(|_, (_, created)| created.elapsed() < TOOL_RESULT_CACHE_TTL);
+        if cache.len() >= TOOL_RESULT_CACHE_CAPACITY
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (_, created))| *created)
+                .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
+        cache.insert(key, (result, std::time::Instant::now()));
+    }
 }
 
 fn add_usize(counter: &AtomicU64, value: usize) {
@@ -1181,6 +1237,11 @@ mod execute_with_context_tests {
 
     struct NamedTool {
         name: &'static str,
+    }
+
+    struct ReadCountingTool {
+        calls: Arc<AtomicUsize>,
+        output: &'static str,
     }
 
     struct ImageInputTool;
@@ -1567,6 +1628,34 @@ mod execute_with_context_tests {
         }
     }
 
+    impl Tool for ReadCountingTool {
+        fn name(&self) -> &str {
+            "read_counting"
+        }
+
+        fn description(&self) -> &str {
+            "read-only cache fixture"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn risk_level(&self) -> ToolRiskLevel {
+            ToolRiskLevel::ReadOnly
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(ToolResult::success(self.output))
+            })
+        }
+    }
+
     impl Tool for ImageInputTool {
         fn name(&self) -> &str {
             "image_input"
@@ -1837,6 +1926,61 @@ mod execute_with_context_tests {
         assert!(result.success);
         assert_eq!(result.output, "recovered");
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_results_are_cached_and_write_results_invalidate_cache()
+    -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new();
+        manager.register(Box::new(ReadCountingTool {
+            calls: Arc::clone(&calls),
+            output: "cached",
+        }));
+        manager.register(Box::new(NamedTool { name: "write" }));
+
+        let params = ToolParameters::new();
+        manager
+            .execute_tool("read_counting", params.clone())
+            .await?;
+        manager
+            .execute_tool("read_counting", params.clone())
+            .await?;
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+
+        manager.execute_tool("write", ToolParameters::new()).await?;
+        manager.execute_tool("read_counting", params).await?;
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_result_cache_has_a_bounded_capacity() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new();
+        manager.register(Box::new(ReadCountingTool {
+            calls: Arc::clone(&calls),
+            output: "cached",
+        }));
+
+        for value in 0..=TOOL_RESULT_CACHE_CAPACITY {
+            let mut params = ToolParameters::new();
+            params.insert("value".to_string(), serde_json::json!(value));
+            manager.execute_tool("read_counting", params).await?;
+        }
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            TOOL_RESULT_CACHE_CAPACITY + 1
+        );
+
+        let mut first = ToolParameters::new();
+        first.insert("value".to_string(), serde_json::json!(0));
+        manager.execute_tool("read_counting", first).await?;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            TOOL_RESULT_CACHE_CAPACITY + 2
+        );
         Ok(())
     }
 

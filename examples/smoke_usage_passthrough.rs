@@ -7,7 +7,7 @@
 //! 4. `usage.model` 非 "unknown"（真实模型名）
 //! 5. `usage.usage_reported == true`（provider 真实上报）
 //!
-//! 运行：`cargo run --example smoke_usage_passthrough --features "subagent,tasks" --release`
+//! 运行：`cargo run --example smoke_usage_passthrough --features subagent --release`
 //! 依赖 `~/.echo-agent/config.yaml` 里配置了默认 provider/model。
 
 use std::sync::Arc;

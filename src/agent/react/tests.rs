@@ -272,6 +272,34 @@ fn react_agent_mcp_server_names() {
 }
 
 #[tokio::test]
+async fn agent_messages_returns_a_non_blocking_context_snapshot() {
+    let agent = ReactAgent::new(AgentConfig::minimal("test-model", "helper"));
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("hello".to_string()));
+
+    let trait_agent: &dyn Agent = &agent;
+    let messages = trait_agent.messages();
+    assert!(messages.iter().any(|message| {
+        message
+            .content
+            .as_text()
+            .is_some_and(|content| content == "hello")
+    }));
+}
+
+#[test]
+fn concrete_and_trait_tool_names_share_one_contract() {
+    let agent = ReactAgent::new(AgentConfig::minimal("test-model", "helper"));
+    let concrete = agent.tool_names();
+    let trait_agent: &dyn Agent = &agent;
+    assert_eq!(concrete, trait_agent.tool_names());
+}
+
+#[tokio::test]
 async fn react_agent_get_messages() {
     let config = AgentConfig::new("test-model", "agent", "You are helpful");
     let agent = ReactAgent::new(config);
@@ -974,29 +1002,26 @@ fn react_agent_builder_split_thread_and_conversation_ids() {
 
 #[test]
 fn react_agent_builder_simple() {
-    let agent = crate::agent::ReactAgentBuilder::simple("qwen3-max", "You are helpful").unwrap();
-
-    assert_eq!(agent.model_name(), "qwen3-max");
-    assert!(!agent.config().is_tool_enabled());
+    let error = crate::agent::ReactAgentBuilder::simple("qwen3-max", "You are helpful")
+        .err()
+        .expect("simple preset must reject deferred LLM configuration");
+    assert!(error.to_string().contains("llm_client"));
 }
 
 #[test]
 fn react_agent_builder_standard() {
-    let agent =
-        crate::agent::ReactAgentBuilder::standard("qwen3-max", "agent1", "Be helpful").unwrap();
-
-    assert!(agent.config().is_tool_enabled());
-    assert!(agent.config().is_cot_enabled());
+    let error = crate::agent::ReactAgentBuilder::standard("qwen3-max", "agent1", "Be helpful")
+        .err()
+        .expect("standard preset must reject deferred LLM configuration");
+    assert!(error.to_string().contains("llm_client"));
 }
 
 #[test]
 fn react_agent_builder_full_featured() {
-    let agent = crate::agent::ReactAgentBuilder::full_featured("qwen3-max", "agent1", "Be helpful")
-        .unwrap();
-
-    assert!(agent.config().is_tool_enabled());
-    assert!(agent.config().is_memory_enabled());
-    assert!(agent.config().is_cot_enabled());
+    let error = crate::agent::ReactAgentBuilder::full_featured("qwen3-max", "agent1", "Be helpful")
+        .err()
+        .expect("full-featured preset must reject deferred LLM configuration");
+    assert!(error.to_string().contains("llm_client"));
 }
 
 // ── Subagent Tests ───────────────────────────────────────────────────────────────
@@ -1895,7 +1920,6 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
 // ── Agent Task Planning Tool Tests ───────────────────────────────────────────────────────
 
 #[test]
-#[cfg(feature = "tasks")]
 fn react_agent_planning_tools_registration() {
     let config = AgentConfig::minimal("model", "agent").enable_tool(true);
     let agent = ReactAgent::new(config);
