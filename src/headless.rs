@@ -28,7 +28,6 @@
 use crate::agent::Agent;
 use crate::agent::react::builder::ReactAgentBuilder;
 use crate::runtime::{AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnOutcome, TurnRequest};
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 struct HeadlessEventSink;
@@ -37,7 +36,7 @@ struct HeadlessEventSink;
 impl EventSink for HeadlessEventSink {
     async fn on_event(
         &self,
-        _envelope: &crate::agent::EventEnvelope,
+        _envelope: crate::agent::EventEnvelope,
     ) -> crate::error::Result<SinkControl> {
         Ok(SinkControl::Continue)
     }
@@ -189,11 +188,7 @@ where
         .mode(TurnMode::Execute)
         .cancel(cancel);
     let receipt = AgentTurnDriver
-        .drive(
-            Arc::new(agent) as Arc<dyn Agent>,
-            request,
-            &HeadlessEventSink,
-        )
+        .drive(&agent, request, &HeadlessEventSink)
         .await;
     let (output, success) = match (receipt.outcome, receipt.final_answer) {
         (TurnOutcome::Completed, Some(output)) => (output, true),
@@ -220,6 +215,7 @@ where
 mod tests {
     use super::*;
     use crate::testing::MockLlmClient;
+    use std::sync::Arc;
 
     #[test]
     fn test_headless_config_default() {

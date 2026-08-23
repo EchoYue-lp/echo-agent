@@ -19,8 +19,9 @@
 //! — callers do NOT need to acquire any additional lock before calling
 //! `execute()`, `chat()`, or streaming methods.
 
-use crate::agent::{Agent, AgentEvent};
+use crate::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationToken};
 use crate::error::Result;
+use crate::llm::types::Message;
 use crate::workflow::SharedAgent;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -51,6 +52,36 @@ struct RwLockAgentWrapper {
     system_prompt: String,
 }
 
+enum LockedStreamCall {
+    Execute(String),
+    ExecuteWithCancel(String, CancellationToken),
+    ExecuteWithInvocation(String, CancellationToken, AgentInvocationContext),
+    ExecuteMessageWithCancel(Message, CancellationToken),
+    ExecuteMessageWithInvocation(Message, CancellationToken, AgentInvocationContext),
+    Chat(String),
+    ChatWithCancel(String, CancellationToken),
+    ChatMessageWithCancel(Message, CancellationToken),
+    ChatMessageWithInvocation(Message, CancellationToken, AgentInvocationContext),
+}
+
+async fn relay_agent_stream(
+    result: Result<BoxStream<'_, Result<AgentEvent>>>,
+    tx: &tokio::sync::mpsc::Sender<Result<AgentEvent>>,
+) {
+    match result {
+        Ok(mut stream) => {
+            while let Some(event) = stream.next().await {
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        }
+        Err(error) => {
+            let _ = tx.send(Err(error)).await;
+        }
+    }
+}
+
 impl RwLockAgentWrapper {
     async fn from_handle(handle: &AgentHandle) -> Self {
         let guard = handle.agent.read().await;
@@ -60,6 +91,94 @@ impl RwLockAgentWrapper {
             model_name: guard.model_name().to_string(),
             system_prompt: guard.system_prompt().to_string(),
         }
+    }
+
+    fn forward_stream<'a>(
+        &'a self,
+        call: LockedStreamCall,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent>>(64);
+
+            tokio::spawn(async move {
+                let guard = inner.read().await;
+                match call {
+                    LockedStreamCall::Execute(task) => {
+                        relay_agent_stream(guard.execute_stream(&task).await, &tx).await;
+                    }
+                    LockedStreamCall::ExecuteWithCancel(task, cancel) => {
+                        relay_agent_stream(
+                            guard.execute_stream_with_cancel(&task, cancel).await,
+                            &tx,
+                        )
+                        .await;
+                    }
+                    LockedStreamCall::ExecuteWithInvocation(task, cancel, invocation) => {
+                        relay_agent_stream(
+                            guard
+                                .execute_stream_with_invocation_context(&task, cancel, invocation)
+                                .await,
+                            &tx,
+                        )
+                        .await;
+                    }
+                    LockedStreamCall::ExecuteMessageWithCancel(message, cancel) => {
+                        relay_agent_stream(
+                            guard
+                                .execute_stream_message_with_cancel(message, cancel)
+                                .await,
+                            &tx,
+                        )
+                        .await;
+                    }
+                    LockedStreamCall::ExecuteMessageWithInvocation(message, cancel, invocation) => {
+                        relay_agent_stream(
+                            guard
+                                .execute_stream_message_with_invocation_context(
+                                    message, cancel, invocation,
+                                )
+                                .await,
+                            &tx,
+                        )
+                        .await;
+                    }
+                    LockedStreamCall::Chat(message) => {
+                        relay_agent_stream(guard.chat_stream(&message).await, &tx).await;
+                    }
+                    LockedStreamCall::ChatWithCancel(message, cancel) => {
+                        relay_agent_stream(
+                            guard.chat_stream_with_cancel(&message, cancel).await,
+                            &tx,
+                        )
+                        .await;
+                    }
+                    LockedStreamCall::ChatMessageWithCancel(message, cancel) => {
+                        relay_agent_stream(
+                            guard.chat_stream_message_with_cancel(message, cancel).await,
+                            &tx,
+                        )
+                        .await;
+                    }
+                    LockedStreamCall::ChatMessageWithInvocation(message, cancel, invocation) => {
+                        relay_agent_stream(
+                            guard
+                                .chat_stream_message_with_invocation_context(
+                                    message, cancel, invocation,
+                                )
+                                .await,
+                            &tx,
+                        )
+                        .await;
+                    }
+                }
+            });
+
+            let stream = futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            });
+            Ok(stream.boxed())
+        })
     }
 }
 
@@ -108,66 +227,87 @@ impl Agent for RwLockAgentWrapper {
         &'a self,
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let inner = self.inner.clone();
-        let task = task.to_string();
-        Box::pin(async move {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<AgentEvent>>();
+        self.forward_stream(LockedStreamCall::Execute(task.to_string()))
+    }
 
-            tokio::spawn(async move {
-                let guard = inner.read().await;
-                match guard.execute_stream(&task).await {
-                    Ok(mut stream) => {
-                        while let Some(event) = stream.next().await {
-                            if tx.send(event).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
-                    }
-                }
-            });
+    fn execute_stream_with_cancel<'a>(
+        &'a self,
+        task: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.forward_stream(LockedStreamCall::ExecuteWithCancel(
+            task.to_string(),
+            cancel,
+        ))
+    }
 
-            let stream = futures::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            });
+    fn execute_stream_with_invocation_context<'a>(
+        &'a self,
+        task: &'a str,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.forward_stream(LockedStreamCall::ExecuteWithInvocation(
+            task.to_string(),
+            cancel,
+            invocation,
+        ))
+    }
 
-            Ok(stream.boxed())
-        })
+    fn execute_stream_message_with_cancel<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.forward_stream(LockedStreamCall::ExecuteMessageWithCancel(message, cancel))
+    }
+
+    fn execute_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.forward_stream(LockedStreamCall::ExecuteMessageWithInvocation(
+            message, cancel, invocation,
+        ))
     }
 
     fn chat_stream<'a>(
         &'a self,
         message: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let inner = self.inner.clone();
-        let message = message.to_string();
-        Box::pin(async move {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<AgentEvent>>();
+        self.forward_stream(LockedStreamCall::Chat(message.to_string()))
+    }
 
-            tokio::spawn(async move {
-                let guard = inner.read().await;
-                match guard.chat_stream(&message).await {
-                    Ok(mut stream) => {
-                        while let Some(event) = stream.next().await {
-                            if tx.send(event).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
-                    }
-                }
-            });
+    fn chat_stream_with_cancel<'a>(
+        &'a self,
+        message: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.forward_stream(LockedStreamCall::ChatWithCancel(
+            message.to_string(),
+            cancel,
+        ))
+    }
 
-            let stream = futures::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            });
+    fn chat_stream_message_with_cancel<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.forward_stream(LockedStreamCall::ChatMessageWithCancel(message, cancel))
+    }
 
-            Ok(stream.boxed())
-        })
+    fn chat_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.forward_stream(LockedStreamCall::ChatMessageWithInvocation(
+            message, cancel, invocation,
+        ))
     }
 
     fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {

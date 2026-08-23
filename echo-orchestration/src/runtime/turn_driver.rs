@@ -36,7 +36,6 @@
 //! use echo_orchestration::runtime::turn_driver::{
 //!     AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnRequest,
 //! };
-//! use std::sync::Arc;
 //!
 //! # struct MyAgent;
 //! # impl Agent for MyAgent {
@@ -65,16 +64,16 @@
 //! # struct PrintSink;
 //! # #[async_trait::async_trait]
 //! # impl EventSink for PrintSink {
-//! #     async fn on_event(&self, _envelope: &echo_core::agent::EventEnvelope)
+//! #     async fn on_event(&self, _envelope: echo_core::agent::EventEnvelope)
 //! #         -> echo_core::error::Result<SinkControl> {
 //! #         Ok(SinkControl::Continue)
 //! #     }
 //! # }
 //! # async fn run() -> echo_core::error::Result<()> {
-//! let agent: Arc<dyn Agent> = Arc::new(MyAgent);
+//! let agent = MyAgent;
 //! let identity = EventIdentity::new("stream-1", "turn-1")?;
 //! let request = TurnRequest::new(identity, "hello").mode(TurnMode::Execute);
-//! let receipt = AgentTurnDriver.drive(agent, request, &PrintSink).await;
+//! let receipt = AgentTurnDriver.drive(&agent, request, &PrintSink).await;
 //! assert_eq!(receipt.outcome.status(), "completed");
 //! assert_eq!(receipt.final_answer.as_deref(), Some("done"));
 //! # Ok(())
@@ -89,7 +88,6 @@ use echo_core::agent::{
 use echo_core::error::{AgentFailure, ReactError};
 use echo_core::llm::Message;
 use futures::StreamExt;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Which Agent stream flavor the turn drives.
@@ -275,7 +273,9 @@ pub enum SinkControl {
 
 #[async_trait]
 pub trait EventSink: Send + Sync {
-    async fn on_event(&self, envelope: &EventEnvelope) -> echo_core::error::Result<SinkControl>;
+    /// Take ownership of one envelope after the driver has completed its
+    /// accounting, allowing product adapters to retain or forward it losslessly.
+    async fn on_event(&self, envelope: EventEnvelope) -> echo_core::error::Result<SinkControl>;
 }
 
 fn invocation_with_cancel(
@@ -298,7 +298,7 @@ impl AgentTurnDriver {
     /// Drive `request` on `agent`, forwarding envelopes to `sink`.
     pub async fn drive(
         &self,
-        agent: Arc<dyn Agent>,
+        agent: &dyn Agent,
         request: TurnRequest,
         sink: &dyn EventSink,
     ) -> TurnReceipt {
@@ -377,7 +377,7 @@ impl AgentTurnDriver {
                     )
                 {
                     last_event_sequence = envelope.sequence;
-                    if let Err(sink_error) = sink.on_event(&envelope).await {
+                    if let Err(sink_error) = sink.on_event(envelope).await {
                         return TurnReceipt::failed(
                             turn_id,
                             AgentFailure::from_react_error(&sink_error),
@@ -442,7 +442,7 @@ impl AgentTurnDriver {
                 }
                 _ => {}
             }
-            match sink.on_event(&envelope).await {
+            match sink.on_event(envelope).await {
                 Ok(SinkControl::Continue) => {}
                 Ok(SinkControl::Closed) => {
                     token.cancel();
@@ -484,8 +484,9 @@ mod tests {
     use echo_core::agent::AgentEvent;
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
+    use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use std::time::Duration as StdDuration;
 
     /// Agent that replays scripted events, optionally with a delay so
@@ -564,10 +565,7 @@ mod tests {
 
     #[async_trait]
     impl EventSink for RecordingSink {
-        async fn on_event(
-            &self,
-            envelope: &EventEnvelope,
-        ) -> echo_core::error::Result<SinkControl> {
+        async fn on_event(&self, envelope: EventEnvelope) -> echo_core::error::Result<SinkControl> {
             let mut events = self
                 .events
                 .lock()
@@ -607,7 +605,7 @@ mod tests {
         }));
         let sink = RecordingSink::default();
         let request = TurnRequest::new(identity("ok"), "hello");
-        let receipt = AgentTurnDriver.drive(agent, request, &sink).await;
+        let receipt = AgentTurnDriver.drive(agent.as_ref(), request, &sink).await;
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
         assert_eq!(receipt.final_answer.as_deref(), Some("done"));
         assert_eq!(receipt.prompt_tokens, 10);
@@ -626,7 +624,7 @@ mod tests {
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| vec![AgentEvent::Cancelled]));
         let sink = RecordingSink::default();
         let request = TurnRequest::new(identity("cancel"), "task").mode(TurnMode::Execute);
-        let receipt = AgentTurnDriver.drive(agent, request, &sink).await;
+        let receipt = AgentTurnDriver.drive(agent.as_ref(), request, &sink).await;
         assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
         assert_eq!(receipt.status(), "cancelled");
         assert!(receipt.final_answer.is_none());
@@ -644,7 +642,7 @@ mod tests {
         }));
         let request = TurnRequest::new(identity("fail"), "hello");
         let receipt = AgentTurnDriver
-            .drive(agent, request, &RecordingSink::default())
+            .drive(agent.as_ref(), request, &RecordingSink::default())
             .await;
         assert_eq!(receipt.outcome, TurnOutcome::Failed(failure));
         assert_eq!(receipt.status(), "failed");
@@ -661,7 +659,7 @@ mod tests {
         }));
         let request = TurnRequest::new(identity("usage"), "hello");
         let receipt = AgentTurnDriver
-            .drive(agent, request, &RecordingSink::default())
+            .drive(agent.as_ref(), request, &RecordingSink::default())
             .await;
         assert_eq!(receipt.prompt_tokens, 107);
         assert_eq!(receipt.completion_tokens, 43);
@@ -673,7 +671,7 @@ mod tests {
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| vec![AgentEvent::Cancelled]));
         let sink = RecordingSink::default();
         let request = TurnRequest::new(identity("resume"), "hello").last_persisted_sequence(41);
-        let receipt = AgentTurnDriver.drive(agent, request, &sink).await;
+        let receipt = AgentTurnDriver.drive(agent.as_ref(), request, &sink).await;
         assert_eq!(receipt.last_event_sequence, 42);
         let events = sink
             .events
@@ -698,7 +696,7 @@ mod tests {
             ..RecordingSink::default()
         };
         let request = TurnRequest::new(identity("closed"), "hello");
-        let receipt = AgentTurnDriver.drive(agent, request, &sink).await;
+        let receipt = AgentTurnDriver.drive(agent.as_ref(), request, &sink).await;
         // The default cancellation wrapper yields Cancelled once the token
         // fires and the stream stops delivering later events.
         assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
@@ -746,7 +744,7 @@ mod tests {
         let agent: Arc<dyn Agent> = Arc::new(FailingAgent);
         let request = TurnRequest::new(identity("startfail"), "hello");
         let sink = RecordingSink::default();
-        let receipt = AgentTurnDriver.drive(agent, request, &sink).await;
+        let receipt = AgentTurnDriver.drive(agent.as_ref(), request, &sink).await;
         assert_eq!(receipt.outcome.status(), "failed");
         assert_eq!(receipt.last_event_sequence, 1);
         assert_eq!(
@@ -764,7 +762,7 @@ mod tests {
     impl EventSink for FailingSink {
         async fn on_event(
             &self,
-            _envelope: &EventEnvelope,
+            _envelope: EventEnvelope,
         ) -> echo_core::error::Result<SinkControl> {
             Err(ReactError::Other(
                 "injected durable sink failure".to_string(),
@@ -782,7 +780,7 @@ mod tests {
         }));
         let receipt = AgentTurnDriver
             .drive(
-                agent,
+                agent.as_ref(),
                 TurnRequest::new(identity("sink-failure"), "hello"),
                 &FailingSink,
             )
@@ -880,11 +878,7 @@ mod tests {
             ..AgentInvocationContext::default()
         });
         let receipt = AgentTurnDriver
-            .drive(
-                Arc::clone(&agent) as Arc<dyn Agent>,
-                request,
-                &RecordingSink::default(),
-            )
+            .drive(agent.as_ref(), request, &RecordingSink::default())
             .await;
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
         assert_eq!(receipt.final_answer.as_deref(), Some("message-ok"));
@@ -909,11 +903,7 @@ mod tests {
         );
 
         let receipt = AgentTurnDriver
-            .drive(
-                Arc::clone(&agent) as Arc<dyn Agent>,
-                request,
-                &RecordingSink::default(),
-            )
+            .drive(agent.as_ref(), request, &RecordingSink::default())
             .await;
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
         assert_eq!(
@@ -945,11 +935,7 @@ mod tests {
             },
         );
         AgentTurnDriver
-            .drive(
-                Arc::clone(&agent) as Arc<dyn Agent>,
-                first,
-                &RecordingSink::default(),
-            )
+            .drive(agent.as_ref(), first, &RecordingSink::default())
             .await;
 
         let request_cancel = CancellationToken::new();
@@ -962,11 +948,7 @@ mod tests {
             })
             .cancel(request_cancel);
         AgentTurnDriver
-            .drive(
-                Arc::clone(&agent) as Arc<dyn Agent>,
-                second,
-                &RecordingSink::default(),
-            )
+            .drive(agent.as_ref(), second, &RecordingSink::default())
             .await;
 
         assert_eq!(
@@ -984,10 +966,7 @@ mod tests {
 
     #[async_trait]
     impl EventSink for DelayedSink {
-        async fn on_event(
-            &self,
-            envelope: &EventEnvelope,
-        ) -> echo_core::error::Result<SinkControl> {
+        async fn on_event(&self, envelope: EventEnvelope) -> echo_core::error::Result<SinkControl> {
             tokio::time::sleep(StdDuration::from_millis(5)).await;
             self.events.lock().await.push((
                 envelope.sequence,
@@ -1018,7 +997,7 @@ mod tests {
 
         let receipt = AgentTurnDriver
             .drive(
-                agent,
+                agent.as_ref(),
                 TurnRequest::new(identity("async-sink"), "hello"),
                 &sink,
             )
@@ -1039,42 +1018,58 @@ mod tests {
         }));
         let request = TurnRequest::new(identity("noterminal"), "hello");
         let receipt = AgentTurnDriver
-            .drive(agent, request, &RecordingSink::default())
+            .drive(agent.as_ref(), request, &RecordingSink::default())
             .await;
         assert_eq!(receipt.outcome.status(), "failed");
     }
 
     #[tokio::test]
-    async fn sink_receives_exactly_one_terminal_envelope() {
-        let terminal_count = AtomicUsize::new(0);
-        struct TerminalCountingSink<'a> {
-            count: &'a AtomicUsize,
+    async fn sink_takes_terminal_envelope_after_receipt_accounting() {
+        #[derive(Default)]
+        struct OwningSink {
+            envelopes: Mutex<Vec<EventEnvelope>>,
         }
         #[async_trait]
-        impl EventSink for TerminalCountingSink<'_> {
+        impl EventSink for OwningSink {
             async fn on_event(
                 &self,
-                envelope: &EventEnvelope,
+                envelope: EventEnvelope,
             ) -> echo_core::error::Result<SinkControl> {
-                if TurnOutcome::from_agent_event(&envelope.payload).is_some() {
-                    self.count.fetch_add(1, Ordering::SeqCst);
-                }
+                self.envelopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(envelope);
                 Ok(SinkControl::Continue)
             }
         }
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
             vec![
-                usage_event(1, 1),
+                usage_event(7, 3),
                 AgentEvent::Token("t".to_string()),
                 AgentEvent::FinalAnswer("fin".to_string()),
             ]
         }));
-        let sink = TerminalCountingSink {
-            count: &terminal_count,
-        };
+        let sink = OwningSink::default();
         let request = TurnRequest::new(identity("exactly"), "hello");
-        let receipt = AgentTurnDriver.drive(agent, request, &sink).await;
+        let receipt = AgentTurnDriver.drive(agent.as_ref(), request, &sink).await;
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
-        assert_eq!(terminal_count.load(Ordering::SeqCst), 1);
+        assert_eq!(receipt.final_answer.as_deref(), Some("fin"));
+        assert_eq!(receipt.prompt_tokens, 7);
+        assert_eq!(receipt.completion_tokens, 3);
+        assert_eq!(receipt.llm_calls, 1);
+
+        let envelopes = sink
+            .envelopes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let terminals: Vec<&EventEnvelope> = envelopes
+            .iter()
+            .filter(|envelope| TurnOutcome::from_agent_event(&envelope.payload).is_some())
+            .collect();
+        assert_eq!(terminals.len(), 1);
+        assert!(matches!(
+            terminals.first().map(|envelope| &envelope.payload),
+            Some(AgentEvent::FinalAnswer(answer)) if answer == "fin"
+        ));
     }
 }
