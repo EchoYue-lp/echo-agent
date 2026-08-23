@@ -2,7 +2,7 @@
 
 ## 产品模型
 
-EKO 以 coding 为主。内置数据工具负责查看、清洗、转换、汇总和可视化；正式统计推断由 Agent 与用户共同编写可审阅的 Python/R 代码，通过沙箱化 `run_code` 执行，并作为任务 artifact 保存。
+embedding application 以 coding 为主。内置数据工具负责查看、清洗、转换、汇总和可视化；正式统计推断由 Agent 与用户共同编写可审阅的 Python/R 代码，通过沙箱化 `run_code` 执行，并作为任务 artifact 保存。
 
 框架不再自行实现 p 值近似或多元回归引擎。
 

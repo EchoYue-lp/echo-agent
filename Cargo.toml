@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "echo-agent-examples",
     "echo-rust-learning",
     "echo-core",
     "echo-macros",
@@ -11,6 +12,7 @@ members = [
 ]
 default-members = [
     ".",
+    "echo-agent-examples",
     "echo-rust-learning",
     "echo-core",
     "echo-macros",
@@ -38,11 +40,10 @@ categories = ["development-tools", "asynchronous", "web-programming::http-client
 
 exclude = [
     "/examples/demo_skills/",
+    "/docs/internal/",
     ".github/",
     ".claude/",
     ".idea/",
-    "echo-agent.example.yaml",
-    "echo-agent.yaml",
     ".env",
     ".env1",
     ".example.env",
@@ -90,8 +91,8 @@ rag = ["echo_tools/rag"]
 chart = ["echo_tools/chart"]
 content-guard = ["echo_core/guard"]
 project-rules = []
-shell = ["echo_execution/shell", "echo_tools/shell"]
-files = ["echo_execution/files", "echo_tools/files"]
+shell = ["echo_tools/shell"]
+files = ["echo_tools/files"]
 research = ["echo_tools/research"]
 eval = []
 improve = []
@@ -186,10 +187,6 @@ name = "demo25_macros"
 
 [[example]]
 name = "demo26_provider_factory"
-
-[[example]]
-name = "smoke_usage_passthrough"
-required-features = ["sqlite", "tasks", "subagent"]
 
 [[example]]
 name = "demo28_workflow"

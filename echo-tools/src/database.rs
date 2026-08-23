@@ -18,7 +18,7 @@ use echo_core::tools::artifact::{
 };
 use echo_core::tools::pagination::{PageInfo, PageRequest};
 use echo_core::tools::permission::ToolPermission;
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 
 const DEFAULT_SQL_PAGE_ROWS: usize = 50;
 const MAX_SQL_PAGE_ROWS: usize = 100;
@@ -54,6 +54,10 @@ impl Tool for SqlQueryTool {
 
     fn permissions(&self) -> Vec<ToolPermission> {
         vec![ToolPermission::Network]
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
     }
 
     fn description(&self) -> &str {
@@ -115,60 +119,8 @@ impl Tool for SqlQueryTool {
                 Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
             };
 
-            // Defense-in-depth: keyword filter is the first layer; SET TRANSACTION READ ONLY
-            // in execute_readonly_query provides database-enforced protection as second layer.
-            // Safety check: only allow read-only statements
-            let trimmed = query.trim().to_uppercase();
-            let allowed = trimmed.starts_with("SELECT")
-                || trimmed.starts_with("SHOW")
-                || trimmed.starts_with("DESCRIBE")
-                || trimmed.starts_with("DESC ")
-                || trimmed.starts_with("EXPLAIN")
-                || trimmed.starts_with("WITH"); // CTE usually followed by SELECT
-
-            if !allowed {
-                return Ok(ToolResult::error(format!(
-                    "Only read-only queries allowed (SELECT/SHOW/DESCRIBE/EXPLAIN), received: {}",
-                    query
-                )));
-            }
-
-            // Defense-in-depth layer 1: block dangerous keywords that could appear in SELECT
-            // statements (e.g., SELECT pg_terminate_backend(), SELECT ... INTO DUMPFILE)
-            let dangerous = [
-                "INSERT",
-                "UPDATE",
-                "DELETE",
-                "DROP",
-                "ALTER",
-                "CREATE",
-                "TRUNCATE",
-                "GRANT",
-                "REVOKE",
-                "REPLACE",
-                "EXECUTE",
-                "EXEC",
-                "INTO OUTFILE",
-                "INTO DUMPFILE",
-                "LOAD_FILE",
-                // PostgreSQL dangerous functions
-                "DBLINK",
-                "LO_IMPORT",
-                "PG_TERMINATE_BACKEND",
-                "PG_CANCEL_BACKEND",
-                "PG_RELOAD_CONF",
-                // PostgreSQL COPY (can read/write files)
-                "COPY",
-                // SQLite PRAGMA can modify database settings
-                "PRAGMA",
-            ];
-            for keyword in &dangerous {
-                if trimmed.contains(keyword) {
-                    return Ok(ToolResult::error(format!(
-                        "Query contains forbidden keyword: {}. Only read-only queries allowed.",
-                        keyword
-                    )));
-                }
+            if let Err(error) = validate_readonly_query(query) {
+                return Ok(ToolResult::error(error));
             }
 
             match execute_readonly_page(conn_url, query, &page_request).await {
@@ -184,6 +136,54 @@ impl Tool for SqlQueryTool {
             }
         })
     }
+}
+
+fn validate_readonly_query(query: &str) -> std::result::Result<(), String> {
+    let trimmed = query.trim().to_uppercase();
+    let allowed = trimmed.starts_with("SELECT")
+        || trimmed.starts_with("SHOW")
+        || trimmed.starts_with("DESCRIBE")
+        || trimmed.starts_with("DESC ")
+        || trimmed.starts_with("EXPLAIN")
+        || trimmed.starts_with("WITH");
+    if !allowed {
+        return Err(format!(
+            "Only read-only queries allowed (SELECT/SHOW/DESCRIBE/EXPLAIN), received: {query}"
+        ));
+    }
+    const MUTATING_SQL: &[&str] = &[
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "DROP",
+        "ALTER",
+        "CREATE",
+        "TRUNCATE",
+        "GRANT",
+        "REVOKE",
+        "REPLACE",
+        "EXECUTE",
+        "EXEC",
+        "INTO OUTFILE",
+        "INTO DUMPFILE",
+        "LOAD_FILE",
+        "DBLINK",
+        "LO_IMPORT",
+        "PG_TERMINATE_BACKEND",
+        "PG_CANCEL_BACKEND",
+        "PG_RELOAD_CONF",
+        "COPY",
+        "PRAGMA",
+    ];
+    if let Some(keyword) = MUTATING_SQL
+        .iter()
+        .find(|keyword| trimmed.contains(**keyword))
+    {
+        return Err(format!(
+            "Query contains forbidden keyword: {keyword}. Only read-only queries allowed."
+        ));
+    }
+    Ok(())
 }
 
 // ── List tables ───────────────────────────────────────────────────────────────────
@@ -919,5 +919,20 @@ mod tests {
         assert!(second.page_info.next_cursor.is_some());
         assert!(!second.page_info.total_known);
         Ok(())
+    }
+
+    #[test]
+    fn writable_sql_never_qualifies_as_read_only() {
+        use echo_core::tools::Tool;
+
+        assert_eq!(SqlQueryTool.risk_level(), ToolRiskLevel::ReadOnly);
+        assert!(validate_readonly_query("SELECT * FROM samples").is_ok());
+        assert!(validate_readonly_query("UPDATE samples SET flag = true").is_err());
+        assert!(
+            validate_readonly_query(
+                "WITH changed AS (DELETE FROM samples RETURNING id) SELECT * FROM changed"
+            )
+            .is_err()
+        );
     }
 }

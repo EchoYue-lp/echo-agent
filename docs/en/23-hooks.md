@@ -12,7 +12,7 @@ Hooks allow custom behavior to be injected at key points in the agent lifecycle.
 
 ## Skills Hooks
 
-The primary hook system. Hooks are configured in YAML (via `echo-agent.yaml` or SKILL.md frontmatter) and executed by the `HookExecutor`.
+The primary hook system. Hooks are configured in YAML (via `application configuration` or SKILL.md frontmatter) and executed by the `HookExecutor`.
 
 ### Hook Events
 
@@ -152,7 +152,7 @@ Exit code `2` blocks the operation and uses stderr as the user-facing reason.
 Other non-zero exits remain non-blocking but are surfaced in HookResult messages
 instead of disappearing into logs.
 
-For portable plugin reuse, EKO also accepts Codex-style `systemMessage` and
+For portable plugin reuse, embedding application also accepts Codex-style `systemMessage` and
 `hookSpecificOutput` fields: `additionalContext`, `permissionDecision`,
 `permissionDecisionReason`, `updatedInput`, and the PermissionRequest
 `decision.behavior` object. Model-visible text is UTF-8-safely bounded before
@@ -171,8 +171,8 @@ User, Skill, and Plugin hooks all use the same registration-time action
 validation. Invalid actions are logged and omitted while valid actions in the
 same rule remain active.
 
-EKO merges inline hooks from `echo-agent.yaml`, global
-`~/.eko/hooks.yaml`, and project `.eko/hooks.yaml`. Its watcher monitors all
+embedding application merges inline hooks from `application configuration`, global
+`<application-data>/hooks.yaml`, and project `<application-data>/hooks.yaml`. Its watcher monitors all
 three targets. Create, modify, atomic-replace, and remove events all trigger a
 reload, so deleting a `hooks.yaml` removes its registered hooks without a
 restart. A failed parse keeps the last known good registry. CLI, TUI, and GUI hook tests call
@@ -188,7 +188,7 @@ source/action list without executing side effects.
 | Max command length | 32K characters | Rejects obviously malformed YAML |
 | Sandbox execution | Optional | Hooks can run inside sandbox |
 
-EKO is a local, user-controlled application. Hook HTTP actions therefore allow
+embedding application is a local, user-controlled application. Hook HTTP actions therefore allow
 plain HTTP for loopback, private-network, and link-local IP literals, as well as
 `localhost`, single-label hosts such as `nas`, and names ending in `.local` or
 `.lan`. Remote addresses must use HTTPS. Configured headers and payloads are
@@ -312,4 +312,4 @@ let agent = ReactAgentBuilder::new()
     .build()?;
 ```
 
-Skills hooks are configured via YAML and loaded automatically from `echo-agent.yaml` or SKILL.md files.
+Skills hooks are configured via YAML and loaded automatically from `application configuration` or SKILL.md files.

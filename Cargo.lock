@@ -1092,6 +1092,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "echo-agent-examples"
+version = "0.0.0"
+dependencies = [
+ "echo_agent",
+]
+
+[[package]]
 name = "echo_agent"
 version = "0.2.0"
 dependencies = [
@@ -1172,7 +1179,6 @@ dependencies = [
  "dashmap",
  "dirs",
  "echo_core",
- "echo_tools",
  "futures",
  "glob",
  "jsonschema",

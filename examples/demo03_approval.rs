@@ -15,7 +15,7 @@ use echo_agent::human_loop::{
 };
 use echo_agent::prelude::*;
 use echo_agent::tool;
-use echo_core::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
+use echo_agent::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;

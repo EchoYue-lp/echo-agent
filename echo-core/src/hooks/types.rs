@@ -78,7 +78,7 @@ impl SubagentStopStatus {
 /// event, not independent event types (Codex `CommandExecutionStatus`; this
 /// avoids the "no carrier object" problem — `TodoStatus` has no Timeout/
 /// Cancelled variants, so firing them at the PlanTask layer was a category
-/// error). The values map 1:1 to EKO `TodoStatus` terminals plus a TimedOut
+/// error). The values map 1:1 to embedding application `TodoStatus` terminals plus a TimedOut
 /// reason for runs that end on a deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -517,7 +517,7 @@ pub struct HookContext {
     // These let a hook correlate a Task/Subagent event back to the owning
     // TaskRun, the plan revision, and the specific attempt. They are optional
     // because the framework layer (which defines HookContext) does not always
-    // know them — application runtimes (e.g. EKO task_runtime) populate them
+    // know them — application runtimes (e.g. embedding application task_runtime) populate them
     // at fire time.
     /// Owning TaskRun ID (Task/Subagent events when known).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1150,7 +1150,7 @@ impl HookResult {
 pub enum HookSource {
     /// Hooks from a file-based skill.
     Skill(String),
-    /// Hooks from user configuration (echo-agent.yaml).
+    /// Hooks supplied by an embedding application's configuration.
     UserConfig,
     /// Hooks from an installed plugin.
     Plugin(String),

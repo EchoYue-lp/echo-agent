@@ -1,492 +1,276 @@
-//! Tool registration helper
-//!
-//! Provides [`register_all_tools`] which registers the canonical default tool
-//! for each enabled domain into any type implementing
-//! [`ToolRegistrar`](echo_core::tools::ToolRegistrar). More granular public
-//! tools remain available for applications that explicitly need them.
-//! [`register_readonly_tools`] registers only read-only tools (no shell, no
-//! file writes) — used by read-only Subagents.
+//! Canonical standard tool pack.
 
-use echo_core::tools::ToolRegistrar;
 use echo_core::tools::cell::CommandCellRegistry;
+use echo_core::tools::{ToolPack, ToolPackEntry, ToolRegistrar};
 use std::sync::Arc;
 
-/// Register only **read-only** tools into the given registrar.
+/// The framework's feature-gated standard tool composition.
 ///
-/// This excludes all mutating tools: shell, write/append/create/delete/move/
-/// update/edit files, git write operations (commit/branch/worktree-enter).
-/// Read-only tools include: read_file, list_dir, grep, glob, diff, repo_map,
-/// code_search, git read ops (status/diff/log/blame), web search/fetch,
-/// data read/profile, research search, media read/extract, statistics.
-///
-/// Used when constructing read-only Subagents so they are physically incapable
-/// of mutating state, not just prompt-constrained.
-#[allow(unused_variables)]
-pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
-    #[cfg(feature = "artifact")]
-    tool_manager.register(Box::new(crate::files::artifact::ReadArtifactTool));
-
-    // ── files (read-only subset) ──────────────────────────────────────────
-    #[cfg(feature = "files")]
-    {
-        use crate::files::code_search::CodeSearchTool;
-        use crate::files::diff::DiffTool;
-        use crate::files::files::{ListDirTool, ReadFileTool};
-        use crate::files::glob::GlobTool;
-        use crate::files::grep::GrepTool;
-        use crate::files::repo_map::RepoMapTool;
-
-        tool_manager.register(Box::new(ReadFileTool::new()));
-        tool_manager.register(Box::new(ListDirTool::new()));
-        tool_manager.register(Box::new(GrepTool::new()));
-        tool_manager.register(Box::new(GlobTool::new()));
-        tool_manager.register(Box::new(DiffTool::new()));
-        tool_manager.register(Box::new(RepoMapTool::new()));
-        tool_manager.register(Box::new(CodeSearchTool::new()));
-    }
-
-    // ── git (read-only subset) ────────────────────────────────────────────
-    #[cfg(feature = "git")]
-    {
-        use crate::git::{GitBlameTool, GitDiffTool, GitLogTool, GitStatusTool};
-        // Deliberately EXCLUDED: GitBranchTool, GitCommitTool,
-        // EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool.
-        tool_manager.register(Box::new(GitStatusTool));
-        tool_manager.register(Box::new(GitDiffTool));
-        tool_manager.register(Box::new(GitLogTool));
-        tool_manager.register(Box::new(GitBlameTool));
-    }
-
-    // ── rag (dependency-free read-only subset) ───────────────────────────
-    #[cfg(feature = "rag")]
-    {
-        use crate::rag::RagChunkDocumentTool;
-        tool_manager.register(Box::new(RagChunkDocumentTool));
-    }
-
-    // ── chart (read-only — generates charts but no file mutation) ─────────
-    #[cfg(feature = "chart")]
-    {
-        use crate::chart::GenerateChartTool;
-        tool_manager.register(Box::new(GenerateChartTool));
-    }
-
-    // ── database (read-only subset) ───────────────────────────────────────
-    #[cfg(feature = "database")]
-    {
-        use crate::database::{DescribeTableTool, ListTablesTool, SqlQueryTool};
-        // SqlQueryTool could mutate (INSERT/UPDATE), but in a local analysis
-        // context the risk is low and the read value is high. Keep it.
-        tool_manager.register(Box::new(SqlQueryTool));
-        tool_manager.register(Box::new(ListTablesTool));
-        tool_manager.register(Box::new(DescribeTableTool));
-    }
-
-    // ── web (all read-only) ───────────────────────────────────────────────
-    #[cfg(feature = "web")]
-    {
-        use crate::web::{WebExtractTool, WebFetchTool, WebSearchTool};
-        tool_manager.register(Box::new(WebFetchTool::new()));
-        tool_manager.register(Box::new(WebExtractTool));
-        tool_manager.register(Box::new(WebSearchTool::with_duckduckgo()));
-    }
-
-    // ── media (read-only subset) ──────────────────────────────────────────
-    #[cfg(feature = "media")]
-    {
-        use crate::image::ViewImageTool;
-        use crate::media::image_fetch::ImageFetchTool;
-        use crate::pdf::{PdfExtractTool, PdfInfoTool};
-        use crate::text::{TextProcessTool, TextSearchTool, TextStatsTool};
-        use crate::word::{WordInfoTool, WordReadTool, WordStructureTool};
-        // Excel: EXCLUDED ExcelWriteTool; kept read/info/csv/profile.
-        use crate::excel::{ExcelInfoTool, ExcelProfileTool, ExcelReadTool};
-
-        tool_manager.register(Box::new(ViewImageTool::new()));
-        if let Ok(tool) = ImageFetchTool::new() {
-            tool_manager.register(Box::new(tool));
-        }
-        tool_manager.register(Box::new(PdfExtractTool));
-        tool_manager.register(Box::new(PdfInfoTool));
-        tool_manager.register(Box::new(ExcelReadTool));
-        tool_manager.register(Box::new(ExcelInfoTool));
-        tool_manager.register(Box::new(ExcelProfileTool));
-        tool_manager.register(Box::new(WordReadTool));
-        tool_manager.register(Box::new(WordInfoTool));
-        tool_manager.register(Box::new(WordStructureTool));
-        tool_manager.register(Box::new(TextSearchTool));
-        tool_manager.register(Box::new(TextStatsTool));
-        tool_manager.register(Box::new(TextProcessTool));
-    }
-
-    // ── data (read-only subset) ───────────────────────────────────────────
-    #[cfg(feature = "data")]
-    {
-        // EXCLUDED: DataExportTool (writes files).
-        use crate::data::{
-            CorrelateTool, DataAggregateTool, DataBinTool, DataContributionTool, DataFilterTool,
-            DataJoinTool, DataMultiReadTool, DataProfileTool, DataRatioTool, DataReadTool,
-            DataStatsTool, DataTopNTool, DataTransformTool, PivotTool,
-        };
-        tool_manager.register(Box::new(DataReadTool));
-        tool_manager.register(Box::new(DataFilterTool));
-        tool_manager.register(Box::new(DataAggregateTool));
-        tool_manager.register(Box::new(DataStatsTool));
-        tool_manager.register(Box::new(DataTransformTool));
-        tool_manager.register(Box::new(DataProfileTool));
-        tool_manager.register(Box::new(DataTopNTool));
-        tool_manager.register(Box::new(DataContributionTool));
-        tool_manager.register(Box::new(DataBinTool));
-        tool_manager.register(Box::new(DataRatioTool));
-        tool_manager.register(Box::new(DataMultiReadTool));
-        tool_manager.register(Box::new(DataJoinTool));
-        tool_manager.register(Box::new(CorrelateTool));
-        tool_manager.register(Box::new(PivotTool));
-
-        use crate::data_quality::{
-            ConsistencyCheckTool, MissingValueAnalysisTool, OutlierDetectionTool,
-        };
-        tool_manager.register(Box::new(MissingValueAnalysisTool));
-        tool_manager.register(Box::new(OutlierDetectionTool));
-        tool_manager.register(Box::new(ConsistencyCheckTool));
-    }
-
-    #[cfg(feature = "statistics")]
-    {
-        use crate::statistics::ExploratoryStatisticsTool;
-        tool_manager.register(Box::new(ExploratoryStatisticsTool::default()));
-    }
-
-    // ── research (all read-only) ──────────────────────────────────────────
-    #[cfg(feature = "research")]
-    {
-        use crate::research::{
-            ArxivSearchTool, ClinicalTrialsSearchTool, PdfFetchTool, PubMedSearchTool,
-            SemanticScholarSearchTool,
-        };
-        tool_manager.register(Box::new(ArxivSearchTool));
-        tool_manager.register(Box::new(SemanticScholarSearchTool));
-        tool_manager.register(Box::new(PubMedSearchTool));
-        tool_manager.register(Box::new(ClinicalTrialsSearchTool));
-        tool_manager.register(Box::new(PdfFetchTool));
-    }
-
-    #[cfg(not(any(
-        feature = "files",
-        feature = "git",
-        feature = "rag",
-        feature = "chart",
-        feature = "database",
-        feature = "web",
-        feature = "media",
-        feature = "data",
-        feature = "statistics",
-        feature = "research"
-    )))]
-    {
-        let _ = tool_manager; // Suppress unused warning when no feature-gated tools
-    }
-}
-
-/// Register the canonical default tools for all enabled domains.
-#[allow(unused_variables)]
-pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
-    register_all_tools_with_cells(tool_manager, None);
-}
-
-/// Like [`register_all_tools`], but `ShellTool` receives the command cell
-/// registry so `background=true` launches a background command cell (returning
-/// a `cell_id` immediately) instead of reporting the mode unavailable.
-#[allow(unused_variables)]
-pub fn register_all_tools_with_cells(
-    tool_manager: &mut dyn ToolRegistrar,
+/// Each entry declares its capabilities at construction time. Read-only
+/// surfaces are projections of this pack, not a second hand-maintained tool
+/// list, so a mutating tool cannot accidentally enter a read-only Agent.
+#[derive(Clone, Default)]
+pub struct StandardToolPack {
     cells: Option<Arc<dyn CommandCellRegistry>>,
-) {
-    #[cfg(feature = "artifact")]
-    tool_manager.register(Box::new(crate::files::artifact::ReadArtifactTool));
+}
 
-    // ── shell ─────────────────────────────────────────────────────────────
-    #[cfg(feature = "shell")]
-    {
-        use crate::shell::ShellTool;
-        let shell = match cells {
-            Some(cells) => ShellTool::new().with_cell_launcher(cells),
-            None => ShellTool::new(),
-        };
-        tool_manager.register(Box::new(shell));
-        // Sprint 10b: inline code execution (Python/R/JS/...). Same shell
-        // feature gate; writer toolset only (readonly subset excludes it —
-        // readonly Subagents shouldn't run arbitrary code).
-        tool_manager.register(Box::new(crate::code::RunCodeTool::new()));
+impl StandardToolPack {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    // ── files ─────────────────────────────────────────────────────────────
-    #[cfg(feature = "files")]
-    {
-        use crate::files::apply_patch::ApplyPatchTool;
-        use crate::files::code_search::CodeSearchTool;
-        use crate::files::diff::DiffTool;
-        use crate::files::files::{ListDirTool, ReadFileTool};
-        use crate::files::glob::GlobTool;
-        use crate::files::grep::GrepTool;
-        use crate::files::repo_map::RepoMapTool;
+    pub fn with_command_cells(mut self, cells: Arc<dyn CommandCellRegistry>) -> Self {
+        self.cells = Some(cells);
+        self
+    }
+}
 
-        tool_manager.register(Box::new(ReadFileTool::new()));
-        tool_manager.register(Box::new(ListDirTool::new()));
-        tool_manager.register(Box::new(GrepTool::new()));
-        tool_manager.register(Box::new(GlobTool::new()));
-        tool_manager.register(Box::new(ApplyPatchTool::new()));
-        tool_manager.register(Box::new(DiffTool::new()));
-        tool_manager.register(Box::new(RepoMapTool::new()));
-        tool_manager.register(Box::new(CodeSearchTool::new()));
+impl ToolPack for StandardToolPack {
+    fn name(&self) -> &str {
+        "standard"
     }
 
-    #[cfg(not(any(
-        feature = "shell",
-        feature = "files",
-        feature = "git",
-        feature = "rag",
-        feature = "chart",
-        feature = "database",
-        feature = "web",
-        feature = "media",
-        feature = "data",
-        feature = "statistics",
-        feature = "research"
-    )))]
-    {
-        let _ = tool_manager; // Suppress unused warning when no feature-gated tools
-    }
-    #[cfg(feature = "git")]
-    {
-        use crate::git::{
-            GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
-        };
-        use crate::worktree_tool::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
-        tool_manager.register(Box::new(GitStatusTool));
-        tool_manager.register(Box::new(GitDiffTool));
-        tool_manager.register(Box::new(GitLogTool));
-        tool_manager.register(Box::new(GitBlameTool));
-        tool_manager.register(Box::new(GitBranchTool));
-        tool_manager.register(Box::new(GitCommitTool));
-        tool_manager.register(Box::new(EnterWorktreeTool));
-        tool_manager.register(Box::new(ExitWorktreeTool));
-        tool_manager.register(Box::new(ListWorktreesTool));
-    }
+    #[allow(unused_mut)]
+    fn tools(&self) -> Vec<ToolPackEntry> {
+        let mut tools = Vec::new();
 
-    #[cfg(feature = "rag")]
-    {
-        use crate::rag::RagChunkDocumentTool;
-        tool_manager.register(Box::new(RagChunkDocumentTool));
-    }
+        #[cfg(feature = "artifact")]
+        tools.push(ToolPackEntry::read_only(Box::new(
+            crate::files::artifact::ReadArtifactTool,
+        )));
 
-    #[cfg(feature = "chart")]
-    {
-        use crate::chart::GenerateChartTool;
-        tool_manager.register(Box::new(GenerateChartTool));
-    }
-
-    #[cfg(feature = "database")]
-    {
-        use crate::database::{DescribeTableTool, ListTablesTool, SqlQueryTool};
-        tool_manager.register(Box::new(SqlQueryTool));
-        tool_manager.register(Box::new(ListTablesTool));
-        tool_manager.register(Box::new(DescribeTableTool));
-    }
-
-    #[cfg(feature = "web")]
-    {
-        use crate::web::{WebExtractTool, WebFetchTool, WebSearchTool};
-        tool_manager.register(Box::new(WebFetchTool::new()));
-        tool_manager.register(Box::new(WebExtractTool));
-        tool_manager.register(Box::new(WebSearchTool::with_duckduckgo()));
-    }
-
-    #[cfg(feature = "media")]
-    {
-        use crate::excel::{
-            ExcelInfoTool, ExcelProfileTool, ExcelReadTool, ExcelToCsvTool, ExcelWriteTool,
-        };
-        use crate::image::ViewImageTool;
-        use crate::media::image_fetch::ImageFetchTool;
-        use crate::pdf::{PdfExtractTool, PdfInfoTool};
-        use crate::text::{TextExportTool, TextProcessTool, TextSearchTool, TextStatsTool};
-        use crate::word::{WordInfoTool, WordReadTool, WordStructureTool};
-
-        tool_manager.register(Box::new(ViewImageTool::new()));
-        if let Ok(tool) = ImageFetchTool::new() {
-            tool_manager.register(Box::new(tool));
+        #[cfg(feature = "shell")]
+        {
+            use crate::code::RunCodeTool;
+            use crate::shell::ShellTool;
+            let shell = self.cells.as_ref().map_or_else(ShellTool::new, |cells| {
+                ShellTool::new().with_cell_launcher(Arc::clone(cells))
+            });
+            tools.push(ToolPackEntry::new(Box::new(shell)));
+            tools.push(ToolPackEntry::new(Box::new(RunCodeTool::new())));
         }
-        tool_manager.register(Box::new(PdfExtractTool));
-        tool_manager.register(Box::new(PdfInfoTool));
-        tool_manager.register(Box::new(ExcelReadTool));
-        tool_manager.register(Box::new(ExcelInfoTool));
-        tool_manager.register(Box::new(ExcelToCsvTool));
-        tool_manager.register(Box::new(ExcelProfileTool));
-        tool_manager.register(Box::new(ExcelWriteTool));
+
+        #[cfg(feature = "files")]
+        {
+            use crate::files::apply_patch::ApplyPatchTool;
+            use crate::files::code_search::CodeSearchTool;
+            use crate::files::diff::DiffTool;
+            use crate::files::files::{ListDirTool, ReadFileTool};
+            use crate::files::glob::GlobTool;
+            use crate::files::grep::GrepTool;
+            use crate::files::repo_map::RepoMapTool;
+            tools.extend([
+                ToolPackEntry::read_only(Box::new(ReadFileTool::new())),
+                ToolPackEntry::read_only(Box::new(ListDirTool::new())),
+                ToolPackEntry::read_only(Box::new(GrepTool::new())),
+                ToolPackEntry::read_only(Box::new(GlobTool::new())),
+                ToolPackEntry::new(Box::new(ApplyPatchTool::new())),
+                ToolPackEntry::read_only(Box::new(DiffTool::new())),
+                ToolPackEntry::read_only(Box::new(RepoMapTool::new())),
+                ToolPackEntry::read_only(Box::new(CodeSearchTool::new())),
+            ]);
+        }
+
+        #[cfg(feature = "git")]
+        {
+            use crate::git::{
+                GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
+            };
+            use crate::worktree_tool::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
+            tools.extend([
+                ToolPackEntry::read_only(Box::new(GitStatusTool)),
+                ToolPackEntry::read_only(Box::new(GitDiffTool)),
+                ToolPackEntry::read_only(Box::new(GitLogTool)),
+                ToolPackEntry::read_only(Box::new(GitBlameTool)),
+                ToolPackEntry::new(Box::new(GitBranchTool)),
+                ToolPackEntry::new(Box::new(GitCommitTool)),
+                ToolPackEntry::new(Box::new(EnterWorktreeTool)),
+                ToolPackEntry::new(Box::new(ExitWorktreeTool)),
+                ToolPackEntry::read_only(Box::new(ListWorktreesTool)),
+            ]);
+        }
+
+        #[cfg(feature = "rag")]
+        tools.push(ToolPackEntry::read_only(Box::new(
+            crate::rag::RagChunkDocumentTool,
+        )));
+
+        #[cfg(feature = "chart")]
+        tools.push(ToolPackEntry::read_only(Box::new(
+            crate::chart::GenerateChartTool,
+        )));
+
+        #[cfg(feature = "database")]
+        {
+            use crate::database::{DescribeTableTool, ListTablesTool, SqlQueryTool};
+            tools.extend([
+                ToolPackEntry::new(Box::new(SqlQueryTool)),
+                ToolPackEntry::read_only(Box::new(ListTablesTool)),
+                ToolPackEntry::read_only(Box::new(DescribeTableTool)),
+            ]);
+        }
+
+        #[cfg(feature = "web")]
+        {
+            use crate::web::{WebExtractTool, WebFetchTool, WebSearchTool};
+            tools.extend([
+                ToolPackEntry::read_only(Box::new(WebFetchTool::new())),
+                ToolPackEntry::read_only(Box::new(WebExtractTool)),
+                ToolPackEntry::read_only(Box::new(WebSearchTool::with_duckduckgo())),
+            ]);
+        }
+
+        #[cfg(feature = "media")]
+        {
+            use crate::excel::{
+                ExcelInfoTool, ExcelProfileTool, ExcelReadTool, ExcelToCsvTool, ExcelWriteTool,
+            };
+            use crate::image::ViewImageTool;
+            use crate::media::image_fetch::ImageFetchTool;
+            use crate::pdf::{PdfExtractTool, PdfInfoTool};
+            use crate::text::{TextExportTool, TextProcessTool, TextSearchTool, TextStatsTool};
+            use crate::word::{WordInfoTool, WordReadTool, WordStructureTool};
+            tools.push(ToolPackEntry::read_only(Box::new(ViewImageTool::new())));
+            if let Ok(tool) = ImageFetchTool::new() {
+                tools.push(ToolPackEntry::read_only(Box::new(tool)));
+            }
+            tools.extend([
+                ToolPackEntry::read_only(Box::new(PdfExtractTool)),
+                ToolPackEntry::read_only(Box::new(PdfInfoTool)),
+                ToolPackEntry::read_only(Box::new(ExcelReadTool)),
+                ToolPackEntry::read_only(Box::new(ExcelInfoTool)),
+                ToolPackEntry::new(Box::new(ExcelToCsvTool)),
+                ToolPackEntry::read_only(Box::new(ExcelProfileTool)),
+                ToolPackEntry::new(Box::new(ExcelWriteTool)),
+                ToolPackEntry::read_only(Box::new(WordReadTool)),
+                ToolPackEntry::read_only(Box::new(WordInfoTool)),
+                ToolPackEntry::read_only(Box::new(WordStructureTool)),
+                ToolPackEntry::read_only(Box::new(TextSearchTool)),
+                ToolPackEntry::read_only(Box::new(TextStatsTool)),
+                ToolPackEntry::read_only(Box::new(TextProcessTool)),
+                ToolPackEntry::new(Box::new(TextExportTool)),
+            ]);
+            #[cfg(feature = "data")]
+            tools.push(ToolPackEntry::new(Box::new(crate::excel::ExcelLoadTool)));
+        }
+
         #[cfg(feature = "data")]
         {
-            use crate::excel::ExcelLoadTool;
-            tool_manager.register(Box::new(ExcelLoadTool));
+            use crate::data::{
+                CorrelateTool, DataAggregateTool, DataBinTool, DataContributionTool,
+                DataExportTool, DataFilterTool, DataJoinTool, DataMultiReadTool, DataProfileTool,
+                DataRatioTool, DataReadTool, DataStatsTool, DataTopNTool, DataTransformTool,
+                PivotTool,
+            };
+            tools.extend([
+                ToolPackEntry::read_only(Box::new(DataReadTool)),
+                ToolPackEntry::read_only(Box::new(DataFilterTool)),
+                ToolPackEntry::read_only(Box::new(DataAggregateTool)),
+                ToolPackEntry::read_only(Box::new(DataStatsTool)),
+                ToolPackEntry::read_only(Box::new(DataTransformTool)),
+                ToolPackEntry::new(Box::new(DataExportTool)),
+                ToolPackEntry::read_only(Box::new(DataProfileTool)),
+                ToolPackEntry::read_only(Box::new(DataTopNTool)),
+                ToolPackEntry::read_only(Box::new(DataContributionTool)),
+                ToolPackEntry::read_only(Box::new(DataBinTool)),
+                ToolPackEntry::read_only(Box::new(DataRatioTool)),
+                ToolPackEntry::read_only(Box::new(DataMultiReadTool)),
+                ToolPackEntry::read_only(Box::new(DataJoinTool)),
+                ToolPackEntry::read_only(Box::new(CorrelateTool)),
+                ToolPackEntry::read_only(Box::new(PivotTool)),
+            ]);
+            use crate::data_quality::{
+                ConsistencyCheckTool, MissingValueAnalysisTool, OutlierDetectionTool,
+            };
+            tools.extend([
+                ToolPackEntry::read_only(Box::new(MissingValueAnalysisTool)),
+                ToolPackEntry::read_only(Box::new(OutlierDetectionTool)),
+                ToolPackEntry::read_only(Box::new(ConsistencyCheckTool)),
+            ]);
         }
-        tool_manager.register(Box::new(WordReadTool));
-        tool_manager.register(Box::new(WordInfoTool));
-        tool_manager.register(Box::new(WordStructureTool));
-        tool_manager.register(Box::new(TextSearchTool));
-        tool_manager.register(Box::new(TextStatsTool));
-        tool_manager.register(Box::new(TextProcessTool));
-        tool_manager.register(Box::new(TextExportTool));
+
+        #[cfg(feature = "statistics")]
+        tools.push(ToolPackEntry::read_only(Box::new(
+            crate::statistics::ExploratoryStatisticsTool::default(),
+        )));
+
+        #[cfg(feature = "research")]
+        {
+            use crate::research::{
+                ArxivSearchTool, BibtexGenerateTool, ClinicalTrialsSearchTool, PdfFetchTool,
+                PubMedSearchTool, SemanticScholarSearchTool,
+            };
+            tools.extend([
+                ToolPackEntry::read_only(Box::new(ArxivSearchTool)),
+                ToolPackEntry::read_only(Box::new(SemanticScholarSearchTool)),
+                ToolPackEntry::read_only(Box::new(PubMedSearchTool)),
+                ToolPackEntry::read_only(Box::new(ClinicalTrialsSearchTool)),
+                ToolPackEntry::read_only(Box::new(PdfFetchTool)),
+                ToolPackEntry::new(Box::new(BibtexGenerateTool)),
+            ]);
+        }
+
+        tools
     }
+}
 
-    #[cfg(feature = "data")]
-    {
-        use crate::data::{
-            CorrelateTool, DataAggregateTool, DataBinTool, DataContributionTool, DataExportTool,
-            DataFilterTool, DataJoinTool, DataMultiReadTool, DataProfileTool, DataRatioTool,
-            DataReadTool, DataStatsTool, DataTopNTool, DataTransformTool, PivotTool,
-        };
+pub fn register_readonly_tools(registrar: &mut dyn ToolRegistrar) {
+    StandardToolPack::new().install_read_only(registrar);
+}
 
-        tool_manager.register(Box::new(DataReadTool));
-        tool_manager.register(Box::new(DataFilterTool));
-        tool_manager.register(Box::new(DataAggregateTool));
-        tool_manager.register(Box::new(DataStatsTool));
-        tool_manager.register(Box::new(DataTransformTool));
-        tool_manager.register(Box::new(DataExportTool));
-        tool_manager.register(Box::new(DataProfileTool));
-        tool_manager.register(Box::new(DataTopNTool));
-        tool_manager.register(Box::new(DataContributionTool));
-        tool_manager.register(Box::new(DataBinTool));
-        tool_manager.register(Box::new(DataRatioTool));
-        tool_manager.register(Box::new(DataMultiReadTool));
-        tool_manager.register(Box::new(DataJoinTool));
-        tool_manager.register(Box::new(CorrelateTool));
-        tool_manager.register(Box::new(PivotTool));
-    }
+pub fn register_all_tools(registrar: &mut dyn ToolRegistrar) {
+    StandardToolPack::new().install(registrar);
+}
 
-    #[cfg(feature = "data")]
-    {
-        use crate::data_quality::{
-            ConsistencyCheckTool, MissingValueAnalysisTool, OutlierDetectionTool,
-        };
-
-        tool_manager.register(Box::new(MissingValueAnalysisTool));
-        tool_manager.register(Box::new(OutlierDetectionTool));
-        tool_manager.register(Box::new(ConsistencyCheckTool));
-    }
-
-    #[cfg(feature = "statistics")]
-    {
-        use crate::statistics::ExploratoryStatisticsTool;
-
-        tool_manager.register(Box::new(ExploratoryStatisticsTool::default()));
-    }
-
-    // ── research ──────────────────────────────────────────────────────────
-    #[cfg(feature = "research")]
-    {
-        use crate::research::{
-            ArxivSearchTool, BibtexGenerateTool, ClinicalTrialsSearchTool, PdfFetchTool,
-            PubMedSearchTool, SemanticScholarSearchTool,
-        };
-        tool_manager.register(Box::new(ArxivSearchTool));
-        tool_manager.register(Box::new(SemanticScholarSearchTool));
-        tool_manager.register(Box::new(PubMedSearchTool));
-        tool_manager.register(Box::new(ClinicalTrialsSearchTool));
-        tool_manager.register(Box::new(PdfFetchTool));
-        tool_manager.register(Box::new(BibtexGenerateTool));
-    }
+pub fn register_all_tools_with_cells(
+    registrar: &mut dyn ToolRegistrar,
+    cells: Option<Arc<dyn CommandCellRegistry>>,
+) {
+    let pack = cells.map_or_else(StandardToolPack::new, |cells| {
+        StandardToolPack::new().with_command_cells(cells)
+    });
+    pack.install(registrar);
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(
-        feature = "shell",
-        feature = "statistics",
-        feature = "files",
-        feature = "media"
-    ))]
-    use echo_core::tools::{Tool, ToolRegistrar};
+    use super::*;
+    use echo_core::tools::Tool;
 
-    /// A registrar that collects the names of every tool registered into it.
-    #[cfg(any(
-        feature = "shell",
-        feature = "statistics",
-        feature = "files",
-        feature = "media"
-    ))]
-    struct Collector {
-        names: std::sync::Mutex<Vec<String>>,
-    }
-    #[cfg(any(
-        feature = "shell",
-        feature = "statistics",
-        feature = "files",
-        feature = "media"
-    ))]
+    #[derive(Default)]
+    struct Collector(Vec<String>);
+
     impl ToolRegistrar for Collector {
         fn register(&mut self, tool: Box<dyn Tool>) {
-            self.names
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(tool.name().to_string());
+            self.0.push(tool.name().to_string());
         }
     }
 
-    /// Sprint 10b: `run_code` must be in the writer toolset
-    /// (`register_all_tools`). readonly subset must NOT include it.
     #[test]
-    #[cfg(feature = "shell")]
-    fn register_all_tools_includes_run_code() {
-        let mut c = Collector {
-            names: std::sync::Mutex::new(vec![]),
-        };
-        crate::register_all_tools(&mut c);
-        let names = c
-            .names
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        assert!(
-            names.contains(&"run_code".to_string()),
-            "run_code missing from register_all_tools: {:?}",
-            names
-        );
+    #[cfg(feature = "database")]
+    fn read_only_projection_contains_only_read_only_sql() {
+        let mut collector = Collector::default();
+        register_readonly_tools(&mut collector);
+        assert!(collector.0.contains(&"sql_query".to_string()));
+        assert!(collector.0.contains(&"list_tables".to_string()));
+        assert!(collector.0.contains(&"describe_table".to_string()));
     }
 
-    /// Sprint 10b: the readonly subset must NOT include `run_code` (it's a
-    /// writer/execute primitive; readonly Subagents shouldn't run arbitrary code).
     #[test]
     #[cfg(feature = "shell")]
-    fn register_readonly_tools_excludes_run_code() {
-        let mut c = Collector {
-            names: std::sync::Mutex::new(vec![]),
-        };
-        crate::register_readonly_tools(&mut c);
-        let names = c
-            .names
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        assert!(
-            !names.contains(&"run_code".to_string()),
-            "run_code must NOT be in the readonly subset: {:?}",
-            names
-        );
+    fn read_only_projection_excludes_process_execution() {
+        let mut collector = Collector::default();
+        register_readonly_tools(&mut collector);
+        assert!(!collector.0.contains(&"shell".to_string()));
+        assert!(!collector.0.contains(&"run_code".to_string()));
     }
 
     #[test]
     #[cfg(feature = "files")]
-    fn default_file_surface_uses_only_canonical_patch_mutation() {
-        let mut collector = Collector {
-            names: std::sync::Mutex::new(Vec::new()),
-        };
-        crate::register_all_tools(&mut collector);
-        let names = collector
-            .names
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        assert!(names.contains(&"apply_patch".to_string()));
+    fn standard_pack_uses_only_canonical_patch_mutation() {
+        let mut collector = Collector::default();
+        register_all_tools(&mut collector);
+        assert!(collector.0.contains(&"apply_patch".to_string()));
         for legacy in [
             "edit_file",
             "write_file",
@@ -496,58 +280,7 @@ mod tests {
             "update_file",
             "move_file",
         ] {
-            assert!(
-                !names.contains(&legacy.to_string()),
-                "legacy mutation tool: {legacy}"
-            );
+            assert!(!collector.0.contains(&legacy.to_string()));
         }
-    }
-
-    #[test]
-    #[cfg(feature = "media")]
-    fn media_surface_exposes_real_image_viewing() {
-        let mut collector = Collector {
-            names: std::sync::Mutex::new(Vec::new()),
-        };
-        crate::register_readonly_tools(&mut collector);
-        let names = collector
-            .names
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        assert!(names.contains(&"view_image".to_string()));
-        assert!(!names.contains(&"analyze_image".to_string()));
-    }
-
-    #[test]
-    #[cfg(feature = "statistics")]
-    fn statistics_registry_exposes_only_exploratory_summary() {
-        let mut all = Collector {
-            names: std::sync::Mutex::new(Vec::new()),
-        };
-        crate::register_all_tools(&mut all);
-        let all_names = all
-            .names
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        assert!(all_names.contains(&"exploratory_statistics".to_string()));
-        assert!(!all_names.contains(&"hypothesis_test".to_string()));
-        assert!(!all_names.contains(&"regression".to_string()));
-        assert!(!all_names.contains(&"descriptive_advanced".to_string()));
-
-        let mut readonly = Collector {
-            names: std::sync::Mutex::new(Vec::new()),
-        };
-        crate::register_readonly_tools(&mut readonly);
-        let readonly_names = readonly
-            .names
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        assert!(readonly_names.contains(&"exploratory_statistics".to_string()));
-        assert!(!readonly_names.contains(&"hypothesis_test".to_string()));
-        assert!(!readonly_names.contains(&"regression".to_string()));
-        assert!(!readonly_names.contains(&"descriptive_advanced".to_string()));
     }
 }

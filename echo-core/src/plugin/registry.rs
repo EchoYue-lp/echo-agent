@@ -91,19 +91,17 @@ pub struct PluginRegistry {
     state_file: PathBuf,
     /// Persistent data directory root.
     data_dir: PathBuf,
+    /// Application-supplied user plugin installation directory.
+    user_plugins_dir: PathBuf,
     /// Project root for resolving Project/Local scopes.
     project_root: Option<PathBuf>,
 }
 
 impl PluginRegistry {
-    /// Create a new registry with the default state file location.
-    ///
-    /// State and data paths resolve under the configurable plugin base dir
-    /// ([`super::plugin_data_base_dir`], default `~/.echo-agent`); applications
-    /// override it at startup via [`super::set_plugin_data_base_dir`] so plugin
-    /// data co-locates with their brand directory (e.g. `~/.eko`).
-    pub fn new(project_root: Option<PathBuf>) -> Self {
-        let base = super::plugin_data_base_dir();
+    /// Create a registry under an explicit application data root.
+    pub fn new(data_root: impl Into<PathBuf>, project_root: Option<PathBuf>) -> Self {
+        let base = data_root.into();
+        let user_plugins_dir = base.join("plugins");
         let state_file = base.join("plugins").join("registry.json");
         let data_dir = base.join("plugins").join("data");
 
@@ -111,6 +109,7 @@ impl PluginRegistry {
             plugins: HashMap::new(),
             state_file,
             data_dir,
+            user_plugins_dir,
             project_root,
         }
     }
@@ -121,10 +120,15 @@ impl PluginRegistry {
         data_dir: PathBuf,
         project_root: Option<PathBuf>,
     ) -> Self {
+        let user_plugins_dir = state_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| data_dir.clone());
         Self {
             plugins: HashMap::new(),
             state_file,
             data_dir,
+            user_plugins_dir,
             project_root,
         }
     }
@@ -147,7 +151,7 @@ impl PluginRegistry {
         let mut total = 0;
 
         for scope in scopes {
-            let dir = scope.resolve_dir(self.project_root.as_deref());
+            let dir = scope.resolve_dir(&self.user_plugins_dir, self.project_root.as_deref());
             let count = self.scan_scope_dir(*scope, &dir)?;
             total += count;
         }
@@ -300,7 +304,7 @@ impl PluginRegistry {
         source: &InstallSource,
         scope: PluginScope,
     ) -> Result<PluginId, String> {
-        let target_dir = scope.resolve_dir(self.project_root.as_deref());
+        let target_dir = scope.resolve_dir(&self.user_plugins_dir, self.project_root.as_deref());
         std::fs::create_dir_all(&target_dir)
             .map_err(|e| format!("Failed to create plugin directory: {e}"))?;
 
@@ -411,7 +415,7 @@ impl PluginRegistry {
         target_dir: &Path,
         scope: PluginScope,
     ) -> Result<PluginId, String> {
-        // EKO is a local user-controlled application. Accept the standard
+        // embedding application is a local user-controlled application. Accept the standard
         // encrypted Git transports, including private repositories over SSH;
         // reject only cleartext/obviously malformed remote inputs.
         let supported = url.starts_with("https://")
@@ -654,11 +658,12 @@ impl PluginRegistry {
             .project_root
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| entry.root.clone()));
-        Ok(
-            super::PluginVariables::new(&entry.manifest.name, entry.root.clone(), project_dir)
-                .with_plugin_data(self.data_dir_for(plugin_id))
-                .with_json_user_config(&entry.user_config),
+        Ok(super::PluginVariables::new(
+            entry.root.clone(),
+            self.data_dir_for(plugin_id),
+            project_dir,
         )
+        .with_json_user_config(&entry.user_config))
     }
 
     /// List all installed plugins.

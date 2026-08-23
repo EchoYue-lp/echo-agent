@@ -6,7 +6,7 @@
 //!
 //! ## Architecture role
 //!
-//! This module provides the shared hook dispatch and extension layer. EKO is a
+//! This module provides the shared hook dispatch and extension layer. embedding application is a
 //! local, user-controlled application, so user-configured commands, local HTTP
 //! endpoints, and MCP tools are treated as trusted extensions. Registration
 //! still rejects malformed configuration and accidental runaway timeouts.
@@ -72,7 +72,7 @@
 //! | `agent` | Invoke a configured subagent |
 //! | `activate_skill` | Activate a discovered skill directly |
 //!
-//! ## YAML format (SKILL.md frontmatter or echo-agent.yaml)
+//! ## YAML format (SKILL.md frontmatter or application configuration)
 //!
 //! ```yaml
 //! hooks:
@@ -1394,7 +1394,7 @@ fn parse_hook_output(stdout: &str, stderr: &str, exit_code: i32) -> HookResult {
             }
         }
 
-        // Portable Codex/Claude hook output fields. EKO keeps its native flat
+        // Portable Codex/Claude hook output fields. embedding application keeps its native flat
         // fields below, while accepting these nested fields for plugin reuse.
         if let Some(decision) = hook_specific
             .get("permissionDecision")

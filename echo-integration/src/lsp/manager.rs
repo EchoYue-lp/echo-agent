@@ -233,10 +233,12 @@ languages:
     }
 
     #[tokio::test]
-    #[ignore = "opt-in live LSP smoke test; set EKO_LSP_SMOKE=1"]
+    #[ignore = "opt-in live LSP smoke test; set ECHO_AGENT_LSP_SMOKE=1"]
     async fn live_installed_servers_initialize_on_real_project_fixture() -> Result<(), String> {
-        if std::env::var("EKO_LSP_SMOKE").as_deref() != Ok("1") {
-            return Err("set EKO_LSP_SMOKE=1 before running ignored LSP smoke tests".to_string());
+        if std::env::var("ECHO_AGENT_LSP_SMOKE").as_deref() != Ok("1") {
+            return Err(
+                "set ECHO_AGENT_LSP_SMOKE=1 before running ignored LSP smoke tests".to_string(),
+            );
         }
         let project = tempfile::tempdir().map_err(|error| error.to_string())?;
         fs::create_dir_all(project.path().join("src")).map_err(|error| error.to_string())?;

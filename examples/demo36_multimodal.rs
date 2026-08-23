@@ -7,20 +7,20 @@
 //!
 //! # 前置条件
 //!
-//! 在 `echo-agent.yaml` 中把 `model.name` 指向一个支持视觉的模型，并在
+//! 在 `application configuration` 中把 `model.name` 指向一个支持视觉的模型，并在
 //! `models.*` 中声明对应 provider 配置。密钥仍可通过 YAML 里的 `${ENV}` 注入。
 //!
 //! # 运行方式
 //!
 //! ```bash
-//! # 使用默认搜索路径中的 echo-agent.yaml
+//! # 使用默认搜索路径中的 application configuration
 //! cargo run --example demo36_multimodal
 //!
 //! # 或者显式指定配置文件路径
-//! ECHO_AGENT_CONFIG=/path/to/echo-agent.yaml cargo run --example demo36_multimodal
+//! ECHO_AGENT_CONFIG=/path/to/application configuration cargo run --example demo36_multimodal
 //! ```
-use echo_agent::config::load_config;
 use echo_agent::prelude::*;
+mod support;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -140,8 +140,7 @@ async fn demo_live_multiple_images(config: &LlmConfig) -> echo_agent::error::Res
 }
 
 fn require_yaml_model() -> echo_agent::error::Result<LlmConfig> {
-    let app_config = load_config(None);
-    let config = app_config.resolve_llm_config(None).map_err(|error| {
+    let config = support::llm_config(None).map_err(|error| {
         echo_agent::error::ReactError::Other(format!(
             "demo36 需要显式配置 provider 和视觉模型：{error}"
         ))

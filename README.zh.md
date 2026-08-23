@@ -14,7 +14,7 @@
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20%E5%85%BC%E5%AE%B9-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/runtime-tokio-blue)](https://tokio.rs/)
 
-[English](./README.md) &middot; [文档中心](./docs/zh/README.md) &middot; [Rust 学习指南](./docs/zh/rust-learning/README.md) &middot; [示例](./examples/) &middot; [更新日志](./CHANGELOG.md)
+[English](./README.md) &middot; [文档中心](./docs/zh/README.md) &middot; [Rust 学习指南](./echo-rust-learning/docs/zh/README.md) &middot; [示例](./examples/) &middot; [更新日志](./CHANGELOG.md)
 
 </div>
 
@@ -245,96 +245,20 @@ echo-agent/
 ├── echo-orchestration/  工作流、人工审批和 DAG 任务
 ├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
 ├── echo-tools/          领域工具：chart、data、database、git、media、web、rag
+├── echo-agent-examples/ 不发布的 facade 外部消费者示例
 ├── echo-rust-learning/  非发布的 Rust 教学 crate 与离线练习
 ├── src/                 Agent 引擎、重导出和门面层
 ├── examples/            可运行的框架功能示例
-├── docs/                双语文档（en + zh）
-└── echo-agent.example.yaml  示例配置
+└── docs/                框架消费者文档（en + zh）
 ```
 
 > **注意：** `echo-agent` 是纯库框架。开箱即用的应用（含 CLI、Web UI、WebSocket）请参见 [echo-agent-cli](https://github.com/EchoYue-lp/echo-agent-cli)。
 
 ---
 
-## 配置
+## 运行时配置
 
-在项目根目录创建应用配置 `echo-agent.yaml`：
-
-```yaml
-model:
-  default_model_id: openai:gpt-5.6-sol
-  provider: openai
-  name: gpt-5.6-sol
-  max_tokens: 4096
-  temperature: 0.7
-
-model_providers:
-  openai:
-    name: OpenAI
-    base_url: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    default_api_protocol: responses
-    requires_api_key: true
-
-configured_models:
-  - id: openai:gpt-5.6-sol
-    display_name: GPT-5.6 Sol
-    provider: openai
-    model: gpt-5.6-sol
-    api_protocol: responses
-    input_modalities: [text, image]
-    enabled: true
-
-agent:
-  name: my-assistant
-  system_prompt: "你是一个有帮助的助手。"
-  max_iterations: 10
-  enable_tools: true
-  enable_memory: true
-
-channels:
-  qq:
-    enabled: false
-    app_id: ${QQ_APP_ID}
-    client_secret: ${QQ_CLIENT_SECRET}
-  feishu:
-    enabled: false
-    app_id: ${FEISHU_APP_ID}
-    app_secret: ${FEISHU_APP_SECRET}
-    mode: long_poll
-  session:
-    timeout_minutes: 60
-    reset_keywords: ["重置对话", "新对话", "清除记忆"]
-    reset_commands: ["/reset", "/clear", "/new"]
-
-mcp:
-  config_path: ./mcp.json
-
-server:
-  host: 0.0.0.0
-  port: 3000
-
-logging:
-  level: info
-```
-
-说明：
-
-- `model_providers:` 保存连接和认证；`configured_models:` 保存每个模型明确选择的协议以及文本/图片/音频/视频输入能力。
-- 思考控制由框架根据 Provider endpoint、API 协议和模型名集中解析，不需要用户配置厂商原始字段。
-
-通过环境变量设置密钥：
-
-```bash
-export DASHSCOPE_API_KEY=sk-xxx      # 阿里云 Qwen
-export DEEPSEEK_API_KEY=sk-xxx       # DeepSeek
-export OPENAI_API_KEY=sk-xxx         # OpenAI
-export ANTHROPIC_API_KEY=sk-ant-xxx  # Anthropic
-export QQ_APP_ID=your-qq-app-id
-export QQ_CLIENT_SECRET=your-qq-client-secret
-export FEISHU_APP_ID=your-feishu-app-id
-export FEISHU_APP_SECRET=your-feishu-app-secret
-```
+框架接收类型化的 `FrameworkConfig`、`AgentConfig`、`LlmConfig`、`PermissionMode` 和显式 `DataRoot`，不发现产品 YAML，也不选择 home 下的数据目录。参见[运行时配置](docs/zh/28-config-reference.md)。
 
 ---
 
@@ -840,7 +764,7 @@ agent.set_circuit_breaker(cb_config);
 
 | 主题 | English | 中文 |
 |------|---------|------|
-| 面向贡献者的 Rust 教程 | — | [ZH](docs/zh/rust-learning/README.md) |
+| 面向贡献者的 Rust 教程 | — | [ZH](echo-rust-learning/docs/zh/README.md) |
 | ReAct Agent | [EN](docs/en/01-react-agent.md) | [ZH](docs/zh/01-react-agent.md) |
 | 工具系统 | [EN](docs/en/02-tools.md) | [ZH](docs/zh/02-tools.md) |
 | 记忆系统 | [EN](docs/en/03-memory.md) | [ZH](docs/zh/03-memory.md) |

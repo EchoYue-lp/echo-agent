@@ -18,6 +18,7 @@
 //! # 基础运行（需要 LLM API Key）
 //! QWEN_API_KEY=your_key cargo run --example demo48_personal_assistant --features sqlite,tasks,subagent
 //! ```
+mod support;
 
 use echo_agent::memory::SqliteStore;
 use echo_agent::prelude::*;
@@ -448,7 +449,7 @@ async fn demo_multimodal_support() -> Result<()> {
     let preview: String = response.chars().take(100).collect();
     println!("    回复: {}...\n", preview);
 
-    println!("  注意: 实际图片分析需要在 echo-agent.yaml 中把 model.name 设为视觉模型");
+    println!("  注意: 实际图片分析需要在 application configuration 中把 model.name 设为视觉模型");
     println!("    例如 `qwen3.7-plus` 或 `gpt-5.5`，并确保它已在 models 中声明\n");
 
     Ok(())
@@ -481,15 +482,9 @@ fn cleanup_sqlite_files(path: &Path) {
 }
 
 fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<LlmConfig> {
-    let app_config = echo_agent::config::load_config(None);
-    preferred
-        .map(|selector| app_config.resolve_llm_config(Some(selector)))
-        .transpose()
-        .and_then(|preferred| preferred.map_or_else(|| app_config.resolve_llm_config(None), Ok))
-        .or_else(|_| app_config.resolve_llm_config(None))
-        .map_err(|error| {
-            echo_agent::error::ReactError::Other(format!(
-                "综合验收失败：缺少显式 provider/model 配置：{error}"
-            ))
-        })
+    support::llm_config(preferred).map_err(|error| {
+        echo_agent::error::ReactError::Other(format!(
+            "demo48 requires explicit provider/model environment settings: {error}"
+        ))
+    })
 }

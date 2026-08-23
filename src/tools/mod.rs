@@ -116,6 +116,41 @@ pub mod research {
     pub use echo_tools::research::*;
 }
 
+#[cfg(feature = "chart")]
+pub mod chart {
+    pub use echo_tools::chart::*;
+}
+
+#[cfg(feature = "data")]
+pub mod data {
+    pub use echo_tools::data::*;
+}
+
+#[cfg(feature = "data")]
+pub mod data_quality {
+    pub use echo_tools::data_quality::*;
+}
+
+#[cfg(feature = "database")]
+pub mod database {
+    pub use echo_tools::database::*;
+}
+
+#[cfg(feature = "git")]
+pub mod git {
+    pub use echo_tools::git::*;
+}
+
+#[cfg(feature = "rag")]
+pub mod rag {
+    pub use echo_tools::rag::*;
+}
+
+#[cfg(feature = "statistics")]
+pub mod statistics {
+    pub use echo_tools::statistics::*;
+}
+
 /// LSP tools — language server integration
 #[cfg(feature = "lsp")]
 pub mod lsp;
@@ -125,14 +160,11 @@ pub mod execution {
     pub use echo_execution::tools::*;
 }
 
-pub use echo_core::tools::{ParamValue, ToolCallParams};
+pub use echo_core::tools::*;
 pub use echo_execution::tools::{
-    ScriptExecutionProfile, ScriptExecutionProfileResolver, Tool, ToolBudgetMetricsSnapshot,
-    ToolContext, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolManager,
-    ToolOutputChannel, ToolParameters, ToolRecoveryAction, ToolResult, ToolResultContent,
-    ToolRiskLevel, ToolRunner, ToolSchemaStats, ToolSearchTool, ToolSideEffect, ToolStreamEvent,
+    ToolBudgetMetricsSnapshot, ToolManager, ToolSchemaStats, ToolSearchTool,
 };
-pub use echo_tools::{register_all_tools, register_readonly_tools};
+pub use echo_tools::{StandardToolPack, register_all_tools, register_readonly_tools};
 
 // ── Common file tool classification ──────────────────────────────────────────
 

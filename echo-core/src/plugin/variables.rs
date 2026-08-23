@@ -33,8 +33,7 @@ pub struct PluginVariables {
 
 impl PluginVariables {
     /// Create a new set of variables for a plugin.
-    pub fn new(plugin_name: &str, plugin_root: PathBuf, project_dir: PathBuf) -> Self {
-        let plugin_data = Self::data_dir_for(plugin_name);
+    pub fn new(plugin_root: PathBuf, plugin_data: PathBuf, project_dir: PathBuf) -> Self {
         Self {
             plugin_root,
             plugin_data,
@@ -64,32 +63,10 @@ impl PluginVariables {
         self
     }
 
-    /// Override the persistent data directory selected by the default plugin
-    /// base path. Embedded runtimes use this to keep variables aligned with
-    /// their configured registry data directory.
+    /// Override the persistent data directory.
     pub fn with_plugin_data(mut self, plugin_data: PathBuf) -> Self {
         self.plugin_data = plugin_data;
         self
-    }
-
-    /// Get the persistent data directory path for a named plugin.
-    ///
-    /// Located at `<plugin_base>/plugins/data/{plugin-name}/` (default
-    /// `~/.echo-agent/plugins/data/...`; app-overridable via
-    /// [`super::set_plugin_data_base_dir`]).
-    pub fn data_dir_for(plugin_name: &str) -> PathBuf {
-        let sanitized = plugin_name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>();
-
-        super::plugins_child("data").join(sanitized)
     }
 
     /// Substitute all variables in a string.
@@ -218,8 +195,8 @@ mod tests {
     #[test]
     fn test_resolve_path() {
         let vars = PluginVariables::new(
-            "test",
             PathBuf::from("/home/user/.echo-agent/plugins/test"),
+            PathBuf::from("/home/user/.echo-agent/plugins/data/test"),
             PathBuf::from("/home/user/project"),
         );
 
@@ -227,13 +204,6 @@ mod tests {
             vars.resolve_path("./skills/my-skill"),
             PathBuf::from("/home/user/.echo-agent/plugins/test/skills/my-skill")
         );
-    }
-
-    #[test]
-    fn test_data_dir_sanitization() {
-        let dir = PluginVariables::data_dir_for("my-plugin@marketplace");
-        assert!(dir.to_string_lossy().contains("my-plugin-marketplace"));
-        assert!(!dir.to_string_lossy().contains('@'));
     }
 
     #[test]

@@ -1670,8 +1670,8 @@ async fn plugin_skill_variables_cover_frontmatter_hooks_and_body() -> Result<(),
     .map_err(|error| format!("write skill file: {error}"))?;
 
     let variables = crate::plugin::PluginVariables::new(
-        "configured-plugin",
         base.clone(),
+        base.join("plugin-data/configured-plugin"),
         base.join("project"),
     )
     .with_user_config(std::collections::HashMap::from([(

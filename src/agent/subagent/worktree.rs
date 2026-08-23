@@ -11,7 +11,7 @@
 //! # Why a framework trait (not a concrete impl)
 //!
 //! Worktree creation is git-subprocess + branch-naming + lifecycle bookkeeping
-//! — all product-form concerns that live in the application layer (EKO's
+//! — all product-form concerns that live in the application layer (embedding application's
 //! `RunWorktree` / `UnattendedWriteMode`). The framework (`echo_agent`) must
 //! not depend on the application, so it defines this trait and lets the
 //! application supply the concrete factory. The framework only needs the

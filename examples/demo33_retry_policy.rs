@@ -31,6 +31,8 @@
 //! cargo run --example demo33_retry_policy
 //! ```
 
+mod support;
+
 use echo_agent::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -266,8 +268,7 @@ async fn demo_llm_retry() -> Result<()> {
     use echo_agent::llm::types::Message;
     use echo_agent::llm::{ChatRequest, LlmClient};
 
-    let app_config = echo_agent::config::load_config(None);
-    let llm_config = app_config.resolve_llm_config(None)?;
+    let llm_config = support::llm_config(None)?;
     let client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
 
     // 5.1 模拟网络波动场景

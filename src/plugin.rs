@@ -9,7 +9,7 @@
 //! use echo_agent::plugin::{PluginRegistry, PluginScope, InstallSource, PluginIntegrator};
 //!
 //! # fn main() -> std::io::Result<()> {
-//! let mut registry = PluginRegistry::new(None);
+//! let mut registry = PluginRegistry::new("/var/lib/my-agent", None);
 //! registry.scan_all()?;
 //!
 //! for entry in registry.list_enabled() {
@@ -25,7 +25,6 @@ pub use echo_core::plugin::{
     AGENT_PLUGIN_SCHEMA_V1, InstallSource, PluginAuthor, PluginCapability, PluginDependency,
     PluginEntry, PluginId, PluginLifecycle, PluginLifecycleManager, PluginManifest, PluginRegistry,
     PluginScope, PluginUserConfigEntry, PluginUserConfigType, PluginVariables, ResolvedComponents,
-    plugin_data_base_dir, set_plugin_data_base_dir, set_plugin_data_base_dir_name,
 };
 
 use std::collections::HashMap;
@@ -52,10 +51,10 @@ pub struct PluginWiringResult {
     /// Names of MCP servers connected.
     pub mcp_connected: Vec<String>,
     /// Agent definition files handed to the application-owned constructor.
-    /// EKO registers each definition together with its executable instance.
+    /// embedding application registers each definition together with its executable instance.
     pub agents_discovered: Vec<String>,
     /// LSP config files handed to the application layer. `ReactAgent` does not
-    /// own an `LspManager`; EKO starts and stops them in `PluginRuntimeService`.
+    /// own an `LspManager`; embedding application starts and stops them in `PluginRuntimeService`.
     pub lsp_discovered: Vec<String>,
     /// Non-fatal diagnostics for isolated standard component failures.
     pub warnings: Vec<String>,
@@ -74,7 +73,7 @@ impl PluginWiringResult {
     /// Total number of components wired into the agent.
     ///
     /// Application-owned categories are excluded from this framework-only
-    /// count; EKO reports their live counts in its reload summary.
+    /// count; embedding application reports their live counts in its reload summary.
     pub fn total_wired(&self) -> usize {
         self.skills_loaded.len() + self.hooks_registered.len() + self.mcp_connected.len()
     }
@@ -121,7 +120,7 @@ impl PluginIntegrator {
     ///
     /// LSP servers are resolved and reported (`lsp_discovered`) but not
     /// assembled by the generic framework because `ReactAgent` does not own an
-    /// `LspManager`. EKO-specific monitors, themes, and output styles are not
+    /// `LspManager`. embedding application-specific monitors, themes, and output styles are not
     /// part of this framework layer and are resolved by the application.
     pub async fn wire_all(
         &self,

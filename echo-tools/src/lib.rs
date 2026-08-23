@@ -36,6 +36,8 @@ pub mod security;
 #[cfg(feature = "shell")]
 #[cfg_attr(docsrs, doc(cfg(feature = "shell")))]
 pub mod shell;
+#[cfg(any(feature = "files", feature = "shell"))]
+pub mod skills;
 
 #[cfg(feature = "chart")]
 #[cfg_attr(docsrs, doc(cfg(feature = "chart")))]
@@ -92,4 +94,6 @@ pub mod word;
 pub mod worktree_tool;
 
 mod registry;
-pub use registry::{register_all_tools, register_all_tools_with_cells, register_readonly_tools};
+pub use registry::{
+    StandardToolPack, register_all_tools, register_all_tools_with_cells, register_readonly_tools,
+};
