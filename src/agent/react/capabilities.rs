@@ -429,7 +429,7 @@ impl ReactAgent {
     /// Force-compress the context using the installed compressor (or fallback
     /// SlidingWindowCompressor with window=40 if no compressor is installed).
     ///
-    /// Designed for manual compression triggers (GUI button, `/compact` CLI command).
+    /// Designed for manual compression triggers (desktop UI button, `/compact` CLI command).
     /// Fires PreCompact/PostCompact hooks with matcher `"manual"`.
     pub async fn force_compress_context(
         &self,

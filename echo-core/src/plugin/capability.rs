@@ -18,9 +18,6 @@ use serde::{Deserialize, Serialize};
 /// | `McpServer` | `McpManager` |
 /// | `LspServer` | `LspManager` |
 /// | `Agent` | `SubagentRegistry` |
-/// | `Monitor` | Background process manager |
-/// | `Theme` | UI theme registry |
-/// | `OutputStyle` | Agent response style projection |
 /// | `Tool` | `ToolManager` (native code plugins, future) |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,12 +34,6 @@ pub enum PluginCapability {
     Agent,
     /// Native code tools — registered with `ToolManager` (requires entry_point, future).
     Tool,
-    /// Background monitor processes (monitors.json).
-    Monitor,
-    /// Color theme definitions (themes/*.json).
-    Theme,
-    /// Custom response style definitions (output-styles/*.md).
-    OutputStyle,
 }
 
 impl PluginCapability {
@@ -55,9 +46,6 @@ impl PluginCapability {
             "lsp" | "lsp_server" | "lspserver" | "lsp_servers" => Some(Self::LspServer),
             "agent" | "agents" => Some(Self::Agent),
             "tool" | "tools" => Some(Self::Tool),
-            "monitor" | "monitors" => Some(Self::Monitor),
-            "theme" | "themes" => Some(Self::Theme),
-            "output_style" | "output_styles" | "outputstyle" => Some(Self::OutputStyle),
             _ => None,
         }
     }
@@ -71,9 +59,6 @@ impl PluginCapability {
             Self::LspServer => "LSP Servers",
             Self::Agent => "Agents",
             Self::Tool => "Tools",
-            Self::Monitor => "Monitors",
-            Self::Theme => "Themes",
-            Self::OutputStyle => "Output Styles",
         }
     }
 }

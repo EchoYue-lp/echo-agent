@@ -259,7 +259,7 @@ impl PermissionService {
 
     /// Replace only the UI/provider transport and keep existing session approvals.
     ///
-    /// GUI/Tauri installs a per-run provider before each message so concurrent
+    /// desktop UI/Tauri installs a per-run provider before each message so concurrent
     /// conversations stay isolated. That provider swap is not a permission
     /// boundary and must not erase approvals such as "approve for this session".
     pub fn replace_provider_preserving_cache(&self, provider: Arc<dyn super::HumanLoopProvider>) {
@@ -1451,7 +1451,7 @@ mod tests {
         assert_eq!(
             count.load(Ordering::SeqCst),
             1,
-            "GUI provider transport swaps must not erase session approvals"
+            "desktop UI provider transport swaps must not erase session approvals"
         );
     }
 

@@ -336,12 +336,12 @@ let transitions = curator.apply_transitions()?; // auto-transition by idle time
 
    ```rust
    use echo_agent::evolution::SkillDraftGenerator;
-   let gen = SkillDraftGenerator::new(".eko".into(), &change_log);
+   let gen = SkillDraftGenerator::new("<application-data>".into(), &change_log);
    let result = gen.generate_from_candidate(&candidate).await?;
    // result.skill_md_path points to the generated draft
    ```
 
-   EKO currently supplies `.eko`, so its drafts live at `.eko/skills/_drafts/<name>/SKILL.md`. That product-owned location should be verified against the [EKO app-core source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src).
+   embedding application currently supplies `<application-data>`, so its drafts live at `<application-data>/skills/_drafts/<name>/SKILL.md`. That product-owned location should be verified against the [embedding application app-core source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src).
 
 3. After human review, `/skill-promote <name>` moves Draft → Active and the skill appears in the skill catalog.
 
@@ -369,7 +369,7 @@ for report in monitor.analyze_all_skills().await? {
 
 ### Rule Promotion (product layer)
 
-`RulePromoter` is an EKO product policy, not a framework persistence contract. EKO currently reviews high-confidence memory proposals before writing approved rules to `.eko/learned-rules.md`; consult the [EKO app-core source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) for the authoritative thresholds and workflow.
+`RulePromoter` is an embedding application product policy, not a framework persistence contract. embedding application currently reviews high-confidence memory proposals before writing approved rules to `<application-data>/learned-rules.md`; consult the [embedding application app-core source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) for the authoritative thresholds and workflow.
 
 ### Security Hardening — `EvolutionSecurityGuard`
 
@@ -387,11 +387,11 @@ There are three automatic memory paths with strictly divided responsibilities to
 | System | Primary responsibility | Should NOT do |
 |--------|----------------------|---------------|
 | `TriggerDetector` (runtime) | Lightweight online discovery with exact source excerpts; direct persistence remains the framework default, while products may install `MemoryTriggerSink` | Session-archive summarization, product review policy |
-| `AutoMemory` (framework+app) | Session-end/manual-trigger observation extraction; the framework exposes an optional typed-memory writer, while EKO queues evidence candidates | Compression/eviction, runtime policy scheduling |
+| Application observation policy | Applications may extract observations and submit accepted facts through the typed-memory API | Compression/eviction, runtime policy scheduling |
 | `memory_promoter` (compression path) | Lifecycle management of messages compressed/evicted due to token pressure (persist, evict, demote) | New-preference discovery, UI-triggered extraction |
 | `BackgroundReviewer` (explicit/app-scheduled) | Evidence-linked JSON candidate from a finished run; proposal-only by default | Automatic durable writes or product scheduling policy |
 
-> Key constraint: any accepted typed memory that enters runtime recall **must** go through `MemoryLayerManager::write_memory`. EKO keeps inferred TriggerDetector/AutoMemory/BackgroundReviewer output in its workspace JSONL Review Inbox until the user accepts it.
+> Key constraint: any accepted typed memory that enters runtime recall **must** go through `MemoryLayerManager::write_memory`. Extraction and review policy belong to the embedding application.
 
 ---
 
@@ -414,7 +414,7 @@ There are three automatic memory paths with strictly divided responsibilities to
   curator_state.json               # Curator state
 ```
 
-Framework consumers may choose another path. EKO injects workspace-scoped files under `.eko/evolution/`, including `evidence-candidates.jsonl` and `curator-state.json`.
+Framework consumers may choose another path. embedding application injects workspace-scoped files under `<application-data>/evolution/`, including `evidence-candidates.jsonl` and `curator-state.json`.
 
 ## Store Namespaces
 

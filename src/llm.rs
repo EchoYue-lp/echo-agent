@@ -84,6 +84,11 @@ pub mod types {
     pub use echo_core::llm::types::*;
 }
 
+/// Provider-neutral prompt-cache contracts.
+pub mod cache {
+    pub use echo_core::llm::cache::*;
+}
+
 pub mod config {
     //! Compatibility re-export of provider config from `echo_integration`.
     pub use echo_integration::providers::config::*;

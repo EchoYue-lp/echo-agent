@@ -103,7 +103,7 @@ impl AgentChannelHandler {
     // They built a *bare* `ReactAgent` bypassing `AgentRuntime::bootstrap`, which
     // is the root cause of A1/C6/D7/E4 (channel agents had no state_store / store /
     // compressor / MemoryLayerManager / permission_service / cache_user_id).
-    // The EKO app layer now routes IM messages through `AgentPool::acquire`
+    // The embedding application app layer now routes IM messages through `AgentPool::acquire`
     // (see `echo-agent-cli` `AppChannelMessageHandler`), which gets the full
     // bootstrap-equivalent capability set. Framework callers/tests that need a
     // pre-configured agent should use `new(ReactAgent::new(config))` / `from_config`.

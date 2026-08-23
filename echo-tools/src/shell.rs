@@ -14,8 +14,9 @@ use echo_core::tools::cell::{
 };
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
-    Tool, ToolContext, ToolFailure, ToolFailureCategory, ToolOutputChannel, ToolParameters,
-    ToolResult, ToolResultKind, ToolRiskLevel, ToolSideEffect, ToolStreamEvent,
+    CommandPolicy, CommandPolicyDecision, Tool, ToolContext, ToolFailure, ToolFailureCategory,
+    ToolOutputChannel, ToolParameters, ToolResult, ToolResultKind, ToolRiskLevel, ToolSideEffect,
+    ToolStreamEvent,
 };
 use echo_core::utils::utf8::{IncrementalUtf8Decoder, split_utf8_chunks};
 use futures::future::BoxFuture;
@@ -119,14 +120,40 @@ static SANDBOX_SAFE_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(||
 });
 
 /// Command safety check result
-#[derive(Debug, Clone, PartialEq)]
-pub enum CommandSafety {
-    /// Safe to execute
-    Safe,
-    /// Requires additional confirmation
-    RequiresApproval(String),
-    /// Dangerous, execution rejected
-    Dangerous(String),
+pub type CommandSafety = CommandPolicyDecision;
+
+/// Default command policy used by [`ShellTool`].
+#[derive(Debug, Clone, Copy)]
+pub struct StandardCommandPolicy {
+    strict: bool,
+    sandboxed: bool,
+}
+
+impl StandardCommandPolicy {
+    pub fn strict() -> Self {
+        Self {
+            strict: true,
+            sandboxed: false,
+        }
+    }
+
+    pub fn permissive() -> Self {
+        Self {
+            strict: false,
+            sandboxed: false,
+        }
+    }
+
+    pub fn with_sandbox(mut self, sandboxed: bool) -> Self {
+        self.sandboxed = sandboxed;
+        self
+    }
+}
+
+impl CommandPolicy for StandardCommandPolicy {
+    fn evaluate(&self, command: &str) -> CommandPolicyDecision {
+        ShellTool::for_policy_evaluation(self.strict, self.sandboxed).check_command_safety(command)
+    }
 }
 
 /// Validate a shell command against the strict default safety policy.
@@ -141,7 +168,7 @@ pub enum CommandSafety {
 /// source) **must** call this before spawning a process and honor the
 /// returned [`CommandSafety`] verdict.
 pub fn validate_command_safety(command: &str) -> CommandSafety {
-    ShellTool::default().check_command_safety(command)
+    StandardCommandPolicy::strict().evaluate(command)
 }
 
 /// Shell command execution tool (with safety checks)
@@ -155,6 +182,8 @@ pub fn validate_command_safety(command: &str) -> CommandSafety {
 pub struct ShellTool {
     /// Whether strict mode is enabled (default true)
     strict_mode: bool,
+    command_policy: Option<Arc<dyn CommandPolicy>>,
+    policy_sandboxed: bool,
     /// Optional sandbox executor (interior-mutable so `Tool::set_sandbox`
     /// can inject it post-construction via `ToolManager::apply_sandbox`).
     sandbox: Mutex<Option<Arc<dyn SandboxExecutor>>>,
@@ -176,6 +205,8 @@ impl ShellTool {
     pub fn new() -> Self {
         Self {
             strict_mode: true,
+            command_policy: None,
+            policy_sandboxed: false,
             sandbox: Mutex::new(None),
             cell_launcher: None,
             timeout_secs: 60,
@@ -186,10 +217,29 @@ impl ShellTool {
     pub fn new_permissive() -> Self {
         Self {
             strict_mode: false,
+            command_policy: None,
+            policy_sandboxed: false,
             sandbox: Mutex::new(None),
             cell_launcher: None,
             timeout_secs: 60,
         }
+    }
+
+    fn for_policy_evaluation(strict_mode: bool, policy_sandboxed: bool) -> Self {
+        Self {
+            strict_mode,
+            command_policy: None,
+            policy_sandboxed,
+            sandbox: Mutex::new(None),
+            cell_launcher: None,
+            timeout_secs: 60,
+        }
+    }
+
+    /// Replace the default classifier with an application-supplied policy.
+    pub fn with_command_policy(mut self, policy: Arc<dyn CommandPolicy>) -> Self {
+        self.command_policy = Some(policy);
+        self
     }
 
     /// Set the sandbox executor; commands will be executed through the sandbox
@@ -328,11 +378,15 @@ impl ShellTool {
 
     /// Check whether a command is safe
     pub fn check_command_safety(&self, command: &str) -> CommandSafety {
+        if let Some(policy) = &self.command_policy {
+            return policy.evaluate(command);
+        }
         let has_sandbox = self
             .sandbox
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some();
+            .is_some()
+            || self.policy_sandboxed;
 
         // Check for shell metacharacters (prevent injection)
         // When sandbox is available, allow metacharacters — sandbox provides isolation

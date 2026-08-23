@@ -35,7 +35,7 @@ pub enum SubagentEvent {
         /// Task description being dispatched.
         task: String,
         /// Stable execution id from the caller's `ExternalRunContext`
-        /// (format `{task_id}:{attempt}` in EKO). `None` = legacy caller that
+        /// (format `{task_id}:{attempt}` in embedding application). `None` = legacy caller that
         /// has not opted in; bridges fall back to temp id allocation.
         /// Frontends should use this as the canonical `subagent_run_id`.
         execution_id: Option<String>,

@@ -9,6 +9,7 @@
 //! ```bash
 //! cargo run --example demo10_streaming
 //! ```
+mod support;
 
 use echo_agent::agent::{Agent, AgentEvent};
 use echo_agent::llm::types::Message;
@@ -76,8 +77,7 @@ async fn main() -> Result<()> {
 }
 
 async fn demo_raw_stream() -> echo_agent::error::Result<()> {
-    let app_config = echo_agent::config::load_config(None);
-    let llm_config = app_config.resolve_llm_config(None)?;
+    let llm_config = support::llm_config(None)?;
     let client = llm_config.build_client()?;
     let messages = vec![
         Message::system("你是一个助手，请用中文简洁作答。".to_string()),

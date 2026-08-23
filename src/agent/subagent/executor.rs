@@ -2735,7 +2735,7 @@ mod tests {
     // the message path can't be exercised in isolation. Subagent multimodal
     // forwarding is instead verified by: (1) the text-path dispatch tests
     // above, (2) compile-time coverage of the DispatchRequest.message field
-    // and execute_agent_streaming branch, and (3) GUI manual testing of
+    // and execute_agent_streaming branch, and (3) desktop UI manual testing of
     // attachment-bearing complex tasks. MockAgent retains the override +
     // message-recording fields so real agents and future test harnesses can
     // use them.

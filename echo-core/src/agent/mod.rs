@@ -592,14 +592,14 @@ pub trait Agent: Send + Sync {
     /// Execute a task and return the final answer.
     ///
     /// **Task-oriented**: resets/restores context, may run a planning phase
-    /// (if `tasks` feature is enabled), then enters the ReAct loop.
+    /// then enters the ReAct loop.
     /// Use this for standalone, single-round tasks where the agent starts fresh
     /// or resumes from a checkpoint.
     ///
     /// # ⚠️ Warning: Do NOT use for multi-turn chat UIs
     ///
     /// `execute()` **clears conversation history** on every call (only the
-    /// system prompt survives). Calling it in a REPL / TUI / chatbot loop
+    /// system prompt survives). Calling it in a REPL / terminal UI / chatbot loop
     /// will make the agent "forget" all previous turns.
     ///
     /// **Use [`chat()`](Agent::chat) instead** for any scenario where the
@@ -610,7 +610,7 @@ pub trait Agent: Send + Sync {
     /// | CLI one-shot command | `execute()` ✓ |
     /// | Workflow / pipeline node | `execute()` ✓ |
     /// | Batch processing (independent tasks) | `execute()` ✓ |
-    /// | REPL / TUI / chatbot | `chat()` ✓ |
+    /// | REPL / terminal UI / chatbot | `chat()` ✓ |
     /// | Multi-turn dialogue | `chat()` ✓ |
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>>;
 
@@ -671,7 +671,7 @@ pub trait Agent: Send + Sync {
     /// accumulates state across calls.
     ///
     /// **Prefer this over [`execute()`](Agent::execute)** for any UI that
-    /// sends multiple messages in sequence (REPL, TUI, chatbot, web chat).
+    /// sends multiple messages in sequence (REPL, terminal UI, chatbot, web chat).
     ///
     /// By default this delegates to [`Self::execute`]; concrete implementations
     /// (like `ReactAgent`) override it to avoid resetting context.

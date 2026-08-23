@@ -25,7 +25,7 @@
 //! # 带流式输出和彩色日志
 //! RUST_LOG=info QWEN_API_KEY=your_key cargo run --example demo45_customer_service --features sqlite,human-loop
 //!
-//! # 若要验证图片输入，请先在 echo-agent.yaml 中把 model.name 设为视觉模型
+//! # 若要验证图片输入，请先在 application configuration 中把 model.name 设为视觉模型
 //! cargo run --example demo45_customer_service --features sqlite,human-loop
 //! ```
 
@@ -35,7 +35,7 @@ use echo_agent::human_loop::{
 use echo_agent::memory::SqliteStore;
 use echo_agent::prelude::*;
 use echo_agent::tool;
-use echo_core::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
+use echo_agent::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
 use futures::StreamExt;
 use serde_json::json;
 use std::io::Write;

@@ -2349,24 +2349,9 @@ mod tests {
             .with_delay(Duration::from_secs(30));
         let agent = agent_with_mock_llm(llm);
 
-        // Set a cancel token on the agent so the think phase picks it up via
-        // the snapshot and passes it to the LLM client.
         let cancel = CancellationToken::new();
-        {
-            let mut guard = agent.cancel_token.lock().await;
-            *guard = Some(cancel.clone());
-        }
-
         // Start streaming — the LLM call will block for 30s unless cancelled.
-        let stream_fut = agent.run_stream_channel(
-            StreamInit {
-                text: "hello".into(),
-                message: None,
-                label: String::new(),
-                invocation: None,
-            },
-            StreamMode::Chat,
-        );
+        let stream_fut = agent.chat_stream_with_cancel("hello", cancel.clone());
 
         // Give the stream a moment to reach the LLM call.
         let stream = tokio::time::timeout(Duration::from_secs(2), stream_fut)

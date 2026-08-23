@@ -578,48 +578,33 @@ fn set_minimal_cmd_env(cmd: &mut tokio::process::Command, ctx: &PromptContext) {
 ///
 /// Skill `!`-blocks are arbitrary code sourced from a SKILL.md file (local or,
 /// in the future, fetched). When no sandbox is configured this validates the
-/// command against the strict default policy — the same gate `ShellTool` and
-/// `spawn_background_task` use — so a skill cannot use an inline shell block to
-/// run destructive commands (`rm -rf`, arbitrary metacharacters, etc.). Skills
-/// that genuinely need such commands must be routed through a sandbox.
+/// command against an execution-layer conservative gate, so a skill cannot use
+/// an inline shell block to run destructive commands (`rm -rf`, arbitrary
+/// metacharacters, etc.). Skills that need richer syntax must use a sandbox.
 ///
 /// Returns `Ok(())` if the command is safe, or `Err(reason)` describing the
 /// rejection.
 fn check_skill_command_safety(command: &str) -> std::result::Result<(), String> {
-    #[cfg(feature = "shell")]
+    const SHELL_META: &[char] = &['|', ';', '&', '$', '`', '>', '<', '(', ')', '\n', '\r'];
+    if command
+        .chars()
+        .any(|character| SHELL_META.contains(&character))
     {
-        use echo_tools::shell::{CommandSafety, validate_command_safety};
-        return match validate_command_safety(command) {
-            CommandSafety::Safe => Ok(()),
-            CommandSafety::RequiresApproval(reason) | CommandSafety::Dangerous(reason) => {
-                Err(reason)
-            }
-        };
+        return Err(
+            "Skill command contains shell metacharacters; sandbox execution required.".to_string(),
+        );
     }
-
-    // Fallback when the `shell` feature is disabled: a conservative inline gate.
-    #[allow(unreachable_code)]
-    {
-        const SHELL_META: &[char] = &['|', ';', '&', '$', '`', '>', '<', '(', ')', '\n', '\r'];
-        if command.chars().any(|c| SHELL_META.contains(&c)) {
-            return Err(
-                "Skill command contains shell metacharacters; sandbox execution required. \
-                 Enable the `shell` feature for the full safety classifier."
-                    .to_string(),
-            );
-        }
-        let base = command.split_whitespace().next().unwrap_or("");
-        let base = base.rsplit(['/', '\\']).next().unwrap_or(base);
-        if matches!(
-            base,
-            "rm" | "rmdir" | "mkfs" | "dd" | "shutdown" | "reboot" | "halt" | "poweroff"
-        ) {
-            return Err(format!(
-                "Skill command '{base}' is destructive; sandbox execution required"
-            ));
-        }
-        Ok(())
+    let base = command.split_whitespace().next().unwrap_or("");
+    let base = base.rsplit(['/', '\\']).next().unwrap_or(base);
+    if matches!(
+        base,
+        "rm" | "rmdir" | "mkfs" | "dd" | "shutdown" | "reboot" | "halt" | "poweroff"
+    ) {
+        return Err(format!(
+            "Skill command '{base}' is destructive; sandbox execution required"
+        ));
     }
+    Ok(())
 }
 
 // -- Tests --

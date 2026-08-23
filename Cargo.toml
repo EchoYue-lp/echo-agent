@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "echo-agent-examples",
     "echo-rust-learning",
     "echo-core",
     "echo-macros",
@@ -11,6 +12,7 @@ members = [
 ]
 default-members = [
     ".",
+    "echo-agent-examples",
     "echo-rust-learning",
     "echo-core",
     "echo-macros",
@@ -38,11 +40,10 @@ categories = ["development-tools", "asynchronous", "web-programming::http-client
 
 exclude = [
     "/examples/demo_skills/",
+    "/docs/internal/",
     ".github/",
     ".claude/",
     ".idea/",
-    "echo-agent.example.yaml",
-    "echo-agent.yaml",
     ".env",
     ".env1",
     ".example.env",
@@ -56,7 +57,7 @@ exclude = [
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "tasks", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
+features = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
 rustdoc-args = ["--cfg", "docsrs"]
 # NOTE: `data` feature (polars) is excluded because polars-ops 0.46–0.53 has a build.rs that
 # unconditionally enables `feature="nightly"` on nightly compilers, then uses
@@ -66,7 +67,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-full = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "tasks", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics", "testing"]
+full = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics", "testing"]
 a2a = ["dep:axum", "dep:jsonwebtoken"]
 mcp = ["echo_integration/mcp"]
 lsp = ["echo_core/lsp", "echo_integration/lsp"]
@@ -74,11 +75,8 @@ sqlite = ["echo_state/sqlite", "dep:rusqlite"]
 telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 human-loop = ["echo_orchestration/websocket"]
 topology = []
-tasks = []
-# `subagent` builds `src/agent/subagent/`, which imports `crate::tasks`
-# (Evidence type). Without `tasks` the `subagent` feature fails to compile on
-# its own — declare the dependency so `--features subagent` works standalone.
-subagent = ["tasks"]
+# Task APIs are part of the framework core; there is no separate task feature.
+subagent = []
 web = ["echo_tools/web"]
 media = ["echo_tools/media"]
 data = ["echo_tools/data"]
@@ -90,8 +88,8 @@ rag = ["echo_tools/rag"]
 chart = ["echo_tools/chart"]
 content-guard = ["echo_core/guard"]
 project-rules = []
-shell = ["echo_execution/shell", "echo_tools/shell"]
-files = ["echo_execution/files", "echo_tools/files"]
+shell = ["echo_tools/shell"]
+files = ["echo_tools/files"]
 research = ["echo_tools/research"]
 eval = []
 improve = []
@@ -153,7 +151,7 @@ required-features = ["sqlite", "human-loop", "content-guard"]
 
 [[example]]
 name = "demo48_personal_assistant"
-required-features = ["sqlite", "tasks", "subagent"]
+required-features = ["sqlite", "subagent"]
 
 [[example]]
 name = "demo46_data_analyst"
@@ -186,10 +184,6 @@ name = "demo25_macros"
 
 [[example]]
 name = "demo26_provider_factory"
-
-[[example]]
-name = "smoke_usage_passthrough"
-required-features = ["sqlite", "tasks", "subagent"]
 
 [[example]]
 name = "demo28_workflow"
@@ -333,11 +327,11 @@ name = "demo66_context_selector"
 
 [[example]]
 name = "demo67_progress"
-required-features = ["tasks"]
+required-features = []
 
 [[example]]
 name = "demo68_human_gate"
-required-features = ["tasks", "subagent", "human-loop"]
+required-features = ["subagent", "human-loop"]
 
 [[example]]
 name = "demo70_scheduler"

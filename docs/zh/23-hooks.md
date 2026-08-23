@@ -12,7 +12,7 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 
 ## Skills Hooks
 
-主 Hook 系统。通过 YAML 配置（`echo-agent.yaml` 或 SKILL.md frontmatter），由 `HookRegistry` 统一分发执行。
+主 Hook 系统。通过 YAML 配置（`application configuration` 或 SKILL.md frontmatter），由 `HookRegistry` 统一分发执行。
 
 ### Hook 事件
 
@@ -115,7 +115,7 @@ Task/Subagent 的取消与超时由对应终态事件的结构化 status 表达�
 | `HookSource` | 含义 | 注册入口 |
 |---|---|---|
 | `Skill(name)` | 来自文件型 skill 的 hooks | `HookRegistry::register` |
-| `UserConfig` | 来自用户配置（echo-agent.yaml 内嵌 + hooks.yaml 文件） | `HookRegistry::register_user_hooks` |
+| `UserConfig` | 来自用户配置（application configuration 内嵌 + hooks.yaml 文件） | `HookRegistry::register_user_hooks` |
 | `Plugin(name)` | 来自已安装插件的 hooks | `HookRegistry::register_plugin_hooks` |
 
 执行优先级：`UserConfig` < `Plugin` < `Skill`（见 `HookRegistry::run_hooks` 的 source 排序）。
@@ -207,7 +207,7 @@ shell 源码，因此安装路径包含空格或 shell 特殊字符时仍可正�
 退出码 `2` 会阻止操作，并把 stderr 作为面向用户的原因；其它非零退出仍不阻止，
 但会进入 HookResult 消息，不再只留在日志里。
 
-为复用可移植插件，EKO 也接受 Codex 风格的 `systemMessage` 与
+为复用可移植插件，embedding application 也接受 Codex 风格的 `systemMessage` 与
 `hookSpecificOutput` 字段：`additionalContext`、`permissionDecision`、
 `permissionDecisionReason`、`updatedInput`，以及 PermissionRequest 的
 `decision.behavior` 对象。所有进入模型上下文的文本都会先进行 UTF-8 安全的长度限制。
@@ -223,8 +223,8 @@ shell 源码，因此安装路径包含空格或 shell 特殊字符时仍可正�
 User、Skill、Plugin 三种来源统一使用同一套注册期 Action 校验：无效 Action
 会被记录并过滤，同一规则中的有效 Action 仍正常注册。
 
-EKO 会合并 `echo-agent.yaml` 内嵌 Hooks、全局 `~/.eko/hooks.yaml` 和项目
-`.eko/hooks.yaml`。监听器同时监控这三个目标；创建、修改、原子替换和删除都会触发重载，
+embedding application 会合并 `application configuration` 内嵌 Hooks、全局 `<application-data>/hooks.yaml` 和项目
+`<application-data>/hooks.yaml`。监听器同时监控这三个目标；创建、修改、原子替换和删除都会触发重载，
 因此删除 `hooks.yaml` 会立即移除其 Hook，无需重启。解析失败时保留 last-known-good
 注册表。CLI、TUI、GUI 的 Hook 测试均调用
 `HookRegistry::dry_run`，真实计算事件、matcher、来源和 Action，但不执行任何副作用。
@@ -238,7 +238,7 @@ EKO 会合并 `echo-agent.yaml` 内嵌 Hooks、全局 `~/.eko/hooks.yaml` 和项
 | 最大命令长度 | 32K 字符 | 拒绝明显畸形的 YAML |
 | 沙箱执行 | 可选 | Hook 可在沙箱内运行 |
 
-EKO 是用户本机上的可信个人助理。HTTP Hook 允许 loopback、私网和 link-local IP
+embedding application 是用户本机上的可信个人助理。HTTP Hook 允许 loopback、私网和 link-local IP
 字面量，以及 `localhost`、`nas` 这类单标签主机和以 `.local` / `.lan` 结尾的域名使用
 明文 HTTP；远程地址仍要求 HTTPS。用户配置的 headers 与 payload 会原样发送，命令
 诊断会对已替换的敏感值脱敏。MCP Hook 可调用用户所配置服务器暴露的任意工具，框架
@@ -360,4 +360,4 @@ let agent = ReactAgentBuilder::new()
     .build()?;
 ```
 
-Skills Hooks 通过 YAML 配置，从 `echo-agent.yaml` 或 SKILL.md 文件自动加载。
+Skills Hooks 通过 YAML 配置，从 `application configuration` 或 SKILL.md 文件自动加载。

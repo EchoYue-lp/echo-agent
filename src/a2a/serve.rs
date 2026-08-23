@@ -74,25 +74,6 @@ pub async fn serve_with_auth(
     serve_inner(server, bind_addr, jwt_config, DEFAULT_MAX_BODY_BYTES).await
 }
 
-/// Start A2A HTTP server (from `ServerConfig`, no auth).
-pub async fn serve_from_config(
-    server: A2AServer,
-    config: &crate::config::ServerConfig,
-) -> crate::error::Result<()> {
-    let addr = format!("{}:{}", config.host, config.port);
-    serve_inner(server, &addr, JwtConfig::disabled(), config.max_body_bytes).await
-}
-
-/// Start A2A HTTP server (from `ServerConfig`, with JWT auth)
-pub async fn serve_from_config_with_auth(
-    server: A2AServer,
-    config: &crate::config::ServerConfig,
-    jwt_config: JwtConfig,
-) -> crate::error::Result<()> {
-    let addr = format!("{}:{}", config.host, config.port);
-    serve_inner(server, &addr, jwt_config, config.max_body_bytes).await
-}
-
 /// Internal unified implementation
 async fn serve_inner(
     server: A2AServer,

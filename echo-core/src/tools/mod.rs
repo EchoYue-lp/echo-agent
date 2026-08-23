@@ -737,6 +737,106 @@ pub enum ToolRiskLevel {
     Dangerous,
 }
 
+/// Whether a tool can change state outside the current model invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolAccess {
+    /// The tool only observes state.
+    ReadOnly,
+    /// The tool may create, update, or delete state.
+    #[default]
+    Mutating,
+}
+
+/// Stable capability metadata used to compose and filter tool surfaces.
+///
+/// Capabilities describe what a tool can do. Approval policy remains a
+/// separate runtime concern, so applications can expose the same pack under
+/// different interaction policies without maintaining name-based allowlists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCapabilities {
+    pub access: ToolAccess,
+    pub risk: ToolRiskLevel,
+    pub permissions: Vec<permission::ToolPermission>,
+}
+
+impl ToolCapabilities {
+    pub fn read_only(permissions: Vec<permission::ToolPermission>) -> Self {
+        Self {
+            access: ToolAccess::ReadOnly,
+            risk: ToolRiskLevel::ReadOnly,
+            permissions,
+        }
+    }
+
+    pub fn mutating(risk: ToolRiskLevel, permissions: Vec<permission::ToolPermission>) -> Self {
+        Self {
+            access: ToolAccess::Mutating,
+            risk,
+            permissions,
+        }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.access == ToolAccess::ReadOnly
+    }
+}
+
+/// One concrete tool plus the capability facts used by a [`ToolPack`].
+pub struct ToolPackEntry {
+    pub tool: Box<dyn Tool>,
+    pub capabilities: ToolCapabilities,
+}
+
+impl ToolPackEntry {
+    pub fn new(tool: Box<dyn Tool>) -> Self {
+        let capabilities = tool.capabilities();
+        Self { tool, capabilities }
+    }
+
+    pub fn read_only(tool: Box<dyn Tool>) -> Self {
+        let permissions = tool.permissions();
+        Self {
+            tool,
+            capabilities: ToolCapabilities::read_only(permissions),
+        }
+    }
+}
+
+/// A reusable, named composition of tools.
+pub trait ToolPack: Send + Sync {
+    fn name(&self) -> &str;
+    fn tools(&self) -> Vec<ToolPackEntry>;
+
+    fn install(&self, registrar: &mut dyn ToolRegistrar) {
+        for entry in self.tools() {
+            registrar.register(entry.tool);
+        }
+    }
+
+    fn install_read_only(&self, registrar: &mut dyn ToolRegistrar) {
+        for entry in self
+            .tools()
+            .into_iter()
+            .filter(|entry| entry.capabilities.is_read_only())
+        {
+            registrar.register(entry.tool);
+        }
+    }
+}
+
+/// Result of applying a command policy before process execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandPolicyDecision {
+    Safe,
+    RequiresApproval(String),
+    Dangerous(String),
+}
+
+/// Policy contract for tools that execute local commands.
+pub trait CommandPolicy: Send + Sync {
+    fn evaluate(&self, command: &str) -> CommandPolicyDecision;
+}
+
 /// Trait for types that can register tools.
 ///
 /// Decouples tool registration from any concrete tool-manager implementation.
@@ -929,6 +1029,14 @@ pub trait Tool: Send + Sync {
     /// Risk level of this tool. Dangerous tools require explicit approval.
     fn risk_level(&self) -> ToolRiskLevel {
         ToolRiskLevel::Standard
+    }
+
+    /// Capability metadata used by tool packs and surface filters.
+    fn capabilities(&self) -> ToolCapabilities {
+        match self.risk_level() {
+            ToolRiskLevel::ReadOnly => ToolCapabilities::read_only(self.permissions()),
+            risk => ToolCapabilities::mutating(risk, self.permissions()),
+        }
     }
 
     /// Human-readable capability declaration (e.g. "Reads files", "Executes shell commands").

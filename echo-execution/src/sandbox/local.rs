@@ -582,7 +582,7 @@ fn code_invocation(
 // - **Windows**:local sandbox 本就是 `cmd /C` + 超时/输出截断的进程级后端,无 rlimit 概念。
 //
 // Claude Code 和 Codex 在所有平台的沙箱层都不设内存上限,真正的内存上限交给容器层
-// (cgroup)。EKO 沿用同一设计:`max_memory_bytes` 字段保留是给 Docker/K8s 路径用的,
+// (cgroup)。embedding application 沿用同一设计:`max_memory_bytes` 字段保留是给 Docker/K8s 路径用的,
 // local 后端(macOS/Linux/Windows)静默忽略它。Linux local 沙箱仍可用 bwrap 做
 // namespace 隔离(见 `build_bubblewrap_command`),只是不限内存。
 #[cfg(unix)]
@@ -1240,7 +1240,7 @@ mod tests {
     /// 给容器路径用的,local 路径上被忽略,见 `configure_command_process` 注释。
     ///
     /// 本测试的历史意义:它守护的是一次回归 —— 之前 macOS 上 `memory_bytes: Some`
-    /// 会让 spawn 直接 EINVAL(`os error 22`),GUI 任何代码执行都失败。现在带 limits
+    /// 会让 spawn 直接 EINVAL(`os error 22`),desktop UI 任何代码执行都失败。现在带 limits
     /// 也必须能成功 spawn。
     #[tokio::test]
     async fn execute_with_memory_limit_starts_os_sandbox_shell()
@@ -1268,7 +1268,7 @@ mod tests {
     }
 
     /// 同 [`execute_with_memory_limit_starts_os_sandbox_shell`],但走 Code 路径(python3 -c)。
-    /// 验证 GUI 用例 `print('hello from sandbox')` 能成功执行 —— 之前 macOS 上传
+    /// 验证 desktop UI 用例 `print('hello from sandbox')` 能成功执行 —— 之前 macOS 上传
     /// `memory_bytes: Some` 会让它 EINVAL。
     #[tokio::test]
     async fn execute_with_memory_limit_starts_os_sandbox_python_when_available()

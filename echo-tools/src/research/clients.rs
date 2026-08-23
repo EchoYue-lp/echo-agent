@@ -976,11 +976,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "opt-in live smoke test; set EKO_PROVIDER_SMOKE=1"]
+    #[ignore = "opt-in live smoke test; set ECHO_AGENT_PROVIDER_SMOKE=1"]
     async fn live_open_scholarly_providers_return_results() -> Result<()> {
-        if std::env::var("EKO_PROVIDER_SMOKE").as_deref() != Ok("1") {
+        if std::env::var("ECHO_AGENT_PROVIDER_SMOKE").as_deref() != Ok("1") {
             return Err(invalid(
-                "set EKO_PROVIDER_SMOKE=1 before running ignored provider smoke tests",
+                "set ECHO_AGENT_PROVIDER_SMOKE=1 before running ignored provider smoke tests",
             ));
         }
         let mailto = std::env::var("OPENALEX_MAILTO").ok();

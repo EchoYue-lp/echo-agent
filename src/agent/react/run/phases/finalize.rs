@@ -191,7 +191,7 @@ pub(crate) async fn emit_final_text(
     // Rich runtime checkpoint (messages + plan + skills + blocked reason)
     snap.save_runtime_checkpoint(context, None).await?;
     // Persist user-visible transcript projection — single source of truth
-    // for GUI/TUI history. Product layers should rely on this instead of
+    // for application UI history. Product layers should rely on this instead of
     // re-implementing save_messages on every chat turn.
     snap.save_transcript_projection(context).await;
     // Finalize trace before moving the answer into the event
@@ -249,7 +249,7 @@ pub(crate) async fn finalize_max_iterations(
     snap.save_runtime_checkpoint(context, Some("Max iterations exceeded".to_string()))
         .await?;
     // Even on failure we save the transcript so the user sees what was
-    // attempted in the GUI/TUI history pane.
+    // attempted in the application UI history pane.
     snap.save_transcript_projection(context).await;
     snap.finalize_run(
         crate::trace::RunStatus::Failed,

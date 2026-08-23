@@ -165,7 +165,7 @@ let decision = registry.check("read_file", &[ToolPermission::Read]);
 ### YAML 配置
 
 ```yaml
-# echo-agent.yaml
+# application configuration
 permissions:
   mode: "prompt"            # default | prompt | auto_allow | auto_deny
   rules:

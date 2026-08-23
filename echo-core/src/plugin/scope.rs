@@ -2,7 +2,7 @@
 //!
 //! | Scope | Path | Use case |
 //! |-------|------|----------|
-//! | `User` | `<plugin_base>/plugins/` (default `~/.echo-agent/plugins/`, app-overridable) | Personal plugins |
+//! | `User` | `<plugin_data_root>/plugins/` | Personal plugins |
 //! | `Project` | `.echo-agent/plugins/` (project root) | Team-shared via VCS |
 //! | `Local` | `.echo-agent/plugins.local/` (project root) | Project-private, gitignored |
 
@@ -26,8 +26,7 @@ pub enum PluginScope {
 impl PluginScope {
     /// Resolve the filesystem path for this scope.
     ///
-    /// - `User`: `<plugin_base>/plugins/` (default `~/.echo-agent/plugins/`,
-    ///   overridable via [`super::set_plugin_data_base_dir`])
+    /// - `User`: the application-supplied user plugin directory
     /// - `Project`: `<project_root>/.echo-agent/plugins/`
     /// - `Local`: `<project_root>/.echo-agent/plugins.local/`
     ///
@@ -35,9 +34,9 @@ impl PluginScope {
     /// user-scope override: they are workspace-relative convention directories,
     /// not user-data directories, and team-shared plugins committed to VCS must
     /// land at a stable path independent of any one developer's brand setting.
-    pub fn resolve_dir(&self, project_root: Option<&Path>) -> PathBuf {
+    pub fn resolve_dir(&self, user_plugins_dir: &Path, project_root: Option<&Path>) -> PathBuf {
         match self {
-            Self::User => super::plugins_dir(),
+            Self::User => user_plugins_dir.to_path_buf(),
             Self::Project => {
                 let root = project_root.unwrap_or_else(|| Path::new("."));
                 root.join(".echo-agent").join("plugins")
@@ -130,13 +129,16 @@ mod tests {
 
     #[test]
     fn test_scope_resolve_user() {
-        let dir = PluginScope::User.resolve_dir(None);
-        assert!(dir.to_string_lossy().contains(".echo-agent/plugins"));
+        let dir = PluginScope::User.resolve_dir(Path::new("/data/plugins"), None);
+        assert_eq!(dir, PathBuf::from("/data/plugins"));
     }
 
     #[test]
     fn test_scope_resolve_project() {
-        let dir = PluginScope::Project.resolve_dir(Some(Path::new("/home/user/my-project")));
+        let dir = PluginScope::Project.resolve_dir(
+            Path::new("/data/plugins"),
+            Some(Path::new("/home/user/my-project")),
+        );
         assert_eq!(
             dir,
             PathBuf::from("/home/user/my-project/.echo-agent/plugins")
@@ -145,7 +147,10 @@ mod tests {
 
     #[test]
     fn test_scope_resolve_local() {
-        let dir = PluginScope::Local.resolve_dir(Some(Path::new("/home/user/my-project")));
+        let dir = PluginScope::Local.resolve_dir(
+            Path::new("/data/plugins"),
+            Some(Path::new("/home/user/my-project")),
+        );
         assert_eq!(
             dir,
             PathBuf::from("/home/user/my-project/.echo-agent/plugins.local")

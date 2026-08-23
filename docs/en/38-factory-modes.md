@@ -7,7 +7,7 @@ agent with builder configuration, tools, prompts, skills, and invocation policy.
 The framework does not provide a `ModeEngine`, `AgentMode`, or built-in
 Coding/Research/Data/Writing mode state machine.
 
-Product modes such as EKO Chat/Task/Auto belong in the application layer. They may
+Product modes such as embedding application Chat/Task/Auto belong in the application layer. They may
 choose prompts and invocation-scoped tools, but they should not become model
 capabilities or framework runtime states.
 

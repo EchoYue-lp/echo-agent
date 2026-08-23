@@ -25,7 +25,7 @@ use super::types::{RawFrontmatter, SkillDescriptor};
 use crate::skills::hooks::HooksDefinition;
 
 const SKILL_FILE: &str = "SKILL.md";
-/// Hook definition file (EKO format) alongside SKILL.md.
+/// Hook definition file (embedding application format) alongside SKILL.md.
 /// Distinct from superpowers' Claude-Code-format hooks.json; assets are
 /// transcribed to this format at integration time.
 const HOOKS_FILE: &str = "hooks.json";
@@ -272,7 +272,7 @@ impl SkillLoader {
                 .await
                 {
                     Ok((mut desc, legacy_instr)) => {
-                        // Merge external hooks.json (EKO format) if present alongside SKILL.md.
+                        // Merge external hooks.json (embedding application format) if present alongside SKILL.md.
                         let hooks_path = path.join(HOOKS_FILE);
                         if hooks_path.exists() {
                             match tokio::fs::read_to_string(&hooks_path).await {
@@ -881,8 +881,8 @@ resources:
         )?;
 
         let variables = echo_core::plugin::PluginVariables::new(
-            "configured-plugin",
             root.clone(),
+            root.join("plugin-data/configured-plugin"),
             root.join("project"),
         )
         .with_user_config(std::collections::HashMap::from([(

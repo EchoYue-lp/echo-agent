@@ -173,7 +173,7 @@ impl ReactAgentBuilder {
         Self::new()
             .model(model)
             .system_prompt(system_prompt)
-            .build()
+            .build_strict()
     }
 
     /// Create a standard Agent (tools + chain-of-thought enabled)
@@ -185,7 +185,7 @@ impl ReactAgentBuilder {
             .name(name)
             .system_prompt(system_prompt)
             .enable_tools()
-            .build()
+            .build_strict()
     }
 
     /// Create a full-featured Agent (tools, memory, planning)
@@ -198,7 +198,7 @@ impl ReactAgentBuilder {
             .system_prompt(system_prompt)
             .enable_tools()
             .enable_memory()
-            .build()
+            .build_strict()
     }
     // ── Basic Configuration ─────────────────────────────────────────────────────
 
@@ -787,6 +787,14 @@ impl ReactAgentBuilder {
             )
             .into());
         }
+        // Validate an explicitly supplied provider contract before creating
+        // the agent. `ReactAgent::set_llm_config` keeps a non-fallible setter
+        // for compatibility, so without this check an invalid endpoint or
+        // protocol would be logged and the builder would still return an
+        // agent that cannot execute a turn.
+        if let Some(llm_config) = self.llm_config.as_ref() {
+            llm_config.build_client()?;
+        }
 
         let mut config = AgentConfig::new(&self.model, &self.name, &self.system_prompt)
             .enable_tool(self.enable_builtin_tools)
@@ -971,6 +979,23 @@ impl ReactAgentBuilder {
         }
 
         Ok(agent)
+    }
+
+    /// Build an executable agent and reject deferred LLM configuration.
+    ///
+    /// [`Self::build`] remains available for application bootstraps that
+    /// resolve a model after assembling the framework capabilities. Public
+    /// quick-start/preset entry points use this strict form so an agent cannot
+    /// be created without an invocation-capable LLM dependency.
+    pub fn build_strict(self) -> Result<ReactAgent> {
+        if self.llm_client.is_none() && self.llm_config.is_none() {
+            return Err(crate::error::ConfigError::MissingConfig(
+                "llm_client".to_string(),
+                "inject an LlmClient or LlmConfig before using build_strict".to_string(),
+            )
+            .into());
+        }
+        self.build()
     }
 
     /// Build the agent and return it as a trait object.

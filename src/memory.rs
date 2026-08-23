@@ -6,7 +6,7 @@
 //!   Backed by [`InMemoryStore`], [`FileStore`], or [`SqliteStore`] (requires feature `sqlite`).
 //!   Used for L3 memory promotion (compression evicts → write here → recall later).
 //! - **ConversationStore** — User-visible transcript projection (one row per
-//!   message, `StoredMessage` shape). Drives the GUI/TUI history panes.
+//!   message, `StoredMessage` shape). Drives the application UI history panes.
 //!   The framework persists this automatically at `run_core_loop` finalization.
 //! - **RuntimeStateStore** — ReAct runtime checkpoint (messages + plan +
 //!   active_skills + blocked_reason) used to resume an
@@ -42,6 +42,11 @@
 /// Direct re-exports from `echo_state::memory`.
 pub mod state {
     pub use echo_state::memory::*;
+}
+
+/// Long-term memory store contracts.
+pub mod store {
+    pub use echo_state::memory::store::*;
 }
 
 pub use echo_state::memory::*;

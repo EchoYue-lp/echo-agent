@@ -2,7 +2,7 @@
 
 ## Product Model
 
-EKO is coding-first. Built-in data tools inspect, clean, reshape, summarize, and visualize data. Formal statistical inference is performed by reviewable Python/R code written with the user, executed through the sandboxed `run_code` path, and preserved as task artifacts.
+embedding application is coding-first. Built-in data tools inspect, clean, reshape, summarize, and visualize data. Formal statistical inference is performed by reviewable Python/R code written with the user, executed through the sandboxed `run_code` path, and preserved as task artifacts.
 
 The framework does not implement its own p-value approximations or multivariable regression engine.
 

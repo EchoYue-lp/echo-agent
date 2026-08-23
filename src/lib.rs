@@ -42,6 +42,10 @@ pub mod eval;
 pub mod evolution;
 pub mod guard;
 pub mod headless;
+/// Framework hook contracts. Skill hook loading remains under [`skills::hooks`].
+pub mod hooks {
+    pub use echo_core::hooks::*;
+}
 #[cfg(feature = "improve")]
 #[cfg_attr(docsrs, doc(cfg(feature = "improve")))]
 pub mod improve;
@@ -146,7 +150,7 @@ pub mod prelude {
     // Prompt Template
     pub use echo_core::agent::{PromptTemplateManager, RunBudgetPolicy};
     // Config
-    pub use crate::config::AppConfig;
+    pub use crate::config::{AgentYamlConfig, FrameworkConfig, ModelConfig};
 
     /// Convenience alias for [`ReactAgentBuilder`], the canonical builder type.
     pub type AgentBuilder = ReactAgentBuilder;
@@ -163,11 +167,14 @@ pub mod prelude {
     // Tools
     pub use crate::tools::builtin::think::ThinkTool;
     pub use crate::tools::permission::{
-        DefaultPermissionPolicy, PermissionDecision, PermissionPolicy, ToolPermission,
+        DefaultPermissionPolicy, PermissionDecision, PermissionMode, PermissionPolicy,
+        ToolPermission,
     };
     pub use crate::tools::{
-        Tool, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolParameters,
-        ToolRecoveryAction, ToolResult, ToolRiskLevel, ToolSideEffect, ToolStreamEvent,
+        CommandPolicy, CommandPolicyDecision, StandardToolPack, Tool, ToolAccess, ToolCapabilities,
+        ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolPack, ToolPackEntry,
+        ToolParameters, ToolRecoveryAction, ToolResult, ToolRiskLevel, ToolSideEffect,
+        ToolStreamEvent,
     };
 
     // Web Tools
@@ -306,7 +313,7 @@ pub mod advanced {
     pub use crate::a2a::{
         A2AClient, A2AServer, A2AStreamEvent, AgentCapabilities, AgentCard, AgentProvider,
         AgentSkill, JwtClaims, JwtConfig, JwtConfigError, TaskState, get_claims, serve,
-        serve_from_config, serve_from_config_with_auth, serve_with_auth,
+        serve_with_auth,
     };
 
     #[cfg(feature = "topology")]

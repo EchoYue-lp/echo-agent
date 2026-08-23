@@ -93,15 +93,6 @@ impl AgentDispatchTool {
         self
     }
 
-    /// Shared updatable cancel handle for the parent run (P1-11).
-    ///
-    /// Returns a clone of the inner `Arc<Mutex<..>>`; the caller (the parent
-    /// agent) writes the active run's token into it each time a run starts, so
-    /// dispatches issued by this tool inherit cancellation.
-    pub fn cancel_handle(&self) -> Arc<tokio::sync::Mutex<Option<CancellationToken>>> {
-        self.cancel.clone()
-    }
-
     fn delegation_policy_from_context(
         ctx: Option<&ToolContext>,
     ) -> std::result::Result<NestedDelegationPolicy, String> {
@@ -118,7 +109,7 @@ impl AgentDispatchTool {
         }
     }
 
-    /// Build [`ExternalRunContext`] for GUI/TUI identity pinning.
+    /// Build [`ExternalRunContext`] for application UI identity pinning.
     ///
     /// Uses the formal run id when present and always preserves the chat turn id.
     /// `execution_id` has no `:` so the Tauri bridge uses the full string as
