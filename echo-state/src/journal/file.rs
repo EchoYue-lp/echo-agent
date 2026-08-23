@@ -11,6 +11,7 @@ use super::{
     JournalEvent, JournalRecord,
 };
 use echo_core::error::{ReactError, Result};
+use echo_core::utils::canonical_json::canonical_json_bytes;
 use echo_core::utils::fs::{
     ExclusiveFileLease, FileDurability, append_existing, atomic_write, create_dir_all_durable,
     read_existing, read_existing_from, read_existing_lines_from, truncate_existing,
@@ -18,6 +19,7 @@ use echo_core::utils::fs::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -472,17 +474,71 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct CheckpointFile<S> {
+const CHECKPOINT_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Serialize)]
+struct CheckpointIntegrity<'a> {
+    schema_version: u16,
     sequence: u64,
-    state: S,
+    state: &'a serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct StoredCheckpointRef<'a> {
+    schema_version: u16,
+    sequence: u64,
+    state: &'a serde_json::Value,
+    digest: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCheckpoint {
+    schema_version: u16,
+    sequence: u64,
+    state: serde_json::Value,
+    digest: String,
+}
+
+fn checkpoint_digest(
+    schema_version: u16,
+    sequence: u64,
+    state: &serde_json::Value,
+) -> Result<String> {
+    let bytes = canonical_json_bytes(&CheckpointIntegrity {
+        schema_version,
+        sequence,
+        state,
+    })
+    .map_err(|error| {
+        ReactError::Other(format!(
+            "failed to encode checkpoint integrity input: {error}"
+        ))
+    })?;
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len().saturating_mul(2));
+    for byte in digest {
+        encoded.push(lower_hex_digit(byte >> 4));
+        encoded.push(lower_hex_digit(byte & 0x0f));
+    }
+    Ok(encoded)
+}
+
+fn lower_hex_digit(nibble: u8) -> char {
+    match nibble {
+        0..=9 => char::from(b'0'.saturating_add(nibble)),
+        _ => char::from(b'a'.saturating_add(nibble.saturating_sub(10))),
+    }
 }
 
 /// Single-file [`CheckpointStore`] written with atomic replace.
 ///
 /// The snapshot is written to a temporary sibling and renamed, so readers
 /// observe either the previous or the new checkpoint, never a partial file. A
-/// missing file loads as `None`; a corrupt file is an error.
+/// missing file loads as `None`; a corrupt file is an error. The private disk
+/// frame is schema-versioned and protected by a SHA-256 checksum so valid JSON
+/// mutations cannot be mistaken for a trustworthy replay prefix. Sequence `0`
+/// is valid and represents a snapshot taken before the first journal event.
 #[derive(Debug)]
 pub struct FileCheckpointStore<S> {
     path: PathBuf,
@@ -506,9 +562,15 @@ impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
     for FileCheckpointStore<S>
 {
     fn save(&self, state: &S, through_sequence: u64) -> Result<()> {
-        let frame = CheckpointFile {
+        let state = serde_json::to_value(state).map_err(|error| {
+            ReactError::Other(format!("failed to encode checkpoint state: {error}"))
+        })?;
+        let digest = checkpoint_digest(CHECKPOINT_SCHEMA_VERSION, through_sequence, &state)?;
+        let frame = StoredCheckpointRef {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
             sequence: through_sequence,
-            state,
+            state: &state,
+            digest: &digest,
         };
         let bytes = serde_json::to_vec(&frame)
             .map_err(|error| ReactError::Other(format!("failed to encode checkpoint: {error}")))?;
@@ -526,12 +588,28 @@ impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(io_error(&context, error)),
         };
-        let frame: CheckpointFile<S> = serde_json::from_slice(&bytes).map_err(|error| {
+        let frame: StoredCheckpoint = serde_json::from_slice(&bytes).map_err(|error| {
             ReactError::Other(format!("{context}: corrupt checkpoint: {error}"))
+        })?;
+        if frame.schema_version != CHECKPOINT_SCHEMA_VERSION {
+            return Err(ReactError::Other(format!(
+                "{context}: unsupported checkpoint schema version {}; expected {CHECKPOINT_SCHEMA_VERSION}",
+                frame.schema_version
+            )));
+        }
+        let expected_digest =
+            checkpoint_digest(frame.schema_version, frame.sequence, &frame.state)?;
+        if frame.digest != expected_digest {
+            return Err(ReactError::Other(format!(
+                "{context}: checkpoint integrity digest mismatch"
+            )));
+        }
+        let state = serde_json::from_value(frame.state).map_err(|error| {
+            ReactError::Other(format!("{context}: corrupt checkpoint state: {error}"))
         })?;
         Ok(Some(CheckpointFrame {
             sequence: frame.sequence,
-            state: frame.state,
+            state,
         }))
     }
 }
@@ -542,7 +620,7 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
 
-    #[derive(Default, Serialize, Deserialize, Debug)]
+    #[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
     struct LensReducer {
         applied: u64,
     }
@@ -563,6 +641,18 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    fn mutate_checkpoint(
+        path: &Path,
+        mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) {
+        let bytes = std::fs::read(path).expect("read checkpoint fixture");
+        let mut frame: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("decode checkpoint fixture");
+        mutate(frame.as_object_mut().expect("checkpoint object"));
+        let bytes = serde_json::to_vec(&frame).expect("encode mutated checkpoint");
+        std::fs::write(path, bytes).expect("write mutated checkpoint");
     }
 
     #[test]
@@ -836,6 +926,98 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_integrity_round_trips_state_and_empty_sequence() {
+        let root = temp_root();
+        let checkpoint_path = root.join("checkpoint.json");
+        let store = FileCheckpointStore::<LensReducer>::open(&checkpoint_path);
+        let expected = LensReducer { applied: 7 };
+        store.save(&expected, 0).expect("save checkpoint");
+
+        let loaded = store
+            .load()
+            .expect("load checkpoint")
+            .expect("checkpoint exists");
+        assert_eq!(loaded.sequence, 0);
+        assert_eq!(loaded.state, expected);
+
+        let bytes = std::fs::read(&checkpoint_path).expect("read checkpoint");
+        let stored: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("decode stored checkpoint");
+        assert_eq!(
+            stored
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::from(CHECKPOINT_SCHEMA_VERSION))
+        );
+        assert_eq!(
+            stored
+                .get("digest")
+                .and_then(serde_json::Value::as_str)
+                .map(str::len),
+            Some(64)
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn checkpoint_rejects_state_sequence_digest_unknown_field_and_schema_tamper() {
+        enum Tamper {
+            State,
+            Sequence,
+            Digest,
+            UnknownField,
+            Schema,
+        }
+
+        for (label, tamper, expected_error) in [
+            ("state", Tamper::State, "digest mismatch"),
+            ("sequence", Tamper::Sequence, "digest mismatch"),
+            ("digest", Tamper::Digest, "digest mismatch"),
+            ("unknown", Tamper::UnknownField, "unknown field"),
+            ("schema", Tamper::Schema, "unsupported checkpoint schema"),
+        ] {
+            let root = temp_root();
+            let checkpoint_path = root.join(format!("{label}.json"));
+            let store = FileCheckpointStore::<LensReducer>::open(&checkpoint_path);
+            store
+                .save(&LensReducer { applied: 2 }, 2)
+                .expect("seed valid checkpoint");
+            mutate_checkpoint(&checkpoint_path, |frame| match tamper {
+                Tamper::State => {
+                    if let Some(state) = frame
+                        .get_mut("state")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        state.insert("applied".to_string(), serde_json::Value::from(99));
+                    }
+                }
+                Tamper::Sequence => {
+                    frame.insert("sequence".to_string(), serde_json::Value::from(99));
+                }
+                Tamper::Digest => {
+                    frame.insert(
+                        "digest".to_string(),
+                        serde_json::Value::String("0".repeat(64)),
+                    );
+                }
+                Tamper::UnknownField => {
+                    frame.insert("unexpected".to_string(), serde_json::Value::Bool(true));
+                }
+                Tamper::Schema => {
+                    frame.insert("schema_version".to_string(), serde_json::Value::from(99));
+                }
+            });
+
+            let error = store.load().expect_err("tampered checkpoint must fail");
+            assert!(
+                error.to_string().contains(expected_error),
+                "{label} tamper produced unexpected error: {error}"
+            );
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
     fn corrupt_checkpoint_is_an_error() {
         let root = temp_root();
         let store = FileCheckpointStore::<LensReducer>::open(root.join("checkpoint.json"));
@@ -875,6 +1057,56 @@ mod tests {
             .expect("load repaired checkpoint")
             .expect("repaired checkpoint exists");
         assert_eq!(repaired.sequence, 3);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reducer_replays_full_journal_and_repairs_valid_json_state_mutation() {
+        let root = temp_root();
+        let journal = std::sync::Arc::new(
+            FileEventJournal::<String>::open(root.join("events.jsonl"), FileDurability::Flush)
+                .expect("open journal"),
+        );
+        for value in ["one", "two", "three"] {
+            journal.append(value.to_string()).expect("append");
+        }
+        let checkpoint_path = root.join("checkpoint.json");
+        let store = FileCheckpointStore::<LensReducer>::open(&checkpoint_path);
+        store
+            .save(&LensReducer { applied: 2 }, 2)
+            .expect("save prefix checkpoint");
+        mutate_checkpoint(&checkpoint_path, |frame| {
+            if let Some(state) = frame
+                .get_mut("state")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                state.insert("applied".to_string(), serde_json::Value::from(200));
+            }
+        });
+        let mutated_bytes = std::fs::read(&checkpoint_path).expect("read mutated checkpoint");
+        assert!(serde_json::from_slice::<serde_json::Value>(&mutated_bytes).is_ok());
+
+        let reducer = CheckpointedReducer::new(
+            journal,
+            std::sync::Arc::new(FileCheckpointStore::<LensReducer>::open(&checkpoint_path)),
+            2,
+        );
+        let receipt = reducer
+            .recover()
+            .expect("recover from authoritative journal");
+        assert_eq!(receipt.last_applied_sequence, 3);
+        assert!(matches!(
+            receipt.checkpoint,
+            super::super::CheckpointRecoveryStatus::Rebuilt { .. }
+        ));
+        reducer.with_state(|state| assert_eq!(state.applied, 3));
+
+        let repaired = store
+            .load()
+            .expect("load repaired checkpoint")
+            .expect("repaired checkpoint exists");
+        assert_eq!(repaired.sequence, 3);
+        assert_eq!(repaired.state, LensReducer { applied: 3 });
         std::fs::remove_dir_all(root).ok();
     }
 

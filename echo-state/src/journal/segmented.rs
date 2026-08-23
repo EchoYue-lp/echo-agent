@@ -1404,7 +1404,7 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CheckpointedReducer, EventReducer, FileCheckpointStore};
+    use super::super::{CheckpointStore, CheckpointedReducer, EventReducer, FileCheckpointStore};
     use super::*;
     use std::sync::Barrier;
 
@@ -1461,12 +1461,9 @@ mod tests {
         let state = RetainedReducer {
             events: events.iter().map(|event| (*event).to_string()).collect(),
         };
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "sequence": sequence,
-            "state": state,
-        }))
-        .expect("encode checkpoint fixture");
-        std::fs::write(path, bytes).expect("write checkpoint fixture");
+        FileCheckpointStore::open(path)
+            .save(&state, sequence)
+            .expect("write checkpoint fixture");
     }
 
     #[test]
@@ -2362,33 +2359,30 @@ mod tests {
             .expect("prune prefix");
         let checkpoint_path = root.join("checkpoint.json");
 
-        for (label, contents) in [
-            ("corrupt", b"{partial".to_vec()),
-            (
-                "behind",
-                serde_json::to_vec(&serde_json::json!({
-                    "sequence": 1,
-                    "state": { "events": ["one"] },
-                }))
-                .expect("behind checkpoint"),
-            ),
-            (
-                "ahead",
-                serde_json::to_vec(&serde_json::json!({
-                    "sequence": 99,
-                    "state": { "events": [] },
-                }))
-                .expect("ahead checkpoint"),
-            ),
+        for (label, expected_error) in [
+            ("corrupt", "checkpoint load failed"),
+            ("behind", "behind retained journal floor"),
+            ("ahead", "ahead of journal sequence"),
         ] {
-            std::fs::write(&checkpoint_path, contents).expect("write checkpoint case");
+            match label {
+                "corrupt" => {
+                    std::fs::write(&checkpoint_path, b"{partial")
+                        .expect("write corrupt checkpoint");
+                }
+                "behind" => write_checkpoint(&checkpoint_path, 1, &["one"]),
+                "ahead" => write_checkpoint(&checkpoint_path, 99, &[]),
+                _ => {}
+            }
             let reducer = CheckpointedReducer::<_, RetainedReducer>::new(
                 Arc::clone(&journal),
                 Arc::new(FileCheckpointStore::open(&checkpoint_path)),
                 0,
             );
             let error = reducer.recover().expect_err(label);
-            assert!(error.to_string().contains("checkpoint"));
+            assert!(
+                error.to_string().contains(expected_error),
+                "{label} checkpoint produced unexpected error: {error}"
+            );
         }
         std::fs::remove_file(&checkpoint_path).expect("remove checkpoint");
         let missing = CheckpointedReducer::<_, RetainedReducer>::new(
