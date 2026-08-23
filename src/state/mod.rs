@@ -20,6 +20,57 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Sequenced event journal and checkpoint-reducer primitives.
+///
+/// Unknown outcomes retain the original [`PreparedJournalBatch`]. After
+/// reopening a file-backed authority, first perform a read-only lookup, then
+/// pass the same prepared value to `apply_batch`: an existing identity returns
+/// `AlreadyCommitted`, and the reducer folds only a not-yet-applied suffix.
+///
+/// ```
+/// use echo_agent::state::journal::{
+///     ApplyBatchReceipt, CheckpointStore, CheckpointedReducer, EventJournal, EventReducer,
+///     JournalBatchLookup, MemoryCheckpointStore, MemoryEventJournal, PreparedJournalBatch,
+/// };
+/// use std::sync::Arc;
+///
+/// #[derive(Default, serde::Serialize, serde::Deserialize)]
+/// struct Count(u64);
+/// impl EventReducer for Count {
+///     type Event = String;
+///     fn apply(&mut self, _event: &String) {
+///         self.0 = self.0.saturating_add(1);
+///     }
+/// }
+///
+/// fn resume_prepared<J, R>(
+///     journal: &J,
+///     reducer: &CheckpointedReducer<J, R>,
+///     prepared: PreparedJournalBatch<R::Event>,
+/// ) -> Result<ApplyBatchReceipt, String>
+/// where
+///     J: EventJournal<R::Event>,
+///     R: EventReducer,
+/// {
+///     if let JournalBatchLookup::Conflict { error } = journal
+///         .lookup_batch(&prepared)
+///         .map_err(|error| error.to_string())?
+///     {
+///         return Err(error);
+///     }
+///     reducer.apply_batch(prepared).map_err(|error| error.to_string())
+/// }
+///
+/// # fn main() -> Result<(), String> {
+/// let journal = Arc::new(MemoryEventJournal::<String>::new());
+/// let checkpoints: Arc<dyn CheckpointStore<Count>> = Arc::new(MemoryCheckpointStore::new());
+/// let reducer = CheckpointedReducer::new(Arc::clone(&journal), checkpoints, 8);
+/// let prepared = PreparedJournalBatch::new(vec!["one".to_string(), "two".to_string()])
+///     .map_err(|error| error.to_string())?;
+/// let receipt = resume_prepared(journal.as_ref(), &reducer, prepared)?;
+/// assert_eq!(receipt.record_count, 2);
+/// # Ok(())
+/// # }
+/// ```
 pub mod journal {
     pub use echo_state::journal::*;
 }

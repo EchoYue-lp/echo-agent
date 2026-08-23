@@ -3,17 +3,21 @@
 //! Kafka's log model uses immutable segments while offsets remain global. This
 //! implementation applies that storage shape to the framework journal: every
 //! segment name is its first global sequence, closed segments are immutable,
-//! and only the active segment may repair a crash-torn tail. LangGraph-style
+//! and only the active segment may repair a crash-torn batch frame. A batch is
+//! always contained by one segment; an oversized batch owns a segment. LangGraph-style
 //! checkpoints remain derived state above this authoritative event history;
 //! callers choose retention and pin policy by passing a keep cursor to prune.
-//! Each append may select `Flush` or `SyncData` without opening a second
+//! Each batch may select `Flush` or `SyncData` without opening a second
 //! authority; event classification remains a caller policy.
 //! Product stream identities, retention counts, and UI projections do not live
 //! in this module.
 
 use super::{
-    EventJournal, JournalAppendReceipt, JournalDurabilityStatus, JournalEvent, JournalRecord,
-    WeakRegistry,
+    BatchIdentity, EventJournal, JournalAppendError, JournalAppendReceipt, JournalAppendResult,
+    JournalBatchAppendError, JournalBatchAppendReceipt, JournalBatchAppendResult,
+    JournalBatchCommitStatus, JournalBatchLookup, JournalDurabilityStatus, JournalEvent,
+    JournalRecord, PreparedJournalBatch, WeakRegistry, decode_journal_batch, prepare_journal_frame,
+    verify_journal_batch_sequence,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
@@ -28,6 +32,7 @@ use echo_core::utils::fs::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::any::TypeId;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -44,27 +49,6 @@ fn journal_error(message: impl Into<String>) -> ReactError {
 
 fn io_error(context: &str, error: std::io::Error) -> ReactError {
     journal_error(format!("{context}: {error}"))
-}
-
-#[derive(Debug, Serialize)]
-struct IntegrityPayload<'a, E> {
-    sequence: u64,
-    event: &'a E,
-}
-
-#[derive(Debug, Serialize)]
-struct StoredRecordRef<'a, E> {
-    sequence: u64,
-    event: &'a E,
-    digest: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredRecord<E> {
-    sequence: u64,
-    event: E,
-    digest: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,10 +90,6 @@ fn lower_hex_digit(nibble: u8) -> char {
         0..=9 => char::from(b'0'.saturating_add(nibble)),
         _ => char::from(b'a'.saturating_add(nibble.saturating_sub(10))),
     }
-}
-
-fn record_digest<E: Serialize>(sequence: u64, event: &E) -> Result<String> {
-    integrity_digest(&IntegrityPayload { sequence, event })
 }
 
 fn retention_digest(
@@ -161,27 +141,6 @@ fn load_retention_marker(directory: &Path, context: &str) -> Result<Option<Reten
     Ok(Some(marker))
 }
 
-fn verify_record<E: JournalEvent>(
-    context: &str,
-    expected_sequence: u64,
-    record: &StoredRecord<E>,
-) -> Result<()> {
-    if record.sequence != expected_sequence {
-        return Err(journal_error(format!(
-            "{context}: journal sequence gap, expected {expected_sequence} but found {}",
-            record.sequence
-        )));
-    }
-    let expected_digest = record_digest(record.sequence, &record.event)?;
-    if record.digest != expected_digest {
-        return Err(journal_error(format!(
-            "{context}: integrity digest mismatch at sequence {}",
-            record.sequence
-        )));
-    }
-    Ok(())
-}
-
 fn segment_name(start_sequence: u64) -> String {
     format!("{start_sequence:020}{SEGMENT_SUFFIX}")
 }
@@ -231,7 +190,22 @@ struct SegmentState {
     end_sequence: u64,
     bytes: u64,
     record_offsets: Vec<u64>,
+    batches: Vec<SegmentBatchIndex>,
     active_file_guard: Option<Arc<ExistingRegularFileGuard>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SegmentBatchIndex {
+    batch_id: String,
+    identity: BatchIdentity,
+    frame_offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SegmentedBatchIndex {
+    identity: BatchIdentity,
+    path: PathBuf,
+    frame_offset: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +266,7 @@ fn scan_segment<E: JournalEvent>(
     let mut valid_len = 0_u64;
     let mut offset = 0_usize;
     let mut record_offsets = Vec::new();
+    let mut batches = Vec::<SegmentBatchIndex>::new();
     while offset < bytes.len() {
         let Some(newline) = bytes
             .get(offset..)
@@ -301,7 +276,7 @@ fn scan_segment<E: JournalEvent>(
                 break;
             }
             return Err(journal_error(format!(
-                "{context}: closed segment has an incomplete trailing record"
+                "{context}: closed segment has an incomplete trailing batch frame"
             )));
         };
         let line_end = offset
@@ -310,18 +285,32 @@ fn scan_segment<E: JournalEvent>(
         let line = bytes
             .get(offset..line_end)
             .ok_or_else(|| journal_error(format!("{context}: invalid segment byte range")))?;
-        let record: StoredRecord<E> = serde_json::from_slice(line).map_err(|error| {
+        let frame = decode_journal_batch::<E>(context, line)?;
+        if batches
+            .iter()
+            .any(|index| index.batch_id == frame.batch_id())
+        {
+            return Err(journal_error(format!(
+                "{context}: duplicate physical batch identity {}",
+                frame.batch_id()
+            )));
+        }
+        verify_journal_batch_sequence(context, expected, &frame)?;
+        let frame_offset = u64::try_from(offset)
+            .map_err(|_| journal_error(format!("{context}: segment exceeds supported size")))?;
+        record_offsets.extend(std::iter::repeat_n(frame_offset, frame.records().len()));
+        let record_count = u64::try_from(frame.records().len()).map_err(|_| {
             journal_error(format!(
-                "{context}: corrupt journal record at sequence {expected}: {error}"
+                "{context}: journal batch count exceeds supported range"
             ))
         })?;
-        verify_record(context, expected, &record)?;
-        record_offsets
-            .push(u64::try_from(offset).map_err(|_| {
-                journal_error(format!("{context}: segment exceeds supported size"))
-            })?);
+        batches.push(SegmentBatchIndex {
+            batch_id: frame.batch_id().to_string(),
+            identity: frame.identity()?,
+            frame_offset,
+        });
         expected = expected
-            .checked_add(1)
+            .checked_add(record_count)
             .ok_or_else(|| journal_error(format!("{context}: journal sequence exhausted")))?;
         offset = line_end
             .checked_add(1)
@@ -354,6 +343,7 @@ fn scan_segment<E: JournalEvent>(
         end_sequence: expected.saturating_sub(1),
         bytes: valid_len,
         record_offsets,
+        batches,
         active_file_guard,
     })
 }
@@ -411,6 +401,7 @@ fn create_segment(
         end_sequence: start_sequence.saturating_sub(1),
         bytes: 0,
         record_offsets: Vec::new(),
+        batches: Vec::new(),
         active_file_guard: Some(active_file_guard),
     })
 }
@@ -443,6 +434,7 @@ fn scan_directory<E: JournalEvent>(
             retained_floor: 1,
             cleanup_pending: false,
             marker_barrier_pending: false,
+            batches: HashMap::new(),
             poison: None,
         });
     }
@@ -515,6 +507,27 @@ fn scan_directory<E: JournalEvent>(
         .last()
         .and_then(|segment| segment.end_sequence.checked_add(1))
         .ok_or_else(|| journal_error(format!("{context}: journal sequence exhausted")))?;
+    let mut batches = HashMap::new();
+    for segment in &segments {
+        for index in &segment.batches {
+            if batches
+                .insert(
+                    index.batch_id.clone(),
+                    SegmentedBatchIndex {
+                        identity: index.identity.clone(),
+                        path: segment.path.clone(),
+                        frame_offset: index.frame_offset,
+                    },
+                )
+                .is_some()
+            {
+                return Err(journal_error(format!(
+                    "{context}: duplicate physical batch identity {}",
+                    index.batch_id
+                )));
+            }
+        }
+    }
     Ok(SegmentedJournalState {
         next_sequence,
         segments,
@@ -522,6 +535,7 @@ fn scan_directory<E: JournalEvent>(
         retained_floor,
         cleanup_pending,
         marker_barrier_pending: false,
+        batches,
         poison: None,
     })
 }
@@ -605,6 +619,7 @@ struct SegmentedJournalState {
     retained_floor: u64,
     cleanup_pending: bool,
     marker_barrier_pending: bool,
+    batches: HashMap<String, SegmentedBatchIndex>,
     poison: Option<String>,
 }
 
@@ -626,6 +641,7 @@ fn segment_layout_matches(left: &[SegmentState], right: &[SegmentState]) -> bool
                 && left.end_sequence == right.end_sequence
                 && left.bytes == right.bytes
                 && left.record_offsets == right.record_offsets
+                && left.batches == right.batches
         })
 }
 
@@ -706,6 +722,10 @@ pub struct SegmentedFileEventJournal<E> {
     #[cfg(test)]
     sync_fault: Mutex<bool>,
     #[cfg(test)]
+    truncate_barrier_fault: Mutex<bool>,
+    #[cfg(test)]
+    reconcile_read_fault: Mutex<bool>,
+    #[cfg(test)]
     create_fault: Mutex<bool>,
     #[cfg(test)]
     marker_write_fault_after: Mutex<Option<usize>>,
@@ -737,9 +757,14 @@ impl<E> Drop for SegmentedFileEventJournal<E> {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 enum AppendFault {
+    ZeroWriteInvalidData,
     FullWrite,
+    FullWriteInvalidData,
     PartialWrite { bytes: usize },
+    PartialWriteInvalidData { bytes: usize },
+    MissingLastByteInvalidData,
     UnrecognizedSuffix,
+    UnrecognizedSuffixInvalidData,
 }
 
 impl<E: JournalEvent> SegmentedFileEventJournal<E> {
@@ -753,6 +778,10 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             append_durabilities: Mutex::new(Vec::new()),
             #[cfg(test)]
             sync_fault: Mutex::new(false),
+            #[cfg(test)]
+            truncate_barrier_fault: Mutex::new(false),
+            #[cfg(test)]
+            reconcile_read_fault: Mutex::new(false),
             #[cfg(test)]
             create_fault: Mutex::new(false),
             #[cfg(test)]
@@ -850,6 +879,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             if rescanned.next_sequence != state.next_sequence
                 || rescanned.retained_floor != state.retained_floor
                 || rescanned.cleanup_pending != state.cleanup_pending
+                || rescanned.batches != state.batches
                 || !segment_layout_matches(&rescanned.segments, &state.segments)
                 || !opaque_layout_matches(&rescanned.obsolete_segments, &state.obsolete_segments)
             {
@@ -1066,6 +1096,9 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         let mut retained = Vec::with_capacity(state.segments.len());
         for segment in std::mem::take(&mut state.segments) {
             if segment.start_sequence < state.retained_floor {
+                for batch in &segment.batches {
+                    state.batches.remove(&batch.batch_id);
+                }
                 state.obsolete_segments.push(OpaqueSegmentState {
                     path: segment.path,
                     start_sequence: segment.start_sequence,
@@ -1354,12 +1387,28 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             .unwrap_or_else(|error| error.into_inner())
             .take()
         {
-            let bytes = match fault {
-                AppendFault::FullWrite => line,
-                AppendFault::PartialWrite { bytes } => {
-                    line.get(..bytes.min(line.len())).unwrap_or(line)
+            let (bytes, error_kind) = match fault {
+                AppendFault::ZeroWriteInvalidData => {
+                    (b"".as_slice(), std::io::ErrorKind::InvalidData)
                 }
-                AppendFault::UnrecognizedSuffix => b"x",
+                AppendFault::FullWrite => (line, std::io::ErrorKind::Other),
+                AppendFault::FullWriteInvalidData => (line, std::io::ErrorKind::InvalidData),
+                AppendFault::PartialWrite { bytes } => (
+                    line.get(..bytes.min(line.len())).unwrap_or(line),
+                    std::io::ErrorKind::Other,
+                ),
+                AppendFault::PartialWriteInvalidData { bytes } => (
+                    line.get(..bytes.min(line.len())).unwrap_or(line),
+                    std::io::ErrorKind::InvalidData,
+                ),
+                AppendFault::MissingLastByteInvalidData => (
+                    line.get(..line.len().saturating_sub(1)).unwrap_or(line),
+                    std::io::ErrorKind::InvalidData,
+                ),
+                AppendFault::UnrecognizedSuffix => (b"x".as_slice(), std::io::ErrorKind::Other),
+                AppendFault::UnrecognizedSuffixInvalidData => {
+                    (b"x".as_slice(), std::io::ErrorKind::InvalidData)
+                }
             };
             append_existing_matching(
                 &active.path,
@@ -1368,7 +1417,8 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 bytes,
                 FileDurability::Flush,
             )?;
-            return Err(std::io::Error::other(
+            return Err(std::io::Error::new(
+                error_kind,
                 "injected segmented append durability failure",
             ));
         }
@@ -1388,6 +1438,22 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 "{context}: active segment identity guard is missing"
             ))
         })?;
+        #[cfg(test)]
+        {
+            let mut fail = self
+                .reconcile_read_fault
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if std::mem::take(&mut *fail) {
+                return Err(io_error(
+                    context,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "injected segmented reconciliation read failure",
+                    ),
+                ));
+            }
+        }
         let suffix = read_existing_from_matching(&active.path, file_guard, active.bytes)
             .map_err(|error| io_error(context, error))?;
         if suffix == line {
@@ -1403,14 +1469,8 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 let current_len = active.bytes.checked_add(suffix_len).ok_or_else(|| {
                     journal_error(format!("{context}: segment byte length exhausted"))
                 })?;
-                truncate_existing_matching(
-                    &active.path,
-                    file_guard,
-                    current_len,
-                    active.bytes,
-                    durability,
-                )
-                .map_err(|error| io_error(context, error))?;
+                self.truncate_partial_suffix(active, file_guard, current_len, durability)
+                    .map_err(|error| io_error(context, error))?;
             }
             return Ok(None);
         }
@@ -1419,17 +1479,337 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             suffix.len()
         )))
     }
-    /// Append one event using an event-specific durability policy.
+
+    fn truncate_partial_suffix(
+        &self,
+        active: &SegmentState,
+        file_guard: &ExistingRegularFileGuard,
+        current_len: u64,
+        durability: FileDurability,
+    ) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let mut fail = self
+                .truncate_barrier_fault
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if std::mem::take(&mut *fail) {
+                truncate_existing_matching(
+                    &active.path,
+                    file_guard,
+                    current_len,
+                    active.bytes,
+                    FileDurability::Flush,
+                )?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "injected segmented truncate durability barrier failure",
+                ));
+            }
+        }
+        truncate_existing_matching(
+            &active.path,
+            file_guard,
+            current_len,
+            active.bytes,
+            durability,
+        )
+    }
+
+    fn read_indexed_batch(
+        &self,
+        state: &SegmentedJournalState,
+        index: &SegmentedBatchIndex,
+        context: &str,
+        confirm_durability: bool,
+    ) -> Result<JournalBatchAppendReceipt<E>> {
+        let segment = state
+            .segments
+            .iter()
+            .find(|segment| segment.path == index.path)
+            .ok_or_else(|| journal_error(format!("{context}: indexed segment is not retained")))?;
+        let bytes = match &segment.active_file_guard {
+            Some(file_guard) => read_existing_lines_from_matching(
+                &segment.path,
+                file_guard,
+                segment.bytes,
+                index.frame_offset,
+                1,
+            ),
+            None => read_existing_lines_from_exact_len(
+                &segment.path,
+                segment.bytes,
+                index.frame_offset,
+                1,
+            ),
+        }
+        .map_err(|error| io_error(context, error))?;
+        let line = bytes
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .ok_or_else(|| journal_error(format!("{context}: indexed batch frame is missing")))?;
+        let frame = decode_journal_batch::<E>(context, line)?;
+        verify_journal_batch_sequence(context, index.identity.first_sequence, &frame)?;
+        if frame.identity()? != index.identity {
+            return Err(journal_error(format!(
+                "{context}: indexed batch identity changed"
+            )));
+        }
+        let durability = if !confirm_durability {
+            JournalDurabilityStatus::Unconfirmed
+        } else if segment.active_file_guard.is_some() {
+            match self.sync_active(segment) {
+                Ok(()) => JournalDurabilityStatus::Confirmed,
+                Err(error) => JournalDurabilityStatus::Degraded {
+                    error: error.to_string(),
+                },
+            }
+        } else {
+            JournalDurabilityStatus::Confirmed
+        };
+        Ok(JournalBatchAppendReceipt {
+            batch_id: frame.batch_id().to_string(),
+            records: frame.into_records().into(),
+            durability,
+            commit: JournalBatchCommitStatus::AlreadyCommitted,
+        })
+    }
+    /// Append one atomic batch using an event-specific durability policy.
     ///
     /// This uses the same serialized sequence authority as [`EventJournal::append`].
     /// A full write whose requested barrier fails returns a degraded committed
     /// receipt and must not be retried. Partial writes are truncated using the
     /// requested durability before the sequence can be reused.
+    pub fn append_batch_with_durability(
+        &self,
+        batch: PreparedJournalBatch<E>,
+        durability: FileDurability,
+    ) -> JournalBatchAppendResult<E> {
+        if let Err(error) = batch.validate_payload_integrity() {
+            return Err(JournalBatchAppendError::prepared_mutation(
+                batch,
+                error.to_string(),
+            ));
+        }
+        let shared = match self.shared() {
+            Ok(shared) => shared,
+            Err(error) => {
+                return Err(JournalBatchAppendError::not_committed(
+                    batch,
+                    error.to_string(),
+                ));
+            }
+        };
+        let mut state = shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = &state.poison {
+            return Err(JournalBatchAppendError::authority_poisoned(
+                batch,
+                format!(
+                    "segmented journal append {} refused because the handle is poisoned: {reason}; reopen the journal to recover",
+                    self.directory.display()
+                ),
+            ));
+        }
+        if let Err(error) = self.verify_directory_identity("segmented journal append") {
+            return Err(JournalBatchAppendError::not_committed(
+                batch,
+                error.to_string(),
+            ));
+        }
+        if let Err(error) = verify_active_segment_identity(&state, "segmented journal append") {
+            return Err(JournalBatchAppendError::not_committed(
+                batch,
+                error.to_string(),
+            ));
+        }
+        if let Some(existing) = state.batches.get(batch.batch_id()).cloned() {
+            if existing.identity.payload_digest != batch.payload_digest()
+                || existing.identity.record_count != u64::try_from(batch.len()).unwrap_or(u64::MAX)
+            {
+                let reason = format!(
+                    "batch identity {} conflicts with an existing committed payload",
+                    batch.batch_id()
+                );
+                state.poison = Some(reason.clone());
+                return Err(JournalBatchAppendError::identity_conflict(
+                    batch,
+                    existing.identity.first_sequence,
+                    existing.identity.record_count,
+                    reason,
+                ));
+            }
+            return match self.read_indexed_batch(&state, &existing, "segmented batch append", true)
+            {
+                Ok(receipt) => Ok(receipt),
+                Err(error) => {
+                    let reason = format!("failed to verify already committed batch: {error}");
+                    state.poison = Some(reason.clone());
+                    Err(JournalBatchAppendError::outcome_unknown(batch, reason))
+                }
+            };
+        }
+        let prepared = match prepare_journal_frame(&batch, state.next_sequence) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(JournalBatchAppendError::not_committed(
+                    batch,
+                    error.to_string(),
+                ));
+            }
+        };
+        let line_len = match u64::try_from(prepared.line.len()) {
+            Ok(line_len) => line_len,
+            Err(_) => {
+                return Err(JournalBatchAppendError::not_committed(
+                    batch,
+                    "segmented journal batch frame exceeds supported size",
+                ));
+            }
+        };
+        let should_roll = state.segments.last().is_some_and(|active| {
+            active.has_records()
+                && active
+                    .bytes
+                    .checked_add(line_len)
+                    .is_none_or(|bytes| bytes > shared.max_active_segment_bytes)
+        });
+        if should_roll && let Err(error) = self.roll_segment(&mut state) {
+            return Err(JournalBatchAppendError::not_committed(
+                batch,
+                error.to_string(),
+            ));
+        }
+        let Some(active) = state.segments.last().cloned() else {
+            return Err(JournalBatchAppendError::not_committed(
+                batch,
+                "segmented journal has no active segment",
+            ));
+        };
+        let Some(new_bytes) = active.bytes.checked_add(line_len) else {
+            return Err(JournalBatchAppendError::not_committed(
+                batch,
+                "segmented journal byte length exhausted before append",
+            ));
+        };
+        let context = format!("segmented journal append {}", active.path.display());
+        let durability_status = match self.append_line(&active, &prepared.line, durability) {
+            Ok(()) => JournalDurabilityStatus::Confirmed,
+            Err(error) => match self.reconcile_failed_append(
+                &active,
+                &prepared.line,
+                &context,
+                &error,
+                durability,
+            ) {
+                Ok(Some(status)) => status,
+                Ok(None) => {
+                    return Err(JournalBatchAppendError::not_committed(
+                        batch,
+                        io_error(&context, error).to_string(),
+                    ));
+                }
+                Err(repair_error) => {
+                    let reason =
+                        format!("append failed ({error}); reconciliation failed ({repair_error})");
+                    state.poison = Some(reason.clone());
+                    return Err(JournalBatchAppendError::outcome_unknown(
+                        batch,
+                        format!("{context}: {reason}; handle poisoned until reopen"),
+                    ));
+                }
+            },
+        };
+        let Some(active) = state.segments.last_mut() else {
+            let reason = "segmented journal lost its active segment after commit".to_string();
+            state.poison = Some(reason.clone());
+            return Err(JournalBatchAppendError::outcome_unknown(batch, reason));
+        };
+        let frame_offset = active.bytes;
+        active
+            .record_offsets
+            .extend(std::iter::repeat_n(frame_offset, prepared.records.len()));
+        let batch_id = batch.batch_id;
+        active.batches.push(SegmentBatchIndex {
+            batch_id: batch_id.clone(),
+            identity: prepared.identity.clone(),
+            frame_offset,
+        });
+        active.bytes = new_bytes;
+        active.end_sequence = prepared.next_sequence.saturating_sub(1);
+        let active_path = active.path.clone();
+        state.next_sequence = prepared.next_sequence;
+        state.batches.insert(
+            batch_id.clone(),
+            SegmentedBatchIndex {
+                identity: prepared.identity,
+                path: active_path,
+                frame_offset,
+            },
+        );
+        Ok(JournalBatchAppendReceipt {
+            batch_id,
+            records: prepared.records,
+            durability: durability_status,
+            commit: JournalBatchCommitStatus::Committed,
+        })
+    }
+
+    /// Append one event through the atomic batch authority with an explicit
+    /// durability policy.
     pub fn append_with_durability(
         &self,
         event: E,
         durability: FileDurability,
-    ) -> Result<JournalAppendReceipt<E>> {
+    ) -> JournalAppendResult<E> {
+        let batch = PreparedJournalBatch::new(vec![event]).map_err(JournalAppendError::Prepare)?;
+        let receipt = self
+            .append_batch_with_durability(batch, durability)
+            .map_err(JournalAppendError::Commit)?;
+        let record = receipt.records.first().cloned().ok_or_else(|| {
+            JournalAppendError::Prepare(super::JournalBatchPrepareError {
+                batch_id: receipt.batch_id.clone(),
+                error: "committed batch contains no record".to_string(),
+            })
+        })?;
+        Ok(JournalAppendReceipt {
+            batch_id: receipt.batch_id,
+            record,
+            durability: receipt.durability,
+            commit: receipt.commit,
+        })
+    }
+}
+
+impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
+    fn append_batch(&self, batch: PreparedJournalBatch<E>) -> JournalBatchAppendResult<E> {
+        if let Err(error) = batch.validate_payload_integrity() {
+            return Err(JournalBatchAppendError::prepared_mutation(
+                batch,
+                error.to_string(),
+            ));
+        }
+        let durability = match self.shared() {
+            Ok(shared) => shared.durability,
+            Err(error) => {
+                return Err(JournalBatchAppendError::not_committed(
+                    batch,
+                    error.to_string(),
+                ));
+            }
+        };
+        self.append_batch_with_durability(batch, durability)
+    }
+
+    fn lookup_batch(&self, batch: &PreparedJournalBatch<E>) -> Result<JournalBatchLookup<E>> {
+        if let Err(error) = batch.validate_payload_integrity() {
+            return Ok(JournalBatchLookup::Conflict {
+                error: error.to_string(),
+            });
+        }
+        let context = format!("segmented batch lookup {}", self.directory.display());
         let shared = self.shared()?;
         let mut state = shared
             .state
@@ -1437,87 +1817,31 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             .unwrap_or_else(|error| error.into_inner());
         if let Some(reason) = &state.poison {
             return Err(journal_error(format!(
-                "segmented journal append {} refused because the handle is poisoned: {reason}; reopen the journal to recover",
-                self.directory.display()
+                "{context}: lookup refused because the handle is poisoned: {reason}; reopen required"
             )));
         }
-        self.verify_directory_identity("segmented journal append")?;
-        verify_active_segment_identity(&state, "segmented journal append")?;
-        let should_roll = state.segments.last().is_some_and(|active| {
-            active.has_records() && active.bytes >= shared.max_active_segment_bytes
-        });
-        if should_roll {
-            self.roll_segment(&mut state)?;
+        self.verify_directory_identity(&context)?;
+        verify_active_segment_identity(&state, &context)?;
+        let Some(existing) = state.batches.get(batch.batch_id()).cloned() else {
+            return Ok(JournalBatchLookup::Absent);
+        };
+        if existing.identity.payload_digest != batch.payload_digest()
+            || existing.identity.record_count != u64::try_from(batch.len()).unwrap_or(u64::MAX)
+        {
+            let reason = format!(
+                "batch identity {} conflicts with an existing committed payload",
+                batch.batch_id()
+            );
+            state.poison = Some(reason.clone());
+            return Ok(JournalBatchLookup::Conflict { error: reason });
         }
-        let next_sequence = state
-            .next_sequence
-            .checked_add(1)
-            .ok_or_else(|| journal_error("segmented journal sequence exhausted before append"))?;
-        let record = JournalRecord {
-            sequence: state.next_sequence,
-            event: Arc::new(event),
-        };
-        let digest = record_digest(record.sequence, record.event.as_ref())?;
-        let stored = StoredRecordRef {
-            sequence: record.sequence,
-            event: record.event.as_ref(),
-            digest: &digest,
-        };
-        let mut line = serde_json::to_vec(&stored).map_err(|error| {
-            journal_error(format!(
-                "failed to encode segmented journal record: {error}"
-            ))
-        })?;
-        line.push(b'\n');
-        let line_len = u64::try_from(line.len())
-            .map_err(|_| journal_error("segmented journal record exceeds supported size"))?;
-        let active = state
-            .segments
-            .last()
-            .cloned()
-            .ok_or_else(|| journal_error("segmented journal has no active segment"))?;
-        let new_bytes = active.bytes.checked_add(line_len).ok_or_else(|| {
-            journal_error("segmented journal byte length exhausted before append")
-        })?;
-        let context = format!("segmented journal append {}", active.path.display());
-        let durability_status = match self.append_line(&active, &line, durability) {
-            Ok(()) => JournalDurabilityStatus::Confirmed,
-            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                return Err(io_error(&context, error));
+        match self.read_indexed_batch(&state, &existing, &context, false) {
+            Ok(receipt) => Ok(JournalBatchLookup::AlreadyCommitted(receipt)),
+            Err(error) => {
+                state.poison = Some(error.to_string());
+                Err(error)
             }
-            Err(error) => match self
-                .reconcile_failed_append(&active, &line, &context, &error, durability)
-            {
-                Ok(Some(status)) => status,
-                Ok(None) => return Err(io_error(&context, error)),
-                Err(repair_error) => {
-                    let reason =
-                        format!("append failed ({error}); reconciliation failed ({repair_error})");
-                    state.poison = Some(reason.clone());
-                    return Err(journal_error(format!(
-                        "{context}: {reason}; handle poisoned until reopen"
-                    )));
-                }
-            },
-        };
-        let active = state
-            .segments
-            .last_mut()
-            .ok_or_else(|| journal_error("segmented journal has no active segment"))?;
-        active.record_offsets.push(active.bytes);
-        active.bytes = new_bytes;
-        active.end_sequence = record.sequence;
-        state.next_sequence = next_sequence;
-        Ok(JournalAppendReceipt {
-            record,
-            durability: durability_status,
-        })
-    }
-}
-
-impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
-    fn append(&self, event: E) -> Result<JournalAppendReceipt<E>> {
-        self.append_with_durability(event, self.shared()?.durability)
+        }
     }
 
     fn next_sequence(&self) -> u64 {
@@ -1595,55 +1919,77 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
                         "{context}: missing byte offset for sequence {first_sequence}"
                     ))
                 })?;
-            let remaining = limit.saturating_sub(records.len());
-            let available = segment.record_offsets.len().saturating_sub(offset_index);
-            let expected_records = remaining.min(available);
-            if expected_records == 0 {
-                return Err(journal_error(format!(
-                    "{context}: segment metadata has no record at sequence {first_sequence}"
-                )));
+            let mut batch_start_index = offset_index;
+            while batch_start_index > 0 {
+                let previous_index = batch_start_index.saturating_sub(1);
+                if segment.record_offsets.get(previous_index).copied() != Some(start_offset) {
+                    break;
+                }
+                batch_start_index = previous_index;
             }
+            let mut expected = segment
+                .start_sequence
+                .checked_add(u64::try_from(batch_start_index).map_err(|_| {
+                    journal_error(format!("{context}: sequence exceeds supported index"))
+                })?)
+                .ok_or_else(|| journal_error(format!("{context}: journal sequence exhausted")))?;
+            let remaining = limit.saturating_sub(records.len());
             let bytes = match &segment.active_file_guard {
                 Some(file_guard) => read_existing_lines_from_matching(
                     &segment.path,
                     file_guard,
                     segment.bytes,
                     start_offset,
-                    expected_records,
+                    remaining,
                 ),
                 None => read_existing_lines_from_exact_len(
                     &segment.path,
                     segment.bytes,
                     start_offset,
-                    expected_records,
+                    remaining,
                 ),
             }
             .map_err(|error| io_error(&context, error))?;
-            let mut expected = first_sequence;
-            let records_before_segment = records.len();
             for line in bytes
                 .split(|byte| *byte == b'\n')
                 .filter(|line| !line.is_empty())
             {
-                let stored: StoredRecord<E> = serde_json::from_slice(line).map_err(|error| {
-                    journal_error(format!("{context}: corrupt journal record: {error}"))
+                let frame = decode_journal_batch::<E>(&context, line)?;
+                verify_journal_batch_sequence(&context, expected, &frame)?;
+                let indexed = state.batches.get(frame.batch_id()).ok_or_else(|| {
+                    journal_error(format!(
+                        "{context}: replayed batch {} is absent from the authority index",
+                        frame.batch_id()
+                    ))
                 })?;
-                verify_record(&context, expected, &stored)?;
-                expected = expected.checked_add(1).ok_or_else(|| {
+                if frame.identity()? != indexed.identity {
+                    return Err(journal_error(format!(
+                        "{context}: replayed batch {} conflicts with the authority index",
+                        frame.batch_id()
+                    )));
+                }
+                let frame_count = u64::try_from(frame.records().len()).map_err(|_| {
+                    journal_error(format!(
+                        "{context}: journal batch count exceeds supported range"
+                    ))
+                })?;
+                expected = expected.checked_add(frame_count).ok_or_else(|| {
                     journal_error(format!("{context}: journal sequence exhausted"))
                 })?;
-                records.push(JournalRecord {
-                    sequence: stored.sequence,
-                    event: Arc::new(stored.event),
-                });
-                if records.len() >= limit {
-                    return Ok(records);
+                for record in frame.into_records() {
+                    if record.sequence > after_sequence {
+                        records.push(record);
+                        if records.len() >= limit {
+                            return Ok(records);
+                        }
+                    }
                 }
             }
-            let decoded_records = records.len().saturating_sub(records_before_segment);
-            if decoded_records != expected_records {
+            if expected.saturating_sub(1) != segment.end_sequence {
                 return Err(journal_error(format!(
-                    "{context}: segment returned {decoded_records} records but metadata requires {expected_records}"
+                    "{context}: segment replay ended at {} but metadata requires {}",
+                    expected.saturating_sub(1),
+                    segment.end_sequence
                 )));
             }
         }
@@ -1662,6 +2008,83 @@ mod tests {
             .shared
             .as_ref()
             .expect("live segmented journal handle")
+    }
+
+    fn batch<E: JournalEvent>(events: Vec<E>) -> PreparedJournalBatch<E> {
+        PreparedJournalBatch::new(events).expect("prepare test batch")
+    }
+
+    #[derive(Clone, Copy)]
+    enum FrameTamper {
+        Schema,
+        BatchId,
+        FirstSequence,
+        RecordBatchId,
+        RecordSequence,
+        Payload,
+        Digest,
+    }
+
+    fn tampered_frame(tamper: FrameTamper) -> Vec<u8> {
+        let prepared = prepare_journal_frame(&batch(vec!["original".to_string()]), 1)
+            .expect("prepare tamper frame");
+        let mut frame: serde_json::Value =
+            serde_json::from_slice(&prepared.line).expect("decode tamper frame");
+        match tamper {
+            FrameTamper::Schema => {
+                if let Some(value) = frame.get_mut("schema_version") {
+                    *value = serde_json::json!(99);
+                }
+            }
+            FrameTamper::BatchId => {
+                if let Some(value) = frame.get_mut("batch_id") {
+                    *value = serde_json::json!(uuid::Uuid::new_v4().to_string());
+                }
+            }
+            FrameTamper::FirstSequence => {
+                if let Some(value) = frame.get_mut("first_sequence") {
+                    *value = serde_json::json!(2);
+                }
+            }
+            FrameTamper::RecordBatchId => {
+                if let Some(value) = frame
+                    .get_mut("records")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|records| records.first_mut())
+                    .and_then(|record| record.get_mut("batch_id"))
+                {
+                    *value = serde_json::json!(uuid::Uuid::new_v4().to_string());
+                }
+            }
+            FrameTamper::RecordSequence => {
+                if let Some(value) = frame
+                    .get_mut("records")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|records| records.first_mut())
+                    .and_then(|record| record.get_mut("sequence"))
+                {
+                    *value = serde_json::json!(2);
+                }
+            }
+            FrameTamper::Payload => {
+                if let Some(value) = frame
+                    .get_mut("records")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|records| records.first_mut())
+                    .and_then(|record| record.get_mut("event"))
+                {
+                    *value = serde_json::json!("changed");
+                }
+            }
+            FrameTamper::Digest => {
+                if let Some(value) = frame.get_mut("digest") {
+                    *value = serde_json::json!("0".repeat(64));
+                }
+            }
+        }
+        let mut bytes = serde_json::to_vec(&frame).expect("encode tamper frame");
+        bytes.push(b'\n');
+        bytes
     }
 
     fn temp_root(label: &str) -> PathBuf {
@@ -1751,12 +2174,60 @@ mod tests {
     }
 
     #[test]
-    fn integrity_digest_is_fixed_width_lowercase_hex() {
-        let digest = record_digest(42, &"digest-event").expect("compute digest");
+    fn batch_never_crosses_segments_and_oversized_batch_is_isolated() {
+        let root = temp_root("batch-rollover");
+        let journal = open_strings(&root, 512, FileDurability::Flush);
+        journal.append("seed".to_string()).expect("seed append");
+        let oversized = (0..8)
+            .map(|index| format!("batch-{index}-{}", "x".repeat(128)))
+            .collect::<Vec<_>>();
+        let receipt = journal
+            .append_batch(batch(oversized))
+            .expect("append oversized batch");
+        assert_eq!(receipt.records.len(), 8);
+        journal.append("tail".to_string()).expect("tail append");
+
+        let segments = journal.segments();
+        assert_eq!(segments.len(), 3);
         assert_eq!(
-            digest,
-            "210912c51b7695a5b542fd2a506eaf15b0cbc34627d40bb0349f40a26fa578b6"
+            segments
+                .iter()
+                .map(|segment| (segment.start_sequence, segment.end_sequence))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (2, 9), (10, 10)]
         );
+        assert!(segments.get(1).is_some_and(|segment| segment.bytes > 512));
+        let replay = journal.replay_after(1, 8).expect("replay batch segment");
+        assert_eq!(
+            replay
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            (2..=9).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            journal
+                .replay_after(5, 3)
+                .expect("replay inside segmented batch")
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![6, 7, 8]
+        );
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn batch_integrity_digest_is_fixed_width_lowercase_hex() {
+        let prepared = prepare_journal_frame(&batch(vec!["digest-event".to_string()]), 42)
+            .expect("prepare batch frame");
+        let frame: serde_json::Value =
+            serde_json::from_slice(&prepared.line).expect("decode batch frame");
+        let digest = frame
+            .get("digest")
+            .and_then(serde_json::Value::as_str)
+            .expect("batch digest");
         assert_eq!(digest.len(), 64);
         assert!(
             digest
@@ -1779,8 +2250,8 @@ mod tests {
     }
 
     #[test]
-    fn thirty_two_concurrent_appends_are_contiguous() {
-        const APPENDS: usize = 32;
+    fn concurrent_segmented_batches_are_contiguous_and_never_interleave() {
+        const APPENDS: usize = 16;
         let root = temp_root("concurrent");
         let journal = Arc::new(open_strings(&root, 4096, FileDurability::Flush));
         let barrier = Arc::new(Barrier::new(APPENDS));
@@ -1790,24 +2261,47 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
-                journal
-                    .append(format!("event-{index}"))
-                    .map(|receipt| receipt.record.sequence)
+                let base = i32::try_from(index).unwrap_or(i32::MAX).saturating_mul(10);
+                journal.append_batch(batch(vec![
+                    base.to_string(),
+                    base.saturating_add(1).to_string(),
+                    base.saturating_add(2).to_string(),
+                ]))
             }));
         }
-        let mut sequences = handles
+        let receipts = handles
             .into_iter()
             .map(|handle| handle.join().expect("append thread").expect("append"))
             .collect::<Vec<_>>();
-        sequences.sort_unstable();
-        assert_eq!(sequences, (1..=32).collect::<Vec<_>>());
-        assert_eq!(journal.last_sequence(), 32);
+        let replay = journal.replay_after(0, usize::MAX).expect("replay batches");
+        for receipt in receipts {
+            let first = receipt
+                .records
+                .first()
+                .map(|record| record.sequence)
+                .expect("first batch record");
+            let count = u64::try_from(receipt.records.len()).unwrap_or(u64::MAX);
+            let values = replay
+                .iter()
+                .filter(|record| {
+                    record.sequence >= first && record.sequence < first.saturating_add(count)
+                })
+                .filter_map(|record| record.event.parse::<i32>().ok())
+                .collect::<Vec<_>>();
+            assert_eq!(values.len(), 3);
+            assert!(values.windows(2).all(|pair| {
+                pair.first()
+                    .zip(pair.get(1))
+                    .is_some_and(|(left, right)| left.saturating_add(1) == *right)
+            }));
+        }
+        assert_eq!(journal.last_sequence(), 48);
         drop(journal);
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn active_torn_tail_is_repaired_on_reopen() {
+    fn active_torn_batch_tail_is_repaired_without_partial_visibility() {
         let root = temp_root("active-torn");
         let journal = open_strings(&root, 1, FileDurability::Flush);
         journal.append("one".to_string()).expect("append one");
@@ -1819,12 +2313,22 @@ mod tests {
             .expect("active segment");
         let good_len = active.bytes;
         drop(journal);
-        echo_core::utils::fs::append_existing(
-            &active.path,
-            b"{\"sequence\":3",
-            FileDurability::Flush,
+        let prepared = prepare_journal_frame(
+            &batch(vec![
+                "three".to_string(),
+                "four".to_string(),
+                "five".to_string(),
+            ]),
+            3,
         )
-        .expect("write torn active tail");
+        .expect("prepare torn batch frame");
+        let partial_len = prepared.line.len().saturating_sub(1).max(1) / 2;
+        let partial = prepared
+            .line
+            .get(..partial_len)
+            .expect("partial batch range");
+        echo_core::utils::fs::append_existing(&active.path, partial, FileDurability::Flush)
+            .expect("write torn active batch tail");
 
         let reopened = open_strings(&root, 1, FileDurability::Flush);
         assert_eq!(
@@ -1887,7 +2391,61 @@ mod tests {
         std::fs::write(&closed.path, b"not-json\n").expect("corrupt closed segment");
         let error = SegmentedFileEventJournal::<String>::open(&root, 1, FileDurability::Flush)
             .expect_err("closed corruption must fail");
-        assert!(error.to_string().contains("corrupt journal record"));
+        assert!(error.to_string().contains("corrupt journal batch"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn segmented_batch_frame_rejects_every_integrity_field_tamper() {
+        for tamper in [
+            FrameTamper::Schema,
+            FrameTamper::BatchId,
+            FrameTamper::FirstSequence,
+            FrameTamper::RecordBatchId,
+            FrameTamper::RecordSequence,
+            FrameTamper::Payload,
+            FrameTamper::Digest,
+        ] {
+            let root = temp_root("frame-tamper");
+            let journal = open_strings(&root, 4096, FileDurability::SyncData);
+            let active = journal
+                .segments()
+                .into_iter()
+                .find(|segment| segment.active)
+                .expect("active segment");
+            drop(journal);
+            std::fs::write(&active.path, tampered_frame(tamper))
+                .expect("write tampered segment frame");
+            let result =
+                SegmentedFileEventJournal::<String>::open(&root, 4096, FileDurability::SyncData);
+            assert!(result.is_err());
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn segmented_cold_scan_rejects_a_duplicated_complete_batch_frame() {
+        let root = temp_root("duplicate-frame");
+        let journal = open_strings(&root, 4096, FileDurability::SyncData);
+        let active = journal
+            .segments()
+            .into_iter()
+            .find(|segment| segment.active)
+            .expect("active segment");
+        drop(journal);
+        let frame = prepare_journal_frame(&batch(vec!["one".to_string()]), 1)
+            .expect("prepare duplicate frame");
+        let mut duplicated = frame.line.clone();
+        duplicated.extend_from_slice(&frame.line);
+        std::fs::write(&active.path, duplicated).expect("write duplicated frame");
+        let error =
+            SegmentedFileEventJournal::<String>::open(&root, 4096, FileDurability::SyncData)
+                .expect_err("duplicate physical identity must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate physical batch identity")
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -2184,6 +2742,8 @@ mod tests {
             .append("second".to_string())
             .expect_err("poisoned handle must reject append");
         assert!(poisoned.to_string().contains("handle is poisoned"));
+        assert!(!poisoned.is_retry_safe());
+        assert!(poisoned.requires_reopen());
         let reopened = open_strings(&root, 4096, FileDurability::Flush);
         assert!(Arc::ptr_eq(shared(&journal), shared(&reopened)));
         assert_eq!(
@@ -2197,6 +2757,227 @@ mod tests {
         drop(journal);
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn segmented_batch_fault_matrix_has_explicit_retry_contract() {
+        let full_root = temp_root("batch-full");
+        let full = open_strings(&full_root, 4096, FileDurability::SyncData);
+        let empty = PreparedJournalBatch::new(Vec::<String>::new())
+            .expect_err("empty segmented batch must fail preflight");
+        assert!(empty.error.contains("at least one"));
+        assert_eq!(full.next_sequence(), 1);
+        assert!(
+            full.segments()
+                .first()
+                .is_some_and(|segment| segment.bytes == 0)
+        );
+        *full
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWriteInvalidData);
+        let committed = full
+            .append_batch(batch(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ]))
+            .expect("complete batch is committed degraded");
+        assert_eq!(committed.records.len(), 3);
+        assert!(matches!(
+            committed.durability,
+            JournalDurabilityStatus::Degraded { .. }
+        ));
+        drop(full);
+        let full_reopened = open_strings(&full_root, 4096, FileDurability::SyncData);
+        assert_eq!(
+            full_reopened
+                .replay_after(0, usize::MAX)
+                .expect("cold replay committed batch")
+                .len(),
+            3
+        );
+        assert_eq!(
+            full_reopened
+                .replay_after(0, usize::MAX)
+                .expect("lookup committed batch")
+                .iter()
+                .filter(|record| record.batch_id == committed.batch_id)
+                .count(),
+            3
+        );
+        drop(full_reopened);
+
+        let full_unknown_root = temp_root("batch-full-unknown");
+        let full_unknown = open_strings(&full_unknown_root, 4096, FileDurability::SyncData);
+        *full_unknown
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWriteInvalidData);
+        *full_unknown
+            .reconcile_read_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let full_unknown_prepared = batch(vec!["a".to_string(), "b".to_string()]);
+        let full_unknown_id = full_unknown_prepared.batch_id().to_string();
+        let full_unknown_error = full_unknown
+            .append_batch(full_unknown_prepared)
+            .expect_err("full write without reconciliation proof is unknown");
+        assert!(matches!(
+            full_unknown_error,
+            JournalBatchAppendError::OutcomeUnknown { .. }
+        ));
+        let full_unknown_returned = full_unknown_error
+            .into_prepared()
+            .expect("unknown outcome retains prepared batch");
+        drop(full_unknown);
+        let full_unknown_reopened =
+            open_strings(&full_unknown_root, 4096, FileDurability::SyncData);
+        *full_unknown_reopened
+            .sync_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let lookup = full_unknown_reopened
+            .lookup_batch(&full_unknown_returned)
+            .expect("lookup full unknown batch");
+        let (reconciled_id, reconciled_len, lookup_durability) = match lookup {
+            JournalBatchLookup::AlreadyCommitted(receipt) => (
+                receipt.batch_id().to_string(),
+                receipt.records().len(),
+                receipt.durability().clone(),
+            ),
+            JournalBatchLookup::Absent | JournalBatchLookup::Conflict { .. } => {
+                (String::new(), 0, JournalDurabilityStatus::Confirmed)
+            }
+        };
+        assert_eq!(reconciled_id, full_unknown_id);
+        assert_eq!(reconciled_len, 2);
+        assert_eq!(lookup_durability, JournalDurabilityStatus::Unconfirmed);
+        drop(full_unknown_reopened);
+
+        let partial_root = temp_root("batch-partial");
+        let partial = open_strings(&partial_root, 4096, FileDurability::SyncData);
+        *partial
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::PartialWriteInvalidData { bytes: 19 });
+        let not_committed = partial
+            .append_batch(batch(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ]))
+            .expect_err("partial batch frame is removed");
+        assert!(matches!(
+            not_committed,
+            JournalBatchAppendError::NotCommitted { .. }
+        ));
+        assert_eq!(partial.next_sequence(), 1);
+        assert!(
+            partial
+                .replay_after(0, usize::MAX)
+                .expect("replay")
+                .is_empty()
+        );
+        drop(partial);
+
+        let short_root = temp_root("batch-short");
+        let short = open_strings(&short_root, 4096, FileDurability::SyncData);
+        *short
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::MissingLastByteInvalidData);
+        let short_prepared = batch(vec!["one".to_string(), "two".to_string()]);
+        let short_id = short_prepared.batch_id().to_string();
+        let short_error = short
+            .append_batch(short_prepared)
+            .expect_err("line len minus one must repair the full batch");
+        assert!(short_error.is_retry_safe());
+        assert!(
+            short
+                .replay_after(0, usize::MAX)
+                .expect("replay")
+                .is_empty()
+        );
+        let short_retry = short
+            .append_batch(short_error.into_prepared().expect("retryable short batch"))
+            .expect("retry short batch");
+        assert_eq!(short_retry.batch_id, short_id);
+        drop(short);
+
+        let barrier_root = temp_root("batch-barrier");
+        let barrier = open_strings(&barrier_root, 4096, FileDurability::SyncData);
+        *barrier
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::PartialWriteInvalidData { bytes: 23 });
+        *barrier
+            .truncate_barrier_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let barrier_prepared = batch(vec!["one".to_string(), "two".to_string()]);
+        let barrier_id = barrier_prepared.batch_id().to_string();
+        let barrier_error = barrier
+            .append_batch(barrier_prepared)
+            .expect_err("truncate barrier ambiguity must poison");
+        assert!(matches!(
+            barrier_error,
+            JournalBatchAppendError::OutcomeUnknown { .. }
+        ));
+        assert_eq!(barrier_error.batch_id(), barrier_id);
+        let barrier_returned = barrier_error
+            .into_prepared()
+            .expect("truncate ambiguity retains prepared batch");
+        drop(barrier);
+        let barrier_reopened = open_strings(&barrier_root, 4096, FileDurability::SyncData);
+        assert!(matches!(
+            barrier_reopened
+                .lookup_batch(&barrier_returned)
+                .expect("lookup absent ambiguous batch"),
+            JournalBatchLookup::Absent
+        ));
+        let barrier_retry = barrier_reopened
+            .append_batch(barrier_returned)
+            .expect("retry proven absent batch");
+        assert_eq!(barrier_retry.batch_id(), barrier_id);
+        drop(barrier_reopened);
+
+        let unknown_root = temp_root("batch-unknown");
+        let unknown = open_strings(&unknown_root, 4096, FileDurability::Flush);
+        *unknown
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::UnrecognizedSuffixInvalidData);
+        let outcome = unknown
+            .append_batch(batch(vec!["a".to_string(), "b".to_string()]))
+            .expect_err("unrecognized suffix has unknown outcome");
+        assert!(matches!(
+            outcome,
+            JournalBatchAppendError::OutcomeUnknown { .. }
+        ));
+        assert!(!outcome.is_retry_safe());
+        assert!(outcome.requires_reopen());
+        let refused = unknown
+            .append_batch(batch(vec!["retry".to_string()]))
+            .expect_err("poison forbids blind retry");
+        assert!(matches!(
+            &refused,
+            JournalBatchAppendError::AuthorityPoisoned { .. }
+        ));
+        assert!(!refused.is_retry_safe());
+        assert!(refused.requires_reopen());
+        drop(unknown);
+
+        std::fs::remove_dir_all(full_root).ok();
+        std::fs::remove_dir_all(full_unknown_root).ok();
+        std::fs::remove_dir_all(partial_root).ok();
+        std::fs::remove_dir_all(short_root).ok();
+        std::fs::remove_dir_all(barrier_root).ok();
+        std::fs::remove_dir_all(unknown_root).ok();
     }
 
     #[test]
@@ -3051,6 +3832,102 @@ mod tests {
         value: String,
     }
 
+    #[derive(Debug)]
+    struct MutableSegmentEvent {
+        value: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Serialize for MutableSegmentEvent {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_u64(
+                u64::try_from(self.value.load(std::sync::atomic::Ordering::SeqCst))
+                    .unwrap_or(u64::MAX),
+            )
+        }
+    }
+
+    impl<'de> Deserialize<'de> for MutableSegmentEvent {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value = usize::deserialize(deserializer)?;
+            Ok(Self {
+                value: std::sync::atomic::AtomicUsize::new(value),
+            })
+        }
+    }
+
+    #[test]
+    fn segmented_rejects_mutated_unknown_payload_before_cold_idempotent_match() {
+        let root = temp_root("mutable-unknown");
+        let journal = SegmentedFileEventJournal::<MutableSegmentEvent>::open(
+            &root,
+            4096,
+            FileDurability::SyncData,
+        )
+        .expect("open mutable segmented journal");
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWriteInvalidData);
+        *journal
+            .reconcile_read_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let prepared = batch(vec![MutableSegmentEvent {
+            value: std::sync::atomic::AtomicUsize::new(1),
+        }]);
+        let batch_id = prepared.batch_id().to_string();
+        let unknown = journal
+            .append_batch(prepared)
+            .expect_err("full write ambiguity retains mutable payload");
+        let mutated = unknown.into_prepared().expect("returned mutable payload");
+        if let Some(event) = mutated.events().first() {
+            event.value.store(2, std::sync::atomic::Ordering::SeqCst);
+        }
+        drop(journal);
+
+        let reopened = SegmentedFileEventJournal::<MutableSegmentEvent>::open(
+            &root,
+            4096,
+            FileDurability::SyncData,
+        )
+        .expect("reopen mutable segmented journal");
+        assert!(matches!(
+            reopened
+                .lookup_batch(&mutated)
+                .expect("lookup mutated payload"),
+            JournalBatchLookup::Conflict { .. }
+        ));
+        let mutation = reopened
+            .append_batch(mutated)
+            .expect_err("mutated payload must not match old commit");
+        assert!(matches!(
+            mutation,
+            JournalBatchAppendError::PreparedMutation { .. }
+        ));
+        assert!(!mutation.is_retry_safe());
+        assert_eq!(reopened.last_sequence(), 1);
+
+        let original = PreparedJournalBatch::with_test_identity(
+            batch_id,
+            vec![MutableSegmentEvent {
+                value: std::sync::atomic::AtomicUsize::new(1),
+            }],
+        )
+        .expect("prepare original payload lookup");
+        assert!(matches!(
+            reopened.lookup_batch(&original).expect("lookup old digest"),
+            JournalBatchLookup::AlreadyCommitted(_)
+        ));
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn non_clone_events_append_and_replay_without_serde_copy() {
         let memory = super::super::MemoryEventJournal::new();
@@ -3072,11 +3949,55 @@ mod tests {
         let root = temp_root("non-clone");
         let journal = SegmentedFileEventJournal::open(&root, 4096, FileDurability::Flush)
             .expect("open non-clone journal");
-        journal
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::ZeroWriteInvalidData);
+        let not_committed = journal
             .append(NonCloneEvent {
                 value: "file".to_string(),
             })
-            .expect("file append");
+            .expect_err("zero-byte write returns prepared batch");
+        assert!(not_committed.is_retry_safe());
+        let returned = not_committed
+            .into_prepared()
+            .expect("returned prepared batch");
+        let batch_id = returned.batch_id().to_string();
+        let payload = returned
+            .events()
+            .first()
+            .cloned()
+            .expect("returned payload");
+        assert_eq!(returned.batch_id(), batch_id);
+        assert!(
+            returned
+                .events()
+                .first()
+                .is_some_and(|event| Arc::ptr_eq(event, &payload))
+        );
+        let receipt = journal.append_batch(returned).expect("retry same batch");
+        assert_eq!(receipt.batch_id(), batch_id);
+        assert!(
+            receipt
+                .records()
+                .first()
+                .is_some_and(|record| Arc::ptr_eq(&record.event, &payload))
+        );
+        let duplicate = PreparedJournalBatch::with_test_identity(
+            batch_id.clone(),
+            vec![NonCloneEvent {
+                value: "file".to_string(),
+            }],
+        )
+        .expect("same identity duplicate");
+        let idempotent = journal
+            .append_batch(duplicate)
+            .expect("idempotent duplicate");
+        assert_eq!(
+            idempotent.commit_status(),
+            JournalBatchCommitStatus::AlreadyCommitted
+        );
+        assert_eq!(journal.last_sequence(), 1);
         assert_eq!(
             journal
                 .replay_after(0, 1)
@@ -3085,6 +4006,18 @@ mod tests {
                 .map(|record| record.event.value.as_str()),
             Some("file")
         );
+        let conflict = PreparedJournalBatch::with_test_identity(
+            batch_id,
+            vec![NonCloneEvent {
+                value: "different".to_string(),
+            }],
+        )
+        .expect("conflicting identity");
+        let conflict_error = journal
+            .append_batch(conflict)
+            .expect_err("same id different payload must poison");
+        assert!(conflict_error.to_string().contains("conflicts"));
+        assert!(!conflict_error.is_retry_safe());
         drop(journal);
         std::fs::remove_dir_all(root).ok();
     }
