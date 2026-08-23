@@ -216,12 +216,9 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 let metadata = std::fs::symlink_metadata(&path)
                     .map_err(|metadata_error| io_error(&context, metadata_error))?;
                 if metadata.file_type().is_file() && metadata.len() == 0 {
-                    let file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(&path)
-                        .map_err(|open_error| io_error(&context, open_error))?;
-                    finish_new_journal_creation(&file, &canonical_parent, sync_directory)
+                    append_existing(&path, b"", FileDurability::SyncData)
+                        .map_err(|barrier_error| io_error(&context, barrier_error))?;
+                    sync_directory(&canonical_parent)
                         .map_err(|barrier_error| io_error(&context, barrier_error))?;
                 }
             }
@@ -951,6 +948,25 @@ mod tests {
             .append("durable".to_string())
             .expect("append after reconciled creation");
         drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_journal_rejects_symlink_authority_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root();
+        let outside = root.join("outside.jsonl");
+        let link = root.join("events.jsonl");
+        std::fs::write(&outside, b"outside").expect("write outside target");
+        symlink(&outside, &link).expect("create journal symlink");
+        let error = FileEventJournal::<String>::open(&link, FileDurability::SyncData)
+            .expect_err("symlink journal authority must reject");
+        assert!(
+            error.to_string().contains("symlink") || error.to_string().contains("Too many levels")
+        );
+        assert_eq!(std::fs::read(&outside).expect("read outside"), b"outside");
         std::fs::remove_dir_all(root).ok();
     }
 
