@@ -37,6 +37,8 @@ pub trait SandboxExecutor: Send + Sync {
     /// Executors without live pipe support degrade explicitly to one buffered
     /// [`SandboxStreamEvent::Complete`] event. Callers can inspect
     /// [`Self::supports_streaming`] before describing output as live.
+    /// Live backends emit [`SandboxStreamEvent::Failed`] when execution or
+    /// required cleanup fails after the stream has started.
     fn execute_stream<'a>(
         &'a self,
         command: SandboxCommand,
@@ -69,7 +71,10 @@ pub trait SandboxExecutor: Send + Sync {
     ///
     /// Concrete backends should override this when cancellation needs backend-
     /// specific cleanup. The default drops the execution future and reports a
-    /// typed cancellation instead of silently treating it as a timeout.
+    /// typed cancellation instead of silently treating it as a timeout, so it
+    /// is only suitable when dropping the future releases every owned resource.
+    /// Process, container, and orchestrated backends must override this method
+    /// and await their cleanup before returning a terminal result.
     fn execute_with_limits_and_cancel(
         &self,
         command: SandboxCommand,
@@ -103,6 +108,28 @@ pub enum SandboxOutputChannel {
     Stderr,
 }
 
+/// Typed terminal failure emitted by a live sandbox stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SandboxStreamFailure {
+    /// The owning run cancelled execution after backend cleanup completed.
+    Cancelled { message: String },
+    /// Execution, output draining, or required cleanup failed.
+    IoError { message: String },
+}
+
+impl SandboxStreamFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Cancelled { message } | Self::IoError { message } => message,
+        }
+    }
+
+    pub const fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled { .. })
+    }
+}
+
 /// Incremental sandbox execution event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
@@ -110,6 +137,10 @@ pub enum SandboxStreamEvent {
     Output {
         channel: SandboxOutputChannel,
         chunk: String,
+    },
+    /// Terminal failure. The stream ends after this event is emitted.
+    Failed {
+        failure: SandboxStreamFailure,
     },
     Complete(ExecutionResult),
 }
@@ -435,6 +466,28 @@ mod tests {
         let mut result = execution_result("", "");
         result.cancelled = true;
         assert!(!result.success());
+    }
+
+    #[test]
+    fn stream_failure_round_trips_as_typed_terminal() -> Result<()> {
+        let event = SandboxStreamEvent::Failed {
+            failure: SandboxStreamFailure::IoError {
+                message: "cleanup failed".to_string(),
+            },
+        };
+        let encoded = serde_json::to_string(&event).map_err(|error| {
+            ReactError::Other(format!("failed to encode sandbox stream failure: {error}"))
+        })?;
+        let decoded: SandboxStreamEvent = serde_json::from_str(&encoded).map_err(|error| {
+            ReactError::Other(format!("failed to decode sandbox stream failure: {error}"))
+        })?;
+        assert!(matches!(
+            decoded,
+            SandboxStreamEvent::Failed {
+                failure: SandboxStreamFailure::IoError { message }
+            } if message == "cleanup failed"
+        ));
+        Ok(())
     }
 
     #[tokio::test]

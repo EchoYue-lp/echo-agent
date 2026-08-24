@@ -342,10 +342,11 @@ impl ExistingRegularFileGuard {
     }
 }
 
-fn existing_file_identity(metadata: &std::fs::Metadata) -> std::io::Result<ExistingFileIdentity> {
+fn existing_file_identity(file: &std::fs::File) -> std::io::Result<ExistingFileIdentity> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
         Ok(ExistingFileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -353,21 +354,31 @@ fn existing_file_identity(metadata: &std::fs::Metadata) -> std::io::Result<Exist
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        let volume_serial_number = metadata.volume_serial_number().ok_or_else(|| {
-            std::io::Error::other("existing regular file has no volume serial number")
-        })?;
-        let file_index = metadata
-            .file_index()
-            .ok_or_else(|| std::io::Error::other("existing regular file has no file index"))?;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the std File owns a valid handle for the complete call and
+        // `information` is writable, correctly aligned, and not retained by
+        // GetFileInformationByHandle after it returns.
+        let succeeded =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut information) };
+        if succeeded == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let file_index =
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
         Ok(ExistingFileIdentity {
-            volume_serial_number,
+            volume_serial_number: information.dwVolumeSerialNumber,
             file_index,
         })
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = metadata;
+        let _ = file;
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "existing regular-file identity is unavailable on this platform",
@@ -487,7 +498,7 @@ fn verify_open_file_matches(
     expected_len: Option<u64>,
 ) -> std::io::Result<u64> {
     let metadata = file.metadata()?;
-    let identity = existing_file_identity(&metadata)?;
+    let identity = existing_file_identity(file)?;
     if identity != guard.identity {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -515,14 +526,14 @@ fn verify_open_file_matches(
 /// Open an existing no-follow regular file and retain its stable identity.
 pub fn open_existing_regular_guard(path: &Path) -> std::io::Result<ExistingRegularFileGuard> {
     let file = open_existing_regular(path, ExistingFileAccess::Read)?;
-    let identity = existing_file_identity(&file.metadata()?)?;
+    let identity = existing_file_identity(&file)?;
     Ok(ExistingRegularFileGuard { file, identity })
 }
 
 /// Open an existing no-follow directory and retain its stable identity.
 pub fn open_existing_directory_guard(path: &Path) -> std::io::Result<ExistingDirectoryGuard> {
     let directory = open_existing_directory(path)?;
-    let identity = existing_file_identity(&directory.metadata()?)?;
+    let identity = existing_file_identity(&directory)?;
     Ok(ExistingDirectoryGuard {
         _directory: directory,
         identity,
@@ -535,7 +546,7 @@ pub fn verify_existing_directory(
     guard: &ExistingDirectoryGuard,
 ) -> std::io::Result<()> {
     let directory = open_existing_directory(path)?;
-    let identity = existing_file_identity(&directory.metadata()?)?;
+    let identity = existing_file_identity(&directory)?;
     if identity != guard.identity {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -555,7 +566,7 @@ pub fn sync_existing_directory_matching(
     guard: &ExistingDirectoryGuard,
 ) -> std::io::Result<()> {
     let directory = open_existing_directory(path)?;
-    let identity = existing_file_identity(&directory.metadata()?)?;
+    let identity = existing_file_identity(&directory)?;
     if identity != guard.identity {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,

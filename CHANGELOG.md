@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SandboxStreamEvent::Failed` and `SandboxStreamFailure` expose cancellation,
+  output-drain, and cleanup debt as a typed live-stream terminal instead of an
+  unexplained EOF or successful-looking completion.
+
 - **HookAction::ActivateSkill**: 声明式直接激活技能 hook 动作。frontmatter 可写
   `type: activate_skill`，execute_action 产出 `HookResult.activate_skill`。
 - **fire_lifecycle_hook 接线**: 收到 `HookResult.activate_skill` 后调用
@@ -38,6 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Keyword（0 token）+ LLM（可选）+ Hook slot 三源融合，`fuse()` 纯函数可单测。
 
 ### Changed
+
+- Local and Docker sandbox execution now transfer spawned resources to detached
+  backend owners. Unix Local cancellation captures and verifies the process
+  group; Windows Local execution is unavailable until Job Object ownership is
+  implemented. Docker uses a caller-abandonment guard, unique container name,
+  bounded CLI control stages and output readers, and reaches checked
+  `docker rm -f` cleanup after normal, non-zero, timeout, cancellation, stdin
+  failure, invalid create output, and caller abort paths. Reserved isolation and
+  ownership flags cannot be supplied through `extra_args`.
 
 - Channel `SessionHandler` now isolates Agent state, locks, mode, HITL,
   timeout, and reset by `(channel_id, conversation_id, sender_id)`. Malformed

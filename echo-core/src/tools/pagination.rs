@@ -252,7 +252,13 @@ fn decode_cursor(cursor: &str) -> Result<CursorEnvelope, PageError> {
     }
     let chars: Vec<char> = cursor.chars().collect();
     let mut bytes = Vec::with_capacity(chars.len() / 2);
-    for pair in chars.chunks_exact(2) {
+    let (pairs, remainder) = chars.as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(PageError::InvalidCursor(
+            "cursor has an invalid length".to_string(),
+        ));
+    }
+    for pair in pairs {
         let high = pair
             .first()
             .and_then(|value| value.to_digit(16))
@@ -395,5 +401,26 @@ mod tests {
 
         assert!(result.output.contains("[page]{"));
         assert!(result.output.contains("\"next_cursor\":\"opaque-cursor\""));
+    }
+
+    #[test]
+    fn cursor_hex_pairs_decode_even_length_and_reject_remainder() -> Result<(), String> {
+        let envelope = CursorEnvelope {
+            version: CURSOR_VERSION,
+            query_fingerprint: "fingerprint".to_string(),
+            offset: 7,
+        };
+        let cursor = encode_cursor(&envelope).map_err(|error| error.to_string())?;
+        let decoded = decode_cursor(&cursor).map_err(|error| error.to_string())?;
+        assert_eq!(decoded.version, CURSOR_VERSION);
+        assert_eq!(decoded.query_fingerprint, "fingerprint");
+        assert_eq!(decoded.offset, 7);
+
+        let with_remainder = format!("{cursor}f");
+        assert!(matches!(
+            decode_cursor(&with_remainder),
+            Err(PageError::InvalidCursor(message)) if message == "cursor has an invalid length"
+        ));
+        Ok(())
     }
 }

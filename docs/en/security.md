@@ -222,6 +222,24 @@ let sandbox = DockerSandbox::new()
 let agent = ReactAgent::builder(config).with_sandbox(sandbox).build()?;
 ```
 
+Controlled sandbox execution treats cleanup as part of the terminal contract.
+On Unix, `LocalSandbox` reports cancellation only after its captured process
+group has been killed, the leader reaped, and group absence verified. Windows
+Local execution is unavailable because the backend does not yet own a Job
+Object; use Docker/K8s on Windows. A live cleanup failure is emitted as the typed
+`SandboxStreamEvent::Failed` terminal, never as a successful-looking completion.
+
+`DockerSandbox` gives every container a unique cleanup name and keeps create,
+start, stdin, execution, and remove under a detached owner. Normal completion,
+timeout, cancellation, execution failure, and caller abort all reach
+`docker rm -f`; cleanup failure returns a typed sandbox I/O error that preserves
+bounded primary and cleanup facts. Docker control commands have fixed deadlines,
+availability checks use a short instance-shared cache, named cleanup retries are
+bounded, truncated global listings fail explicitly, and retained stdout/stderr
+share the configured output cap. Extra Docker arguments use a narrow allowlist and cannot override
+container identity, labels, restart, network, namespace, mount, security, or
+capability settings.
+
 ---
 
 ## 6. Secret Management

@@ -3,7 +3,7 @@
 //! 使用本地进程执行命令，并在支持的平台启用操作系统原生隔离：
 //! - **macOS**: `sandbox-exec` (Seatbelt)
 //! - **Linux**: `bubblewrap` (user/mount/pid/network namespaces)
-//! - **Windows**: minimal process backend (`cmd /C` + timeout/output limits)
+//! - **Windows**: unavailable until a Job Object owns the complete process tree
 //! - **其他**: 仅进程隔离（超时 + 输出截断）
 //! - 支持通过 `SandboxCommand::stdin` 传入标准输入
 //!
@@ -11,7 +11,7 @@
 
 use super::{
     CommandKind, ExecutionResult, IsolationLevel, ResourceLimits, SandboxCommand, SandboxExecutor,
-    SandboxOutputChannel, SandboxStreamEvent,
+    SandboxOutputChannel, SandboxStreamEvent, SandboxStreamFailure,
 };
 use echo_core::error::Result;
 use echo_core::error::SandboxError;
@@ -21,18 +21,45 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 const STREAM_CHANNEL_CAPACITY: usize = 32;
 
+type LocalEventStream = Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send>>;
+
+struct StartedLocalCommand {
+    stream: LocalEventStream,
+    task: tokio::task::JoinHandle<LocalChildTerminal>,
+}
+
+enum LocalChildTerminal {
+    Completed,
+    Failed(SandboxError),
+    Abandoned(std::result::Result<(), String>),
+}
+
+struct LocalChildRequest {
+    stdin: Option<String>,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+    process_group_id: Option<u32>,
+    events: mpsc::Sender<SandboxStreamEvent>,
+    timeout: std::time::Duration,
+    max_output_bytes: usize,
+    sandbox_type: &'static str,
+    cancel: Option<Arc<CancellationToken>>,
+}
+
 /// 本地沙箱配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalConfig {
-    /// 是否启用本地沙箱后端（sandbox-exec / bubblewrap / Windows process backend）
+    /// 是否启用本地沙箱后端（sandbox-exec / bubblewrap）
     pub enable_os_sandbox: bool,
     /// 允许访问的路径（只读）
     pub allowed_read_paths: Vec<PathBuf>,
@@ -51,11 +78,7 @@ pub struct LocalConfig {
 impl Default for LocalConfig {
     fn default() -> Self {
         Self {
-            enable_os_sandbox: cfg!(any(
-                target_os = "macos",
-                target_os = "linux",
-                target_os = "windows"
-            )),
+            enable_os_sandbox: cfg!(any(target_os = "macos", target_os = "linux")),
             allowed_read_paths: vec![PathBuf::from("/usr"), PathBuf::from("/bin")],
             allowed_write_paths: vec![],
             allow_network: false,
@@ -79,12 +102,7 @@ impl LocalSandbox {
     }
 
     fn effective_os_sandbox_enabled(&self) -> bool {
-        self.config.enable_os_sandbox
-            && cfg!(any(
-                target_os = "macos",
-                target_os = "linux",
-                target_os = "windows"
-            ))
+        self.config.enable_os_sandbox && cfg!(any(target_os = "macos", target_os = "linux"))
     }
 
     fn sandbox_type(&self) -> &'static str {
@@ -95,8 +113,6 @@ impl LocalSandbox {
             "local-seatbelt"
         } else if cfg!(target_os = "linux") {
             "local-bubblewrap"
-        } else if cfg!(target_os = "windows") {
-            "local-windows-process"
         } else {
             "local"
         }
@@ -376,28 +392,93 @@ impl LocalSandbox {
         stdin: Option<&str>,
         sandbox_type: &'static str,
     ) -> Result<ExecutionResult> {
-        let mut stream = self
-            .run_command_stream(command, timeout, stdin, sandbox_type)
+        self.run_command_controlled(command, timeout, stdin, sandbox_type, None)
+            .await
+    }
+
+    async fn run_command_controlled(
+        &self,
+        command: Command,
+        timeout: std::time::Duration,
+        stdin: Option<&str>,
+        sandbox_type: &'static str,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> Result<ExecutionResult> {
+        ensure_local_execution_supported()?;
+
+        if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
+            return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::Cancelled(
+                    "owning run was cancelled before process start".to_string(),
+                ),
+            )));
+        }
+
+        let StartedLocalCommand { mut stream, task } = self
+            .start_command_stream(command, timeout, stdin, sandbox_type, cancel)
             .await?;
+        let mut completion = None;
         while let Some(event) = stream.next().await {
-            if let SandboxStreamEvent::Complete(result) = event {
-                return Ok(result);
+            match event {
+                SandboxStreamEvent::Complete(result) => {
+                    completion = Some(result);
+                    break;
+                }
+                SandboxStreamEvent::Failed { .. } => break,
+                SandboxStreamEvent::Output { .. } => {}
             }
         }
-        Err(echo_core::error::ReactError::Sandbox(Box::new(
-            SandboxError::IoError(
-                "Local sandbox stream ended without a completion event".to_string(),
-            ),
-        )))
+
+        match task.await {
+            Ok(LocalChildTerminal::Completed) => completion.ok_or_else(|| {
+                echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(
+                    "Local sandbox stream ended without a completion event".to_string(),
+                )))
+            }),
+            Ok(LocalChildTerminal::Failed(error)) => {
+                Err(echo_core::error::ReactError::Sandbox(Box::new(error)))
+            }
+            Ok(LocalChildTerminal::Abandoned(cleanup)) => {
+                Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::IoError(match cleanup {
+                        Ok(()) => "Local sandbox event receiver closed before terminal delivery"
+                            .to_string(),
+                        Err(error) => format!(
+                            "Local sandbox event receiver closed before terminal delivery; cleanup failed: {error}"
+                        ),
+                    }),
+                )))
+            }
+            Err(error) => Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::IoError(format!("Local sandbox execution task failed: {error}")),
+            ))),
+        }
     }
 
     async fn run_command_stream(
+        &self,
+        command: Command,
+        timeout: std::time::Duration,
+        stdin: Option<&str>,
+        sandbox_type: &'static str,
+    ) -> Result<LocalEventStream> {
+        let StartedLocalCommand { stream, task } = self
+            .start_command_stream(command, timeout, stdin, sandbox_type, None)
+            .await?;
+        // Streaming callers own the receiver. Dropping it wakes the detached
+        // owner task, which performs kill + wait before it exits.
+        drop(task);
+        Ok(stream)
+    }
+
+    async fn start_command_stream(
         &self,
         mut command: Command,
         timeout: std::time::Duration,
         stdin: Option<&str>,
         sandbox_type: &'static str,
-    ) -> Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send>>> {
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> Result<StartedLocalCommand> {
         if stdin.is_some() {
             command.stdin(std::process::Stdio::piped());
         }
@@ -411,42 +492,36 @@ impl LocalSandbox {
                 "Failed to spawn process: {e}"
             ))))
         })?;
-
-        // 写入 stdin 并处理写入失败时的进程清理
-        if let Some(input) = stdin
-            && let Some(mut child_stdin) = child.stdin.take()
-        {
-            if let Err(e) = child_stdin.write_all(input.as_bytes()).await {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(echo_core::error::ReactError::Sandbox(Box::new(
-                    SandboxError::IoError(format!("Failed to write stdin: {e}")),
-                )));
-            }
-            // 关闭 stdin 发送 EOF
-            drop(child_stdin);
-        }
-
+        let process_group_id = child.id();
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
+        let stdin_input = stdin.map(ToString::to_string);
         let max_output_bytes = self.config.max_output_bytes;
         let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            run_streaming_child(
+        let failure_events = tx.clone();
+        let task = tokio::spawn(async move {
+            let terminal = run_streaming_child(
                 &mut child,
-                stdout_pipe,
-                stderr_pipe,
-                tx,
-                timeout,
-                max_output_bytes,
-                sandbox_type,
+                LocalChildRequest {
+                    stdin: stdin_input,
+                    stdout: stdout_pipe,
+                    stderr: stderr_pipe,
+                    process_group_id,
+                    events: tx,
+                    timeout,
+                    max_output_bytes,
+                    sandbox_type,
+                    cancel,
+                },
             )
             .await;
+            emit_local_terminal_failure(&failure_events, &terminal).await;
+            terminal
         });
-        Ok(Box::pin(futures::stream::unfold(
-            rx,
-            |mut receiver| async move { receiver.recv().await.map(|event| (event, receiver)) },
-        )))
+        let stream = Box::pin(futures::stream::unfold(rx, |mut receiver| async move {
+            receiver.recv().await.map(|event| (event, receiver))
+        }));
+        Ok(StartedLocalCommand { stream, task })
     }
 }
 
@@ -593,33 +668,124 @@ fn configure_command_process(command: &mut Command, _max_memory_bytes: Option<u6
 #[cfg(not(unix))]
 fn configure_command_process(_command: &mut Command, _max_memory_bytes: Option<u64>) {}
 
-async fn cleanup_child_process(child: &mut tokio::process::Child) {
-    #[cfg(unix)]
-    if let Some(pid) = child.id()
-        && let Err(e) = std::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-    {
-        tracing::warn!("Failed to send SIGKILL to process group {pid}: {e}");
+fn ensure_local_execution_supported() -> Result<()> {
+    if cfg!(windows) {
+        Err(echo_core::error::ReactError::Sandbox(Box::new(
+            SandboxError::Unavailable(
+                "Local sandbox execution is unavailable on Windows until the backend owns a Job Object"
+                    .to_string(),
+            ),
+        )))
+    } else {
+        Ok(())
     }
+}
 
-    if let Err(e) = child.kill().await {
-        tracing::warn!("Failed to kill child process: {e}");
+pub(super) async fn cleanup_child_process(
+    child: &mut tokio::process::Child,
+    process_group_id: Option<u32>,
+) -> std::result::Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = process_group_id;
+    #[cfg(unix)]
+    let group_signal = match process_group_id {
+        Some(process_group_id) => signal_process_group(process_group_id, libc::SIGKILL),
+        None => Err("missing captured process-group id during cleanup".to_string()),
+    };
+    #[cfg(not(unix))]
+    let group_signal: std::result::Result<(), String> = Ok(());
+
+    if let Err(error) = child.start_kill() {
+        tracing::debug!("Child process was already exiting during cleanup: {error}");
     }
-    let _ = child.wait().await;
+    let child_wait = child
+        .wait()
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("failed to wait for child process termination: {error}"));
+
+    #[cfg(unix)]
+    let group_absent = match process_group_id {
+        Some(process_group_id) => verify_process_group_absent(process_group_id).await,
+        None => Err("cannot verify process-group cleanup without a captured id".to_string()),
+    };
+    #[cfg(not(unix))]
+    let group_absent: std::result::Result<(), String> = Ok(());
+
+    let failures = [group_signal.err(), child_wait.err(), group_absent.err()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(process_group_id: u32, signal: i32) -> std::result::Result<(), String> {
+    let process_group_id = i32::try_from(process_group_id)
+        .map_err(|error| format!("process-group id is out of range: {error}"))?;
+    // SAFETY: `kill` receives a negated process-group id captured immediately
+    // after spawning a child configured with `process_group(0)`. No pointers or
+    // borrowed memory cross the FFI boundary.
+    let result = unsafe { libc::kill(-process_group_id, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to signal process group {process_group_id}: {error}"
+        ))
+    }
+}
+
+#[cfg(unix)]
+async fn verify_process_group_absent(process_group_id: u32) -> std::result::Result<(), String> {
+    let process_group_id = i32::try_from(process_group_id)
+        .map_err(|error| format!("process-group id is out of range: {error}"))?;
+    for _ in 0..100 {
+        // SAFETY: signal 0 performs existence/permission validation only; the
+        // negative id addresses the captured process group and no pointers cross
+        // the FFI boundary.
+        let result = unsafe { libc::kill(-process_group_id, 0) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            if error.raw_os_error() != Some(libc::EPERM) {
+                return Err(format!(
+                    "failed to verify process group {process_group_id} absence: {error}"
+                ));
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err(format!(
+        "process group {process_group_id} still exists after kill and child wait"
+    ))
 }
 
 async fn run_streaming_child(
     child: &mut tokio::process::Child,
-    mut stdout: Option<tokio::process::ChildStdout>,
-    mut stderr: Option<tokio::process::ChildStderr>,
-    tx: mpsc::Sender<SandboxStreamEvent>,
-    timeout: std::time::Duration,
-    max_output_bytes: usize,
-    sandbox_type: &'static str,
-) {
+    request: LocalChildRequest,
+) -> LocalChildTerminal {
+    let LocalChildRequest {
+        stdin,
+        mut stdout,
+        mut stderr,
+        process_group_id,
+        events: tx,
+        timeout,
+        max_output_bytes,
+        sandbox_type,
+        cancel,
+    } = request;
     let start = Instant::now();
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
@@ -631,28 +797,81 @@ async fn run_streaming_child(
     let mut retained_stderr = RetainedPipeOutput::new();
     let mut status = None;
 
+    if let Some(input) = stdin {
+        let Some(mut child_stdin) = child.stdin.take() else {
+            let cleanup = cleanup_child_process(child, process_group_id).await;
+            return local_failure_after_cleanup(
+                "local sandbox did not provide the requested stdin pipe".to_string(),
+                cleanup,
+            );
+        };
+        let write = tokio::select! {
+            _ = tx.closed() => {
+                drop(child_stdin);
+                let cleanup = cleanup_child_process(child, process_group_id).await;
+                return abandoned_local_terminal(cleanup);
+            }
+            _ = wait_for_local_cancel(cancel.as_ref()) => {
+                drop(child_stdin);
+                let cleanup = cleanup_child_process(child, process_group_id).await;
+                return local_cancellation_terminal(
+                    "owning run was cancelled while writing process stdin",
+                    cleanup,
+                );
+            }
+            _ = &mut deadline => {
+                drop(child_stdin);
+                let cleanup = cleanup_child_process(child, process_group_id).await;
+                return local_timeout_terminal(
+                    cleanup,
+                    retained_stdout,
+                    retained_stderr,
+                    start.elapsed(),
+                    sandbox_type,
+                    timeout,
+                    &tx,
+                ).await;
+            }
+            result = child_stdin.write_all(input.as_bytes()) => result,
+        };
+        if let Err(error) = write {
+            drop(child_stdin);
+            let cleanup = cleanup_child_process(child, process_group_id).await;
+            return local_failure_after_cleanup(
+                format!("failed to write local sandbox stdin: {error}"),
+                cleanup,
+            );
+        }
+        drop(child_stdin);
+    }
+
     loop {
         if stdout.is_none() && stderr.is_none() && status.is_some() {
             break;
         }
         tokio::select! {
             _ = tx.closed() => {
-                cleanup_child_process(child).await;
-                return;
+                let cleanup = cleanup_child_process(child, process_group_id).await;
+                return abandoned_local_terminal(cleanup);
+            }
+            _ = wait_for_local_cancel(cancel.as_ref()) => {
+                let cleanup = cleanup_child_process(child, process_group_id).await;
+                return local_cancellation_terminal(
+                    "owning run was cancelled during local sandbox execution",
+                    cleanup,
+                );
             }
             _ = &mut deadline => {
-                cleanup_child_process(child).await;
-                let result = local_execution_result(
-                    -1,
+                let cleanup = cleanup_child_process(child, process_group_id).await;
+                return local_timeout_terminal(
+                    cleanup,
                     retained_stdout,
                     retained_stderr,
                     start.elapsed(),
                     sandbox_type,
-                    true,
-                    Some(format!("Process timed out after {}s", timeout.as_secs())),
-                );
-                let _ = tx.send(SandboxStreamEvent::Complete(result)).await;
-                return;
+                    timeout,
+                    &tx,
+                ).await;
             }
             read = async {
                 match stdout.as_mut() {
@@ -666,8 +885,8 @@ async fn run_streaming_child(
                         if let Some(chunk) = stdout_decoder.finish()
                             && send_sandbox_output(&tx, SandboxOutputChannel::Stdout, chunk).await.is_err()
                         {
-                            cleanup_child_process(child).await;
-                            return;
+                            let cleanup = cleanup_child_process(child, process_group_id).await;
+                            return abandoned_local_terminal(cleanup);
                         }
                     }
                     Ok(count) => {
@@ -679,12 +898,18 @@ async fn run_streaming_child(
                         retained_stdout.push(bytes, max_output_bytes.saturating_sub(retained));
                         for chunk in stdout_decoder.push(bytes) {
                             if send_sandbox_output(&tx, SandboxOutputChannel::Stdout, chunk).await.is_err() {
-                                cleanup_child_process(child).await;
-                                return;
+                                let cleanup = cleanup_child_process(child, process_group_id).await;
+                                return abandoned_local_terminal(cleanup);
                             }
                         }
                     }
-                    Err(_) => stdout = None,
+                    Err(error) => {
+                        let cleanup = cleanup_child_process(child, process_group_id).await;
+                        return local_failure_after_cleanup(
+                            format!("failed to read local sandbox stdout: {error}"),
+                            cleanup,
+                        );
+                    }
                 }
             }
             read = async {
@@ -699,8 +924,8 @@ async fn run_streaming_child(
                         if let Some(chunk) = stderr_decoder.finish()
                             && send_sandbox_output(&tx, SandboxOutputChannel::Stderr, chunk).await.is_err()
                         {
-                            cleanup_child_process(child).await;
-                            return;
+                            let cleanup = cleanup_child_process(child, process_group_id).await;
+                            return abandoned_local_terminal(cleanup);
                         }
                     }
                     Ok(count) => {
@@ -712,30 +937,29 @@ async fn run_streaming_child(
                         retained_stderr.push(bytes, max_output_bytes.saturating_sub(retained));
                         for chunk in stderr_decoder.push(bytes) {
                             if send_sandbox_output(&tx, SandboxOutputChannel::Stderr, chunk).await.is_err() {
-                                cleanup_child_process(child).await;
-                                return;
+                                let cleanup = cleanup_child_process(child, process_group_id).await;
+                                return abandoned_local_terminal(cleanup);
                             }
                         }
                     }
-                    Err(_) => stderr = None,
+                    Err(error) => {
+                        let cleanup = cleanup_child_process(child, process_group_id).await;
+                        return local_failure_after_cleanup(
+                            format!("failed to read local sandbox stderr: {error}"),
+                            cleanup,
+                        );
+                    }
                 }
             }
             waited = child.wait(), if status.is_none() => {
                 match waited {
                     Ok(exit_status) => status = Some(exit_status),
                     Err(error) => {
-                        cleanup_child_process(child).await;
-                        let result = local_execution_result(
-                            -1,
-                            retained_stdout,
-                            retained_stderr,
-                            start.elapsed(),
-                            sandbox_type,
-                            false,
-                            Some(format!("Process wait error: {error}")),
+                        let cleanup = cleanup_child_process(child, process_group_id).await;
+                        return local_failure_after_cleanup(
+                            format!("failed to wait for local sandbox process: {error}"),
+                            cleanup,
                         );
-                        let _ = tx.send(SandboxStreamEvent::Complete(result)).await;
-                        return;
                     }
                 }
             }
@@ -759,7 +983,128 @@ async fn run_streaming_child(
         false,
         termination_message,
     );
-    let _ = tx.send(SandboxStreamEvent::Complete(result)).await;
+    if tx.send(SandboxStreamEvent::Complete(result)).await.is_ok() {
+        LocalChildTerminal::Completed
+    } else {
+        LocalChildTerminal::Abandoned(Ok(()))
+    }
+}
+
+fn local_failure_after_cleanup(
+    primary: String,
+    cleanup: std::result::Result<(), String>,
+) -> LocalChildTerminal {
+    let message = match cleanup {
+        Ok(()) => primary,
+        Err(cleanup) => format!(
+            "{}; local sandbox cleanup failed: {}",
+            bounded_terminal_fact(&primary),
+            bounded_terminal_fact(&cleanup)
+        ),
+    };
+    LocalChildTerminal::Failed(SandboxError::IoError(message))
+}
+
+fn local_cancellation_terminal(
+    primary: &str,
+    cleanup: std::result::Result<(), String>,
+) -> LocalChildTerminal {
+    match cleanup {
+        Ok(()) => LocalChildTerminal::Failed(SandboxError::Cancelled(primary.to_string())),
+        Err(cleanup) => local_failure_after_cleanup(primary.to_string(), Err(cleanup)),
+    }
+}
+
+async fn local_timeout_terminal(
+    cleanup: std::result::Result<(), String>,
+    stdout: RetainedPipeOutput,
+    stderr: RetainedPipeOutput,
+    duration: std::time::Duration,
+    sandbox_type: &str,
+    timeout: std::time::Duration,
+    events: &mpsc::Sender<SandboxStreamEvent>,
+) -> LocalChildTerminal {
+    let result = local_execution_result(
+        -1,
+        stdout,
+        stderr,
+        duration,
+        sandbox_type,
+        true,
+        Some(format!("Process timed out after {}s", timeout.as_secs())),
+    );
+    match cleanup {
+        Ok(()) => {
+            if events
+                .send(SandboxStreamEvent::Complete(result))
+                .await
+                .is_ok()
+            {
+                LocalChildTerminal::Completed
+            } else {
+                LocalChildTerminal::Abandoned(Ok(()))
+            }
+        }
+        Err(cleanup) => local_failure_after_cleanup(
+            format!(
+                "local sandbox timed out after {}s (stdout_bytes={}, stderr_bytes={})",
+                timeout.as_secs(),
+                result.stdout_bytes,
+                result.stderr_bytes
+            ),
+            Err(cleanup),
+        ),
+    }
+}
+
+fn abandoned_local_terminal(cleanup: std::result::Result<(), String>) -> LocalChildTerminal {
+    if let Err(error) = cleanup.as_ref() {
+        tracing::error!(
+            error,
+            "local sandbox cleanup debt after event receiver closed"
+        );
+    }
+    LocalChildTerminal::Abandoned(cleanup)
+}
+
+fn bounded_terminal_fact(value: &str) -> String {
+    const MAX_FACT_CHARS: usize = 1_024;
+    let mut fact = value.chars().take(MAX_FACT_CHARS).collect::<String>();
+    if value.chars().count() > MAX_FACT_CHARS {
+        fact.push_str("...");
+    }
+    fact
+}
+
+fn local_stream_failure(error: &SandboxError) -> SandboxStreamFailure {
+    match error {
+        SandboxError::Cancelled(message) => SandboxStreamFailure::Cancelled {
+            message: message.clone(),
+        },
+        _ => SandboxStreamFailure::IoError {
+            message: error.to_string(),
+        },
+    }
+}
+
+async fn emit_local_terminal_failure(
+    events: &mpsc::Sender<SandboxStreamEvent>,
+    terminal: &LocalChildTerminal,
+) {
+    if let LocalChildTerminal::Failed(error) = terminal {
+        let _ = events
+            .send(SandboxStreamEvent::Failed {
+                failure: local_stream_failure(error),
+            })
+            .await;
+    }
+}
+
+async fn wait_for_local_cancel(cancel: Option<&Arc<CancellationToken>>) {
+    match cancel {
+        Some(cancel) => cancel.cancelled().await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn send_sandbox_output(
@@ -884,7 +1229,9 @@ impl SandboxExecutor for LocalSandbox {
 
     fn is_available(&self) -> BoxFuture<'_, bool> {
         Box::pin(async {
-            if self.effective_os_sandbox_enabled() && cfg!(target_os = "macos") {
+            if cfg!(windows) {
+                false
+            } else if self.effective_os_sandbox_enabled() && cfg!(target_os = "macos") {
                 Command::new("sandbox-exec")
                     .arg("-p")
                     .arg("(version 1)\n(allow default)")
@@ -912,6 +1259,7 @@ impl SandboxExecutor for LocalSandbox {
 
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
         Box::pin(async move {
+            ensure_local_execution_supported()?;
             let timeout = command.timeout;
             let cmd = match &command.kind {
                 CommandKind::Shell(cmd) => self.build_shell_command(cmd, &command),
@@ -932,6 +1280,7 @@ impl SandboxExecutor for LocalSandbox {
         command: SandboxCommand,
     ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>>>> {
         Box::pin(async move {
+            ensure_local_execution_supported()?;
             let timeout = command.timeout;
             let cmd = match &command.kind {
                 CommandKind::Shell(cmd) => self.build_shell_command(cmd, &command),
@@ -948,7 +1297,7 @@ impl SandboxExecutor for LocalSandbox {
     }
 
     fn supports_streaming(&self) -> bool {
-        true
+        !cfg!(windows)
     }
 
     fn execute_with_limits(
@@ -974,6 +1323,41 @@ impl SandboxExecutor for LocalSandbox {
             // 使用更新后的配置执行
             let sandbox = LocalSandbox::new(config);
             sandbox.execute(cmd_with_timeout).await
+        })
+    }
+
+    fn execute_with_limits_and_cancel(
+        &self,
+        command: SandboxCommand,
+        limits: ResourceLimits,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> BoxFuture<'_, Result<ExecutionResult>> {
+        Box::pin(async move {
+            ensure_local_execution_supported()?;
+            let timeout = limits
+                .cpu_time_secs
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(command.timeout);
+            let sandbox = LocalSandbox::new(merge_limits_into_config(self.config.clone(), &limits));
+            let command = SandboxCommand { timeout, ..command };
+            let process = match &command.kind {
+                CommandKind::Shell(shell) => sandbox.build_shell_command(shell, &command),
+                CommandKind::Program { program, args } => {
+                    sandbox.build_program_command(program, args, &command)
+                }
+                CommandKind::Code { language, code } => sandbox
+                    .build_code_command(language, code, &command)
+                    .map_err(|error| echo_core::error::ReactError::Sandbox(Box::new(error)))?,
+            };
+            sandbox
+                .run_command_controlled(
+                    process,
+                    timeout,
+                    command.stdin.as_deref(),
+                    sandbox.sandbox_type(),
+                    cancel,
+                )
+                .await
         })
     }
 }
@@ -1019,6 +1403,36 @@ mod tests {
     use echo_core::sandbox::{SandboxOutputChannel, SandboxStreamEvent};
     use futures::StreamExt;
     use std::sync::Arc;
+
+    #[cfg(unix)]
+    async fn wait_for_pid(path: &std::path::Path) -> std::result::Result<u32, String> {
+        for _ in 0..100 {
+            if let Ok(contents) = std::fs::read_to_string(path)
+                && let Ok(pid) = contents.trim().parse::<u32>()
+            {
+                return Ok(pid);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Err(format!("process did not publish pid at {}", path.display()))
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> std::result::Result<bool, String> {
+        let pid = i32::try_from(pid).map_err(|error| format!("pid is out of range: {error}"))?;
+        // SAFETY: signal 0 performs existence validation only and receives a
+        // numeric pid parsed from a child-owned test barrier file.
+        let result = unsafe { libc::kill(pid, 0) };
+        if result == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(false)
+        } else {
+            Err(format!("failed to inspect process {pid}: {error}"))
+        }
+    }
 
     #[tokio::test]
     async fn test_local_sandbox_echo() {
@@ -1158,29 +1572,170 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&temp_dir)?;
-        let marker = temp_dir.join("should-not-exist");
-        let command =
-            SandboxCommand::shell("sleep 0.2; touch should-not-exist").with_working_dir(&temp_dir);
+        let owner_pid = temp_dir.join("owner.pid");
+        let descendant_pid = temp_dir.join("descendant.pid");
+        let command = SandboxCommand::shell(
+            "printf '%s' \"$$\" > owner.pid; sh -c 'printf \"%s\" \"$$\" > descendant.pid; while :; do sleep 1; done' & while [ ! -s descendant.pid ]; do sleep 0.01; done; exit 0",
+        )
+        .with_working_dir(&temp_dir);
         let cancel = Arc::new(CancellationToken::new());
-        let cancel_after_start = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            cancel_after_start.cancel();
+        let execution_cancel = cancel.clone();
+        let execution = tokio::spawn(async move {
+            sandbox
+                .execute_with_limits_and_cancel(
+                    command,
+                    ResourceLimits::default(),
+                    Some(execution_cancel),
+                )
+                .await
         });
 
-        let result = sandbox
-            .execute_with_limits_and_cancel(command, ResourceLimits::default(), Some(cancel))
-            .await;
+        let pid = wait_for_pid(&owner_pid)
+            .await
+            .map_err(|error| format!("owner pid barrier failed: {error}"))?;
+        let descendant = wait_for_pid(&descendant_pid)
+            .await
+            .map_err(|error| format!("descendant pid barrier failed: {error}"))?;
+        for _ in 0..100 {
+            if !process_exists(pid)? {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !process_exists(pid)?,
+            "leader must exit before cancellation"
+        );
+        assert!(
+            process_exists(descendant)?,
+            "descendant must remain alive before cancellation"
+        );
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| "local sandbox cancellation did not reach a terminal state")?
+            .map_err(|error| format!("local sandbox execution task failed: {error}"))?;
         assert!(matches!(
             result,
             Err(echo_core::error::ReactError::Sandbox(error))
                 if matches!(*error, SandboxError::Cancelled(_))
         ));
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(!marker.exists());
+        verify_process_group_absent(pid).await?;
+        assert!(!process_exists(descendant)?);
         std::fs::remove_dir_all(temp_dir)?;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn caller_abort_during_blocked_stdin_keeps_detached_process_owner()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        });
+        let temp_dir = std::env::temp_dir().join(format!(
+            "echo-local-stdin-abort-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temp_dir)?;
+        let owner_pid = temp_dir.join("owner.pid");
+        let command =
+            SandboxCommand::shell("printf '%s' \"$$\" > owner.pid; while :; do sleep 1; done")
+                .with_working_dir(&temp_dir)
+                .with_stdin("x".repeat(8 * 1024 * 1024));
+        let execution = tokio::spawn(async move { sandbox.execute(command).await });
+        let pid = wait_for_pid(&owner_pid)
+            .await
+            .map_err(|error| format!("stdin owner pid barrier failed: {error}"))?;
+        execution.abort();
+        let join = execution.await;
+        assert!(matches!(join, Err(error) if error.is_cancelled()));
+        verify_process_group_absent(pid).await?;
+        std::fs::remove_dir_all(temp_dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_never_emits_fake_timeout_completion() {
+        let (events, mut receiver) = mpsc::channel(1);
+        let terminal = local_timeout_terminal(
+            Err("process group still exists".to_string()),
+            RetainedPipeOutput::new(),
+            RetainedPipeOutput::new(),
+            std::time::Duration::from_secs(1),
+            "local",
+            std::time::Duration::from_secs(1),
+            &events,
+        )
+        .await;
+        emit_local_terminal_failure(&events, &terminal).await;
+        assert!(matches!(
+            &terminal,
+            LocalChildTerminal::Failed(SandboxError::IoError(message))
+                if message.contains("timed out")
+                    && message.contains("process group still exists")
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SandboxStreamEvent::Failed {
+                failure: SandboxStreamFailure::IoError { message }
+            }) if message.contains("timed out")
+                && message.contains("process group still exists")
+        ));
+    }
+
+    #[test]
+    fn read_failure_preserves_primary_and_cleanup_debt() {
+        let terminal = local_failure_after_cleanup(
+            "failed to read stdout".to_string(),
+            Err("process group still exists".to_string()),
+        );
+        assert!(matches!(
+            terminal,
+            LocalChildTerminal::Failed(SandboxError::IoError(message))
+                if message.contains("failed to read stdout")
+                    && message.contains("process group still exists")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn every_local_execution_path_fails_closed_without_job_object_owner() {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        });
+        assert!(!sandbox.is_available().await);
+        assert!(!sandbox.supports_streaming());
+        let ordinary = sandbox
+            .execute(SandboxCommand::shell("echo must-not-run"))
+            .await;
+        let streaming = sandbox
+            .execute_stream(SandboxCommand::shell("echo must-not-run"))
+            .await;
+        let controlled = sandbox
+            .execute_with_limits_and_cancel(
+                SandboxCommand::shell("echo must-not-run"),
+                ResourceLimits::default(),
+                Some(Arc::new(CancellationToken::new())),
+            )
+            .await;
+        for result in [ordinary, controlled] {
+            assert!(matches!(
+                result,
+                Err(echo_core::error::ReactError::Sandbox(error))
+                    if matches!(&*error, SandboxError::Unavailable(message)
+                        if message.contains("Job Object"))
+            ));
+        }
+        assert!(matches!(
+            streaming,
+            Err(echo_core::error::ReactError::Sandbox(error))
+                if matches!(&*error, SandboxError::Unavailable(message)
+                    if message.contains("Job Object"))
+        ));
     }
 
     #[tokio::test]

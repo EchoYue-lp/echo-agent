@@ -7,12 +7,13 @@
 //! - [`ResourceLimits::cpu_time_secs`] 表示 wall-clock timeout，而不是 CPU request / quota
 //! - [`SandboxCommand::stdin`] 会透传到 Local / Docker / K8s 三个执行器
 //! - K8s 执行器会显式删除临时 Pod；无法逐 Pod 强制断网时，`network=false` 会明确拒绝执行
+//! - Local 受控取消会等待进程回收；Docker 各 terminal 路径会检查容器清理结果
 //!
 //! ## 架构
 //!
 //! | 层 | 实现 | 隔离强度 | 开销 | 适用场景 |
 //! |----|------|----------|------|----------|
-//! | Local | [`LocalSandbox`] | macOS/Linux OS 级；Windows 进程级 | 极低 | 开发调试、受信操作 |
+//! | Local | [`LocalSandbox`] | macOS/Linux OS 级；Windows 暂不可用 | 极低 | 开发调试、受信操作 |
 //! | Docker | [`DockerSandbox`] | 容器级（namespace + cgroups） | 中等 | 不可信代码、环境隔离 |
 //! | K8s | [`K8sSandbox`] | 编排工作负载级（Pod） | 较高 | 大规模并发、企业级 |
 //!
@@ -59,7 +60,7 @@ pub use policy::{SandboxPolicy, SecurityLevel};
 // Re-export core types from echo_core
 pub use echo_core::sandbox::{
     CommandKind, ExecutionResult, IsolationLevel, ResourceLimits, SandboxCommand, SandboxExecutor,
-    SandboxOutputChannel, SandboxStreamEvent,
+    SandboxOutputChannel, SandboxStreamEvent, SandboxStreamFailure,
 };
 
 // ── 共享工具 ────────────────────────────────────────────────────────────────

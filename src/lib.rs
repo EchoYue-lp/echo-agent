@@ -261,7 +261,7 @@ pub mod prelude {
     pub use crate::sandbox::{
         DockerSandbox, ExecutionResult as SandboxResult, IsolationLevel, K8sSandbox, LocalSandbox,
         ResourceLimits, SandboxCommand, SandboxExecutor, SandboxManager, SandboxOutputChannel,
-        SandboxPolicy, SandboxStreamEvent, SecurityLevel,
+        SandboxPolicy, SandboxStreamEvent, SandboxStreamFailure, SecurityLevel,
     };
 
     // Circuit Breaker

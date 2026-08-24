@@ -258,6 +258,21 @@ let agent = ReactAgent::builder(config)
     .build()?;
 ```
 
+受控沙箱执行把资源清理作为 terminal 契约的一部分。在 Unix 上，`LocalSandbox`
+只有在杀死固定进程组、回收 leader 并确认进程组已不存在后才报告取消。Windows
+Local 后端尚未拥有 Job Object，因此所有 Local 执行入口都在 spawn 前返回不可用；
+Windows 应使用 Docker/K8s。活跃 stream
+中的清理失败通过 typed `SandboxStreamEvent::Failed` terminal 返回，不会伪装成
+成功完成。
+
+`DockerSandbox` 为每个容器预分配唯一清理名，并由 detached owner 统一持有 create、
+start、stdin、执行与 remove。正常完成、超时、取消、执行失败和 caller abort 都会到达
+`docker rm -f`；清理失败会返回同时保留有限 primary facts 与 cleanup facts 的 typed
+sandbox I/O 错误。Docker 控制命令具有固定 deadline，按唯一名称执行有界清理重试，
+availability 使用实例共享短缓存，截断的全局容器列表会显式失败，stdout/stderr 共享
+输出保留上限；额外 Docker 参数采用窄 allowlist，不能覆盖容器身份、
+label、restart、network、namespace、mount、security 或 capability 设置。
+
 ---
 
 ## 6. 密钥管理

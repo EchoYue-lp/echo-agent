@@ -870,6 +870,27 @@ fn start_sandbox_stream<'a>(
                     let result = tool_result_from_execution(result, working_dir.as_ref());
                     ToolStreamEvent::Complete(artifact_capture.finish(result))
                 }
+                SandboxStreamEvent::Failed { failure } => {
+                    let category = if failure.is_cancelled() {
+                        ToolFailureCategory::Cancelled
+                    } else {
+                        ToolFailureCategory::Permanent
+                    };
+                    let result = ToolResult::failure(category, failure.message())
+                        .with_meta("duration_ms", "0")
+                        .with_meta("exit_code", "-1")
+                        .with_meta(
+                            "working_dir",
+                            working_dir
+                                .as_ref()
+                                .map(|dir| dir.display().to_string())
+                                .unwrap_or_default(),
+                        )
+                        .with_meta("output_truncated", "false")
+                        .with_meta("stdout_bytes", "0")
+                        .with_meta("stderr_bytes", "0");
+                    ToolStreamEvent::Complete(artifact_capture.finish(result))
+                }
             };
             if tx.send(mapped).await.is_err() {
                 return;

@@ -1338,6 +1338,22 @@ async fn run_sandbox_cell(
                 }
                 return CellOutcome::exited(Some(result.exit_code), result.success());
             }
+            SandboxStreamEvent::Failed { failure } => {
+                let message = failure.message().to_string();
+                append_output(
+                    &handle,
+                    message.as_bytes(),
+                    max_retained,
+                    ToolOutputChannel::Stderr,
+                );
+                if failure.is_cancelled() {
+                    return CellOutcome::cancelled();
+                }
+                return CellOutcome::runtime_failure(
+                    CommandCellTerminalCause::OutputDrainFailed,
+                    message,
+                );
+            }
         }
     }
 }
