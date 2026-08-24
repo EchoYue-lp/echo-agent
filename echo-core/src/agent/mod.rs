@@ -69,6 +69,226 @@ impl std::fmt::Display for AgentSteerError {
 
 impl std::error::Error for AgentSteerError {}
 
+/// Observable lifecycle phase of one accepted steering input.
+///
+/// Acceptance only means that the active turn's mailbox owns the input.
+/// [`AgentSteerPhase::Drained`] means the ReAct loop moved it into model
+/// context, while [`AgentSteerPhase::TurnSettled`] means the owning root turn
+/// reached its real terminal boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSteerPhase {
+    /// The active turn mailbox owns the input, but model context does not.
+    Accepted,
+    /// The input was inserted into the active turn's model context.
+    Drained,
+    /// The root turn reached a terminal boundary.
+    TurnSettled,
+}
+
+/// Terminal outcome of the root turn that owned a steering input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSteerTurnOutcome {
+    /// The root turn completed normally.
+    Completed,
+    /// Cancellation reached the root turn.
+    Cancelled,
+    /// Provider, tool, validation, or runtime processing failed.
+    Failed,
+    /// The turn owner was dropped or aborted before it could publish a typed
+    /// terminal. This is terminal, but must not be interpreted as success.
+    Dropped,
+}
+
+/// Current durable-consumption boundary observed for one steering input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSteerState {
+    /// The mailbox owns the input.
+    Accepted,
+    /// The active model context owns the input.
+    Drained,
+    /// The root turn terminated.
+    TurnSettled {
+        /// Root-turn terminal outcome.
+        outcome: AgentSteerTurnOutcome,
+        /// Whether the input reached model context before the turn settled.
+        drained: bool,
+    },
+}
+
+impl AgentSteerState {
+    /// Return the coarse lifecycle phase.
+    pub fn phase(&self) -> AgentSteerPhase {
+        match self {
+            Self::Accepted => AgentSteerPhase::Accepted,
+            Self::Drained => AgentSteerPhase::Drained,
+            Self::TurnSettled { .. } => AgentSteerPhase::TurnSettled,
+        }
+    }
+
+    /// Whether the input reached model context before the current state.
+    pub fn was_drained(&self) -> bool {
+        matches!(
+            self,
+            Self::Drained | Self::TurnSettled { drained: true, .. }
+        )
+    }
+}
+
+/// Tracked receipt for one steering input accepted by an active Agent turn.
+///
+/// The receipt is driven by the Agent implementation. Product adapters should
+/// retain their durable input until `state().was_drained()` is true, and use
+/// `wait_for_turn_settled` when terminal root-turn semantics are required.
+#[derive(Debug, Clone)]
+pub struct AgentSteerReceipt {
+    steer_id: String,
+    turn_id: String,
+    state: tokio::sync::watch::Receiver<AgentSteerState>,
+    closed_terminal: std::sync::Arc<std::sync::Mutex<Option<AgentSteerState>>>,
+}
+
+impl AgentSteerReceipt {
+    #[doc(hidden)]
+    pub fn new(
+        steer_id: String,
+        turn_id: String,
+        state: tokio::sync::watch::Receiver<AgentSteerState>,
+    ) -> Self {
+        Self {
+            steer_id,
+            turn_id,
+            state,
+            closed_terminal: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Stable identity of this steering input.
+    pub fn steer_id(&self) -> &str {
+        &self.steer_id
+    }
+
+    /// Identity of the root turn that accepted this input.
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+
+    /// Snapshot the latest observed lifecycle state without waiting.
+    pub fn state(&self) -> AgentSteerState {
+        if let Some(state) = self.cached_closed_terminal() {
+            return state;
+        }
+        if self.state.has_changed().is_err() {
+            return self.synthesize_closed_terminal();
+        }
+        self.state.borrow().clone()
+    }
+
+    fn cached_closed_terminal(&self) -> Option<AgentSteerState> {
+        self.closed_terminal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn synthesize_closed_terminal(&self) -> AgentSteerState {
+        let mut cached = self
+            .closed_terminal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(state) = cached.as_ref() {
+            return state.clone();
+        }
+        let current = self.state.borrow().clone();
+        let terminal = match current {
+            state @ AgentSteerState::TurnSettled { .. } => state,
+            state => AgentSteerState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Dropped,
+                drained: state.was_drained(),
+            },
+        };
+        *cached = Some(terminal.clone());
+        terminal
+    }
+
+    /// Wait until the input is drained or its turn settles first.
+    pub async fn wait_for_drained(&mut self) -> AgentSteerState {
+        loop {
+            let state = self.state();
+            if !matches!(state, AgentSteerState::Accepted) {
+                return state;
+            }
+            if self.state.changed().await.is_err() {
+                return self.synthesize_closed_terminal();
+            }
+        }
+    }
+
+    /// Wait for the owning root turn's real terminal boundary.
+    pub async fn wait_for_turn_settled(&mut self) -> AgentSteerState {
+        loop {
+            let state = self.state();
+            if matches!(state, AgentSteerState::TurnSettled { .. }) {
+                return state;
+            }
+            if self.state.changed().await.is_err() {
+                return self.synthesize_closed_terminal();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod steer_receipt_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn closed_sender_terminal_is_shared_across_receipt_clones() {
+        let (sender, receiver) = tokio::sync::watch::channel(AgentSteerState::Accepted);
+        let mut first = AgentSteerReceipt::new(
+            "steer-closed".to_string(),
+            "turn-closed".to_string(),
+            receiver,
+        );
+        let mut second = first.clone();
+        drop(sender);
+
+        let (first_state, second_state) = tokio::join!(
+            first.wait_for_turn_settled(),
+            second.wait_for_turn_settled()
+        );
+        let expected = AgentSteerState::TurnSettled {
+            outcome: AgentSteerTurnOutcome::Dropped,
+            drained: false,
+        };
+        assert_eq!(first_state, expected);
+        assert_eq!(second_state, expected);
+        assert_eq!(first.state(), expected);
+        assert_eq!(second.state(), expected);
+    }
+
+    #[tokio::test]
+    async fn closed_sender_preserves_prior_drain() {
+        let (sender, receiver) = tokio::sync::watch::channel(AgentSteerState::Drained);
+        let mut receipt = AgentSteerReceipt::new(
+            "steer-drained".to_string(),
+            "turn-drained".to_string(),
+            receiver,
+        );
+        drop(sender);
+
+        assert_eq!(
+            receipt.wait_for_turn_settled().await,
+            AgentSteerState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Dropped,
+                drained: true,
+            }
+        );
+    }
+}
+
 /// Optional soft budgets applied to one ReAct invocation.
 ///
 /// `None` fields preserve the existing behavior. The hard iteration limit
@@ -811,6 +1031,20 @@ pub trait Agent: Send + Sync {
         Err(AgentSteerError::Unsupported)
     }
 
+    /// Inject and track one message through acceptance, model-context drain,
+    /// and root-turn settlement.
+    ///
+    /// Implementations that only support the legacy [`Self::steer_input`]
+    /// remain source compatible and return [`AgentSteerError::Unsupported`]
+    /// here until they can provide real lifecycle signals.
+    fn steer_input_tracked(
+        &self,
+        _expected_turn_id: Option<&str>,
+        _message: Message,
+    ) -> std::result::Result<AgentSteerReceipt, AgentSteerError> {
+        Err(AgentSteerError::Unsupported)
+    }
+
     // ── External run context (跨 spawn 安全的值传递, 见 ExternalRunContext) ──
 
     /// Legacy agent-wide run context setter.
@@ -922,6 +1156,13 @@ impl Agent for Box<dyn Agent> {
         message: Message,
     ) -> std::result::Result<String, AgentSteerError> {
         self.as_ref().steer_input(expected_turn_id, message)
+    }
+    fn steer_input_tracked(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: Message,
+    ) -> std::result::Result<AgentSteerReceipt, AgentSteerError> {
+        self.as_ref().steer_input_tracked(expected_turn_id, message)
     }
     fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
         self.as_ref().close()

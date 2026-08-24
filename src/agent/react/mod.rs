@@ -260,6 +260,16 @@ impl ReactAgent {
         self.turn_steer_mailbox.steer(expected_turn_id, message)
     }
 
+    /// Inject user input and observe when the active turn drains and settles it.
+    pub fn steer_input_tracked(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<crate::agent::AgentSteerReceipt, crate::agent::TurnSteerError> {
+        self.turn_steer_mailbox
+            .steer_tracked(expected_turn_id, message)
+    }
+
     /// Chain-of-thought preamble auto-injected before tool calls.
     const COT_INSTRUCTION: &'static str =
         "Before calling any tool, briefly describe your analysis and execution plan.";
@@ -2752,6 +2762,15 @@ impl Agent for ReactAgent {
         message: crate::llm::types::Message,
     ) -> std::result::Result<String, echo_core::agent::AgentSteerError> {
         ReactAgent::steer_input(self, expected_turn_id, message)
+    }
+
+    fn steer_input_tracked(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<crate::agent::AgentSteerReceipt, echo_core::agent::AgentSteerError>
+    {
+        ReactAgent::steer_input_tracked(self, expected_turn_id, message)
     }
 
     fn current_run_id(&self) -> Option<String> {

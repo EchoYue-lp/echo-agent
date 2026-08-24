@@ -443,6 +443,8 @@ pub struct AgentRunSnapshot {
     pub trace_run_id: Option<String>,
     /// Current user-input/agent turn ID.
     pub current_turn_id: Option<String>,
+    /// Private authority for draining the exact active turn incarnation.
+    pub(crate) turn_steer_incarnation: Option<Arc<()>>,
     /// Message that triggered the current invocation.
     pub current_message_id: Option<String>,
     /// Typed active user message, including any attachments.
@@ -563,6 +565,7 @@ impl AgentRunSnapshot {
                     .clone()
             },
             current_turn_id: runtime.and_then(|context| context.turn_id.clone()),
+            turn_steer_incarnation: None,
             current_message_id: if invocation.is_some() {
                 runtime.and_then(|context| context.message_id.clone())
             } else {

@@ -181,6 +181,7 @@ impl ReactAgent {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         snap.current_turn_id = Some(turn_id);
+        snap.turn_steer_incarnation = Some(active_turn_lease.incarnation());
         snap.external_cancel = self
             .external_cancel
             .lock()
@@ -195,6 +196,10 @@ impl ReactAgent {
             .external_delegation_policy
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let turn_cancel = snap
+            .external_cancel
+            .as_ref()
+            .map(|cancel| cancel.as_ref().clone());
 
         // Run the shared core loop in a spawned task
         let context = self.memory.context.clone();
@@ -238,13 +243,117 @@ impl ReactAgent {
 
         let core_result = core.await.map_err(|error| {
             ReactError::Other(format!("Core loop task failed before terminal: {error}"))
-        })?;
-        core_result?;
-        drop(active_turn_lease);
+        });
+        match core_result {
+            Ok(Ok(outcome)) => active_turn_lease.settle(outcome),
+            Ok(Err(error)) => {
+                let outcome = if turn_cancel
+                    .as_ref()
+                    .is_some_and(crate::agent::CancellationToken::is_cancelled)
+                {
+                    crate::agent::AgentSteerTurnOutcome::Cancelled
+                } else {
+                    crate::agent::AgentSteerTurnOutcome::Failed
+                };
+                active_turn_lease.settle(outcome);
+                return Err(error);
+            }
+            Err(error) => {
+                drop(active_turn_lease);
+                return Err(error);
+            }
+        }
         terminal.unwrap_or_else(|| {
             Err(ReactError::Other(
                 "Core loop closed without a terminal event".to_string(),
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::hooks::{
+        HookAction, HookEvent, HookRegistry, HookResult, HookRule, HooksDefinition,
+    };
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn tracked_steer_nonstream_hook_block_is_failed_before_drain() -> Result<()> {
+        let hook_entered = Arc::new(tokio::sync::Notify::new());
+        let release_hook = Arc::new(tokio::sync::Notify::new());
+        let mut definition = HooksDefinition::default();
+        definition.add_rules(
+            HookEvent::UserPromptSubmit,
+            vec![HookRule {
+                matcher: String::new(),
+                hooks: vec![HookAction::McpTool {
+                    server: "test".to_string(),
+                    tool: "blocking-hook".to_string(),
+                    arguments: None,
+                    timeout: 5,
+                }],
+            }],
+        );
+        let mut registry = HookRegistry::new();
+        let entered = hook_entered.clone();
+        let release = release_hook.clone();
+        registry.set_mcp_executor(Arc::new(move |_, _, _| {
+            let entered = entered.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                HookResult {
+                    block: true,
+                    block_reason: Some("blocked by test hook".to_string()),
+                    ..HookResult::default()
+                }
+            })
+        }));
+        registry.register("slow-blocker", "/tmp", definition);
+
+        let mut agent = ReactAgent::new(crate::agent::AgentConfig::new(
+            "test-model",
+            "agent",
+            "system",
+        ));
+        agent.set_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        *agent
+            .current_run_id
+            .lock()
+            .map_err(|_| ReactError::Other("run identity lock poisoned".to_string()))? =
+            Some("hook-block-turn".to_string());
+        let agent = Arc::new(agent);
+        let running = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.run_react_loop("blocked request").await })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), hook_entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("UserPromptSubmit hook did not start".to_string()))?;
+        let mut receipt = agent
+            .steer_input_tracked(
+                Some("hook-block-turn"),
+                Message::user("must not be consumed".to_string()),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
+        release_hook.notify_one();
+
+        let response = running
+            .await
+            .map_err(|error| ReactError::Other(format!("nonstream task failed: {error}")))??;
+        assert!(response.contains("blocked by test hook"));
+        assert_eq!(
+            receipt.wait_for_turn_settled().await,
+            crate::agent::AgentSteerState::TurnSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+                drained: false,
+            }
+        );
+        Ok(())
     }
 }

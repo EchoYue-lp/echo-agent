@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Agent::steer_input_tracked` and `AgentSteerReceipt` expose authoritative
+  `Accepted`, model-context `Drained`, and root `TurnSettled` boundaries. The
+  terminal records completed, cancelled, failed, or dropped ownership and
+  whether consumption happened before settlement; the legacy turn-ID API stays
+  compatible. Private turn incarnations reject stale same-ID leases, hook blocks
+  cannot report success, and abnormal signal closure converges cloned receipts
+  on a cached dropped terminal.
+
 - `SandboxStreamEvent::Failed` and `SandboxStreamFailure` expose cancellation,
   output-drain, and cleanup debt as a typed live-stream terminal instead of an
   unexplained EOF or successful-looking completion.
