@@ -17,8 +17,10 @@ static SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"AIza[0-9A-Za-z\-_]{35}",
         r"glpat-[A-Za-z0-9\-_]{26}",
         r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+",
+        r#"(?i)(api[_-]?key|apikey|token|secret|password|passwd)[\s:=]+["'](?:\\.|[^"'\\\r\n])*"#,
         r"(?i)(api[_-]?key|apikey|token|secret|password|passwd)[\s:=]+[A-Za-z0-9_\-!@#$%^&*+/=]{8,}",
-        r#"(?i)\"(?:[^\"]*(?:api[_-]?key|apikey|token|secret|password|passwd)[^\"]*)\"\s*:\s*\"[^\"]*\""#,
+        r#"(?i)"(?:\\.|[^"\\])*(?:api[_-]?key|apikey|token|secret|password|passwd)(?:\\.|[^"\\])*"\s*:\s*"(?:\\.|[^"\\])*""#,
+        r#"(?i)"(?:\\.|[^"\\])*(?:api[_-]?key|apikey|token|secret|password|passwd)(?:\\.|[^"\\])*"\s*:\s*"(?:\\.|[^"\\])*\z"#,
         r"(?i)(postgres(ql)?|mysql)://[^@\s]+:[^@\s]+@",
         r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
     ]
@@ -144,5 +146,41 @@ mod tests {
 
         let text = policy.sanitize_text(r#"{"password":"short","name":"ok"}"#);
         assert!(!text.contains("short"));
+    }
+
+    #[test]
+    fn embedded_json_redaction_handles_escaped_quotes_and_newlines() {
+        let policy = ContentRetentionPolicy::default();
+        let text = policy
+            .sanitize_text("prefix {\"password\"\n:\n\"alpha\\\"omega\",\"visible\":true} suffix");
+        assert!(!text.contains("alpha"));
+        assert!(!text.contains("omega"));
+        assert!(text.contains("\"visible\":true"));
+        assert!(text.contains("prefix"));
+        assert!(text.contains("suffix"));
+    }
+
+    #[test]
+    fn embedded_json_redaction_preserves_escaped_non_secret_fields() {
+        let policy = ContentRetentionPolicy::default();
+        let text = r#"{"message":"alpha\"omega","visible":true}"#;
+        assert_eq!(policy.sanitize_text(text), text);
+    }
+
+    #[test]
+    fn sensitive_quoted_values_fail_closed_when_truncated() {
+        let policy = ContentRetentionPolicy::default();
+        for text in [
+            r#"password="supersecret"#,
+            r#"{"password":"alpha\"omega"#,
+            "token: 'tiny",
+        ] {
+            let sanitized = policy.sanitize_text(text);
+            assert!(!sanitized.contains("supersecret"));
+            assert!(!sanitized.contains("alpha"));
+            assert!(!sanitized.contains("omega"));
+            assert!(!sanitized.contains("tiny"));
+            assert!(sanitized.contains("[REDACTED]"));
+        }
     }
 }
