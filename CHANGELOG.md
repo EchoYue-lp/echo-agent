@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `FileRuntimeStateStore` and `FileConversationStore` now submit async-trait
+  filesystem work to one process-wide bounded, keyed blocking owner. Operations
+  for a conversation remain ordered, accepted writes survive caller abort, and
+  unrelated conversations can progress concurrently without unbounded blocking
+  tasks. Exact UTF-8 entity IDs now map to collision-free ASCII paths, avoiding
+  APFS case-folding and Unicode-normalization aliases. Atomic write, fsync,
+  corruption, and optional SQLite semantics are unchanged. Store constructors
+  remain synchronous bootstrap APIs; only async trait methods use the process
+  file-operation owner.
+
 - Local and Docker sandbox execution now transfer spawned resources to detached
   backend owners. Unix Local cancellation captures and verifies the process
   group; Windows Local execution is unavailable until Job Object ownership is

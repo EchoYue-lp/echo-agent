@@ -31,6 +31,15 @@ fn public_facade_composes_without_split_crates() {
 }
 
 #[test]
+fn file_backends_are_constructible_from_public_facade_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let _runtime = echo_agent::state::FileRuntimeStateStore::new(root.path())?;
+    let _conversation = echo_agent::memory::FileConversationStore::new(root.path())?;
+    Ok(())
+}
+
+#[test]
 fn runtime_state_and_task_primitives_are_available_from_the_facade() {
     let journal = MemoryEventJournal::new();
     let receipt = journal.append("facade-event".to_string()).expect("append");
