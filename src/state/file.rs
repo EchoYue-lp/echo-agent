@@ -23,6 +23,7 @@ use echo_core::error::ReactError;
 use echo_core::utils::blocking::{
     BlockingFileOperationKey, BlockingFileOperationScope, run_keyed_file_operation,
 };
+use fs2::FileExt;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -101,6 +102,43 @@ impl FileRuntimeStateStore {
             .base
             .join("_runtime_owners")
             .join(format!("{safe}.json")))
+    }
+
+    fn scope_lock_path(&self, scope_id: &str) -> Result<PathBuf, ReactError> {
+        let safe = safe_segment(scope_id)?;
+        Ok(self.base.join("_locks").join(format!("scope-{safe}.lock")))
+    }
+
+    fn runtime_lock_path(&self, runtime_state_id: &str) -> Result<PathBuf, ReactError> {
+        let safe = safe_segment(runtime_state_id)?;
+        Ok(self
+            .base
+            .join("_locks")
+            .join(format!("runtime-{safe}.lock")))
+    }
+
+    fn acquire_file_lock(path: &Path) -> crate::error::Result<std::fs::File> {
+        let parent = path.parent().ok_or_else(|| {
+            ReactError::Other("runtime state lock path has no parent".to_string())
+        })?;
+        std::fs::create_dir_all(parent).map_err(Self::to_react_err)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .map_err(Self::to_react_err)?;
+        FileExt::lock_exclusive(&file).map_err(Self::to_react_err)?;
+        Ok(file)
+    }
+
+    fn acquire_scope_lock(&self, scope_id: &str) -> crate::error::Result<std::fs::File> {
+        Self::acquire_file_lock(&self.scope_lock_path(scope_id)?)
+    }
+
+    fn acquire_runtime_lock(&self, runtime_state_id: &str) -> crate::error::Result<std::fs::File> {
+        Self::acquire_file_lock(&self.runtime_lock_path(runtime_state_id)?)
     }
 
     fn to_react_err(e: impl std::fmt::Display) -> ReactError {
@@ -321,6 +359,8 @@ impl RuntimeStateStore for FileRuntimeStateStore {
     ) -> BoxFuture<'a, crate::error::Result<()>> {
         let checkpoint = checkpoint.clone();
         self.run_scope_blocking(scope_id.to_string(), move |store, scope_id| {
+            let _scope_lock = store.acquire_scope_lock(&scope_id)?;
+            let _runtime_lock = store.acquire_runtime_lock(&checkpoint.conversation_id)?;
             let owner = store.read_runtime_owner_sync(&checkpoint.conversation_id)?;
             if let Some(owner) = owner.as_ref()
                 && owner.scope_id != scope_id
@@ -351,6 +391,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         scope_id: &'a str,
     ) -> BoxFuture<'a, crate::error::Result<Vec<String>>> {
         self.run_scope_blocking(scope_id.to_string(), move |store, scope_id| {
+            let _scope_lock = store.acquire_scope_lock(&scope_id)?;
             Ok(store
                 .read_scope_index_sync(&scope_id)?
                 .runtime_state_ids
@@ -366,6 +407,8 @@ impl RuntimeStateStore for FileRuntimeStateStore {
     ) -> BoxFuture<'a, crate::error::Result<RuntimeStateClearReceipt>> {
         let runtime_state_id = runtime_state_id.to_string();
         self.run_scope_blocking(scope_id.to_string(), move |store, scope_id| {
+            let _scope_lock = store.acquire_scope_lock(&scope_id)?;
+            let _runtime_lock = store.acquire_runtime_lock(&runtime_state_id)?;
             let mut index = store.read_scope_index_sync(&scope_id)?;
             let indexed = index.runtime_state_ids.contains(&runtime_state_id);
             let checkpoint_removed = if indexed || scope_id == runtime_state_id {
@@ -399,6 +442,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         scope_id: &'a str,
     ) -> BoxFuture<'a, crate::error::Result<RuntimeStateScopeClearReceipt>> {
         self.run_scope_blocking(scope_id.to_string(), move |store, scope_id| {
+            let _scope_lock = store.acquire_scope_lock(&scope_id)?;
             let index = store.read_scope_index_sync(&scope_id)?;
             let mut runtime_state_ids = index.runtime_state_ids.into_iter().collect::<Vec<_>>();
             if store.checkpoint_exists_sync(&scope_id)?
@@ -410,6 +454,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                 runtime_state_ids.sort();
             }
             for runtime_state_id in &runtime_state_ids {
+                let _runtime_lock = store.acquire_runtime_lock(runtime_state_id)?;
                 if let Some(owner) = store.read_runtime_owner_sync(runtime_state_id)?
                     && owner.scope_id != scope_id
                 {
@@ -554,6 +599,44 @@ mod tests {
             restarted.runtime_state_ids("bob").await?,
             vec!["bob-1".to_string()]
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_scopes_cannot_claim_one_runtime_identity() -> crate::error::Result<()> {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let first_store = store.clone();
+        let first_barrier = std::sync::Arc::clone(&barrier);
+        let first = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_store
+                .save_checkpoint_for_scope("scope-a", &checkpoint("shared-runtime", "a"))
+                .await
+        });
+        let second_store = store.clone();
+        let second_barrier = std::sync::Arc::clone(&barrier);
+        let second = tokio::spawn(async move {
+            second_barrier.wait().await;
+            second_store
+                .save_checkpoint_for_scope("scope-b", &checkpoint("shared-runtime", "b"))
+                .await
+        });
+        barrier.wait().await;
+        let first = first.await.map_err(FileRuntimeStateStore::to_react_err)?;
+        let second = second.await.map_err(FileRuntimeStateStore::to_react_err)?;
+        assert_ne!(first.is_ok(), second.is_ok());
+
+        let scope_a = store.runtime_state_ids("scope-a").await?;
+        let scope_b = store.runtime_state_ids("scope-b").await?;
+        assert_eq!(scope_a.len().saturating_add(scope_b.len()), 1);
+        assert!(
+            scope_a.first().map(String::as_str) == Some("shared-runtime")
+                || scope_b.first().map(String::as_str) == Some("shared-runtime")
+        );
+        assert!(store.get_checkpoint("shared-runtime").await?.is_some());
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
     }
