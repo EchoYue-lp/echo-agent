@@ -121,6 +121,7 @@ pub(crate) async fn run_compact(
         for m in &r.messages {
             super::super::context::push_runtime_context_note(context, "Hook:PostCompact", m).await;
         }
+        snap.realign_transcript_projection(context).await?;
     }
 
     Ok(CompactOutcome::Continue(prepare_result.messages))

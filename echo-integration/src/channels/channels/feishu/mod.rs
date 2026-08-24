@@ -66,8 +66,11 @@ mod identity_tests {
             return Err("Feishu sender identity was not namespaced".to_string());
         }
 
-        let sessions =
-            SessionHandler::with_defaults(|| -> Box<dyn MessageHandler> { Box::new(EchoHandler) });
+        let sessions = SessionHandler::with_defaults(
+            |_instance: &crate::channels::ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                Box::new(EchoHandler)
+            },
+        );
         for (sender_id, message_id) in [(open_id, "m1"), (user_id, "m2")] {
             sessions
                 .handle(InboundMessage::new(

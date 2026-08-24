@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use echo_agent::channels::{
-    AgentChannelHandler, ChannelManager, FeishuChannel, FeishuConfig, MessageHandler, QqChannel,
-    QqConfig, SessionConfig, SessionHandler,
+    AgentChannelHandler, ChannelManager, ChannelSessionInstance, FeishuChannel, FeishuConfig,
+    MessageHandler, QqChannel, QqConfig, SessionConfig, SessionHandler,
 };
 use echo_agent::prelude::{AgentConfig, LlmClient};
 
@@ -51,7 +51,8 @@ async fn main() -> echo_agent::error::Result<()> {
         let llm_client = Arc::clone(&llm_client);
         Arc::new(SessionHandler::new(
             session_config.clone(),
-            move || -> Box<dyn MessageHandler> {
+            move |instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                let _runtime_incarnation = instance.incarnation_id();
                 Box::new(AgentChannelHandler::from_config_with_client(
                     AgentConfig::standard(&model, "im-assistant", "Answer the user clearly."),
                     Arc::clone(&llm_client),

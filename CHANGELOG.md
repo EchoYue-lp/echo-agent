@@ -56,7 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout, and reset by `(channel_id, conversation_id, sender_id)`. Malformed
   identities are rejected before an Agent is created, and built-in QQ/Feishu
   adapters no longer emit a shared `unknown` sender sentinel. Feishu scopes
-  `open_id` and `user_id` in distinct identity namespaces.
+  `open_id` and `user_id` in distinct identity namespaces. Each concrete
+  handler also receives a framework-owned `ChannelSessionInstance` whose opaque
+  incarnation rotates on timeout/reset and is reported by the end callback,
+  allowing persistent runtimes to start clean without deleting stable product
+  conversation history. `AgentInvocationContext` can separately bind product
+  conversation, runtime checkpoint, and transcript generation identities;
+  generation ordinals plus checkpointed SHA-256 cursors keep transcript append
+  idempotent across repeated content, compaction, eviction, and crash cuts.
 
 - Procedural macros now resolve their owning split crate directly:
   core-owned macros accept `echo_core`, while `#[handler]` accepts

@@ -17,4 +17,6 @@ pub(crate) struct MemorySubsystem {
     pub(crate) snapshot_manager: Arc<std::sync::RwLock<Option<SnapshotManager>>>,
     pub(crate) conversation_store: Option<Arc<dyn crate::memory::ConversationStore>>,
     pub(crate) state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
+    pub(crate) transcript_projection_cursor:
+        Arc<tokio::sync::Mutex<crate::agent::snapshot::TranscriptProjectionCursor>>,
 }

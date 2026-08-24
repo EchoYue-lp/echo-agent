@@ -66,7 +66,8 @@ pub use channels::feishu::channel::{FeishuChannel, FeishuConfig};
 pub use channels::qq::channel::{QqChannel, QqConfig};
 pub use manager::ChannelManager;
 pub use session::{
-    SessionConfig, SessionEndInfo, SessionEndReason, SessionFactory, SessionHandler,
+    ChannelSessionInstance, ChannelSessionRotation, SessionConfig, SessionEndInfo,
+    SessionEndReason, SessionFactory, SessionHandler,
 };
 pub use types::*;
 
@@ -76,7 +77,8 @@ pub mod prelude {
     pub use super::channels::qq::channel::{QqChannel, QqConfig};
     pub use super::manager::ChannelManager;
     pub use super::session::{
-        SessionConfig, SessionEndInfo, SessionEndReason, SessionFactory, SessionHandler,
+        ChannelSessionInstance, ChannelSessionRotation, SessionConfig, SessionEndInfo,
+        SessionEndReason, SessionFactory, SessionHandler,
     };
     pub use super::types::*;
 }

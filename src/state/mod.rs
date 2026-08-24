@@ -100,6 +100,42 @@ pub struct AgentCheckpoint {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Stable message identity persisted for one transcript projection generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranscriptProjectionMessage {
+    pub ordinal: u64,
+    /// SHA-256 of the normalized user-visible message projection.
+    pub digest: String,
+}
+
+/// Durable cursor for append-only projection of one model-context generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranscriptProjectionCheckpoint {
+    pub generation_id: String,
+    pub next_ordinal: u64,
+    pub projected: Vec<TranscriptProjectionMessage>,
+}
+
+/// Validated runtime payload restored from one `AgentCheckpoint` parse.
+pub struct RestoredAgentCheckpoint {
+    pub messages: Vec<crate::llm::types::Message>,
+    pub transcript_projection: Option<TranscriptProjectionCheckpoint>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AgentCheckpointPayload {
+    messages: Vec<crate::llm::types::Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcript_projection: Option<TranscriptProjectionCheckpoint>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AgentCheckpointPayloadCompat {
+    Current(AgentCheckpointPayload),
+    Legacy(Vec<crate::llm::types::Message>),
+}
+
 impl AgentCheckpoint {
     /// Create a new checkpoint.
     pub fn new(conversation_id: impl Into<String>) -> Self {
@@ -121,16 +157,96 @@ impl AgentCheckpoint {
     /// sending provider-invalid context or replaying an already completed
     /// side effect after restart.
     pub fn restore_messages(&self) -> crate::error::Result<Vec<crate::llm::types::Message>> {
-        let messages: Vec<crate::llm::types::Message> = serde_json::from_str(&self.messages_json)
-            .map_err(|error| {
+        self.restore_runtime_payload()
+            .map(|payload| payload.messages)
+    }
+
+    /// Restore the durable transcript generation cursor, when present.
+    pub fn restore_transcript_projection(
+        &self,
+    ) -> crate::error::Result<Option<TranscriptProjectionCheckpoint>> {
+        self.restore_runtime_payload()
+            .map(|payload| payload.transcript_projection)
+    }
+
+    /// Parse and validate messages plus transcript cursor exactly once.
+    pub fn restore_runtime_payload(&self) -> crate::error::Result<RestoredAgentCheckpoint> {
+        let (messages, projection) = self.restore_payload()?;
+        validate_tool_message_pairing(&messages)?;
+        self.validate_transcript_projection(projection.as_ref())?;
+        Ok(RestoredAgentCheckpoint {
+            messages,
+            transcript_projection: projection,
+        })
+    }
+
+    fn validate_transcript_projection(
+        &self,
+        projection: Option<&TranscriptProjectionCheckpoint>,
+    ) -> crate::error::Result<()> {
+        if let Some(projection) = projection.as_ref() {
+            if projection.generation_id != self.conversation_id {
+                return Err(invalid_checkpoint(
+                    "transcript projection generation does not match checkpoint identity"
+                        .to_string(),
+                ));
+            }
+            let mut previous = None;
+            for message in &projection.projected {
+                if message.ordinal >= projection.next_ordinal
+                    || previous.is_some_and(|previous| message.ordinal <= previous)
+                    || message.digest.len() != 64
+                    || !message.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(invalid_checkpoint(
+                        "transcript projection cursor is corrupt".to_string(),
+                    ));
+                }
+                previous = Some(message.ordinal);
+            }
+        }
+        Ok(())
+    }
+
+    /// Serialize messages and their exact transcript projection cursor into the
+    /// existing checkpoint payload column/file.
+    pub fn serialize_payload(
+        messages: Vec<crate::llm::types::Message>,
+        transcript_projection: Option<TranscriptProjectionCheckpoint>,
+    ) -> crate::error::Result<String> {
+        serde_json::to_string(&AgentCheckpointPayload {
+            messages,
+            transcript_projection,
+        })
+        .map_err(|error| {
             crate::error::ReactError::RuntimeState(Box::new(
                 echo_core::error::RuntimeStateError::SerializationError(format!(
-                    "Failed to deserialize checkpoint messages: {error}"
+                    "Failed to serialize checkpoint payload: {error}"
                 )),
             ))
-        })?;
-        validate_tool_message_pairing(&messages)?;
-        Ok(messages)
+        })
+    }
+
+    fn restore_payload(
+        &self,
+    ) -> crate::error::Result<(
+        Vec<crate::llm::types::Message>,
+        Option<TranscriptProjectionCheckpoint>,
+    )> {
+        let payload: AgentCheckpointPayloadCompat = serde_json::from_str(&self.messages_json)
+            .map_err(|error| {
+                crate::error::ReactError::RuntimeState(Box::new(
+                    echo_core::error::RuntimeStateError::SerializationError(format!(
+                        "Failed to deserialize checkpoint messages: {error}"
+                    )),
+                ))
+            })?;
+        Ok(match payload {
+            AgentCheckpointPayloadCompat::Current(payload) => {
+                (payload.messages, payload.transcript_projection)
+            }
+            AgentCheckpointPayloadCompat::Legacy(messages) => (messages, None),
+        })
     }
 
     /// Completed tool call IDs present in this checkpoint, in message order.
@@ -300,6 +416,105 @@ mod checkpoint_tests {
             ),
         ])?;
         assert!(duplicate.restore_messages().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn transcript_projection_cursor_round_trips_and_rejects_corruption() -> crate::error::Result<()>
+    {
+        let projection = TranscriptProjectionCheckpoint {
+            generation_id: "conversation-1".to_string(),
+            next_ordinal: 2,
+            projected: vec![
+                TranscriptProjectionMessage {
+                    ordinal: 0,
+                    digest: "a".repeat(64),
+                },
+                TranscriptProjectionMessage {
+                    ordinal: 1,
+                    digest: "b".repeat(64),
+                },
+            ],
+        };
+        let mut checkpoint = AgentCheckpoint::new("conversation-1");
+        checkpoint.messages_json = AgentCheckpoint::serialize_payload(
+            vec![Message::user("hello".to_string())],
+            Some(projection.clone()),
+        )?;
+        assert_eq!(
+            checkpoint.restore_transcript_projection()?,
+            Some(projection)
+        );
+
+        let wrong_generation = TranscriptProjectionCheckpoint {
+            generation_id: "other".to_string(),
+            next_ordinal: 1,
+            projected: vec![TranscriptProjectionMessage {
+                ordinal: 0,
+                digest: "c".repeat(64),
+            }],
+        };
+        checkpoint.messages_json =
+            AgentCheckpoint::serialize_payload(Vec::new(), Some(wrong_generation))?;
+        assert!(checkpoint.restore_transcript_projection().is_err());
+
+        let duplicate_ordinal = TranscriptProjectionCheckpoint {
+            generation_id: "conversation-1".to_string(),
+            next_ordinal: 2,
+            projected: vec![
+                TranscriptProjectionMessage {
+                    ordinal: 1,
+                    digest: "d".repeat(64),
+                },
+                TranscriptProjectionMessage {
+                    ordinal: 1,
+                    digest: "e".repeat(64),
+                },
+            ],
+        };
+        checkpoint.messages_json =
+            AgentCheckpoint::serialize_payload(Vec::new(), Some(duplicate_ordinal))?;
+        assert!(checkpoint.restore_transcript_projection().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn transcript_cursor_checkpoint_has_bounded_digest_overhead() -> crate::error::Result<()> {
+        let projection = TranscriptProjectionCheckpoint {
+            generation_id: "conversation-1".to_string(),
+            next_ordinal: 100_000,
+            projected: (0_u64..100_000)
+                .map(|ordinal| TranscriptProjectionMessage {
+                    ordinal,
+                    digest: "f".repeat(64),
+                })
+                .collect(),
+        };
+        let started = std::time::Instant::now();
+        let payload = AgentCheckpoint::serialize_payload(
+            vec![Message::user("x".repeat(1_000_000))],
+            Some(projection),
+        )?;
+        let serialize_elapsed = started.elapsed();
+        let mut checkpoint = AgentCheckpoint::new("conversation-1");
+        checkpoint.messages_json = payload;
+        let restore_started = std::time::Instant::now();
+        let restored = checkpoint.restore_runtime_payload()?;
+        let restore_elapsed = restore_started.elapsed();
+        if checkpoint.messages_json.len() > 13_000_000
+            || serialize_elapsed > std::time::Duration::from_secs(5)
+            || restore_elapsed > std::time::Duration::from_secs(5)
+            || restored
+                .transcript_projection
+                .as_ref()
+                .map(|projection| projection.projected.len())
+                != Some(100_000)
+        {
+            return Err(crate::error::ReactError::Other(format!(
+                "checkpoint cursor exceeded budget: bytes={}, serialize={serialize_elapsed:?}, restore={restore_elapsed:?}",
+                checkpoint.messages_json.len(),
+            )));
+        }
         Ok(())
     }
 }

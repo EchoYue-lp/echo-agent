@@ -77,6 +77,16 @@ Checkpoint:             state@7
 
 `AgentCheckpoint` 只拥有 ReAct runtime state，不拥有任务 DAG 或其它应用领域状态。它也不是 `ConversationStore` 中面向用户展示的 transcript。
 
+`AgentInvocationContext` 可以显式拆分这两种身份：`runtime.conversation_id` 继续表示产品事件与
+transcript 身份，`runtime_state_id` 只选择 `RuntimeStateStore` checkpoint key。两者不同时，调用方
+还应把 runtime incarnation 传给 `transcript_generation_id`。framework 会为规范 transcript 记录
+附加 typed generation + ordinal，并在 `AgentCheckpoint` 中只保存 ordinal/digest cursor。即使两轮
+内容完全相同，多次 safe point、checkpoint 与产品 Store 的 crash cut 也保持幂等；压缩只在完整
+pre-compaction transcript 已落盘后重新对齐 cursor。
+
+轮换 `runtime_state_id` 会创建干净的模型上下文，但不会删除稳定产品会话。新 incarnation 不会读取
+旧 runtime key；旧 key 的物理 GC 属于独立 retention 议题，reset 不是磁盘擦除。
+
 ### 其它同名 checkpoint
 
 框架还有其它作用域不同的 checkpoint：

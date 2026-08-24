@@ -1,7 +1,7 @@
 # ADR 0001: Sender-Scoped Channel Sessions
 
 - Status: Accepted
-- Date: 2026-08-24
+- Date: 2026-08-25
 - Owners: `echo-integration/channels`
 
 ## Context
@@ -30,6 +30,13 @@ after adding a sender coordinate.
 4. Use one typed framework key for identified senders and reject malformed
    identity coordinates. This keeps one authority and bounds retained sessions
    to identified channel participants.
+5. Derive runtime identity only from the stable sender key. This cannot
+   distinguish a replacement handler from its predecessor, so a persistent
+   runtime store may silently restore model messages after timeout or reset.
+6. Give every concrete handler a framework-owned opaque incarnation while
+   leaving the stable sender key unchanged. This separates ephemeral runtime
+   continuity from product conversation history without imposing an EKO data
+   model on the framework.
 
 ## Decision
 
@@ -49,6 +56,25 @@ after adding a sender coordinate.
   messages to a handler. Feishu emits `open_id:{value}` or, when `open_id` is
   absent, `user_id:{value}` so the two identity namespaces cannot collide.
 - Session-end callbacks report the same validated identity used by the key.
+- Every factory call receives a `ChannelSessionInstance`: its three validated
+  coordinates are stable and its opaque incarnation is unique to that concrete
+  handler lifetime.
+- Framework timeout/reset replacement creates a new incarnation. Applications
+  that own a richer reset barrier can call `ChannelSessionInstance::rotate()`
+  after settlement; all clones and the eventual end callback share that one
+  authority.
+- `SessionEndInfo.incarnation_id` always reports the incarnation that actually
+  ended, including an application rotation, so exact runtime cleanup does not
+  depend on reconstructing identities from strings.
+- `AgentInvocationContext.runtime_state_id` separates ReAct checkpoint identity
+  from the stable product conversation carried by `ExternalRunContext`.
+  `transcript_generation_id` enables typed append projection for that runtime
+  incarnation.
+- Canonical transcript records carry an internal `(generation, ordinal)` in
+  their existing projection metadata. `AgentCheckpoint` persists the committed
+  ordinal/digest cursor in its existing payload, so duplicate content, pool
+  eviction, crash cuts, and post-compaction suffixes do not require content
+  boundary guesses.
 
 No anonymous per-message fallback is retained, and anonymous messages do not
 reuse state across deliveries.
@@ -64,9 +90,24 @@ malformed transport event is rejected instead of receiving an Agent response;
 transport owners must provide a stable sender identity before entering the
 framework.
 
-The key is private, so this changes runtime behavior without adding a second
-public session API or a serialized compatibility contract. Timeout pruning
-continues to reclaim identified sessions under the existing `SessionConfig`.
+The key remains private and no parallel session store or serialized contract is
+introduced. `ChannelSessionInstance` is a lifecycle capability supplied by the
+existing `SessionFactory`, not a second lookup authority. Consumers may include
+its incarnation in model/checkpoint keys while retaining the three stable
+coordinates for journals, TaskRuns, and UI routing. Timeout pruning continues
+to reclaim identified sessions under the existing `SessionConfig`.
+
+An incarnation rotation is a model-context boundary, not product-history or
+disk deletion. A new runtime key cannot load the predecessor checkpoint, while
+the stable `ConversationStore` transcript remains append-only and queryable.
+Physical garbage collection for retired runtime keys is intentionally deferred
+to a separate persistence-retention policy.
+
+This decision changes the public `SessionFactory` callback shape and adds
+`ChannelSessionInstance`, `ChannelSessionRotation`,
+`AgentInvocationContext.runtime_state_id`, and
+`AgentInvocationContext.transcript_generation_id`. Callers that do not split
+identities keep the prior behavior through `None` defaults.
 
 ## Verification
 
@@ -74,3 +115,9 @@ Regression coverage exercises same-group multi-sender isolation, independent
 mutexes, mode and HITL isolation, sender-local reset, same-sender reuse,
 channel/conversation separation, timeout callback identity, invalid identity
 fail-closed behavior, and QQ/Feishu ingress rejection.
+Incarnation coverage additionally exercises same-handler reuse, application
+rotation, timeout callback accuracy after rotation, and fresh replacement IDs.
+Persistence coverage exercises same-incarnation checkpoint recovery, rotated
+checkpoint isolation, identical-tail transcript append, repeated safe-point
+idempotency, crash-cut catch-up, corrupt cursor rejection, and post-compaction
+ordinal continuation.

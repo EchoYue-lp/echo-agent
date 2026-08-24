@@ -72,6 +72,19 @@ Restoration validates assistant tool calls and tool results as paired messages. 
 
 `AgentCheckpoint` owns only ReAct runtime state. It does not own an application task DAG and is not the user-visible transcript stored by `ConversationStore`.
 
+`AgentInvocationContext` may separate these identities explicitly. `runtime.conversation_id`
+remains the product/event/transcript identity, while `runtime_state_id` selects the
+`RuntimeStateStore` checkpoint key. When they differ, callers should also set
+`transcript_generation_id` to the runtime incarnation. The framework then adds a typed
+generation + ordinal to canonical transcript records and persists only ordinal/digest cursor
+state in `AgentCheckpoint`. Repeated safe points and checkpoint/product-store crash cuts are
+idempotent even when two turns have identical content; compaction realigns the cursor only after
+the complete pre-compaction transcript is durable.
+
+Rotating `runtime_state_id` starts a clean model context without deleting the stable product
+conversation. Old runtime-state keys are unreadable to the new incarnation, but physical garbage
+collection is a separate retention concern; reset is not a disk wipe.
+
 ### Other checkpoint domains
 
 The framework also uses the name for distinct domains:

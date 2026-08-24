@@ -551,6 +551,9 @@ impl ReactAgent {
                 snapshot_manager: Arc::new(std::sync::RwLock::new(None)),
                 conversation_store: None,
                 state_store: None,
+                transcript_projection_cursor: Arc::new(tokio::sync::Mutex::new(
+                    crate::agent::snapshot::TranscriptProjectionCursor::default(),
+                )),
             },
             pre_model_context_projector: std::sync::RwLock::new(None),
             #[cfg(feature = "human-loop")]
@@ -1730,7 +1733,14 @@ impl ReactAgent {
 
         let checkpoint = store.get_checkpoint(conv_id).await?;
         if let Some(ref cp) = checkpoint {
-            let messages = cp.restore_messages()?;
+            let restored = cp.restore_runtime_payload()?;
+            let messages = restored.messages;
+            let mut projection_cursor = self.memory.transcript_projection_cursor.lock().await;
+            match restored.transcript_projection {
+                Some(transcript_projection) => projection_cursor.restore(transcript_projection),
+                None => projection_cursor.align_restored(conv_id, &messages)?,
+            }
+            drop(projection_cursor);
 
             let msg_count = messages.len();
             self.memory.context.lock().await.set_messages(messages);

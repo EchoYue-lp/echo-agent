@@ -21,6 +21,17 @@ struct MessageProjectionMeta {
     name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcript_generation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcript_ordinal: Option<u64>,
+}
+
+/// Typed append identity for one product transcript message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptProjectionMeta {
+    pub generation_id: String,
+    pub ordinal: u64,
 }
 
 /// Project runtime Message list to persistable transcript records.
@@ -66,6 +77,8 @@ pub fn project_message(conversation_id: &str, message: &Message) -> Result<Store
         reasoning_content: message.reasoning_content.clone(),
         name: message.name.clone(),
         tool_call_id: message.tool_call_id.clone(),
+        transcript_generation_id: None,
+        transcript_ordinal: None,
     })?);
 
     Ok(StoredMessage {
@@ -78,6 +91,61 @@ pub fn project_message(conversation_id: &str, message: &Message) -> Result<Store
         tool_result_json,
         created_at: echo_core::utils::time::now_local().to_rfc3339(),
     })
+}
+
+/// Attach one generation-local ordinal to a canonical projected message.
+pub fn set_transcript_projection_meta(
+    stored: &mut StoredMessage,
+    generation_id: &str,
+    ordinal: u64,
+) -> Result<()> {
+    let mut projection = restore_projection_meta(stored)?.ok_or_else(|| {
+        MemoryError::SerializationError(
+            "transcript projection metadata requires a canonical message projection".to_string(),
+        )
+    })?;
+    projection.transcript_generation_id = Some(generation_id.to_string());
+    projection.transcript_ordinal = Some(ordinal);
+    stored.attachments_json = Some(serde_json::to_string(&projection)?);
+    Ok(())
+}
+
+/// Read a generation-local ordinal from a canonical projected message.
+pub fn transcript_projection_meta(
+    stored: &StoredMessage,
+) -> Result<Option<TranscriptProjectionMeta>> {
+    let Some(projection) = restore_projection_meta(stored)? else {
+        return Ok(None);
+    };
+    Ok(
+        match (
+            projection.transcript_generation_id,
+            projection.transcript_ordinal,
+        ) {
+            (Some(generation_id), Some(ordinal)) => Some(TranscriptProjectionMeta {
+                generation_id,
+                ordinal,
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(MemoryError::SerializationError(
+                    "transcript projection generation and ordinal must be present together"
+                        .to_string(),
+                )
+                .into());
+            }
+        },
+    )
+}
+
+/// Return attachment metadata with generation-local append coordinates removed.
+pub fn normalized_transcript_attachments(stored: &StoredMessage) -> Result<Option<String>> {
+    let Some(mut projection) = restore_projection_meta(stored)? else {
+        return Ok(stored.attachments_json.clone());
+    };
+    projection.transcript_generation_id = None;
+    projection.transcript_ordinal = None;
+    Ok(Some(serde_json::to_string(&projection)?))
 }
 
 /// Restore a single persisted transcript record back into a runtime [`Message`].

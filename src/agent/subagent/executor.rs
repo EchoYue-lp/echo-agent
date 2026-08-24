@@ -1841,6 +1841,8 @@ impl SubagentExecutor {
             );
             let invocation = AgentInvocationContext {
                 runtime: runtime_context.clone(),
+                runtime_state_id: None,
+                transcript_generation_id: None,
                 working_dir: isolation_handle.as_ref().map(|handle| handle.path.clone()),
                 cancel: None,
                 disabled_tools,

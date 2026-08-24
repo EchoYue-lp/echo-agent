@@ -22,7 +22,7 @@ exclude = ["**/.DS_Store"]
 default = []
 mcp = ["dep:tokio-tungstenite", "echo_core/mcp"]
 lsp = ["echo_core/lsp"]
-channels = ["echo_core/channels", "dep:axum", "dep:tokio-tungstenite"]
+channels = ["echo_core/channels", "dep:axum", "dep:tokio-tungstenite", "dep:uuid"]
 
 [dependencies]
 echo_core = { version = "0.2.0", path = "../echo-core" }
@@ -47,6 +47,7 @@ axum = { version = "0.7", optional = true }
 prost = "0.13"
 url = "2"
 rand = "0.9"
+uuid = { version = "1", features = ["v4"], optional = true }
 hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"

@@ -131,6 +131,195 @@ fn merge_transcript_projection(
     persisted
 }
 
+fn same_projection_content(
+    left: &crate::state::TranscriptProjectionMessage,
+    right: &crate::state::TranscriptProjectionMessage,
+) -> bool {
+    left.digest == right.digest
+}
+
+fn generation_overlap(
+    previous: &[crate::state::TranscriptProjectionMessage],
+    projected: &[crate::state::TranscriptProjectionMessage],
+) -> usize {
+    let max_overlap = previous.len().min(projected.len());
+    (0..=max_overlap)
+        .rev()
+        .find(|overlap| {
+            previous
+                .iter()
+                .skip(previous.len().saturating_sub(*overlap))
+                .zip(projected.iter().take(*overlap))
+                .all(|(left, right)| same_projection_content(left, right))
+        })
+        .unwrap_or_default()
+}
+
+fn transcript_projection_messages(
+    projected: &[crate::memory::StoredMessage],
+) -> crate::error::Result<Vec<crate::state::TranscriptProjectionMessage>> {
+    projected
+        .iter()
+        .map(|message| {
+            use sha2::{Digest, Sha256};
+            let normalized = serde_json::to_vec(&(
+                &message.role,
+                &message.content,
+                crate::memory::normalized_transcript_attachments(message)?,
+                &message.tool_calls_json,
+                &message.tool_result_json,
+            ))?;
+            Ok(crate::state::TranscriptProjectionMessage {
+                ordinal: 0,
+                digest: format!("{:x}", Sha256::digest(normalized)),
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct TranscriptProjectionCursor {
+    generation_id: Option<String>,
+    next_ordinal: u64,
+    projected: Vec<crate::state::TranscriptProjectionMessage>,
+}
+
+impl TranscriptProjectionCursor {
+    pub(crate) fn align_restored(
+        &mut self,
+        generation_id: &str,
+        messages: &[Message],
+    ) -> crate::error::Result<()> {
+        let visible = filter_user_visible_transcript(messages);
+        let projected = crate::memory::project_messages(generation_id, &visible)?;
+        let mut assigned = transcript_projection_messages(&projected)?;
+        self.next_ordinal = 0;
+        for message in &mut assigned {
+            message.ordinal = self.next_ordinal;
+            self.next_ordinal = self.next_ordinal.checked_add(1).ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "transcript projection ordinal capacity exhausted".to_string(),
+                )
+            })?;
+        }
+        self.projected = assigned;
+        self.generation_id = Some(generation_id.to_string());
+        Ok(())
+    }
+
+    fn assign(
+        &mut self,
+        generation_id: &str,
+        projected: &[crate::memory::StoredMessage],
+    ) -> crate::error::Result<Vec<crate::state::TranscriptProjectionMessage>> {
+        if self.generation_id.as_deref() != Some(generation_id) {
+            self.generation_id = Some(generation_id.to_string());
+            self.next_ordinal = 0;
+            self.projected.clear();
+        }
+        let identities = transcript_projection_messages(projected)?;
+        let overlap = generation_overlap(&self.projected, &identities);
+        let mut assigned = self
+            .projected
+            .iter()
+            .skip(self.projected.len().saturating_sub(overlap))
+            .cloned()
+            .collect::<Vec<_>>();
+        for mut message in identities.into_iter().skip(overlap) {
+            message.ordinal = self.next_ordinal;
+            self.next_ordinal = self.next_ordinal.checked_add(1).ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "transcript projection ordinal capacity exhausted".to_string(),
+                )
+            })?;
+            assigned.push(message);
+        }
+        Ok(assigned)
+    }
+
+    fn checkpoint_for(&self, generation_id: &str) -> crate::state::TranscriptProjectionCheckpoint {
+        crate::state::TranscriptProjectionCheckpoint {
+            generation_id: generation_id.to_string(),
+            next_ordinal: if self.generation_id.as_deref() == Some(generation_id) {
+                self.next_ordinal
+            } else {
+                0
+            },
+            projected: if self.generation_id.as_deref() == Some(generation_id) {
+                self.projected.clone()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    pub(crate) fn restore(&mut self, checkpoint: crate::state::TranscriptProjectionCheckpoint) {
+        self.generation_id = Some(checkpoint.generation_id);
+        self.next_ordinal = checkpoint.next_ordinal;
+        self.projected = checkpoint.projected;
+    }
+}
+
+fn merge_generation_projection(
+    mut persisted: Vec<crate::memory::StoredMessage>,
+    projected: &[crate::memory::StoredMessage],
+    assigned: &[crate::state::TranscriptProjectionMessage],
+    generation_id: &str,
+) -> crate::error::Result<Vec<crate::memory::StoredMessage>> {
+    if projected.len() != assigned.len() {
+        return Err(crate::error::ReactError::Other(
+            "transcript projection assignment length mismatch".to_string(),
+        ));
+    }
+    let mut persisted_ordinals =
+        std::collections::HashMap::<u64, crate::state::TranscriptProjectionMessage>::new();
+    for message in &persisted {
+        let Some(meta) = crate::memory::transcript_projection_meta(message)? else {
+            continue;
+        };
+        if meta.generation_id != generation_id {
+            continue;
+        }
+        let mut identity = transcript_projection_messages(std::slice::from_ref(message))?
+            .pop()
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "transcript projection identity was unexpectedly empty".to_string(),
+                )
+            })?;
+        identity.ordinal = meta.ordinal;
+        if let Some(existing) = persisted_ordinals.get(&meta.ordinal) {
+            if existing != &identity {
+                return Err(crate::error::ReactError::Other(format!(
+                    "transcript generation ordinal {} has conflicting content",
+                    meta.ordinal
+                )));
+            }
+        } else {
+            persisted_ordinals.insert(meta.ordinal, identity);
+        }
+    }
+    for (mut message, identity) in projected.iter().cloned().zip(assigned.iter()) {
+        match persisted_ordinals.get(&identity.ordinal) {
+            Some(existing) if existing == identity => continue,
+            Some(_) => {
+                return Err(crate::error::ReactError::Other(format!(
+                    "transcript generation ordinal {} collided with different content",
+                    identity.ordinal
+                )));
+            }
+            None => {}
+        }
+        crate::memory::set_transcript_projection_meta(
+            &mut message,
+            generation_id,
+            identity.ordinal,
+        )?;
+        persisted.push(message);
+    }
+    Ok(persisted)
+}
+
 // ── RuntimeConfig ────────────────────────────────────────────────────
 
 /// Immutable subset of [`AgentConfig`](crate::agent::AgentConfig) that
@@ -151,6 +340,8 @@ pub struct RuntimeConfig {
     /// [`crate::config::LlmConfig`].
     pub input_modalities: Option<Vec<echo_core::llm::ModelInputModality>>,
     pub session_id: Option<String>,
+    /// Identity used exclusively for `RuntimeStateStore` checkpoints.
+    pub runtime_state_id: Option<String>,
     pub conversation_id: Option<String>,
     /// Session-bound working directory (worktree path). Injected into each
     /// tool call's ToolContext so file/shell/git tools run inside the
@@ -206,6 +397,7 @@ impl RuntimeConfig {
                 .is_none_or(|profile| profile.supports_tool_choice_none),
             input_modalities: None,
             session_id: config.session_id.clone(),
+            runtime_state_id: config.conversation_id.clone(),
             conversation_id: config.conversation_id.clone(),
             working_dir: config.working_dir.lock().ok().and_then(|g| g.clone()),
             temperature: config.temperature,
@@ -414,6 +606,8 @@ pub struct AgentRunSnapshot {
     pub guard: Arc<GuardRuntime>,
     /// Snapshot manager (from memory subsystem).
     pub snapshot_manager: Arc<std::sync::RwLock<Option<SnapshotManager>>>,
+    transcript_generation_id: Option<String>,
+    transcript_projection_cursor: Arc<tokio::sync::Mutex<TranscriptProjectionCursor>>,
     /// HTTP client.
     pub client: Arc<reqwest::Client>,
     /// Optional trait-level LLM client. When present, the streaming core loop
@@ -519,7 +713,13 @@ impl AgentRunSnapshot {
         }
         let runtime = invocation.and_then(|context| context.runtime.as_ref());
         if let Some(conversation_id) = runtime.and_then(|context| context.conversation_id.clone()) {
-            config.conversation_id = Some(conversation_id);
+            config.conversation_id = Some(conversation_id.clone());
+            config.runtime_state_id = Some(conversation_id);
+        }
+        if let Some(runtime_state_id) =
+            invocation.and_then(|context| context.runtime_state_id.clone())
+        {
+            config.runtime_state_id = Some(runtime_state_id);
         }
         Self {
             config: Arc::new(config),
@@ -531,6 +731,9 @@ impl AgentRunSnapshot {
             )),
             guard: Arc::new(GuardRuntime::from_agent(agent)),
             snapshot_manager: agent.memory.snapshot_manager.clone(),
+            transcript_generation_id: invocation
+                .and_then(|context| context.transcript_generation_id.clone()),
+            transcript_projection_cursor: Arc::clone(&agent.memory.transcript_projection_cursor),
             client: agent.client().clone(),
             llm_client: agent.llm_client().cloned(),
             thinking: agent.thinking().cloned(),
@@ -680,7 +883,7 @@ impl AgentRunSnapshot {
     /// plan, and blocked reason) so an in-flight conversation can resume
     /// across process restarts.
     ///
-    /// Silently no-ops if no state store or conversation_id is configured.
+    /// Silently no-ops if no state store or runtime-state identity is configured.
     pub async fn save_runtime_checkpoint(
         &self,
         context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
@@ -689,7 +892,7 @@ impl AgentRunSnapshot {
         let Some(ref store) = self.state_store else {
             return Ok(());
         };
-        let Some(ref conv_id) = self.config.conversation_id else {
+        let Some(ref conv_id) = self.config.runtime_state_id else {
             return Ok(());
         };
 
@@ -698,18 +901,19 @@ impl AgentRunSnapshot {
             ctx.messages().to_vec()
         };
 
-        let messages_json = match serde_json::to_string(&messages) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to serialize messages for runtime checkpoint"
-                );
-                return Err(crate::error::ReactError::Other(format!(
-                    "Failed to serialize runtime checkpoint: {e}"
-                )));
-            }
+        let transcript_projection = match self.transcript_generation_id.as_deref() {
+            Some(generation_id) => Some(
+                self.transcript_projection_cursor
+                    .lock()
+                    .await
+                    .checkpoint_for(generation_id),
+            ),
+            None => None,
         };
+        let messages_json = crate::state::AgentCheckpoint::serialize_payload(
+            messages.clone(),
+            transcript_projection,
+        )?;
 
         let current_plan = self.tools.plan_state.read().await.clone();
 
@@ -810,6 +1014,21 @@ impl AgentRunSnapshot {
             return;
         }
 
+        // Generation-local cursor ownership serializes load/append/save safe
+        // points for one Agent incarnation. Without it, two projections could
+        // both load the same durable prefix and overwrite each other's suffix.
+        let mut generation_cursor = match self.transcript_generation_id.as_deref() {
+            Some(generation_id) => {
+                let mut cursor = self.transcript_projection_cursor.lock().await;
+                if cursor.generation_id.as_deref() != Some(generation_id) {
+                    cursor.generation_id = Some(generation_id.to_string());
+                    cursor.next_ordinal = 0;
+                    cursor.projected.clear();
+                }
+                Some(cursor)
+            }
+            None => None,
+        };
         let persisted = match store.get_messages(conv_id).await {
             Ok(messages) => messages,
             Err(e) => {
@@ -821,21 +1040,99 @@ impl AgentRunSnapshot {
                 return;
             }
         };
-        let merged = merge_transcript_projection(persisted, projected);
+        let mut assigned_projection = None;
+        let mut cursor_before_assignment = None;
+        let merged = if let (Some(cursor), Some(generation_id)) = (
+            generation_cursor.as_mut(),
+            self.transcript_generation_id.as_deref(),
+        ) {
+            cursor_before_assignment = Some((**cursor).clone());
+            let assigned = match cursor.assign(generation_id, &projected) {
+                Ok(assigned) => assigned,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        conversation_id = conv_id.as_str(),
+                        "Failed to assign transcript generation ordinals"
+                    );
+                    return;
+                }
+            };
+            let merged = match merge_generation_projection(
+                persisted,
+                &projected,
+                &assigned,
+                generation_id,
+            ) {
+                Ok(merged) => merged,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        generation_id,
+                        "Failed to merge transcript generation projection"
+                    );
+                    if let Some(before) = cursor_before_assignment.take() {
+                        **cursor = before;
+                    }
+                    return;
+                }
+            };
+            assigned_projection = Some(assigned);
+            merged
+        } else {
+            merge_transcript_projection(persisted, projected.clone())
+        };
 
         if let Err(e) = store.save_messages(conv_id, &merged).await {
+            if let (Some(cursor), Some(before)) =
+                (generation_cursor.as_mut(), cursor_before_assignment.take())
+            {
+                **cursor = before;
+            }
             tracing::warn!(
                 error = %e,
                 conversation_id = conv_id.as_str(),
                 "Failed to save transcript projection to conversation store"
             );
         } else {
+            if let (Some(cursor), Some(assigned)) =
+                (generation_cursor.as_mut(), assigned_projection)
+            {
+                cursor.projected = assigned;
+            }
             tracing::debug!(
                 conversation_id = conv_id.as_str(),
                 message_count = merged.len(),
                 "Transcript projection saved"
             );
         }
+    }
+
+    /// Realign the generation cursor after compaction has replaced the active
+    /// context. The complete pre-compaction transcript has already been saved,
+    /// so retained messages keep their prior ordinals and only later messages
+    /// receive new ordinals.
+    pub(crate) async fn realign_transcript_projection(
+        &self,
+        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+    ) -> crate::error::Result<()> {
+        let Some(generation_id) = self.transcript_generation_id.as_deref() else {
+            return Ok(());
+        };
+        let messages = {
+            let context = context.lock().await;
+            filter_user_visible_transcript(context.messages())
+        };
+        let conversation_id = self
+            .config
+            .conversation_id
+            .as_deref()
+            .unwrap_or(generation_id);
+        let projected = crate::memory::project_messages(conversation_id, &messages)?;
+        let mut cursor = self.transcript_projection_cursor.lock().await;
+        let assigned = cursor.assign(generation_id, &projected)?;
+        cursor.projected = assigned;
+        Ok(())
     }
 
     // ── Tool execution helpers (delegated from Pipeline stages) ─────
@@ -1474,7 +1771,10 @@ impl AgentRunSnapshot {
 
 #[cfg(test)]
 mod transcript_filter_tests {
-    use super::{AgentRunSnapshot, ToolRuntime, filter_user_visible_transcript};
+    use super::{
+        AgentRunSnapshot, ToolRuntime, TranscriptProjectionCursor, filter_user_visible_transcript,
+        merge_generation_projection,
+    };
     use crate::compression::{ContextManager, ContextProjection};
     use crate::error::Result;
     use echo_core::llm::types::Message;
@@ -1545,6 +1845,182 @@ mod transcript_filter_tests {
         ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
             Box::pin(async { Ok(ToolResult::success("ok")) })
         }
+    }
+
+    #[test]
+    fn invocation_separates_product_conversation_from_runtime_state_identity() {
+        let config = crate::agent::AgentConfig::new("test-model", "agent", "system")
+            .conversation_id("runtime-incarnation");
+        let agent = crate::agent::ReactAgent::new(config);
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime_state_id: Some("runtime-incarnation".to_string()),
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("product-conversation".to_string()),
+                run_id: None,
+                turn_id: None,
+                execution_id: None,
+                isolation_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+            }),
+            ..Default::default()
+        };
+
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        assert_eq!(
+            snapshot.config.conversation_id.as_deref(),
+            Some("product-conversation")
+        );
+        assert_eq!(
+            snapshot.config.runtime_state_id.as_deref(),
+            Some("runtime-incarnation")
+        );
+    }
+
+    #[test]
+    fn invocation_conversation_remains_checkpoint_identity_without_explicit_override() {
+        let agent = crate::agent::ReactAgent::new(crate::agent::AgentConfig::new(
+            "test-model",
+            "agent",
+            "system",
+        ));
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("shared-identity".to_string()),
+                run_id: None,
+                turn_id: None,
+                execution_id: None,
+                isolation_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+            }),
+            ..Default::default()
+        };
+
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        assert_eq!(
+            snapshot.config.conversation_id,
+            snapshot.config.runtime_state_id
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_runtime_context_appends_to_stable_product_transcript_without_model_restore()
+    -> Result<()> {
+        let old = crate::memory::project_messages(
+            "product-conversation",
+            &[
+                Message::user("old product turn".to_string()),
+                Message::assistant("same answer".to_string()),
+            ],
+        )?;
+        let new = crate::memory::project_messages(
+            "product-conversation",
+            &[
+                Message::user("again".to_string()),
+                Message::assistant("same answer".to_string()),
+            ],
+        )?;
+        let mut cursor = TranscriptProjectionCursor::default();
+        let assigned = cursor.assign("new-runtime-incarnation", &new)?;
+        let merged =
+            merge_generation_projection(old.clone(), &new, &assigned, "new-runtime-incarnation")?;
+        let text = merged
+            .iter()
+            .filter_map(|message| message.content.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            text,
+            vec!["old product turn", "same answer", "again", "same answer"]
+        );
+        cursor.projected = assigned.clone();
+        let same_safe_point = cursor.assign("new-runtime-incarnation", &new)?;
+        assert_eq!(same_safe_point, assigned);
+        let idempotent = merge_generation_projection(
+            merged.clone(),
+            &new,
+            &same_safe_point,
+            "new-runtime-incarnation",
+        )?;
+        assert_eq!(idempotent.len(), merged.len());
+
+        let mut restored_before_product_save = TranscriptProjectionCursor::default();
+        let checkpoint_before_product_save =
+            restored_before_product_save.checkpoint_for("new-runtime-incarnation");
+        restored_before_product_save.restore(checkpoint_before_product_save);
+        let reassigned = restored_before_product_save.assign("new-runtime-incarnation", &new)?;
+        let product_ahead = merge_generation_projection(
+            merged.clone(),
+            &new,
+            &reassigned,
+            "new-runtime-incarnation",
+        )?;
+        assert_eq!(product_ahead.len(), merged.len());
+        let product_behind =
+            merge_generation_projection(old, &new, &reassigned, "new-runtime-incarnation")?;
+        assert_eq!(product_behind.len(), merged.len());
+
+        let checkpoint = cursor.checkpoint_for("new-runtime-incarnation");
+        let mut restored_cursor = TranscriptProjectionCursor::default();
+        restored_cursor.restore(checkpoint);
+        let compacted = crate::memory::project_messages(
+            "product-conversation",
+            &[
+                Message::user("again".to_string()),
+                Message::assistant("same answer".to_string()),
+                Message::user("after compact".to_string()),
+            ],
+        )?;
+        let after_compact = restored_cursor.assign("new-runtime-incarnation", &compacted)?;
+        assert_eq!(after_compact.len(), 3);
+        assert_eq!(after_compact.get(0).map(|message| message.ordinal), Some(0));
+        assert_eq!(after_compact.get(1).map(|message| message.ordinal), Some(1));
+        assert_eq!(after_compact.get(2).map(|message| message.ordinal), Some(2));
+
+        let repeated = crate::memory::project_messages(
+            "product-conversation",
+            &[
+                Message::user("A".to_string()),
+                Message::assistant("B".to_string()),
+                Message::user("A".to_string()),
+                Message::assistant("B".to_string()),
+            ],
+        )?;
+        let retained = crate::memory::project_messages(
+            "product-conversation",
+            &[
+                Message::user("A".to_string()),
+                Message::assistant("B".to_string()),
+            ],
+        )?;
+        let mut repeated_cursor = TranscriptProjectionCursor::default();
+        let repeated_projection = repeated_cursor.assign("repeat-generation", &repeated)?;
+        repeated_cursor.projected = repeated_projection;
+        let retained_projection = repeated_cursor.assign("repeat-generation", &retained)?;
+        repeated_cursor.projected = retained_projection;
+        let after_repeated_tail = repeated_cursor.assign("repeat-generation", &repeated)?;
+        assert_eq!(
+            after_repeated_tail
+                .iter()
+                .map(|message| message.ordinal)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4, 5]
+        );
+
+        let fresh_agent = crate::agent::ReactAgent::new(
+            crate::agent::AgentConfig::new("test-model", "agent", "system")
+                .conversation_id("new-runtime-incarnation"),
+        );
+        assert!(!fresh_agent.get_messages().await.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|text| text.contains("old product turn"))
+        }));
+        Ok(())
     }
 
     #[cfg(feature = "human-loop")]
@@ -1631,6 +2107,8 @@ mod transcript_filter_tests {
         let cancel = std::sync::Arc::new(crate::agent::CancellationToken::new());
         let trace_sink: echo_core::tools::TraceSinkFn = std::sync::Arc::new(|_| {});
         let invocation = echo_core::agent::AgentInvocationContext {
+            runtime_state_id: None,
+            transcript_generation_id: None,
             runtime: Some(echo_core::tools::ExternalRunContext {
                 conversation_id: None,
                 run_id: Some("run-atomic".to_string()),

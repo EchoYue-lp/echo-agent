@@ -122,6 +122,21 @@ pub struct ToolInvocation {
 pub struct AgentInvocationContext {
     /// Run metadata propagated into the invocation's tool context.
     pub runtime: Option<crate::tools::ExternalRunContext>,
+    /// Optional runtime checkpoint identity distinct from the product
+    /// conversation carried by `runtime`.
+    ///
+    /// `None` preserves the existing behavior: a runtime conversation override
+    /// is also used for checkpoints. Persistent runtimes may set this to an
+    /// ephemeral incarnation while keeping product events and transcripts on a
+    /// stable conversation ID.
+    pub runtime_state_id: Option<String>,
+    /// Optional model-context generation for append-only transcript projection.
+    ///
+    /// When set, the framework tracks the already-projected prefix on the Agent
+    /// and appends only new messages from this generation. This prevents a
+    /// fresh model context from being content-deduplicated against an older
+    /// product transcript that happens to end with identical text.
+    pub transcript_generation_id: Option<String>,
     /// Per-invocation working directory. `None` uses the agent's configured default.
     pub working_dir: Option<std::path::PathBuf>,
     /// Cancellation token captured with the invocation before queueing.
@@ -145,6 +160,8 @@ pub struct AgentInvocationContext {
 impl std::fmt::Debug for AgentInvocationContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentInvocationContext")
+            .field("runtime_state_id", &self.runtime_state_id)
+            .field("transcript_generation_id", &self.transcript_generation_id)
             .field(
                 "run_id",
                 &self

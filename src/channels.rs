@@ -47,7 +47,8 @@
 //!     let llm_client = Arc::clone(&llm_client);
 //!     Arc::new(SessionHandler::new(
 //!         session_config.clone(),
-//!         move || -> Box<dyn MessageHandler> {
+//!         move |instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+//!             let _runtime_incarnation = instance.incarnation_id();
 //!             Box::new(AgentChannelHandler::from_config_with_client(
 //!                 AgentConfig::standard("qwen3-max", "im-assistant", "You are a friendly assistant")
 //!                     .enable_tool(true)

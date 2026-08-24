@@ -37,7 +37,7 @@
 //!     .with_reset_keywords(vec!["reset chat".into(), "new chat".into()])
 //!     .with_reset_reply("Conversation has been reset.");
 //!
-//! let handler = SessionHandler::new(config, || -> Box<dyn MessageHandler> {
+//! let handler = SessionHandler::new(config, |_instance| -> Box<dyn MessageHandler> {
 //!     Box::new(DummyHandler)
 //! });
 //! ```
@@ -172,6 +172,107 @@ struct SessionKey {
     sender_id: String,
 }
 
+/// One concrete incarnation of a sender-scoped channel session.
+///
+/// The channel coordinates remain stable while `incarnation_id` changes every
+/// time [`SessionHandler`] creates or replaces the inner message handler. The
+/// opaque identifier lets consumers isolate ephemeral model/runtime state from
+/// product conversation history without reimplementing session lifecycle.
+#[derive(Clone, Debug)]
+pub struct ChannelSessionInstance {
+    channel_id: String,
+    conversation_id: String,
+    sender_id: String,
+    incarnation_id: Arc<StdMutex<String>>,
+    previous_incarnation_id: Option<String>,
+}
+
+/// Atomic result of rotating one channel session to a new incarnation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[must_use]
+pub struct ChannelSessionRotation {
+    previous_incarnation_id: String,
+    incarnation_id: String,
+}
+
+impl ChannelSessionRotation {
+    /// Incarnation that must be settled and retired before new admission.
+    pub fn previous_incarnation_id(&self) -> &str {
+        &self.previous_incarnation_id
+    }
+
+    /// Newly-authoritative incarnation for subsequent runtime state.
+    pub fn incarnation_id(&self) -> &str {
+        &self.incarnation_id
+    }
+}
+
+impl ChannelSessionInstance {
+    fn from_key(key: &SessionKey, previous_incarnation_id: Option<String>) -> Self {
+        Self {
+            channel_id: key.channel_id.clone(),
+            conversation_id: key.conversation_id.clone(),
+            sender_id: key.sender_id.clone(),
+            incarnation_id: Arc::new(StdMutex::new(uuid::Uuid::new_v4().to_string())),
+            previous_incarnation_id,
+        }
+    }
+
+    fn lock_incarnation(&self) -> StdMutexGuard<'_, String> {
+        match self.incarnation_id.lock() {
+            Ok(incarnation_id) => incarnation_id,
+            Err(poisoned) => {
+                tracing::error!("channel session incarnation mutex was poisoned");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    /// Stable channel identifier for this session scope.
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    /// Stable channel conversation identifier for this session scope.
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+
+    /// Stable sender identifier for this session scope.
+    pub fn sender_id(&self) -> &str {
+        &self.sender_id
+    }
+
+    /// Opaque identity for this concrete handler incarnation.
+    pub fn incarnation_id(&self) -> String {
+        self.lock_incarnation().clone()
+    }
+
+    /// Incarnation replaced directly by this factory-created instance.
+    ///
+    /// A pruned session has no immediate replacement; consumers should use
+    /// [`SessionEndInfo`] to retain any cleanup obligation until the sender
+    /// returns.
+    pub fn previous_incarnation_id(&self) -> Option<&str> {
+        self.previous_incarnation_id.as_deref()
+    }
+
+    /// Atomically rotate this validated sender scope to a new incarnation.
+    ///
+    /// This is intended for application-owned reset commands that must settle
+    /// product work before rotating model/runtime state themselves. All clones
+    /// of this instance and the framework end callback observe the new value.
+    pub fn rotate(&self) -> ChannelSessionRotation {
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let mut current = self.lock_incarnation();
+        let previous_incarnation_id = std::mem::replace(&mut *current, incarnation_id.clone());
+        ChannelSessionRotation {
+            previous_incarnation_id,
+            incarnation_id,
+        }
+    }
+}
+
 impl SessionKey {
     fn from_message(msg: &InboundMessage) -> echo_core::error::Result<Self> {
         let channel_id = require_channel_id(Some(&msg.channel_id))?;
@@ -188,6 +289,7 @@ impl SessionKey {
 /// Single user session
 struct Session {
     handler: Arc<dyn MessageHandler>,
+    instance: ChannelSessionInstance,
     generation: Arc<SessionGeneration>,
 }
 
@@ -266,17 +368,17 @@ impl Drop for SessionStreamReceipt {
 /// Called whenever a new session is needed, returning a brand new MessageHandler.
 /// Users typically create an Agent inside a closure and wrap it as a MessageHandler.
 pub trait SessionFactory: Send + Sync {
-    /// Create a new message handler (new session)
-    fn create(&self) -> Box<dyn MessageHandler>;
+    /// Create a new message handler for one concrete session incarnation.
+    fn create(&self, instance: &ChannelSessionInstance) -> Box<dyn MessageHandler>;
 }
 
 /// Closure-based SessionFactory implementation
 impl<F> SessionFactory for F
 where
-    F: Fn() -> Box<dyn MessageHandler> + Send + Sync,
+    F: Fn(&ChannelSessionInstance) -> Box<dyn MessageHandler> + Send + Sync,
 {
-    fn create(&self) -> Box<dyn MessageHandler> {
-        self()
+    fn create(&self, instance: &ChannelSessionInstance) -> Box<dyn MessageHandler> {
+        self(instance)
     }
 }
 
@@ -287,6 +389,8 @@ pub struct SessionEndInfo {
     pub channel_id: String,
     pub chat_id: String,
     pub sender_id: String,
+    /// Opaque identity of the handler incarnation that ended.
+    pub incarnation_id: String,
     pub reason: SessionEndReason,
 }
 
@@ -346,17 +450,21 @@ impl SessionHandler {
         self.sessions.len()
     }
 
+    fn create_session(&self, key: &SessionKey, previous_incarnation_id: Option<String>) -> Session {
+        let instance = ChannelSessionInstance::from_key(key, previous_incarnation_id);
+        let handler = Arc::from(self.factory.create(&instance));
+        Session {
+            handler,
+            instance,
+            generation: Arc::new(SessionGeneration::new()),
+        }
+    }
+
     /// Get or create a session (atomic operation, uses DashMap entry API to prevent race conditions)
     fn get_or_create(&self, key: &SessionKey) -> Arc<Mutex<Session>> {
-        let handler = self.factory.clone();
         self.sessions
             .entry(key.clone())
-            .or_insert_with(|| {
-                Arc::new(Mutex::new(Session {
-                    handler: Arc::from(handler.create()),
-                    generation: Arc::new(SessionGeneration::new()),
-                }))
-            })
+            .or_insert_with(|| Arc::new(Mutex::new(self.create_session(key, None))))
             .clone()
     }
 
@@ -378,48 +486,45 @@ impl SessionHandler {
         }
     }
 
-    fn notify_session_end(
-        &self,
-        channel_id: String,
-        chat_id: String,
-        sender_id: String,
-        reason: SessionEndReason,
-    ) {
+    fn notify_session_end(&self, instance: ChannelSessionInstance, reason: SessionEndReason) {
         if let Some(ref callback) = self.on_session_end {
+            let incarnation_id = instance.incarnation_id();
             callback(SessionEndInfo {
-                channel_id,
-                chat_id,
-                sender_id,
+                channel_id: instance.channel_id,
+                chat_id: instance.conversation_id,
+                sender_id: instance.sender_id,
+                incarnation_id,
                 reason,
             });
         }
     }
 
-    async fn prune_expired(&self) {
+    async fn prune_expired_except(&self, requested_key: &SessionKey) {
         let sessions = self
             .sessions
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect::<Vec<_>>();
         for (key, session) in sessions {
+            // The requested key must be replaced under its own session mutex so
+            // the new factory call receives the exact previous incarnation.
+            if &key == requested_key {
+                continue;
+            }
             let Some(guard) = session.try_lock().ok() else {
                 continue;
             };
             if !guard.generation.is_idle_and_expired(self.config.timeout) {
                 continue;
             }
+            let ended_instance = guard.instance.clone();
             let removed = self
                 .sessions
                 .remove_if(&key, |_, current| Arc::ptr_eq(current, &session))
                 .is_some();
             drop(guard);
             if removed {
-                self.notify_session_end(
-                    key.channel_id,
-                    key.conversation_id,
-                    key.sender_id,
-                    SessionEndReason::TimeoutReplaced,
-                );
+                self.notify_session_end(ended_instance, SessionEndReason::TimeoutReplaced);
             }
         }
     }
@@ -428,19 +533,14 @@ impl SessionHandler {
 #[async_trait]
 impl MessageHandler for SessionHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
-        self.prune_expired().await;
         let key = SessionKey::from_message(&msg)?;
+        self.prune_expired_except(&key).await;
         let mut guard = self.lock_current_session(&key).await;
         if self.config.is_reset(&msg.text) {
-            guard.handler = Arc::from(self.factory.create());
-            guard.generation = Arc::new(SessionGeneration::new());
+            let ended_instance = guard.instance.clone();
+            *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
             drop(guard);
-            self.notify_session_end(
-                msg.channel_id.clone(),
-                msg.chat_id.clone(),
-                msg.sender_id.clone(),
-                SessionEndReason::CommandReset,
-            );
+            self.notify_session_end(ended_instance, SessionEndReason::CommandReset);
             return Ok(OutboundMessage::new(
                 &msg.channel_id,
                 msg.reply_target(),
@@ -449,14 +549,9 @@ impl MessageHandler for SessionHandler {
             ));
         }
         if guard.generation.is_idle_and_expired(self.config.timeout) {
-            self.notify_session_end(
-                msg.channel_id.clone(),
-                msg.chat_id.clone(),
-                msg.sender_id.clone(),
-                SessionEndReason::TimeoutReplaced,
-            );
-            guard.handler = Arc::from(self.factory.create());
-            guard.generation = Arc::new(SessionGeneration::new());
+            let ended_instance = guard.instance.clone();
+            *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
+            self.notify_session_end(ended_instance, SessionEndReason::TimeoutReplaced);
         }
         guard.generation.touch();
         let result = guard.handler.handle(msg).await;
@@ -471,19 +566,14 @@ impl MessageHandler for SessionHandler {
         futures::stream::BoxStream<'a, echo_core::error::Result<OutboundMessage>>,
     > {
         use futures::stream::StreamExt;
-        self.prune_expired().await;
         let key = SessionKey::from_message(&msg)?;
+        self.prune_expired_except(&key).await;
         let mut guard = self.lock_current_session(&key).await;
         if self.config.is_reset(&msg.text) {
-            guard.handler = Arc::from(self.factory.create());
-            guard.generation = Arc::new(SessionGeneration::new());
+            let ended_instance = guard.instance.clone();
+            *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
             drop(guard);
-            self.notify_session_end(
-                msg.channel_id.clone(),
-                msg.chat_id.clone(),
-                msg.sender_id.clone(),
-                SessionEndReason::CommandReset,
-            );
+            self.notify_session_end(ended_instance, SessionEndReason::CommandReset);
             let reply = OutboundMessage::new(
                 &msg.channel_id,
                 msg.reply_target(),
@@ -494,9 +584,14 @@ impl MessageHandler for SessionHandler {
         }
 
         let timeout_replaced = guard.generation.is_idle_and_expired(self.config.timeout);
+        let ended_instance = timeout_replaced.then(|| guard.instance.clone());
         if timeout_replaced {
-            guard.handler = Arc::from(self.factory.create());
-            guard.generation = Arc::new(SessionGeneration::new());
+            *guard = self.create_session(
+                &key,
+                ended_instance
+                    .as_ref()
+                    .map(ChannelSessionInstance::incarnation_id),
+            );
         }
         let handler = guard.handler.clone();
         let Some(stream_receipt) = guard.generation.begin() else {
@@ -505,13 +600,8 @@ impl MessageHandler for SessionHandler {
             ));
         };
         drop(guard);
-        if timeout_replaced {
-            self.notify_session_end(
-                msg.channel_id.clone(),
-                msg.chat_id.clone(),
-                msg.sender_id.clone(),
-                SessionEndReason::TimeoutReplaced,
-            );
+        if let Some(ended_instance) = ended_instance {
+            self.notify_session_end(ended_instance, SessionEndReason::TimeoutReplaced);
         }
 
         let stream = async_stream::stream! {
@@ -598,7 +688,7 @@ mod tests {
         counter: Arc<AtomicUsize>,
     }
     impl SessionFactory for TwoChunkFactory {
-        fn create(&self) -> Box<dyn MessageHandler> {
+        fn create(&self, _instance: &ChannelSessionInstance) -> Box<dyn MessageHandler> {
             Box::new(TwoChunkHandler {
                 call_count: self.counter.clone(),
             })
@@ -673,7 +763,7 @@ mod tests {
     }
 
     impl SessionFactory for ConcurrentStreamFactory {
-        fn create(&self) -> Box<dyn MessageHandler> {
+        fn create(&self, _instance: &ChannelSessionInstance) -> Box<dyn MessageHandler> {
             Box::new(ConcurrentStreamHandler {
                 parked_started: self.parked_started.clone(),
                 release_parked: self.release_parked.clone(),
@@ -781,7 +871,7 @@ mod tests {
     }
 
     impl SessionFactory for GenerationalStreamFactory {
-        fn create(&self) -> Box<dyn MessageHandler> {
+        fn create(&self, _instance: &ChannelSessionInstance) -> Box<dyn MessageHandler> {
             let generation = self
                 .created
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -862,7 +952,7 @@ mod tests {
     }
 
     impl SessionFactory for SenderScopedFactory {
-        fn create(&self) -> Box<dyn MessageHandler> {
+        fn create(&self, _instance: &ChannelSessionInstance) -> Box<dyn MessageHandler> {
             let instance_id = self
                 .created
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -1237,6 +1327,99 @@ mod tests {
         }
         if handler.active_sessions() != 1 || created.load(Ordering::Acquire) != 1 {
             return Err("same sender created more than one session".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn application_rotation_remains_authoritative_through_timeout_replacement()
+    -> Result<(), String> {
+        let instances = Arc::new(StdMutex::new(Vec::<ChannelSessionInstance>::new()));
+        let factory_instances = Arc::clone(&instances);
+        let ended = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let callback_ended = Arc::clone(&ended);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = SessionHandler::new(
+            SessionConfig::default().with_timeout(Duration::from_secs(60)),
+            move |instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                match factory_instances.lock() {
+                    Ok(mut instances) => instances.push(instance.clone()),
+                    Err(poisoned) => poisoned.into_inner().push(instance.clone()),
+                }
+                Box::new(TwoChunkHandler {
+                    call_count: Arc::clone(&calls),
+                })
+            },
+        )
+        .with_on_session_end(move |info| match callback_ended.lock() {
+            Ok(mut ended) => ended.push(info.incarnation_id),
+            Err(poisoned) => poisoned.into_inner().push(info.incarnation_id),
+        });
+
+        handler
+            .handle(test_message("first", "m1"))
+            .await
+            .map_err(|error| error.to_string())?;
+        handler
+            .handle(test_message("same", "m2"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let first_instance = match instances.lock() {
+            Ok(instances) => instances
+                .first()
+                .cloned()
+                .ok_or_else(|| "factory did not receive the first instance".to_string())?,
+            Err(poisoned) => poisoned
+                .into_inner()
+                .first()
+                .cloned()
+                .ok_or_else(|| "factory did not receive the first instance".to_string())?,
+        };
+        let first_incarnation = first_instance.incarnation_id();
+        let rotation = first_instance.rotate();
+        if rotation.previous_incarnation_id() != first_incarnation
+            || rotation.incarnation_id() == first_incarnation
+            || first_instance.incarnation_id() != rotation.incarnation_id()
+        {
+            return Err("application rotation did not update the shared authority".to_string());
+        }
+        if match instances.lock() {
+            Ok(instances) => instances.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        } != 1
+        {
+            return Err("same sender did not reuse its original instance".to_string());
+        }
+
+        mark_test_session_expired(&handler).await?;
+        handler
+            .handle(test_message("after-timeout", "m3"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let replacement_instance = match instances.lock() {
+            Ok(instances) => instances.get(1).cloned(),
+            Err(poisoned) => poisoned.into_inner().get(1).cloned(),
+        }
+        .ok_or_else(|| "timeout did not create a replacement instance".to_string())?;
+        let replacement_incarnation = replacement_instance.incarnation_id();
+        if replacement_incarnation == first_incarnation
+            || replacement_incarnation == rotation.incarnation_id()
+        {
+            return Err("timeout reused an earlier incarnation".to_string());
+        }
+        if replacement_instance.previous_incarnation_id() != Some(rotation.incarnation_id()) {
+            return Err("replacement factory lost the exact previous incarnation".to_string());
+        }
+        let ended_incarnations = match ended.lock() {
+            Ok(ended) => ended.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if ended_incarnations.len() != 1
+            || ended_incarnations.first().map(String::as_str) != Some(rotation.incarnation_id())
+        {
+            return Err(format!(
+                "timeout callback reported stale incarnation: {ended_incarnations:?}"
+            ));
         }
         Ok(())
     }
