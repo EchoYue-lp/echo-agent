@@ -142,6 +142,7 @@ pub mod prelude {
     // Agent
     pub use crate::agent::{
         AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle,
+        AgentSteerPhase, AgentSteerReceipt, AgentSteerState, AgentSteerTurnOutcome,
         CancellationToken, EventEnvelope, EventIdentity, InterventionCallback, InterventionResult,
         PreparedAgentModelDeactivation, PreparedAgentModelGeneration, PreparedCriticUpdate,
         PreparedTokenLimit, ReactAgent, ReactAgentBuilder, StepType, StructuredAgent,

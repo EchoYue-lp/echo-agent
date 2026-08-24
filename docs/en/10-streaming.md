@@ -150,6 +150,45 @@ See: `examples/demo10_streaming.rs`
 
 ---
 
+## Tracked Same-Turn Steering
+
+`steer_input()` confirms only that the active turn mailbox accepted the input.
+Durable applications should use `steer_input_tracked()` when they must distinguish
+mailbox acceptance, insertion into model context, and root-turn settlement:
+
+```rust
+use echo_agent::prelude::{AgentSteerState, Message};
+
+let mut receipt = agent_handle
+    .steer_input_tracked(
+        Some("turn-42"),
+        Message::user("Also verify the generated files.".to_string()),
+    )
+    .await?;
+
+match receipt.wait_for_drained().await {
+    AgentSteerState::Drained
+    | AgentSteerState::TurnSettled { drained: true, .. } => {
+        // The input reached the active model context. A durable inbox may ack it.
+    }
+    AgentSteerState::TurnSettled { drained: false, .. } => {
+        // The turn ended before consumption. Retain the input for replay.
+    }
+    AgentSteerState::Accepted => {}
+}
+
+let _terminal = receipt.wait_for_turn_settled().await;
+```
+
+`Drained` is not a success terminal. The owning turn may still complete, fail,
+be cancelled, or be dropped. Receipt transitions come from the framework's real
+mailbox drain and active-turn lease; callers should not infer them from rendered
+tokens or transcript timing. Hook blocks settle as `Failed`. If the lifecycle
+signal closes abnormally, all receipt clones converge on `Dropped` while
+preserving the last known drain fact.
+
+---
+
 ## Stream Timeout Mechanism (Planned)
 
 > **Note:** The API below is planned but not yet implemented in the current version. Stream timeouts are currently controlled via the LLM client's request timeout.

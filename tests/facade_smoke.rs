@@ -40,6 +40,20 @@ fn file_backends_are_constructible_from_public_facade_paths()
 }
 
 #[test]
+fn tracked_steering_types_are_available_from_the_public_facade() {
+    fn public_type<T>() {}
+
+    public_type::<echo_agent::agent::AgentSteerReceipt>();
+    public_type::<echo_agent::agent::AgentSteerState>();
+    public_type::<echo_agent::agent::AgentSteerPhase>();
+    public_type::<echo_agent::agent::AgentSteerTurnOutcome>();
+    assert_eq!(
+        echo_agent::agent::AgentSteerState::Accepted.phase(),
+        echo_agent::agent::AgentSteerPhase::Accepted
+    );
+}
+
+#[test]
 fn runtime_state_and_task_primitives_are_available_from_the_facade() {
     let journal = MemoryEventJournal::new();
     let receipt = journal.append("facade-event".to_string()).expect("append");
