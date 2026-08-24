@@ -24,9 +24,39 @@ use echo_core::utils::blocking::{
     BlockingFileOperationKey, BlockingFileOperationScope, run_keyed_file_operation,
 };
 use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::{AgentCheckpoint, RuntimeStateStore};
+use super::{
+    AgentCheckpoint, RuntimeStateClearReceipt, RuntimeStateScopeClearReceipt, RuntimeStateStore,
+};
+
+const SCOPE_INDEX_VERSION: u8 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RuntimeStateScopeIndex {
+    version: u8,
+    scope_id: String,
+    runtime_state_ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RuntimeStateOwner {
+    version: u8,
+    runtime_state_id: String,
+    scope_id: String,
+}
+
+impl RuntimeStateScopeIndex {
+    fn empty(scope_id: &str) -> Self {
+        Self {
+            version: SCOPE_INDEX_VERSION,
+            scope_id: scope_id.to_string(),
+            runtime_state_ids: BTreeSet::new(),
+        }
+    }
+}
 
 /// File-backed runtime state store.
 ///
@@ -60,6 +90,19 @@ impl FileRuntimeStateStore {
         Ok(self.conv_dir(conversation_id)?.join("checkpoint.json"))
     }
 
+    fn scope_index_path(&self, scope_id: &str) -> Result<PathBuf, ReactError> {
+        let safe = safe_segment(scope_id)?;
+        Ok(self.base.join("_scope_index").join(format!("{safe}.json")))
+    }
+
+    fn runtime_owner_path(&self, runtime_state_id: &str) -> Result<PathBuf, ReactError> {
+        let safe = safe_segment(runtime_state_id)?;
+        Ok(self
+            .base
+            .join("_runtime_owners")
+            .join(format!("{safe}.json")))
+    }
+
     fn to_react_err(e: impl std::fmt::Display) -> ReactError {
         ReactError::Other(format!("FileRuntimeStateStore: {e}"))
     }
@@ -75,6 +118,123 @@ impl FileRuntimeStateStore {
         echo_core::utils::fs::atomic_write(&path, json.as_bytes())
             .map_err(|error| ReactError::Other(format!("write checkpoint: {error}")))?;
         Ok(())
+    }
+
+    fn read_scope_index_sync(
+        &self,
+        scope_id: &str,
+    ) -> crate::error::Result<RuntimeStateScopeIndex> {
+        let path = self.scope_index_path(scope_id)?;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RuntimeStateScopeIndex::empty(scope_id));
+            }
+            Err(error) => return Err(Self::to_react_err(error)),
+        };
+        let index: RuntimeStateScopeIndex = serde_json::from_str(&raw)
+            .map_err(|error| ReactError::Other(format!("parse {}: {error}", path.display())))?;
+        if index.version != SCOPE_INDEX_VERSION || index.scope_id != scope_id {
+            return Err(ReactError::Other(format!(
+                "runtime state scope index identity mismatch at {}",
+                path.display()
+            )));
+        }
+        for runtime_state_id in &index.runtime_state_ids {
+            let _safe = safe_segment(runtime_state_id)?;
+        }
+        Ok(index)
+    }
+
+    fn write_scope_index_sync(&self, index: &RuntimeStateScopeIndex) -> crate::error::Result<()> {
+        let path = self.scope_index_path(&index.scope_id)?;
+        if index.runtime_state_ids.is_empty() {
+            return match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(Self::to_react_err(error)),
+            };
+        }
+        let parent = path.parent().ok_or_else(|| {
+            ReactError::Other("runtime state scope index has no parent".to_string())
+        })?;
+        std::fs::create_dir_all(parent).map_err(Self::to_react_err)?;
+        let raw = serde_json::to_vec_pretty(index)
+            .map_err(|error| ReactError::Other(format!("serialize scope index: {error}")))?;
+        echo_core::utils::fs::atomic_write(&path, &raw).map_err(Self::to_react_err)
+    }
+
+    fn read_runtime_owner_sync(
+        &self,
+        runtime_state_id: &str,
+    ) -> crate::error::Result<Option<RuntimeStateOwner>> {
+        let path = self.runtime_owner_path(runtime_state_id)?;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Self::to_react_err(error)),
+        };
+        let owner: RuntimeStateOwner = serde_json::from_str(&raw)
+            .map_err(|error| ReactError::Other(format!("parse {}: {error}", path.display())))?;
+        if owner.version != SCOPE_INDEX_VERSION || owner.runtime_state_id != runtime_state_id {
+            return Err(ReactError::Other(format!(
+                "runtime state owner identity mismatch at {}",
+                path.display()
+            )));
+        }
+        let _safe = safe_segment(&owner.scope_id)?;
+        Ok(Some(owner))
+    }
+
+    fn write_runtime_owner_sync(&self, owner: &RuntimeStateOwner) -> crate::error::Result<()> {
+        let path = self.runtime_owner_path(&owner.runtime_state_id)?;
+        let parent = path.parent().ok_or_else(|| {
+            ReactError::Other("runtime state owner path has no parent".to_string())
+        })?;
+        std::fs::create_dir_all(parent).map_err(Self::to_react_err)?;
+        let raw = serde_json::to_vec_pretty(owner)
+            .map_err(|error| ReactError::Other(format!("serialize runtime owner: {error}")))?;
+        echo_core::utils::fs::atomic_write(&path, &raw).map_err(Self::to_react_err)
+    }
+
+    fn remove_runtime_owner_sync(
+        &self,
+        scope_id: &str,
+        runtime_state_id: &str,
+    ) -> crate::error::Result<()> {
+        let Some(owner) = self.read_runtime_owner_sync(runtime_state_id)? else {
+            return Ok(());
+        };
+        if owner.scope_id != scope_id {
+            return Err(ReactError::Other(format!(
+                "runtime state {runtime_state_id} belongs to scope {}, not {scope_id}",
+                owner.scope_id
+            )));
+        }
+        let path = self.runtime_owner_path(runtime_state_id)?;
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Self::to_react_err(error)),
+        }
+    }
+
+    fn remove_checkpoint_sync(&self, runtime_state_id: &str) -> crate::error::Result<bool> {
+        let dir = self.conv_dir(runtime_state_id)?;
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(Self::to_react_err(error)),
+        }
+    }
+
+    fn checkpoint_exists_sync(&self, runtime_state_id: &str) -> crate::error::Result<bool> {
+        let path = self.checkpoint_path(runtime_state_id)?;
+        match std::fs::metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(Self::to_react_err(error)),
+        }
     }
 
     fn run_blocking<'a, T, F>(
@@ -95,6 +255,29 @@ impl FileRuntimeStateStore {
                 BlockingFileOperationScope::Entity(safe),
             );
             run_keyed_file_operation(key, move || operation(store, conversation_id))
+                .await
+                .map_err(Self::to_react_err)?
+        })
+    }
+
+    fn run_scope_blocking<'a, T, F>(
+        &'a self,
+        scope_id: String,
+        operation: F,
+    ) -> BoxFuture<'a, crate::error::Result<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Self, String) -> crate::error::Result<T> + Send + 'static,
+    {
+        let store = self.clone();
+        Box::pin(async move {
+            let safe = safe_segment(&scope_id)?;
+            let key = BlockingFileOperationKey::new(
+                "runtime-state",
+                store.base.clone(),
+                BlockingFileOperationScope::Entity(safe),
+            );
+            run_keyed_file_operation(key, move || operation(store, scope_id))
                 .await
                 .map_err(Self::to_react_err)?
         })
@@ -128,10 +311,121 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         &'a self,
         checkpoint: &'a AgentCheckpoint,
     ) -> BoxFuture<'a, crate::error::Result<()>> {
+        self.save_checkpoint_for_scope(&checkpoint.conversation_id, checkpoint)
+    }
+
+    fn save_checkpoint_for_scope<'a>(
+        &'a self,
+        scope_id: &'a str,
+        checkpoint: &'a AgentCheckpoint,
+    ) -> BoxFuture<'a, crate::error::Result<()>> {
         let checkpoint = checkpoint.clone();
-        let conversation_id = checkpoint.conversation_id.clone();
-        self.run_blocking(conversation_id, move |store, _conversation_id| {
+        self.run_scope_blocking(scope_id.to_string(), move |store, scope_id| {
+            let owner = store.read_runtime_owner_sync(&checkpoint.conversation_id)?;
+            if let Some(owner) = owner.as_ref()
+                && owner.scope_id != scope_id
+            {
+                return Err(ReactError::Other(format!(
+                    "runtime state {} already belongs to scope {}",
+                    checkpoint.conversation_id, owner.scope_id
+                )));
+            }
+            let mut index = store.read_scope_index_sync(&scope_id)?;
+            index
+                .runtime_state_ids
+                .insert(checkpoint.conversation_id.clone());
+            store.write_scope_index_sync(&index)?;
+            if owner.is_none() {
+                store.write_runtime_owner_sync(&RuntimeStateOwner {
+                    version: SCOPE_INDEX_VERSION,
+                    runtime_state_id: checkpoint.conversation_id.clone(),
+                    scope_id,
+                })?;
+            }
             store.save_checkpoint_sync(&checkpoint)
+        })
+    }
+
+    fn runtime_state_ids<'a>(
+        &'a self,
+        scope_id: &'a str,
+    ) -> BoxFuture<'a, crate::error::Result<Vec<String>>> {
+        self.run_scope_blocking(scope_id.to_string(), move |store, scope_id| {
+            Ok(store
+                .read_scope_index_sync(&scope_id)?
+                .runtime_state_ids
+                .into_iter()
+                .collect())
+        })
+    }
+
+    fn clear_runtime_state<'a>(
+        &'a self,
+        scope_id: &'a str,
+        runtime_state_id: &'a str,
+    ) -> BoxFuture<'a, crate::error::Result<RuntimeStateClearReceipt>> {
+        let runtime_state_id = runtime_state_id.to_string();
+        self.run_scope_blocking(scope_id.to_string(), move |store, scope_id| {
+            let mut index = store.read_scope_index_sync(&scope_id)?;
+            let indexed = index.runtime_state_ids.contains(&runtime_state_id);
+            let checkpoint_removed = if indexed || scope_id == runtime_state_id {
+                if let Some(owner) = store.read_runtime_owner_sync(&runtime_state_id)?
+                    && owner.scope_id != scope_id
+                {
+                    return Err(ReactError::Other(format!(
+                        "runtime state {runtime_state_id} belongs to scope {}",
+                        owner.scope_id
+                    )));
+                }
+                store.remove_checkpoint_sync(&runtime_state_id)?
+            } else {
+                false
+            };
+            if indexed {
+                store.remove_runtime_owner_sync(&scope_id, &runtime_state_id)?;
+                index.runtime_state_ids.remove(&runtime_state_id);
+                store.write_scope_index_sync(&index)?;
+            }
+            Ok(RuntimeStateClearReceipt {
+                scope_id,
+                runtime_state_id,
+                checkpoint_removed,
+            })
+        })
+    }
+
+    fn clear_runtime_state_scope<'a>(
+        &'a self,
+        scope_id: &'a str,
+    ) -> BoxFuture<'a, crate::error::Result<RuntimeStateScopeClearReceipt>> {
+        self.run_scope_blocking(scope_id.to_string(), move |store, scope_id| {
+            let index = store.read_scope_index_sync(&scope_id)?;
+            let mut runtime_state_ids = index.runtime_state_ids.into_iter().collect::<Vec<_>>();
+            if store.checkpoint_exists_sync(&scope_id)?
+                && !runtime_state_ids
+                    .iter()
+                    .any(|runtime_id| runtime_id == &scope_id)
+            {
+                runtime_state_ids.push(scope_id.clone());
+                runtime_state_ids.sort();
+            }
+            for runtime_state_id in &runtime_state_ids {
+                if let Some(owner) = store.read_runtime_owner_sync(runtime_state_id)?
+                    && owner.scope_id != scope_id
+                {
+                    return Err(ReactError::Other(format!(
+                        "runtime state {runtime_state_id} belongs to scope {}",
+                        owner.scope_id
+                    )));
+                }
+                let _removed = store.remove_checkpoint_sync(runtime_state_id)?;
+                store.remove_runtime_owner_sync(&scope_id, runtime_state_id)?;
+            }
+            store.write_scope_index_sync(&RuntimeStateScopeIndex::empty(&scope_id))?;
+            Ok(RuntimeStateScopeClearReceipt {
+                scope_id,
+                runtime_state_ids,
+            })
         })
     }
 
@@ -139,18 +433,11 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         &'a self,
         conversation_id: &'a str,
     ) -> BoxFuture<'a, crate::error::Result<()>> {
-        self.run_blocking(
-            conversation_id.to_string(),
-            move |store, conversation_id| {
-                let dir = store.conv_dir(&conversation_id)?;
-                // Remove the conversation directory if it exists; tolerate absence.
-                match std::fs::remove_dir_all(&dir) {
-                    Ok(()) => Ok(()),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(e) => Err(Self::to_react_err(e)),
-                }
-            },
-        )
+        Box::pin(async move {
+            self.clear_runtime_state(conversation_id, conversation_id)
+                .await
+                .map(|_receipt| ())
+        })
     }
 }
 
@@ -172,6 +459,18 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4()
         ))
+    }
+
+    fn checkpoint(runtime_state_id: &str, marker: &str) -> AgentCheckpoint {
+        AgentCheckpoint {
+            conversation_id: runtime_state_id.to_string(),
+            messages_json: format!(r#"["{marker}"]"#),
+            current_plan: None,
+            active_skills: Vec::new(),
+            blocked_reason: None,
+            working_dir: None,
+            timestamp: Utc::now(),
+        }
     }
 
     #[tokio::test]
@@ -201,6 +500,180 @@ mod tests {
         // clear on a never-existing conversation is a no-op.
         store.clear_conversation("never").await?;
 
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scoped_incarnations_survive_restart_and_reset_is_sender_local()
+    -> crate::error::Result<()> {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        store
+            .save_checkpoint_for_scope("alice", &checkpoint("alice-1", "alice one"))
+            .await?;
+        store
+            .save_checkpoint_for_scope("alice", &checkpoint("alice-2", "alice two"))
+            .await?;
+        store
+            .save_checkpoint_for_scope("bob", &checkpoint("bob-1", "bob one"))
+            .await?;
+        assert!(
+            store
+                .save_checkpoint_for_scope("bob", &checkpoint("alice-2", "wrong owner"))
+                .await
+                .is_err()
+        );
+        drop(store);
+
+        let restarted = FileRuntimeStateStore::new(&tmp)?;
+        assert_eq!(
+            restarted.runtime_state_ids("alice").await?,
+            vec!["alice-1".to_string(), "alice-2".to_string()]
+        );
+        let cross_sender = restarted.clear_runtime_state("alice", "bob-1").await?;
+        assert!(!cross_sender.checkpoint_removed);
+        assert!(restarted.get_checkpoint("bob-1").await?.is_some());
+        let reset = restarted.clear_runtime_state("alice", "alice-1").await?;
+        assert!(reset.checkpoint_removed);
+        assert_eq!(
+            restarted.runtime_state_ids("alice").await?,
+            vec!["alice-2".to_string()]
+        );
+        assert!(restarted.get_checkpoint("alice-1").await?.is_none());
+        assert!(restarted.get_checkpoint("alice-2").await?.is_some());
+        assert_eq!(
+            restarted
+                .get_checkpoint("alice-2")
+                .await?
+                .map(|checkpoint| checkpoint.messages_json),
+            Some(r#"["alice two"]"#.to_string())
+        );
+        assert!(restarted.get_checkpoint("bob-1").await?.is_some());
+        assert_eq!(
+            restarted.runtime_state_ids("bob").await?,
+            vec!["bob-1".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_keeps_transcript_and_product_delete_clears_all_incarnations()
+    -> crate::error::Result<()> {
+        use crate::memory::{ConversationStore, FileConversationStore, NewConversation};
+
+        let tmp = tmp_base();
+        let runtime = FileRuntimeStateStore::new(&tmp)?;
+        let conversations = FileConversationStore::new(&tmp)?;
+        for conversation_id in ["alice", "bob"] {
+            conversations
+                .ensure_conversation(NewConversation {
+                    conversation_id: conversation_id.to_string(),
+                    user_id: "default".to_string(),
+                    agent_type: None,
+                    title: None,
+                })
+                .await?;
+            let messages = crate::memory::project_messages(
+                conversation_id,
+                &[crate::llm::types::Message::user(format!(
+                    "{conversation_id} transcript"
+                ))],
+            )?;
+            conversations
+                .save_messages(conversation_id, &messages)
+                .await?;
+        }
+        runtime
+            .save_checkpoint_for_scope("alice", &checkpoint("alice-1", "one"))
+            .await?;
+        runtime
+            .save_checkpoint_for_scope("alice", &checkpoint("alice-2", "two"))
+            .await?;
+        runtime
+            .save_checkpoint_for_scope("bob", &checkpoint("bob-1", "bob"))
+            .await?;
+
+        for runtime_state_id in ["alice-1", "bob-1"] {
+            conversations
+                .ensure_conversation(NewConversation {
+                    conversation_id: runtime_state_id.to_string(),
+                    user_id: "default".to_string(),
+                    agent_type: None,
+                    title: None,
+                })
+                .await?;
+            let incarnation_messages = crate::memory::project_messages(
+                runtime_state_id,
+                &[crate::llm::types::Message::user(format!(
+                    "{runtime_state_id} incarnation-only transcript"
+                ))],
+            )?;
+            conversations
+                .save_messages(runtime_state_id, &incarnation_messages)
+                .await?;
+        }
+
+        assert!(
+            super::super::clear_persisted_runtime_incarnation(
+                &conversations,
+                &runtime,
+                "alice",
+                "bob-1",
+            )
+            .await
+            .is_err()
+        );
+        assert!(conversations.get_conversation("bob-1").await?.is_some());
+
+        super::super::clear_persisted_runtime_incarnation(
+            &conversations,
+            &runtime,
+            "alice",
+            "alice-1",
+        )
+        .await?;
+        assert_eq!(conversations.count_messages("alice").await?, 1);
+        assert!(conversations.get_conversation("alice-1").await?.is_none());
+
+        let deleted =
+            super::super::delete_persisted_conversation(&conversations, &runtime, "alice").await?;
+        assert_eq!(deleted.runtime_state_ids, vec!["alice-2".to_string()]);
+        assert!(conversations.get_conversation("alice").await?.is_none());
+        assert!(runtime.get_checkpoint("alice-2").await?.is_none());
+        assert!(runtime.runtime_state_ids("alice").await?.is_empty());
+        assert!(conversations.get_conversation("bob").await?.is_some());
+        assert!(conversations.get_conversation("bob-1").await?.is_some());
+        assert!(runtime.get_checkpoint("bob-1").await?.is_some());
+
+        drop(conversations);
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn crash_tombstone_is_recoverable_after_restart() -> crate::error::Result<()> {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        let mut index = RuntimeStateScopeIndex::empty("crash-scope");
+        index
+            .runtime_state_ids
+            .insert("missing-after-crash".to_string());
+        store.write_scope_index_sync(&index)?;
+        drop(store);
+
+        let restarted = FileRuntimeStateStore::new(&tmp)?;
+        assert_eq!(
+            restarted.runtime_state_ids("crash-scope").await?,
+            vec!["missing-after-crash".to_string()]
+        );
+        let receipt = restarted.clear_runtime_state_scope("crash-scope").await?;
+        assert_eq!(
+            receipt.runtime_state_ids,
+            vec!["missing-after-crash".to_string()]
+        );
+        assert!(restarted.runtime_state_ids("crash-scope").await?.is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
     }

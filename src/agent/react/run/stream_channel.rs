@@ -1149,6 +1149,9 @@ mod tests {
     #[derive(Default)]
     struct RecordingRuntimeStateStore {
         checkpoint: std::sync::Mutex<Option<crate::state::AgentCheckpoint>>,
+        scopes: std::sync::Mutex<
+            std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        >,
     }
 
     impl crate::state::RuntimeStateStore for RecordingRuntimeStateStore {
@@ -1169,7 +1172,21 @@ mod tests {
             &'a self,
             checkpoint: &'a crate::state::AgentCheckpoint,
         ) -> futures::future::BoxFuture<'a, Result<()>> {
+            self.save_checkpoint_for_scope(&checkpoint.conversation_id, checkpoint)
+        }
+
+        fn save_checkpoint_for_scope<'a>(
+            &'a self,
+            scope_id: &'a str,
+            checkpoint: &'a crate::state::AgentCheckpoint,
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
             Box::pin(async move {
+                self.scopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .entry(scope_id.to_string())
+                    .or_default()
+                    .insert(checkpoint.conversation_id.clone());
                 *self
                     .checkpoint
                     .lock()
@@ -1178,16 +1195,107 @@ mod tests {
             })
         }
 
-        fn clear_conversation<'a>(
+        fn runtime_state_ids<'a>(
             &'a self,
-            _conversation_id: &'a str,
-        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            scope_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, Result<Vec<String>>> {
             Box::pin(async move {
-                *self
+                Ok(self
+                    .scopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(scope_id)
+                    .map(|ids| ids.iter().cloned().collect())
+                    .unwrap_or_default())
+            })
+        }
+
+        fn clear_runtime_state<'a>(
+            &'a self,
+            scope_id: &'a str,
+            runtime_state_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, Result<crate::state::RuntimeStateClearReceipt>>
+        {
+            Box::pin(async move {
+                let mut scopes = self
+                    .scopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let indexed = scopes
+                    .get_mut(scope_id)
+                    .is_some_and(|ids| ids.remove(runtime_state_id));
+                if scopes.get(scope_id).is_some_and(|ids| ids.is_empty()) {
+                    scopes.remove(scope_id);
+                }
+                drop(scopes);
+                let mut checkpoint = self
                     .checkpoint
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = None;
-                Ok(())
+                    .unwrap_or_else(|error| error.into_inner());
+                let checkpoint_removed = checkpoint.as_ref().is_some_and(|checkpoint| {
+                    checkpoint.conversation_id == runtime_state_id
+                        && (indexed || scope_id == runtime_state_id)
+                });
+                if checkpoint_removed {
+                    *checkpoint = None;
+                }
+                Ok(crate::state::RuntimeStateClearReceipt {
+                    scope_id: scope_id.to_string(),
+                    runtime_state_id: runtime_state_id.to_string(),
+                    checkpoint_removed,
+                })
+            })
+        }
+
+        fn clear_runtime_state_scope<'a>(
+            &'a self,
+            scope_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, Result<crate::state::RuntimeStateScopeClearReceipt>>
+        {
+            Box::pin(async move {
+                let mut runtime_state_ids = self
+                    .scopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(scope_id)
+                    .map(|ids| ids.into_iter().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let mut checkpoint = self
+                    .checkpoint
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.conversation_id == scope_id)
+                    && !runtime_state_ids
+                        .iter()
+                        .any(|runtime_id| runtime_id == scope_id)
+                {
+                    runtime_state_ids.push(scope_id.to_string());
+                    runtime_state_ids.sort();
+                }
+                if checkpoint.as_ref().is_some_and(|checkpoint| {
+                    runtime_state_ids
+                        .iter()
+                        .any(|runtime_id| runtime_id == &checkpoint.conversation_id)
+                }) {
+                    *checkpoint = None;
+                }
+                Ok(crate::state::RuntimeStateScopeClearReceipt {
+                    scope_id: scope_id.to_string(),
+                    runtime_state_ids,
+                })
+            })
+        }
+
+        fn clear_conversation<'a>(
+            &'a self,
+            conversation_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.clear_runtime_state(conversation_id, conversation_id)
+                    .await
+                    .map(|_receipt| ())
             })
         }
     }

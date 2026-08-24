@@ -82,8 +82,12 @@ idempotent even when two turns have identical content; compaction realigns the c
 the complete pre-compaction transcript is durable.
 
 Rotating `runtime_state_id` starts a clean model context without deleting the stable product
-conversation. Old runtime-state keys are unreadable to the new incarnation, but physical garbage
-collection is a separate retention concern; reset is not a disk wipe.
+conversation. `save_checkpoint_for_scope` durably indexes each runtime ID under that product
+scope. After its admission/settlement barrier, reset uses
+`clear_persisted_runtime_incarnation` to reclaim the exact retired checkpoint and any
+incarnation-keyed transcript while keeping the stable transcript. Product deletion uses
+`delete_persisted_conversation` to clear the complete runtime lineage and incarnation transcripts
+before deleting the stable transcript. See [ADR 0006](../adr/0006-runtime-state-scope-lineage.md).
 
 ### Other checkpoint domains
 

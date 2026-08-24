@@ -75,10 +75,11 @@
 
 ### 架构决策
 
-| ADR                                                                                  | 决策                                                     |
-| ------------------------------------------------------------------------------------ | -------------------------------------------------------- |
-| [0001 - Channel 用户会话隔离](../adr/0001-channel-session-sender-scope.md)            | Channel 会话按通道、会话与发送者三元身份隔离            |
-| [0002 - 沙箱取消清理](../adr/0002-sandbox-cancellation-cleanup.md)                    | 持有资源的沙箱后端完成清理后才返回 terminal             |
+| ADR                                                                              | 决策                                                       |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [0001 - Channel 用户会话隔离](../adr/0001-channel-session-sender-scope.md)       | Channel 会话按通道、会话与发送者三元身份隔离               |
+| [0006 - Runtime-State Scope Lineage](../adr/0006-runtime-state-scope-lineage.md) | 稳定 scope 持久拥有并可回收 runtime checkpoint incarnation |
+| [0002 - 沙箱取消清理](../adr/0002-sandbox-cancellation-cleanup.md)               | 持有资源的沙箱后端完成清理后才返回 terminal                |
 
 ---
 

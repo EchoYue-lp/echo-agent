@@ -100,8 +100,10 @@ to reclaim identified sessions under the existing `SessionConfig`.
 An incarnation rotation is a model-context boundary, not product-history or
 disk deletion. A new runtime key cannot load the predecessor checkpoint, while
 the stable `ConversationStore` transcript remains append-only and queryable.
-Physical garbage collection for retired runtime keys is intentionally deferred
-to a separate persistence-retention policy.
+After old foreground/resource settlement, callers use the durable scope lineage
+from [ADR 0006](0006-runtime-state-scope-lineage.md) to delete the exact retired
+runtime checkpoint. Product deletion clears every indexed incarnation and then
+the stable transcript.
 
 This decision changes the public `SessionFactory` callback shape and adds
 `ChannelSessionInstance`, `ChannelSessionRotation`,

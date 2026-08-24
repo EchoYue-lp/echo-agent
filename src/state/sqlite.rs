@@ -1,6 +1,8 @@
 //! SQLite-backed [`RuntimeStateStore`] implementation.
 
-use super::{AgentCheckpoint, RuntimeStateStore};
+use super::{
+    AgentCheckpoint, RuntimeStateClearReceipt, RuntimeStateScopeClearReceipt, RuntimeStateStore,
+};
 use crate::error::{Result, RuntimeStateError};
 use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
@@ -45,6 +47,15 @@ impl SqliteRuntimeStateStore {
                 working_dir     TEXT,
                 timestamp       TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_state_scopes (
+                scope_id         TEXT NOT NULL,
+                runtime_state_id TEXT NOT NULL,
+                PRIMARY KEY (scope_id, runtime_state_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_runtime_state_scopes_runtime
+                ON runtime_state_scopes(runtime_state_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_runtime_state_scope_owner
+                ON runtime_state_scopes(runtime_state_id);
             "#,
         )
         .map_err(|error| RuntimeStateError::Io(format!("failed to init tables: {error}")))?;
@@ -75,6 +86,50 @@ impl SqliteRuntimeStateStore {
             params![conversation_id],
         )
         .map_err(|error| RuntimeStateError::Io(format!("failed to clear checkpoint: {error}")))?;
+        conn.execute(
+            "DELETE FROM runtime_state_scopes WHERE runtime_state_id = ?1",
+            params![conversation_id],
+        )
+        .map_err(|error| {
+            RuntimeStateError::Io(format!("failed to clear checkpoint scope binding: {error}"))
+        })?;
+        Ok(())
+    }
+
+    fn save_checkpoint_on_connection(
+        conn: &Connection,
+        checkpoint: &AgentCheckpoint,
+    ) -> Result<()> {
+        let active_skills = serde_json::to_string(&checkpoint.active_skills).map_err(|error| {
+            RuntimeStateError::SerializationError(format!(
+                "failed to serialize checkpoint active_skills: {error}"
+            ))
+        })?;
+        conn.execute(
+            r#"
+            INSERT INTO agent_checkpoints (conversation_id, messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                messages_json = excluded.messages_json,
+                current_plan = excluded.current_plan,
+                active_skills = excluded.active_skills,
+                blocked_reason = excluded.blocked_reason,
+                working_dir = excluded.working_dir,
+                timestamp = excluded.timestamp
+            "#,
+            params![
+                &checkpoint.conversation_id,
+                &checkpoint.messages_json,
+                checkpoint.current_plan.as_deref(),
+                active_skills,
+                checkpoint.blocked_reason.as_deref(),
+                checkpoint.working_dir.as_ref().and_then(|path| path.to_str()),
+                crate::utils::time::to_local(checkpoint.timestamp).to_rfc3339(),
+            ],
+        )
+        .map_err(|error| {
+            RuntimeStateError::Io(format!("failed to save checkpoint: {error}"))
+        })?;
         Ok(())
     }
 }
@@ -148,45 +203,205 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
     }
 
     fn save_checkpoint<'a>(&'a self, checkpoint: &'a AgentCheckpoint) -> BoxFuture<'a, Result<()>> {
+        self.save_checkpoint_for_scope(&checkpoint.conversation_id, checkpoint)
+    }
+
+    fn save_checkpoint_for_scope<'a>(
+        &'a self,
+        scope_id: &'a str,
+        checkpoint: &'a AgentCheckpoint,
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let conn = self.open_conn()?;
-            let active_skills =
-                serde_json::to_string(&checkpoint.active_skills).map_err(|error| {
-                    RuntimeStateError::SerializationError(format!(
-                        "failed to serialize checkpoint active_skills: {error}"
-                    ))
+            let mut conn = self.open_conn()?;
+            let transaction = conn.transaction().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to begin checkpoint transaction: {error}"))
+            })?;
+            transaction
+                .execute(
+                    "INSERT INTO runtime_state_scopes (scope_id, runtime_state_id) VALUES (?1, ?2)
+                     ON CONFLICT(scope_id, runtime_state_id) DO NOTHING",
+                    params![scope_id, &checkpoint.conversation_id],
+                )
+                .map_err(|error| {
+                    RuntimeStateError::Io(format!("failed to bind checkpoint scope: {error}"))
                 })?;
-            conn.execute(
-                r#"
-                INSERT INTO agent_checkpoints (conversation_id, messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                ON CONFLICT(conversation_id) DO UPDATE SET
-                    messages_json = excluded.messages_json,
-                    current_plan = excluded.current_plan,
-                    active_skills = excluded.active_skills,
-                    blocked_reason = excluded.blocked_reason,
-                    working_dir = excluded.working_dir,
-                    timestamp = excluded.timestamp
-                "#,
-                params![
-                    &checkpoint.conversation_id,
-                    &checkpoint.messages_json,
-                    checkpoint.current_plan.as_deref(),
-                    active_skills,
-                    checkpoint.blocked_reason.as_deref(),
-                    checkpoint.working_dir.as_ref().and_then(|path| path.to_str()),
-                    crate::utils::time::to_local(checkpoint.timestamp).to_rfc3339(),
-                ],
-            )
-            .map_err(|error| {
-                RuntimeStateError::Io(format!("failed to save checkpoint: {error}"))
+            Self::save_checkpoint_on_connection(&transaction, checkpoint)?;
+            transaction.commit().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to commit checkpoint transaction: {error}"))
             })?;
             Ok(())
         })
     }
 
+    fn runtime_state_ids<'a>(&'a self, scope_id: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async move {
+            let conn = self.open_conn()?;
+            let mut statement = conn
+                .prepare(
+                    "SELECT runtime_state_id FROM runtime_state_scopes WHERE scope_id = ?1 ORDER BY runtime_state_id",
+                )
+                .map_err(|error| {
+                    RuntimeStateError::Io(format!("failed to prepare scope query: {error}"))
+                })?;
+            let rows = statement
+                .query_map(params![scope_id], |row| row.get::<_, String>(0))
+                .map_err(|error| {
+                    RuntimeStateError::Io(format!("failed to query checkpoint scope: {error}"))
+                })?;
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row.map_err(|error| {
+                    RuntimeStateError::Io(format!("failed to read checkpoint scope: {error}"))
+                })?);
+            }
+            Ok(ids)
+        })
+    }
+
+    fn clear_runtime_state<'a>(
+        &'a self,
+        scope_id: &'a str,
+        runtime_state_id: &'a str,
+    ) -> BoxFuture<'a, Result<RuntimeStateClearReceipt>> {
+        Box::pin(async move {
+            let mut conn = self.open_conn()?;
+            let transaction = conn.transaction().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to begin runtime clear: {error}"))
+            })?;
+            let indexed = transaction
+                .query_row(
+                    "SELECT 1 FROM runtime_state_scopes WHERE scope_id = ?1 AND runtime_state_id = ?2",
+                    params![scope_id, runtime_state_id],
+                    |_row| Ok(()),
+                )
+                .map(|()| true)
+                .or_else(|error| match error {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                    error => Err(error),
+                })
+                .map_err(|error| {
+                    RuntimeStateError::Io(format!("failed to inspect runtime scope: {error}"))
+                })?;
+            let checkpoint_removed = if indexed || scope_id == runtime_state_id {
+                transaction
+                    .execute(
+                        "DELETE FROM agent_checkpoints WHERE conversation_id = ?1",
+                        params![runtime_state_id],
+                    )
+                    .map_err(|error| {
+                        RuntimeStateError::Io(format!("failed to delete checkpoint: {error}"))
+                    })?
+                    != 0
+            } else {
+                false
+            };
+            if indexed {
+                transaction
+                    .execute(
+                        "DELETE FROM runtime_state_scopes WHERE scope_id = ?1 AND runtime_state_id = ?2",
+                        params![scope_id, runtime_state_id],
+                    )
+                    .map_err(|error| {
+                        RuntimeStateError::Io(format!("failed to delete scope binding: {error}"))
+                    })?;
+            }
+            transaction.commit().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to commit runtime clear: {error}"))
+            })?;
+            Ok(RuntimeStateClearReceipt {
+                scope_id: scope_id.to_string(),
+                runtime_state_id: runtime_state_id.to_string(),
+                checkpoint_removed,
+            })
+        })
+    }
+
+    fn clear_runtime_state_scope<'a>(
+        &'a self,
+        scope_id: &'a str,
+    ) -> BoxFuture<'a, Result<RuntimeStateScopeClearReceipt>> {
+        Box::pin(async move {
+            let mut conn = self.open_conn()?;
+            let transaction = conn.transaction().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to begin scope clear: {error}"))
+            })?;
+            let mut runtime_state_ids = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT runtime_state_id FROM runtime_state_scopes WHERE scope_id = ?1 ORDER BY runtime_state_id",
+                    )
+                    .map_err(|error| {
+                        RuntimeStateError::Io(format!("failed to prepare scope clear: {error}"))
+                    })?;
+                let rows = statement
+                    .query_map(params![scope_id], |row| row.get::<_, String>(0))
+                    .map_err(|error| {
+                        RuntimeStateError::Io(format!("failed to query scope clear: {error}"))
+                    })?;
+                let mut ids = Vec::new();
+                for row in rows {
+                    ids.push(row.map_err(|error| {
+                        RuntimeStateError::Io(format!("failed to read scope clear: {error}"))
+                    })?);
+                }
+                ids
+            };
+            let legacy_exists = transaction
+                .query_row(
+                    "SELECT 1 FROM agent_checkpoints WHERE conversation_id = ?1",
+                    params![scope_id],
+                    |_row| Ok(()),
+                )
+                .map(|()| true)
+                .or_else(|error| match error {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                    error => Err(error),
+                })
+                .map_err(|error| {
+                    RuntimeStateError::Io(format!("failed to inspect legacy checkpoint: {error}"))
+                })?;
+            if legacy_exists
+                && !runtime_state_ids
+                    .iter()
+                    .any(|runtime_id| runtime_id == scope_id)
+            {
+                runtime_state_ids.push(scope_id.to_string());
+                runtime_state_ids.sort();
+            }
+            for runtime_state_id in &runtime_state_ids {
+                transaction
+                    .execute(
+                        "DELETE FROM agent_checkpoints WHERE conversation_id = ?1",
+                        params![runtime_state_id],
+                    )
+                    .map_err(|error| {
+                        RuntimeStateError::Io(format!("failed to delete scope checkpoint: {error}"))
+                    })?;
+            }
+            transaction
+                .execute(
+                    "DELETE FROM runtime_state_scopes WHERE scope_id = ?1",
+                    params![scope_id],
+                )
+                .map_err(|error| {
+                    RuntimeStateError::Io(format!("failed to delete runtime scope: {error}"))
+                })?;
+            transaction.commit().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to commit scope clear: {error}"))
+            })?;
+            Ok(RuntimeStateScopeClearReceipt {
+                scope_id: scope_id.to_string(),
+                runtime_state_ids,
+            })
+        })
+    }
+
     fn clear_conversation<'a>(&'a self, conversation_id: &'a str) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move { self.clear_conversation_sync(conversation_id) })
+        Box::pin(async move {
+            self.clear_runtime_state(conversation_id, conversation_id)
+                .await
+                .map(|_receipt| ())
+        })
     }
 }
 
@@ -223,6 +438,62 @@ mod tests {
 
         store.clear_conversation("conv-1").await?;
         assert!(store.get_checkpoint("conv-1").await?.is_none());
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_scope_index_survives_restart_and_clears_exactly() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-scope-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let checkpoint = |runtime_state_id: &str| AgentCheckpoint {
+            conversation_id: runtime_state_id.to_string(),
+            messages_json: "[]".to_string(),
+            current_plan: None,
+            active_skills: Vec::new(),
+            blocked_reason: None,
+            working_dir: None,
+            timestamp: Utc::now(),
+        };
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        store
+            .save_checkpoint_for_scope("alice", &checkpoint("alice-1"))
+            .await?;
+        store
+            .save_checkpoint_for_scope("alice", &checkpoint("alice-2"))
+            .await?;
+        store
+            .save_checkpoint_for_scope("bob", &checkpoint("bob-1"))
+            .await?;
+        assert!(
+            store
+                .save_checkpoint_for_scope("bob", &checkpoint("alice-2"))
+                .await
+                .is_err()
+        );
+        drop(store);
+
+        let restarted = SqliteRuntimeStateStore::new(&path)?;
+        assert_eq!(
+            restarted.runtime_state_ids("alice").await?,
+            vec!["alice-1".to_string(), "alice-2".to_string()]
+        );
+        assert!(
+            restarted
+                .clear_runtime_state("alice", "alice-1")
+                .await?
+                .checkpoint_removed
+        );
+        assert!(restarted.get_checkpoint("alice-1").await?.is_none());
+        assert!(restarted.get_checkpoint("alice-2").await?.is_some());
+        assert!(restarted.get_checkpoint("bob-1").await?.is_some());
+        let cleared = restarted.clear_runtime_state_scope("alice").await?;
+        assert_eq!(cleared.runtime_state_ids, vec!["alice-2".to_string()]);
+        assert!(restarted.get_checkpoint("alice-2").await?.is_none());
+        assert!(restarted.get_checkpoint("bob-1").await?.is_some());
         let _ = std::fs::remove_file(path);
         Ok(())
     }

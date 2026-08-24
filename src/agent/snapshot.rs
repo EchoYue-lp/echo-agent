@@ -943,7 +943,14 @@ impl AgentRunSnapshot {
             timestamp: chrono::Utc::now(),
         };
 
-        store.save_checkpoint(&checkpoint).await?;
+        let scope_id = self
+            .config
+            .conversation_id
+            .as_deref()
+            .unwrap_or(conv_id.as_str());
+        store
+            .save_checkpoint_for_scope(scope_id, &checkpoint)
+            .await?;
         self.record_event(crate::trace::RunEvent::Checkpoint {
             id: format!(
                 "checkpoint:{}:{}",
@@ -1894,6 +1901,64 @@ mod transcript_filter_tests {
             snapshot.config.runtime_state_id.as_deref(),
             Some("runtime-incarnation")
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_save_indexes_product_scope_and_exact_reset_reclaims_runtime() -> Result<()>
+    {
+        use crate::state::RuntimeStateStore;
+
+        let temp = tempfile::tempdir()?;
+        let store = Arc::new(crate::state::FileRuntimeStateStore::new(temp.path())?);
+        let config = crate::agent::AgentConfig::new("test-model", "agent", "system")
+            .conversation_id("runtime-incarnation");
+        let mut agent = crate::agent::ReactAgent::new(config);
+        agent.set_state_store(store.clone());
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .push(Message::user("indexed turn".to_string()));
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime_state_id: Some("runtime-incarnation".to_string()),
+            transcript_generation_id: Some("runtime-incarnation".to_string()),
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("product-conversation".to_string()),
+                run_id: None,
+                turn_id: None,
+                execution_id: None,
+                isolation_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+                resource_guards: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        snapshot
+            .save_runtime_checkpoint(&agent.memory.context, None)
+            .await?;
+
+        assert_eq!(
+            store.runtime_state_ids("product-conversation").await?,
+            vec!["runtime-incarnation".to_string()]
+        );
+        assert!(store.get_checkpoint("runtime-incarnation").await?.is_some());
+        let reset = store
+            .clear_runtime_state("product-conversation", "runtime-incarnation")
+            .await?;
+        assert!(reset.checkpoint_removed);
+        assert!(store.get_checkpoint("runtime-incarnation").await?.is_none());
+        assert!(
+            store
+                .runtime_state_ids("product-conversation")
+                .await?
+                .is_empty()
+        );
+        Ok(())
     }
 
     #[test]

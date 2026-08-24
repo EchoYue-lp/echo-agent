@@ -76,10 +76,11 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 ### Architecture Decisions
 
-| ADR                                                                                  | Decision                                                    |
-| ------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| [0001 - Sender-Scoped Channel Sessions](../adr/0001-channel-session-sender-scope.md) | Channel sessions are isolated by channel, conversation, and sender |
-| [0002 - Sandbox Cancellation Cleanup](../adr/0002-sandbox-cancellation-cleanup.md)  | Resource-owning sandbox backends drain cleanup before terminal return |
+| ADR                                                                                  | Decision                                                              |
+| ------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| [0001 - Sender-Scoped Channel Sessions](../adr/0001-channel-session-sender-scope.md) | Channel sessions are isolated by channel, conversation, and sender    |
+| [0006 - Runtime-State Scope Lineage](../adr/0006-runtime-state-scope-lineage.md)     | Stable scopes durably own resettable runtime checkpoint incarnations  |
+| [0002 - Sandbox Cancellation Cleanup](../adr/0002-sandbox-cancellation-cleanup.md)   | Resource-owning sandbox backends drain cleanup before terminal return |
 
 ---
 

@@ -96,6 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation, runtime checkpoint, and transcript generation identities;
   generation ordinals plus checkpointed SHA-256 cursors keep transcript append
   idempotent across repeated content, compaction, eviction, and crash cuts.
+  `RuntimeStateStore` now durably indexes runtime incarnations under a stable
+  scope, supports exact reset and whole-scope cleanup, and provides a combined
+  conversation deletion helper that clears runtime lineage before transcript.
 
 - Procedural macros now resolve their owning split crate directly:
   core-owned macros accept `echo_core`, while `#[handler]` accepts

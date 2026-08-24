@@ -84,8 +84,12 @@ transcript 身份，`runtime_state_id` 只选择 `RuntimeStateStore` checkpoint 
 内容完全相同，多次 safe point、checkpoint 与产品 Store 的 crash cut 也保持幂等；压缩只在完整
 pre-compaction transcript 已落盘后重新对齐 cursor。
 
-轮换 `runtime_state_id` 会创建干净的模型上下文，但不会删除稳定产品会话。新 incarnation 不会读取
-旧 runtime key；旧 key 的物理 GC 属于独立 retention 议题，reset 不是磁盘擦除。
+轮换 `runtime_state_id` 会创建干净的模型上下文，但不会删除稳定产品会话。
+`save_checkpoint_for_scope` 把每个 runtime ID 持久索引到产品 scope。关闭 admission 并完成旧 owner
+结算后，reset 通过 `clear_persisted_runtime_incarnation` 精确回收旧 checkpoint 和可能存在的
+incarnation transcript，同时保留稳定 transcript；产品删除通过 `delete_persisted_conversation`
+先清完整 runtime lineage 与 incarnation transcripts，再删除稳定 transcript。详见
+[ADR 0006](../adr/0006-runtime-state-scope-lineage.md)。
 
 ### 其它同名 checkpoint
 

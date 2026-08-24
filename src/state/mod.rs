@@ -320,6 +320,28 @@ fn invalid_checkpoint(message: String) -> crate::error::ReactError {
 
 // ── RuntimeStateStore trait ────────────────────────────────────────────
 
+/// Result of deleting one exact runtime-state incarnation from a stable scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStateClearReceipt {
+    pub scope_id: String,
+    pub runtime_state_id: String,
+    pub checkpoint_removed: bool,
+}
+
+/// Result of deleting every indexed runtime-state incarnation in one scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStateScopeClearReceipt {
+    pub scope_id: String,
+    pub runtime_state_ids: Vec<String>,
+}
+
+/// Result of deleting stable transcript data and its runtime-state lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedConversationDeleteReceipt {
+    pub conversation_id: String,
+    pub runtime_state_ids: Vec<String>,
+}
+
 /// Trait for persistent runtime state storage.
 ///
 /// Implementations may use SQLite, JSON files, or another durable backend.
@@ -336,11 +358,108 @@ pub trait RuntimeStateStore: Send + Sync {
         checkpoint: &'a AgentCheckpoint,
     ) -> futures::future::BoxFuture<'a, crate::error::Result<()>>;
 
+    /// Save a checkpoint and durably bind its globally unique runtime identity
+    /// to one stable product/session scope.
+    ///
+    /// Implementations write the index before the checkpoint. A crash may leave
+    /// an index tombstone, but cannot leave an unindexed checkpoint that a later
+    /// scope deletion cannot discover.
+    fn save_checkpoint_for_scope<'a>(
+        &'a self,
+        scope_id: &'a str,
+        checkpoint: &'a AgentCheckpoint,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<()>>;
+
+    /// List sorted runtime-state identities durably bound to `scope_id`.
+    fn runtime_state_ids<'a>(
+        &'a self,
+        scope_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<Vec<String>>>;
+
+    /// Delete one exact runtime-state incarnation and remove its scope binding.
+    fn clear_runtime_state<'a>(
+        &'a self,
+        scope_id: &'a str,
+        runtime_state_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<RuntimeStateClearReceipt>>;
+
+    /// Delete every runtime-state incarnation indexed by `scope_id`.
+    fn clear_runtime_state_scope<'a>(
+        &'a self,
+        scope_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<RuntimeStateScopeClearReceipt>>;
+
     /// Delete all state for a conversation.
     fn clear_conversation<'a>(
         &'a self,
         conversation_id: &'a str,
     ) -> futures::future::BoxFuture<'a, crate::error::Result<()>>;
+}
+
+/// Delete one retired runtime incarnation without deleting its stable product
+/// transcript.
+///
+/// An incarnation-keyed transcript, if one was written by a non-invocation
+/// operation, is deleted first. The exact runtime checkpoint and scope binding
+/// are then cleared. Callers retain both IDs and can safely retry either step.
+pub async fn clear_persisted_runtime_incarnation(
+    conversation_store: &dyn crate::memory::ConversationStore,
+    runtime_state_store: &dyn RuntimeStateStore,
+    scope_id: &str,
+    runtime_state_id: &str,
+) -> crate::error::Result<RuntimeStateClearReceipt> {
+    if runtime_state_id != scope_id {
+        let indexed = runtime_state_store.runtime_state_ids(scope_id).await?;
+        if !indexed
+            .iter()
+            .any(|indexed_id| indexed_id == runtime_state_id)
+        {
+            return Err(echo_core::error::RuntimeStateError::NotFound(format!(
+                "runtime state {runtime_state_id} is not owned by scope {scope_id}"
+            ))
+            .into());
+        }
+        conversation_store
+            .delete_conversation(runtime_state_id)
+            .await?;
+    }
+    runtime_state_store
+        .clear_runtime_state(scope_id, runtime_state_id)
+        .await
+}
+
+/// Delete a stable user-visible transcript and every runtime checkpoint bound
+/// to the same scope.
+///
+/// Incarnation-keyed transcripts are removed while the durable lineage still
+/// exists, then runtime state is cleared, and the stable transcript is deleted
+/// last. Each step is idempotent, so a crash can resume enumeration from the
+/// retained scope index.
+pub async fn delete_persisted_conversation(
+    conversation_store: &dyn crate::memory::ConversationStore,
+    runtime_state_store: &dyn RuntimeStateStore,
+    conversation_id: &str,
+) -> crate::error::Result<PersistedConversationDeleteReceipt> {
+    let runtime_state_ids = runtime_state_store
+        .runtime_state_ids(conversation_id)
+        .await?;
+    for runtime_state_id in &runtime_state_ids {
+        if runtime_state_id != conversation_id {
+            conversation_store
+                .delete_conversation(runtime_state_id)
+                .await?;
+        }
+    }
+    let runtime = runtime_state_store
+        .clear_runtime_state_scope(conversation_id)
+        .await?;
+    conversation_store
+        .delete_conversation(conversation_id)
+        .await?;
+    Ok(PersistedConversationDeleteReceipt {
+        conversation_id: conversation_id.to_string(),
+        runtime_state_ids: runtime.runtime_state_ids,
+    })
 }
 
 // ── Re-export implementations ─────────────────────────────────────────
