@@ -284,7 +284,8 @@ mod tests {
         let store: Arc<InMemoryRunStore> = Arc::new(InMemoryRunStore::new());
         let mut agent = ReactAgent::new(AgentConfig::new("test-model", agent_name, "sys"));
         agent.set_run_store(store.clone());
-        agent.start_trace_run("test input").await;
+        let legacy = agent.capture_legacy_external_context();
+        agent.start_legacy_trace_run("test input", &legacy).await;
 
         let snap = AgentRunSnapshot::from_agent(&agent);
         (snap, store, agent)

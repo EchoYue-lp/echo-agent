@@ -555,6 +555,7 @@ impl PipelineStage for ExecuteStage {
             cancel: snapshot.external_cancel.clone(),
             trace_sink: snapshot.external_trace_sink.clone(),
             delegation_policy: snapshot.external_delegation_policy,
+            resource_guards: snapshot.resource_guards.clone(),
         };
         let execution_result = if snapshot
             .tools
@@ -1131,7 +1132,7 @@ fn resolve_tracking_path(path: &str, working_dir: Option<&std::path::Path>) -> S
 mod tests {
     use super::*;
     use crate::agent::AgentEvent;
-    use echo_core::tools::{Tool, ToolContext, ToolOutputChannel};
+    use echo_core::tools::{InvocationResourceGuard, Tool, ToolContext, ToolOutputChannel};
     use futures::Stream;
     #[cfg(feature = "files")]
     use std::collections::HashMap;
@@ -1175,6 +1176,10 @@ mod tests {
     struct InterleavingTool;
 
     struct InvalidResultTool;
+
+    struct ResourceGuardStreamingTool {
+        observed_guard_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
 
     impl Tool for InvalidResultTool {
         fn name(&self) -> &str {
@@ -1288,6 +1293,51 @@ mod tests {
 
         fn supports_streaming(&self) -> bool {
             true
+        }
+    }
+
+    impl Tool for ResourceGuardStreamingTool {
+        fn name(&self) -> &str {
+            "resource_guard_stream"
+        }
+
+        fn description(&self) -> &str {
+            "captures invocation resource guards on the streaming path"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("fallback")) })
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+
+        fn execute_stream_with_context<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+            context: &ToolContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>,
+        > {
+            self.observed_guard_count.store(
+                context.resource_guards.len(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            Box::pin(async {
+                Ok(Box::pin(futures::stream::iter([ToolStreamEvent::Complete(
+                    ToolResult::success("streamed"),
+                )]))
+                    as Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send>>)
+            })
         }
     }
 
@@ -1751,6 +1801,44 @@ mod tests {
             failure.result.failure.map(|failure| failure.category),
             Some(crate::tools::ToolFailureCategory::InvalidArguments)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_pipeline_forwards_invocation_resource_guards() -> crate::error::Result<()> {
+        let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .enable_tools()
+            .tool(Box::new(ResourceGuardStreamingTool {
+                observed_guard_count: Arc::clone(&observed),
+            }))
+            .build()?;
+        let invocation = echo_core::agent::AgentInvocationContext {
+            resource_guards: vec![InvocationResourceGuard::new("stream-lease".to_string())],
+            ..echo_core::agent::AgentInvocationContext::default()
+        };
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &invocation,
+        );
+        let (stream_tx, _stream_rx) = mpsc::channel(4);
+        let execution = snapshot
+            .execute_tool_with_policy(
+                "guard-stream-call".to_string(),
+                "resource_guard_stream",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                Some(stream_tx),
+            )
+            .await;
+        if let Err(failure) = execution {
+            return Err(crate::error::ReactError::Other(format!(
+                "streaming guard tool failed: {}",
+                failure.result.output
+            )));
+        }
+        assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), 1);
         Ok(())
     }
 

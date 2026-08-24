@@ -116,7 +116,16 @@ impl AgentDispatchTool {
     /// `subagent_run_id` (avoids colliding parallel same-role dispatches).
     fn runtime_context_from_tool_ctx(ctx: Option<&ToolContext>) -> Option<ExternalRunContext> {
         let c = ctx?;
-        if c.run_id.is_none() && c.turn_id.is_none() {
+        if c.conversation_id.is_none()
+            && c.run_id.is_none()
+            && c.turn_id.is_none()
+            && c.message_id.is_none()
+            && c.execution_id.is_none()
+            && c.cancel.is_none()
+            && c.trace_sink.is_none()
+            && c.delegation_policy.is_none()
+            && c.resource_guards.is_empty()
+        {
             return None;
         }
         Some(ExternalRunContext {
@@ -133,6 +142,7 @@ impl AgentDispatchTool {
             cancel: c.cancel.clone(),
             trace_sink: c.trace_sink.clone(),
             delegation_policy: c.delegation_policy,
+            resource_guards: c.resource_guards.clone(),
         })
     }
 
@@ -466,6 +476,15 @@ mod tests {
     use crate::agent::subagent::{SubagentDefinition, SubagentExecutorConfig, SubagentRegistry};
     use crate::testing::MockAgent;
     use echo_core::llm::types::{ContentPart, Message};
+    use std::sync::atomic::AtomicUsize;
+
+    struct BackgroundGuardDrop(Arc<AtomicUsize>);
+
+    impl Drop for BackgroundGuardDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     #[test]
     fn synchronous_parent_result_preserves_structured_contract() -> Result<(), String> {
@@ -541,15 +560,77 @@ mod tests {
     }
 
     #[test]
+    fn runtime_context_preserves_guards_without_run_or_turn_id() -> Result<(), String> {
+        let ctx = ToolContext {
+            resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                "anonymous-lease".to_string(),
+            )],
+            ..ToolContext::default()
+        };
+        let runtime = AgentDispatchTool::runtime_context_from_tool_ctx(Some(&ctx))
+            .ok_or_else(|| "guard-only runtime context was dropped".to_string())?;
+
+        assert!(runtime.run_id.is_none());
+        assert!(runtime.turn_id.is_none());
+        assert_eq!(runtime.resource_guards.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_context_preserves_conversation_only() -> Result<(), String> {
+        let context = ToolContext {
+            conversation_id: Some("conversation-only".to_string()),
+            ..ToolContext::default()
+        };
+        let runtime = AgentDispatchTool::runtime_context_from_tool_ctx(Some(&context))
+            .ok_or_else(|| "conversation-only ToolContext was dropped".to_string())?;
+        assert_eq!(
+            runtime.conversation_id.as_deref(),
+            Some("conversation-only")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_context_preserves_cancel_and_trace_only() -> Result<(), String> {
+        let cancel = Arc::new(CancellationToken::new());
+        let trace: echo_core::tools::TraceSinkFn = Arc::new(|_| {});
+        let context = ToolContext {
+            cancel: Some(Arc::clone(&cancel)),
+            trace_sink: Some(Arc::clone(&trace)),
+            ..ToolContext::default()
+        };
+        let runtime = AgentDispatchTool::runtime_context_from_tool_ctx(Some(&context))
+            .ok_or_else(|| "cancel/trace-only ToolContext was dropped".to_string())?;
+        assert!(
+            runtime
+                .cancel
+                .as_ref()
+                .is_some_and(|value| Arc::ptr_eq(value, &cancel))
+        );
+        assert!(
+            runtime
+                .trace_sink
+                .as_ref()
+                .is_some_and(|value| Arc::ptr_eq(value, &trace))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn runtime_context_from_run_id_pins_message_and_execution_id() -> Result<(), String> {
         let ctx = ToolContext {
             run_id: Some("msg-key-1".to_string()),
+            resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                "lease".to_string(),
+            )],
             ..Default::default()
         };
         let rt = AgentDispatchTool::runtime_context_from_tool_ctx(Some(&ctx))
             .ok_or_else(|| "runtime_context missing when run_id is set".to_string())?;
         assert_eq!(rt.run_id.as_deref(), Some("msg-key-1"));
         assert_eq!(rt.message_id.as_deref(), Some("msg-key-1"));
+        assert_eq!(rt.resource_guards.len(), 1);
         let exec_id = rt
             .execution_id
             .ok_or_else(|| "execution_id missing from runtime context".to_string())?;
@@ -584,6 +665,79 @@ mod tests {
         if !child.is_cancelled() {
             return Err("invocation cancellation did not reach the subagent child".to_string());
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn anonymous_background_dispatch_retains_guard_until_subagent_settles()
+    -> Result<(), String> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let executor = Arc::new(SubagentExecutor::new(
+            Arc::clone(&registry),
+            SubagentExecutorConfig::default(),
+        ));
+        let agent = MockAgent::new("background").with_response("## Summary\ncomplete");
+        registry
+            .register(
+                SubagentDefinition::new("background", "Background role"),
+                Box::new(agent.clone()),
+            )
+            .await;
+        let tool = AgentDispatchTool::new(executor, "parent", CancellationToken::new());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let context = ToolContext {
+            resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                BackgroundGuardDrop(Arc::clone(&drops)),
+            )],
+            ..ToolContext::default()
+        };
+        let parameters: ToolParameters = [
+            (
+                "agent_name".to_string(),
+                Value::String("background".to_string()),
+            ),
+            ("task".to_string(), Value::String("continue".to_string())),
+            ("background".to_string(), Value::Bool(true)),
+        ]
+        .into_iter()
+        .collect();
+
+        let started = tool
+            .execute_with_context(parameters, &context)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !started.success {
+            return Err(format!("background dispatch failed to start: {started:?}"));
+        }
+        drop(context);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while agent.invocation_contexts().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| "background invocation did not reach the subagent".to_string())?;
+        let invocations = agent.take_invocation_contexts();
+        let guard_count = invocations
+            .first()
+            .and_then(|invocation| invocation.runtime.as_ref())
+            .map(|runtime| runtime.resource_guards.len());
+        if guard_count != Some(1) {
+            return Err(format!(
+                "background subagent lost anonymous guards: {guard_count:?}"
+            ));
+        }
+        drop(invocations);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while drops.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| "background guard outlived subagent settlement".to_string())?;
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

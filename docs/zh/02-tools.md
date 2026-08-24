@@ -235,6 +235,40 @@ impl Tool for LongRunningTool {
 
 ---
 
+## 保留调用期资源
+
+某些由应用持有的资源必须一直存活到已经启动的工具工作真正结算，例如 owned
+并发许可、临时 workspace owner 或外部服务 lease。应用可以把它们作为 opaque
+guard 附加到单次调用：
+
+```rust
+use echo_agent::agent::AgentInvocationContext;
+use echo_agent::tools::InvocationResourceGuard;
+
+let invocation = AgentInvocationContext {
+    resource_guards: vec![InvocationResourceGuard::new(my_owned_lease)],
+    ..AgentInvocationContext::default()
+};
+```
+
+框架会沿 `AgentRunSnapshot`、`ExternalRunContext`、Subagent dispatch 和
+`ToolContext` 克隆这些 guard。工具如果启动独立异步任务或 blocking 工作，必须把
+`context.resource_guards` 克隆进该 owned task。这样即使 caller 被丢弃，资源也不会
+在实际工作结算前提前释放。
+`Agent` trait 的默认 value-scoped 方法也会把完整 invocation 保留在返回的 stream
+中，因此第三方 Agent 即使没有 override context-aware 方法，也具有相同生命周期语义。
+
+被包装的值有意保持 opaque：工具只能保留 guard，不能通过该 API downcast 或读取
+应用状态。Debug 输出只包含 guard 的 Rust 类型名和数量，不会格式化内部值。
+当一次调用包含多种资源时，可用 `guard.retains::<MyLease>()` 做精确类型过滤；该谓词
+不会返回内部值。若 guard 包装的是 `Arc<MyLease>`，则应查询
+`retains::<Arc<MyLease>>()`。
+
+所有权和传播决策见
+[ADR 0005](../adr/0005-invocation-resource-lifetime.md)。
+
+---
+
 ## ToolRiskLevel（风险级别）
 
 ```rust

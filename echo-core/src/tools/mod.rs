@@ -1063,6 +1063,56 @@ pub trait Tool: Send + Sync {
 /// 应用层类型——应用层在填入时把自己的事件序列化成 Value。
 pub type TraceSinkFn = std::sync::Arc<dyn Fn(serde_json::Value) + Send + Sync>;
 
+/// Opaque ownership token retained for the lifetime of one Agent invocation.
+///
+/// Applications can wrap a permit, lease, temporary-directory owner, or any
+/// other `Send + Sync + 'static` resource whose destructor releases ownership.
+/// The framework only clones and retains the token while an invocation, its
+/// subagents, and their tools are running. The wrapped value cannot be read or
+/// downcast through this API, keeping application policy out of the framework.
+///
+/// Debug output contains only the Rust type name and never formats the wrapped
+/// value.
+#[derive(Clone)]
+pub struct InvocationResourceGuard {
+    resource_type: &'static str,
+    _resource: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl InvocationResourceGuard {
+    /// Retain `resource` until the last clone of this guard is dropped.
+    pub fn new<T>(resource: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        Self {
+            resource_type: std::any::type_name::<T>(),
+            _resource: std::sync::Arc::new(resource),
+        }
+    }
+
+    /// Whether this guard retains exactly `T`.
+    ///
+    /// This predicate supports typed filtering when one invocation carries
+    /// several independent resources. It never returns or downcasts the
+    /// wrapped value. If the guard was constructed with `Arc<T>`, query
+    /// `retains::<Arc<T>>()`, because the exact wrapped type is `Arc<T>`.
+    pub fn retains<T>(&self) -> bool
+    where
+        T: Send + Sync + 'static,
+    {
+        self._resource.is::<T>()
+    }
+}
+
+impl std::fmt::Debug for InvocationResourceGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InvocationResourceGuard")
+            .field("resource_type", &self.resource_type)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Nested delegation policy for agents and subagents.
 ///
 /// Lives in `echo_core` because [`ToolContext`] is the cross-spawn channel used
@@ -1213,6 +1263,29 @@ pub struct ExternalRunContext {
     pub trace_sink: Option<TraceSinkFn>,
     /// Nested delegation policy to propagate into tools such as `agent_tool`.
     pub delegation_policy: Option<NestedDelegationPolicy>,
+    /// Opaque resources retained across main Agent, subagent, and tool spawns.
+    pub resource_guards: Vec<InvocationResourceGuard>,
+}
+
+impl std::fmt::Debug for ExternalRunContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalRunContext")
+            .field("conversation_id", &self.conversation_id)
+            .field("run_id", &self.run_id)
+            .field("turn_id", &self.turn_id)
+            .field("execution_id", &self.execution_id)
+            .field("isolation_id", &self.isolation_id)
+            .field("message_id", &self.message_id)
+            .field(
+                "cancel",
+                &self.cancel.as_ref().map(|_| "<CancellationToken>"),
+            )
+            .field("trace_sink", &self.trace_sink.as_ref().map(|_| "<sink>"))
+            .field("delegation_policy", &self.delegation_policy)
+            .field("resource_guard_count", &self.resource_guards.len())
+            .field("resource_guards", &self.resource_guards)
+            .finish()
+    }
 }
 
 /// 运行时上下文，工具执行时由 ExecuteStage 注入。
@@ -1262,6 +1335,9 @@ pub struct ToolContext {
     pub trace_sink: Option<TraceSinkFn>,
     /// Nested delegation policy for LLM-callable dispatch tools.
     pub delegation_policy: Option<NestedDelegationPolicy>,
+    /// Opaque invocation resources. Tools may clone and retain these guards
+    /// when work crosses an internal spawn or blocking boundary.
+    pub resource_guards: Vec<InvocationResourceGuard>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -1296,6 +1372,8 @@ impl std::fmt::Debug for ToolContext {
             )
             .field("trace_sink", &self.trace_sink.as_ref().map(|_| "<sink>"))
             .field("delegation_policy", &self.delegation_policy)
+            .field("resource_guard_count", &self.resource_guards.len())
+            .field("resource_guards", &self.resource_guards)
             .finish()
     }
 }
@@ -1430,6 +1508,50 @@ impl ToolContext {
 mod tool_context_tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DropCounter {
+        drops: std::sync::Arc<AtomicUsize>,
+        _secret: &'static str,
+    }
+
+    struct OtherResource;
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn invocation_resource_guard_is_opaque_cloneable_and_redacted() {
+        let drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let guard = InvocationResourceGuard::new(DropCounter {
+            drops: std::sync::Arc::clone(&drops),
+            _secret: "must-not-appear",
+        });
+        let retained = guard.clone();
+        let guards = [guard.clone(), InvocationResourceGuard::new(OtherResource)];
+
+        let debug = format!("{guard:?}");
+        assert!(debug.contains("DropCounter"));
+        assert!(!debug.contains("must-not-appear"));
+        assert!(guard.retains::<DropCounter>());
+        assert!(!guard.retains::<OtherResource>());
+        assert_eq!(
+            guards
+                .iter()
+                .filter(|candidate| candidate.retains::<DropCounter>())
+                .count(),
+            1
+        );
+        assert!(!format!("{guards:?}").contains("must-not-appear"));
+        drop(guards);
+        drop(guard);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(retained);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn test_default_is_all_none() {
@@ -1439,6 +1561,7 @@ mod tool_context_tests {
         assert!(ctx.run_id.is_none());
         assert!(ctx.message_id.is_none());
         assert!(ctx.delegation_policy.is_none());
+        assert!(ctx.resource_guards.is_empty());
     }
 
     #[test]
@@ -1470,6 +1593,7 @@ mod tool_context_tests {
             cancel: None,
             trace_sink: None,
             delegation_policy: None,
+            resource_guards: Vec::new(),
             // No cache_user_id field — if it still exists, this fails to compile.
         };
     }
@@ -1491,6 +1615,7 @@ mod tool_context_tests {
             trace_sink: None,
             delegation_policy: None,
             active_message: None,
+            resource_guards: Vec::new(),
             // No cache_user_id field — if it still exists, this fails to compile.
         };
     }

@@ -86,24 +86,7 @@ impl ReactAgent {
         // context while this invocation is queued, but this snapshot belongs
         // to the invocation that entered here.
         let legacy_runtime = if invocation.is_none() {
-            Some((
-                self.current_run_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
-                self.external_cancel
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
-                self.external_trace_sink
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
-                *self
-                    .external_delegation_policy
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-            ))
+            Some(self.capture_legacy_external_context())
         } else {
             None
         };
@@ -137,7 +120,24 @@ impl ReactAgent {
                             tracing::warn!(%error, "Failed to log guard audit event");
                         }
                     }
-                    let trace_run_id = self.start_trace_run("[input blocked by guard]").await;
+                    let trace_run_id = if let Some(runtime) = invocation
+                        .as_ref()
+                        .and_then(|context| context.runtime.as_ref())
+                    {
+                        self.start_scoped_trace_run(
+                            "[input blocked by guard]",
+                            runtime.run_id.as_deref(),
+                            runtime.conversation_id.as_deref(),
+                            runtime.turn_id.as_deref(),
+                            runtime.execution_id.as_deref(),
+                        )
+                        .await
+                    } else if let Some(legacy) = legacy_runtime.as_ref() {
+                        self.start_legacy_trace_run("[input blocked by guard]", legacy)
+                            .await
+                    } else {
+                        None
+                    };
                     let _ = tx
                         .send(Ok(AgentEvent::FinalAnswer(format!(
                             "Request blocked by safety guard: {reason}"
@@ -193,17 +193,24 @@ impl ReactAgent {
                 )
                 .await;
         } else {
-            trace_run_id = self.start_trace_run(&text).await;
+            trace_run_id = match legacy_runtime.as_ref() {
+                Some(legacy) => self.start_legacy_trace_run(&text, legacy).await,
+                None => None,
+            };
         }
         let turn_id = invocation
             .as_ref()
             .and_then(|value| value.runtime.as_ref())
             .and_then(|runtime| runtime.turn_id.clone().or_else(|| runtime.run_id.clone()))
             .or_else(|| {
-                self.current_run_id
-                    .lock()
-                    .ok()
-                    .and_then(|value| value.clone())
+                legacy_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.turn_id.clone())
+                    .or_else(|| {
+                        legacy_runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.current_run_id.clone())
+                    })
             })
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let active_turn_lease = self.turn_steer_mailbox.begin(turn_id.clone());
@@ -229,9 +236,10 @@ impl ReactAgent {
                 .as_ref()
                 .and_then(|context| context.cancel.clone())
                 .or_else(|| {
-                    legacy_runtime.as_ref().and_then(|(_, token, _, _)| {
-                        token.as_ref().map(|token| token.as_ref().clone())
-                    })
+                    legacy_runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.cancel.as_ref())
+                        .map(|token| token.as_ref().clone())
                 })
                 .unwrap_or_default();
             let intent = router.classify_with_cancel(&text, &messages, cancel).await;
@@ -271,23 +279,11 @@ impl ReactAgent {
             }
         }
 
-        let mut snap = if let Some(invocation) = invocation.as_ref() {
-            AgentSnapshot::from_agent_with_invocation(self, invocation)
-        } else {
-            make_snapshot(self)
+        let mut snap = match (invocation.as_ref(), legacy_runtime.as_ref()) {
+            (Some(invocation), _) => AgentSnapshot::from_agent_with_invocation(self, invocation),
+            (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
+            (None, None) => make_snapshot(self),
         };
-        if let Some((
-            current_run_id,
-            external_cancel,
-            external_trace_sink,
-            external_delegation_policy,
-        )) = legacy_runtime.as_ref()
-        {
-            snap.current_run_id = current_run_id.clone();
-            snap.external_cancel = external_cancel.clone();
-            snap.external_trace_sink = external_trace_sink.clone();
-            snap.external_delegation_policy = *external_delegation_policy;
-        }
         snap.current_turn_id = Some(turn_id);
         snap.turn_steer_incarnation = Some(active_turn_lease.incarnation());
         snap.current_message = message.clone();
@@ -928,6 +924,49 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn legacy_guard_block_trace_uses_captured_context() -> Result<()> {
+        let mut agent = agent_with_blocking_guard();
+        let store = Arc::new(crate::trace::InMemoryRunStore::new());
+        agent.set_run_store(store.clone());
+        agent.set_external_context(&echo_core::tools::ExternalRunContext {
+            conversation_id: Some("blocked-conversation".to_string()),
+            run_id: Some("blocked-parent".to_string()),
+            turn_id: Some("blocked-turn".to_string()),
+            execution_id: Some("blocked-execution".to_string()),
+            isolation_id: None,
+            message_id: Some("blocked-message".to_string()),
+            cancel: None,
+            trace_sink: None,
+            delegation_policy: None,
+            resource_guards: Vec::new(),
+        });
+
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "blocked input".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        let _: Vec<_> = stream.collect().await;
+        agent.clear_external_context();
+
+        let traces = crate::trace::RunStore::list_all(store.as_ref(), 10).await?;
+        let trace = traces
+            .first()
+            .ok_or_else(|| ReactError::Other("blocked trace missing".to_string()))?;
+        assert_eq!(trace.parent_run_id.as_deref(), Some("blocked-parent"));
+        assert_eq!(trace.session_id, "blocked-conversation");
+        assert_eq!(trace.turn_id.as_deref(), Some("blocked-turn"));
+        assert_eq!(trace.execution_id.as_deref(), Some("blocked-execution"));
+        Ok(())
+    }
+
     /// After a guard blocks one stream, the execution mutex must be released so
     /// the very next call can proceed. This guards against the lock-leak
     /// regression where a short-circuited branch forgets to drop the owned
@@ -1198,6 +1237,7 @@ mod tests {
                     delegate_depth: 1,
                     max_delegate_depth: 2,
                 }),
+                resource_guards: Vec::new(),
             }),
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-a")),
             cancel: None,
@@ -1205,6 +1245,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
         let first_stream = agent
             .execute_stream_with_invocation_context(
@@ -1237,6 +1278,7 @@ mod tests {
                     delegate_depth: 2,
                     max_delegate_depth: 3,
                 }),
+                resource_guards: Vec::new(),
             }),
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-b")),
             cancel: None,
@@ -1244,6 +1286,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
         let mut queued = Box::pin(agent.execute_stream_with_invocation_context(
             "second",
@@ -1291,6 +1334,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             working_dir: None,
             cancel: None,
@@ -1298,6 +1342,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
 
         let stream = agent
@@ -1350,6 +1395,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             working_dir: None,
             cancel: None,
@@ -1357,6 +1403,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
 
         let stream = agent
@@ -2618,6 +2665,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             working_dir: None,
             cancel: None,
@@ -2625,6 +2673,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
         let stream = agent
             .run_stream_channel(
@@ -2700,6 +2749,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             working_dir: None,
             cancel: None,
@@ -2707,6 +2757,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
         let stream = agent
             .run_stream_channel(
@@ -2773,6 +2824,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             working_dir: None,
             cancel: Some(cancel.clone()),
@@ -2780,6 +2832,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
         let stream = agent
             .run_stream_channel(

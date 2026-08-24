@@ -360,6 +360,9 @@ pub struct AgentInvocationContext {
     /// before the current input. This is value-scoped and never mutates the
     /// agent's configured system prompt.
     pub history: Option<Vec<Message>>,
+    /// Opaque resources retained through the invocation's spawned Agent,
+    /// subagent, and tool work.
+    pub resource_guards: Vec<crate::tools::InvocationResourceGuard>,
 }
 
 impl std::fmt::Debug for AgentInvocationContext {
@@ -407,6 +410,8 @@ impl std::fmt::Debug for AgentInvocationContext {
             )
             .field("run_budget", &self.run_budget)
             .field("history_messages", &self.history.as_ref().map(Vec::len))
+            .field("resource_guard_count", &self.resource_guards.len())
+            .field("resource_guards", &self.resource_guards)
             .finish()
     }
 }
@@ -878,9 +883,12 @@ pub trait Agent: Send + Sync {
         &'a self,
         task: &'a str,
         cancel: CancellationToken,
-        _invocation: AgentInvocationContext,
+        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.execute_stream_with_cancel(task, cancel)
+        Box::pin(async move {
+            let stream = self.execute_stream_with_cancel(task, cancel).await?;
+            Ok(invocation_retaining_stream(stream, invocation))
+        })
     }
 
     /// Chat with the agent in a multi-turn conversation.
@@ -956,9 +964,14 @@ pub trait Agent: Send + Sync {
         &'a self,
         message: Message,
         cancel: CancellationToken,
-        _invocation: AgentInvocationContext,
+        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.chat_stream_message_with_cancel(message, cancel)
+        Box::pin(async move {
+            let stream = self
+                .chat_stream_message_with_cancel(message, cancel)
+                .await?;
+            Ok(invocation_retaining_stream(stream, invocation))
+        })
     }
 
     /// Streaming task execution with cancellation (multimodal version).
@@ -993,9 +1006,14 @@ pub trait Agent: Send + Sync {
         &'a self,
         message: Message,
         cancel: CancellationToken,
-        _invocation: AgentInvocationContext,
+        invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        self.execute_stream_message_with_cancel(message, cancel)
+        Box::pin(async move {
+            let stream = self
+                .execute_stream_message_with_cancel(message, cancel)
+                .await?;
+            Ok(invocation_retaining_stream(stream, invocation))
+        })
     }
 
     /// Reset in-memory conversational state.
@@ -1303,6 +1321,139 @@ fn cancel_aware_stream<'a>(
         }
     };
     Box::pin(wrapped)
+}
+
+fn invocation_retaining_stream<'a>(
+    mut stream: BoxStream<'a, Result<AgentEvent>>,
+    invocation: AgentInvocationContext,
+) -> BoxStream<'a, Result<AgentEvent>> {
+    let wrapped = async_stream::try_stream! {
+        let _invocation = invocation;
+        while let Some(event) = stream.next().await {
+            yield event?;
+        }
+    };
+    Box::pin(wrapped)
+}
+
+#[cfg(test)]
+mod invocation_retaining_stream_tests {
+    use super::*;
+    use crate::tools::InvocationResourceGuard;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct DefaultInvocationAgent;
+
+    impl Agent for DefaultInvocationAgent {
+        fn name(&self) -> &str {
+            "default-invocation"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                Ok(Box::pin(futures::stream::pending()) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+
+        fn chat_stream_message_with_cancel<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                Ok(Box::pin(futures::stream::pending()) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+
+        fn execute_stream_message_with_cancel<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                Ok(Box::pin(futures::stream::pending()) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+    }
+
+    fn invocation(drops: &Arc<AtomicUsize>) -> AgentInvocationContext {
+        AgentInvocationContext {
+            resource_guards: vec![InvocationResourceGuard::new(DropCounter(Arc::clone(drops)))],
+            ..AgentInvocationContext::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn default_text_invocation_retains_guards_until_stream_drop() -> Result<()> {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let stream = DefaultInvocationAgent
+            .execute_stream_with_invocation_context(
+                "task",
+                CancellationToken::new(),
+                invocation(&drops),
+            )
+            .await?;
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(stream);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_multimodal_chat_retains_guards_until_stream_drop() -> Result<()> {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let stream = DefaultInvocationAgent
+            .chat_stream_message_with_invocation_context(
+                Message::user("chat".to_string()),
+                CancellationToken::new(),
+                invocation(&drops),
+            )
+            .await?;
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(stream);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_multimodal_execute_retains_guards_until_stream_drop() -> Result<()> {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let stream = DefaultInvocationAgent
+            .execute_stream_message_with_invocation_context(
+                Message::user("execute".to_string()),
+                CancellationToken::new(),
+                invocation(&drops),
+            )
+            .await?;
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(stream);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
 }
 
 /// Agent lifecycle callback interface

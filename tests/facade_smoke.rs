@@ -1,3 +1,4 @@
+use echo_agent::agent::AgentInvocationContext;
 use echo_agent::config::FrameworkConfig;
 use echo_agent::paths::DataRoot;
 use echo_agent::runtime::{AgentTurnDriver, TurnMode};
@@ -14,7 +15,7 @@ use echo_agent::tasks::{
     RuntimeTaskSettlementOutcome, Task, TaskClaim, cancel_unfinished_runtime_tasks,
     resume_runtime_task, retry_runtime_task,
 };
-use echo_agent::tools::{StandardToolPack, ToolPack};
+use echo_agent::tools::{InvocationResourceGuard, StandardToolPack, ToolPack};
 
 #[test]
 fn public_facade_composes_without_split_crates() {
@@ -50,6 +51,22 @@ fn tracked_steering_types_are_available_from_the_public_facade() {
     assert_eq!(
         echo_agent::agent::AgentSteerState::Accepted.phase(),
         echo_agent::agent::AgentSteerPhase::Accepted
+    );
+}
+
+#[test]
+fn invocation_resource_guards_are_available_from_the_facade() {
+    let invocation = AgentInvocationContext {
+        resource_guards: vec![InvocationResourceGuard::new("facade-lease".to_string())],
+        ..AgentInvocationContext::default()
+    };
+
+    assert_eq!(invocation.resource_guards.len(), 1);
+    assert!(
+        invocation
+            .resource_guards
+            .first()
+            .is_some_and(InvocationResourceGuard::retains::<String>)
     );
 }
 

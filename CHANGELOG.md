@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot report success, and abnormal signal closure converges cloned receipts
   on a cached dropped terminal.
 
+- `InvocationResourceGuard` lets framework consumers attach opaque ownership
+  tokens to `AgentInvocationContext`. Guards flow through snapshots,
+  `ExternalRunContext`, subagents, and `ToolContext`, so tools can retain a
+  lease across their own spawn or blocking boundary without exposing
+  application policy or the wrapped value to the framework. Anonymous and
+  background dispatches preserve guard-only contexts, queued legacy calls
+  capture guards before admission, and replaced guards are dropped outside the
+  framework mutex. `retains::<T>()` supports exact-type filtering without
+  exposing or downcasting the wrapped value. A private context epoch keeps all
+  legacy run metadata and guards in one atomic snapshot.
+
 - `SandboxStreamEvent::Failed` and `SandboxStreamFailure` expose cancellation,
   output-drain, and cleanup debt as a typed live-stream terminal instead of an
   unexplained EOF or successful-looking completion.

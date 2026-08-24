@@ -1221,7 +1221,8 @@ fn add_usize(counter: &AtomicU64, value: usize) {
 mod execute_with_context_tests {
     use super::*;
     use echo_core::tools::{
-        Tool, ToolContext, ToolOutputChannel, ToolParameters, ToolResult, ToolStreamEvent,
+        InvocationResourceGuard, Tool, ToolContext, ToolOutputChannel, ToolParameters, ToolResult,
+        ToolStreamEvent,
     };
     use futures::Stream;
     use std::path::PathBuf;
@@ -1249,6 +1250,20 @@ mod execute_with_context_tests {
     struct DelayedStreamingTool;
 
     struct InternallyTimedTool;
+
+    struct SpawnRetainingTool {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        settled: Arc<tokio::sync::Notify>,
+    }
+
+    struct GuardDropCounter(Arc<AtomicUsize>);
+
+    impl Drop for GuardDropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
 
     struct PendingTool {
         name: &'static str,
@@ -1681,6 +1696,55 @@ mod execute_with_context_tests {
         }
     }
 
+    impl Tool for SpawnRetainingTool {
+        fn name(&self) -> &str {
+            "spawn_retaining"
+        }
+
+        fn description(&self) -> &str {
+            "retains invocation resources across a tool-owned spawn"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async {
+                Err(ToolError::ExecutionFailed {
+                    tool: "spawn_retaining".to_string(),
+                    message: "ToolContext is required".to_string(),
+                }
+                .into())
+            })
+        }
+
+        fn execute_with_context<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+            context: &'a ToolContext,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            let resource_guards = context.resource_guards.clone();
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            let settled = Arc::clone(&self.settled);
+            Box::pin(async move {
+                let task = tokio::spawn(async move {
+                    let retained = resource_guards;
+                    started.notify_one();
+                    release.notified().await;
+                    drop(retained);
+                    settled.notify_one();
+                });
+                std::mem::drop(task);
+                futures::future::pending::<echo_core::error::Result<ToolResult>>().await
+            })
+        }
+    }
+
     impl Tool for CtxCapturingTool {
         fn name(&self) -> &str {
             "capture"
@@ -1714,6 +1778,7 @@ mod execute_with_context_tests {
     async fn test_execute_tool_with_context_forwards_ctx() {
         let tm = ToolManager::new();
         let captured = Arc::new(Mutex::new(None));
+        let drops = Arc::new(AtomicUsize::new(0));
         tm.register(Box::new(CtxCapturingTool {
             captured: captured.clone(),
         }));
@@ -1722,19 +1787,110 @@ mod execute_with_context_tests {
             working_dir: Some(PathBuf::from("/wt/x")),
             conversation_id: Some("c".into()),
             run_id: Some("r".into()),
+            resource_guards: vec![InvocationResourceGuard::new(GuardDropCounter(Arc::clone(
+                &drops,
+            )))],
             ..Default::default()
         };
-        tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx)
-            .await
-            .unwrap();
+        let result = tm
+            .execute_tool_with_context("capture", ToolParameters::new(), &ctx)
+            .await;
+        assert!(result.is_ok());
 
-        let got = captured.lock().unwrap().clone().expect("ctx not captured");
+        drop(ctx);
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 0);
+        let got = captured
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .unwrap_or_default();
         assert_eq!(
             got.working_dir.as_deref(),
             Some(std::path::Path::new("/wt/x"))
         );
         assert_eq!(got.conversation_id.as_deref(), Some("c"));
         assert_eq!(got.run_id.as_deref(), Some("r"));
+        assert_eq!(got.resource_guards.len(), 1);
+        drop(got);
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_owned_spawn_retains_guards_after_caller_abort() -> echo_core::error::Result<()> {
+        let manager = Arc::new(ToolManager::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let settled = Arc::new(tokio::sync::Notify::new());
+        let drops = Arc::new(AtomicUsize::new(0));
+        manager.register(Box::new(SpawnRetainingTool {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+            settled: Arc::clone(&settled),
+        }));
+        let context = ToolContext {
+            resource_guards: vec![InvocationResourceGuard::new(GuardDropCounter(Arc::clone(
+                &drops,
+            )))],
+            ..ToolContext::default()
+        };
+        let task_manager = Arc::clone(&manager);
+        let caller = tokio::spawn(async move {
+            task_manager
+                .execute_tool_with_context("spawn_retaining", ToolParameters::new(), &context)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .map_err(|_| ToolError::Timeout("spawn_retaining start".to_string()))?;
+        caller.abort();
+        let _ = caller.await;
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 0);
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), settled.notified())
+            .await
+            .map_err(|_| ToolError::Timeout("spawn_retaining settlement".to_string()))?;
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocking_closure_retains_guards_after_context_drop() -> echo_core::error::Result<()> {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let context = ToolContext {
+            resource_guards: vec![InvocationResourceGuard::new(GuardDropCounter(Arc::clone(
+                &drops,
+            )))],
+            ..ToolContext::default()
+        };
+        let retained = context.resource_guards.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let closure = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.blocking_recv();
+            drop(retained);
+        });
+
+        drop(context);
+        started_rx.await.map_err(|_| ToolError::ExecutionFailed {
+            tool: "blocking_guard_test".to_string(),
+            message: "blocking closure did not start".to_string(),
+        })?;
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 0);
+        release_tx
+            .send(())
+            .map_err(|_| ToolError::ExecutionFailed {
+                tool: "blocking_guard_test".to_string(),
+                message: "blocking closure release channel closed".to_string(),
+            })?;
+        closure.await.map_err(|error| ToolError::ExecutionFailed {
+            tool: "blocking_guard_test".to_string(),
+            message: format!("blocking closure failed: {error}"),
+        })?;
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 1);
+        Ok(())
     }
 
     #[tokio::test]

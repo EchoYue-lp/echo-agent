@@ -879,6 +879,7 @@ impl SubagentExecutor {
                     cancel: None,
                     trace_sink: None,
                     delegation_policy: None,
+                    resource_guards: Vec::new(),
                 });
         if let Some(existing) = context.execution_id.as_deref()
             && existing != identity.execution_id.as_str()
@@ -927,6 +928,7 @@ impl SubagentExecutor {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             });
         if ctx
             .execution_id
@@ -1847,6 +1849,7 @@ impl SubagentExecutor {
                 visible_tools: None,
                 run_budget: None,
                 history: (!invocation_history.is_empty()).then_some(invocation_history.clone()),
+                resource_guards: Vec::new(),
             };
             registry
                 .event_bus()
@@ -1972,7 +1975,7 @@ mod tests {
     use crate::agent::subagent::registry::FnAgentFactory;
     use crate::testing::{FailingMockAgent, MockAgent};
     use echo_core::agent::{ToolInvocation, ToolInvocationRewrite};
-    use echo_core::tools::{ToolResult, ToolResultKind};
+    use echo_core::tools::{InvocationResourceGuard, ToolResult, ToolResultKind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -2178,6 +2181,100 @@ mod tests {
         let registry = Arc::new(SubagentRegistry::new());
         let executor = SubagentExecutor::new(registry.clone(), SubagentExecutorConfig::default());
         (registry, executor)
+    }
+
+    struct DispatchGuardDrop(Arc<AtomicUsize>);
+
+    impl Drop for DispatchGuardDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn assert_mode_retains_runtime_guards(
+        mode: ExecutionMode,
+    ) -> std::result::Result<(), String> {
+        let (registry, executor) = make_executor().await;
+        let agent = MockAgent::new("guarded").with_response("done");
+        registry
+            .register(
+                SubagentDefinition {
+                    execution_mode: mode.clone(),
+                    ..SubagentDefinition::new("guarded", "Guarded subagent")
+                },
+                Box::new(agent.clone()),
+            )
+            .await;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let result = executor
+            .dispatch(DispatchRequest {
+                agent_name: "guarded".to_string(),
+                task: "retain guard".to_string(),
+                mode_override: Some(mode),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: Some(echo_core::tools::ExternalRunContext {
+                    conversation_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    execution_id: None,
+                    isolation_id: None,
+                    message_id: None,
+                    cancel: None,
+                    trace_sink: None,
+                    delegation_policy: None,
+                    resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                        Arc::clone(&drops),
+                    ))],
+                }),
+                message: None,
+                prompt_payload: None,
+                constraints: Vec::new(),
+                background: false,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        if result.outcome.status != SubagentStatus::Completed {
+            return Err(format!(
+                "guarded dispatch did not complete: {:?}",
+                result.outcome.status
+            ));
+        }
+
+        let contexts = agent.take_invocation_contexts();
+        let guard_count = contexts
+            .first()
+            .and_then(|context| context.runtime.as_ref())
+            .map(|runtime| runtime.resource_guards.len());
+        if guard_count != Some(1) {
+            return Err(format!(
+                "subagent invocation lost runtime guards: {guard_count:?}"
+            ));
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(contexts);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_dispatch_retains_runtime_guards_until_settlement()
+    -> std::result::Result<(), String> {
+        assert_mode_retains_runtime_guards(ExecutionMode::Sync).await
+    }
+
+    #[tokio::test]
+    async fn fork_dispatch_retains_runtime_guards_until_settlement()
+    -> std::result::Result<(), String> {
+        assert_mode_retains_runtime_guards(ExecutionMode::Fork).await
+    }
+
+    #[tokio::test]
+    async fn teammate_dispatch_retains_runtime_guards_until_settlement()
+    -> std::result::Result<(), String> {
+        assert_mode_retains_runtime_guards(ExecutionMode::Teammate).await
     }
 
     #[tokio::test]
@@ -2700,6 +2797,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             message: None,
             prompt_payload: None,
@@ -3588,6 +3686,7 @@ mod tests {
                     cancel: None,
                     trace_sink: None,
                     delegation_policy: None,
+                    resource_guards: Vec::new(),
                 }),
                 message: None,
                 prompt_payload: None,
@@ -3706,6 +3805,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             message: None,
             prompt_payload: None,

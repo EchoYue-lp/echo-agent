@@ -256,6 +256,15 @@ impl MockAgent {
             .clone()
     }
 
+    /// Drain invocation contexts recorded by value-scoped streaming methods.
+    pub fn take_invocation_contexts(&self) -> Vec<echo_core::agent::AgentInvocationContext> {
+        let mut contexts = self
+            .invocation_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::mem::take(&mut *contexts)
+    }
+
     fn next_response(&self) -> Result<String> {
         self.responses
             .lock()
