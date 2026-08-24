@@ -264,6 +264,31 @@ let invocation = AgentInvocationContext {
 不会返回内部值。若 guard 包装的是 `Arc<MyLease>`，则应查询
 `retains::<Arc<MyLease>>()`。
 
+当多个 guard 保留相同资源类型时，可以附加 immutable typed descriptor，并在不暴露
+descriptor 值的情况下匹配：
+
+```rust
+#[derive(PartialEq, Eq)]
+struct LeaseIdentity {
+    scope: &'static str,
+    generation: u64,
+}
+
+let guard = InvocationResourceGuard::new_identified(
+    my_owned_lease,
+    LeaseIdentity { scope: "workspace", generation: 7 },
+);
+
+assert!(guard.matches_identity(&LeaseIdentity {
+    scope: "workspace",
+    generation: 7,
+}));
+```
+
+`matches_identity` 只有在 descriptor 的具体类型和值都相等时才返回 `true`；identity
+缺失、类型错误或值不等都会返回 `false`。该 API 只返回布尔值，Debug 不输出 identity
+值，也不提供 getter 或 downcast。
+
 所有权和传播决策见
 [ADR 0005](../adr/0005-invocation-resource-lifetime.md)。
 

@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   framework mutex. `retains::<T>()` supports exact-type filtering without
   exposing or downcasting the wrapped value. A private context epoch keeps all
   legacy run metadata and guards in one atomic snapshot.
+  `new_identified` and `matches_identity` add optional exact typed identity
+  matching when several guards retain the same resource type, without exposing
+  the identity value through getters, downcasts, or Debug.
 
 - `SandboxStreamEvent::Failed` and `SandboxStreamFailure` expose cancellation,
   output-drain, and cleanup debt as a typed live-stream terminal instead of an

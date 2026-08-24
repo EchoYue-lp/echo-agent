@@ -1077,6 +1077,7 @@ pub type TraceSinkFn = std::sync::Arc<dyn Fn(serde_json::Value) + Send + Sync>;
 pub struct InvocationResourceGuard {
     resource_type: &'static str,
     _resource: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    identity: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl InvocationResourceGuard {
@@ -1088,6 +1089,24 @@ impl InvocationResourceGuard {
         Self {
             resource_type: std::any::type_name::<T>(),
             _resource: std::sync::Arc::new(resource),
+            identity: None,
+        }
+    }
+
+    /// Retain `resource` with one immutable, typed identity descriptor.
+    ///
+    /// The descriptor can only be compared through [`Self::matches_identity`].
+    /// Neither the resource nor its identity can be read or downcast through
+    /// the public API.
+    pub fn new_identified<T, I>(resource: T, identity: I) -> Self
+    where
+        T: Send + Sync + 'static,
+        I: Send + Sync + 'static,
+    {
+        Self {
+            resource_type: std::any::type_name::<T>(),
+            _resource: std::sync::Arc::new(resource),
+            identity: Some(std::sync::Arc::new(identity)),
         }
     }
 
@@ -1103,12 +1122,27 @@ impl InvocationResourceGuard {
     {
         self._resource.is::<T>()
     }
+
+    /// Whether the optional identity has exactly type `I` and equals `expected`.
+    ///
+    /// A missing identity or a descriptor with a different concrete type
+    /// returns `false`. This method never exposes the stored descriptor.
+    pub fn matches_identity<I>(&self, expected: &I) -> bool
+    where
+        I: PartialEq + Send + Sync + 'static,
+    {
+        self.identity
+            .as_ref()
+            .and_then(|identity| identity.downcast_ref::<I>())
+            .is_some_and(|identity| identity == expected)
+    }
 }
 
 impl std::fmt::Debug for InvocationResourceGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InvocationResourceGuard")
             .field("resource_type", &self.resource_type)
+            .field("has_identity", &self.identity.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -1517,6 +1551,17 @@ mod tool_context_tests {
 
     struct OtherResource;
 
+    #[derive(PartialEq, Eq)]
+    struct GuardIdentity {
+        secret: &'static str,
+        generation: u64,
+    }
+
+    #[derive(PartialEq, Eq)]
+    struct OtherIdentity {
+        generation: u64,
+    }
+
     impl Drop for DropCounter {
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::SeqCst);
@@ -1547,6 +1592,53 @@ mod tool_context_tests {
         );
         assert!(!format!("{guards:?}").contains("must-not-appear"));
         drop(guards);
+        drop(guard);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(retained);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn identified_resource_guard_matches_exact_type_and_value_without_disclosure() {
+        let drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let guard = InvocationResourceGuard::new_identified(
+            DropCounter {
+                drops: std::sync::Arc::clone(&drops),
+                _secret: "resource-secret",
+            },
+            GuardIdentity {
+                secret: "identity-secret",
+                generation: 7,
+            },
+        );
+        let retained = guard.clone();
+
+        assert!(guard.retains::<DropCounter>());
+        assert!(guard.matches_identity(&GuardIdentity {
+            secret: "identity-secret",
+            generation: 7,
+        }));
+        assert!(!guard.matches_identity(&GuardIdentity {
+            secret: "identity-secret",
+            generation: 8,
+        }));
+        assert!(!guard.matches_identity(&OtherIdentity { generation: 7 }));
+        assert!(
+            !InvocationResourceGuard::new(OtherResource).matches_identity(&GuardIdentity {
+                secret: "identity-secret",
+                generation: 7,
+            })
+        );
+        assert!(retained.matches_identity(&GuardIdentity {
+            secret: "identity-secret",
+            generation: 7,
+        }));
+
+        let debug = format!("{guard:?}");
+        assert!(debug.contains("has_identity: true"));
+        assert!(!debug.contains("resource-secret"));
+        assert!(!debug.contains("identity-secret"));
+        assert!(!debug.contains("generation"));
         drop(guard);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         drop(retained);

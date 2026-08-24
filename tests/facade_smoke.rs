@@ -57,7 +57,10 @@ fn tracked_steering_types_are_available_from_the_public_facade() {
 #[test]
 fn invocation_resource_guards_are_available_from_the_facade() {
     let invocation = AgentInvocationContext {
-        resource_guards: vec![InvocationResourceGuard::new("facade-lease".to_string())],
+        resource_guards: vec![InvocationResourceGuard::new_identified(
+            "facade-lease".to_string(),
+            ("facade", 3_u64),
+        )],
         ..AgentInvocationContext::default()
     };
 
@@ -67,6 +70,12 @@ fn invocation_resource_guards_are_available_from_the_facade() {
             .resource_guards
             .first()
             .is_some_and(InvocationResourceGuard::retains::<String>)
+    );
+    assert!(
+        invocation
+            .resource_guards
+            .first()
+            .is_some_and(|guard| guard.matches_identity(&("facade", 3_u64)))
     );
 }
 

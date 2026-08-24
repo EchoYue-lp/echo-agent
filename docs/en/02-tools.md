@@ -268,6 +268,32 @@ When several resource types are present, `guard.retains::<MyLease>()` provides
 an exact-type predicate for filtering without returning the wrapped value. A
 guard built with `Arc<MyLease>` must be queried as `retains::<Arc<MyLease>>()`.
 
+When multiple guards retain the same resource type, attach an immutable typed
+descriptor and match it without exposing the descriptor value:
+
+```rust
+#[derive(PartialEq, Eq)]
+struct LeaseIdentity {
+    scope: &'static str,
+    generation: u64,
+}
+
+let guard = InvocationResourceGuard::new_identified(
+    my_owned_lease,
+    LeaseIdentity { scope: "workspace", generation: 7 },
+);
+
+assert!(guard.matches_identity(&LeaseIdentity {
+    scope: "workspace",
+    generation: 7,
+}));
+```
+
+`matches_identity` requires the exact descriptor type and equal value. Missing,
+wrongly typed, or unequal identities return `false`. The API returns only a
+boolean; identity values are absent from Debug output and cannot be retrieved
+or downcast.
+
 See [ADR 0005](../adr/0005-invocation-resource-lifetime.md) for the ownership
 and propagation decision.
 

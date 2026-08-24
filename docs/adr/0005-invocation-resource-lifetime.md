@@ -39,6 +39,15 @@ reference, owned handle, or downcast operation. A free-form marker key was
 rejected because it introduces collision, spoofing, and naming-governance
 problems that the Rust type already solves.
 
+When several resources have the same concrete type, callers may use
+`new_identified(resource, identity)` to attach one immutable typed descriptor.
+`matches_identity::<I>(&I)` performs an exact type-and-value comparison and
+returns only a boolean. The descriptor remains behind `Any`: there is no
+getter, public downcast, or Debug value. A string marker was rejected because
+it recreates collision and naming-governance problems; a getter/downcast was
+rejected because it would turn an ownership token into an application-data
+transport.
+
 `resource_guards` propagate through:
 
 ```text
@@ -93,7 +102,10 @@ policy.
   own future. The framework cannot retain a resource for work it does not own
   or observe.
 - Debug output includes Rust type names and guard counts, but never formats the
-  wrapped values.
+  wrapped resource or identity values.
+- Identified guards can be selected among same-typed resources without giving
+  tools access to the identity descriptor itself. Clones share the same
+  immutable resource and identity allocations.
 - The new public struct fields are intentionally source-breaking for explicit
   context literals; the project is pre-release and updates all workspace
   consumers together.
