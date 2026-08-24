@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Agent::steer_input_tracked` and `AgentSteerReceipt` expose authoritative
+  `Accepted`, model-context `Drained`, and root `TurnSettled` boundaries. The
+  terminal records completed, cancelled, failed, or dropped ownership and
+  whether consumption happened before settlement; the legacy turn-ID API stays
+  compatible. Private turn incarnations reject stale same-ID leases, hook blocks
+  cannot report success, and abnormal signal closure converges cloned receipts
+  on a cached dropped terminal.
+
+- `InvocationResourceGuard` lets framework consumers attach opaque ownership
+  tokens to `AgentInvocationContext`. Guards flow through snapshots,
+  `ExternalRunContext`, subagents, and `ToolContext`, so tools can retain a
+  lease across their own spawn or blocking boundary without exposing
+  application policy or the wrapped value to the framework. Anonymous and
+  background dispatches preserve guard-only contexts, queued legacy calls
+  capture guards before admission, and replaced guards are dropped outside the
+  framework mutex. `retains::<T>()` supports exact-type filtering without
+  exposing or downcasting the wrapped value. A private context epoch keeps all
+  legacy run metadata and guards in one atomic snapshot.
+  `new_identified` and `matches_identity` add optional exact typed identity
+  matching when several guards retain the same resource type, without exposing
+  the identity value through getters, downcasts, or Debug.
+
 - `SandboxStreamEvent::Failed` and `SandboxStreamFailure` expose cancellation,
   output-drain, and cleanup debt as a typed live-stream terminal instead of an
   unexplained EOF or successful-looking completion.
@@ -42,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Keyword（0 token）+ LLM（可选）+ Hook slot 三源融合，`fuse()` 纯函数可单测。
 
 ### Changed
+
+- `FileRuntimeStateStore` and `FileConversationStore` now submit async-trait
+  filesystem work to one process-wide bounded, keyed blocking owner. Operations
+  for a conversation remain ordered, accepted writes survive caller abort, and
+  unrelated conversations can progress concurrently without unbounded blocking
+  tasks. Exact UTF-8 entity IDs now map to collision-free ASCII paths, avoiding
+  APFS case-folding and Unicode-normalization aliases. Atomic write, fsync,
+  corruption, and optional SQLite semantics are unchanged. Store constructors
+  remain synchronous bootstrap APIs; only async trait methods use the process
+  file-operation owner.
 
 - Local and Docker sandbox execution now transfer spawned resources to detached
   backend owners. Unix Local cancellation captures and verifies the process

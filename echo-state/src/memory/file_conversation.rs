@@ -33,12 +33,15 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use echo_core::error::{MemoryError, Result};
 use echo_core::memory::conversation::{
     Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
     StoredMessage,
+};
+use echo_core::utils::blocking::{
+    BlockingFileOperationKey, BlockingFileOperationScope, run_keyed_file_operation,
 };
 use echo_core::utils::fs::{ExclusiveFileLease, try_exclusive_file_lease};
 use futures::future::BoxFuture;
@@ -214,17 +217,17 @@ struct ConversationCache {
     messages: Vec<CachedMessage>,
 }
 
-#[derive(Debug)]
-struct StoreState {
-    meta: StoreMeta,
-    conversations: HashMap<String, ConversationCache>,
-}
-
 /// File-backed conversation store.
 ///
 /// Handles opened on the same canonical base share one in-process authority
-/// and serialize operations through its mutex. A lifetime-held sidecar lease
-/// rejects a competing process instead of allowing unsynchronized file writes.
+/// and ordered operations for each conversation. Distinct conversations use a
+/// process-wide bounded blocking pool. A lifetime-held sidecar lease rejects a
+/// competing process instead of allowing unsynchronized file writes.
+///
+/// [`Self::new`] is synchronous bootstrap: it obtains the process lease,
+/// reconciles metadata, and removes orphaned generations. Async callers should
+/// construct the store before latency-sensitive work or in a blocking setup
+/// task. The [`ConversationStore`] methods offload their file operations.
 #[derive(Clone)]
 pub struct FileConversationStore {
     base: PathBuf,
@@ -232,8 +235,18 @@ pub struct FileConversationStore {
 }
 
 struct FileConversationAuthority {
-    state: Mutex<StoreState>,
+    meta: Mutex<StoreMeta>,
+    conversations: Mutex<HashMap<String, ConversationCache>>,
+    scan_barrier: RwLock<()>,
+    #[cfg(test)]
+    search_snapshot_hook: Mutex<Option<SearchSnapshotHook>>,
     _lease: ExclusiveFileLease,
+}
+
+#[cfg(test)]
+struct SearchSnapshotHook {
+    captured: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 fn file_conversation_registry() -> &'static Mutex<HashMap<PathBuf, Weak<FileConversationAuthority>>>
@@ -245,6 +258,8 @@ fn file_conversation_registry() -> &'static Mutex<HashMap<PathBuf, Weak<FileConv
 
 impl FileConversationStore {
     /// Create a file-backed conversation store rooted at `base/conversations/`.
+    ///
+    /// This synchronous bootstrap acquires the lease and scans existing files.
     pub fn new(base: impl AsRef<Path>) -> Result<Self> {
         let base = base.as_ref().join("conversations");
         std::fs::create_dir_all(&base)
@@ -264,28 +279,78 @@ impl FileConversationStore {
         let meta = Self::read_meta(&base)?;
         Self::cleanup_orphaned_message_logs(&base)?;
         let authority = Arc::new(FileConversationAuthority {
-            state: Mutex::new(StoreState {
-                meta,
-                conversations: HashMap::new(),
-            }),
+            meta: Mutex::new(meta),
+            conversations: Mutex::new(HashMap::new()),
+            scan_barrier: RwLock::new(()),
+            #[cfg(test)]
+            search_snapshot_hook: Mutex::new(None),
             _lease: lease,
         });
         registry.insert(base.clone(), Arc::downgrade(&authority));
         Ok(Self { base, authority })
     }
 
-    fn run_blocking<'a, T, F>(&'a self, operation: F) -> BoxFut<'a, T>
+    fn conversation_scope(conversation_id: impl Into<String>) -> BlockingFileOperationScope {
+        let conversation_id = conversation_id.into();
+        BlockingFileOperationScope::Entity(echo_core::utils::fs::encode_utf8_path_identity(
+            &conversation_id,
+        ))
+    }
+
+    #[cfg(test)]
+    fn install_search_snapshot_hook(
+        &self,
+        captured: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> Result<()> {
+        let mut hook = self.authority.search_snapshot_hook.lock().map_err(poison)?;
+        if hook.is_some() {
+            return Err(
+                MemoryError::IoError("search snapshot hook is already installed".into()).into(),
+            );
+        }
+        *hook = Some(SearchSnapshotHook { captured, release });
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn pause_search_after_snapshot(&self) -> Result<()> {
+        let hook = self
+            .authority
+            .search_snapshot_hook
+            .lock()
+            .map_err(poison)?
+            .take();
+        let Some(hook) = hook else {
+            return Ok(());
+        };
+        hook.captured
+            .send(())
+            .map_err(|_| MemoryError::IoError("search snapshot observer was dropped".into()))?;
+        hook.release
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(|error| MemoryError::IoError(format!("release search snapshot: {error}")))?;
+        Ok(())
+    }
+
+    fn run_blocking<'a, T, F>(
+        &'a self,
+        scope: BlockingFileOperationScope,
+        operation: F,
+    ) -> BoxFut<'a, T>
     where
         T: Send + 'static,
         F: FnOnce(Self) -> Result<T> + Send + 'static,
     {
         let store = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || operation(store))
+            let key =
+                BlockingFileOperationKey::new("conversation-store", store.base.clone(), scope);
+            run_keyed_file_operation(key, move || operation(store))
                 .await
                 .map_err(|error| {
                     MemoryError::IoError(format!(
-                        "FileConversationStore blocking task failed: {error}"
+                        "FileConversationStore blocking operation failed: {error}"
                     ))
                 })?
         })
@@ -636,6 +701,23 @@ impl FileConversationStore {
         assigned
     }
 
+    fn reserve_messages(
+        &self,
+        conversation_id: &str,
+        incoming: &[StoredMessage],
+    ) -> Result<Vec<StoredMessage>> {
+        let mut meta = self.authority.meta.lock().map_err(poison)?;
+        Ok(incoming
+            .iter()
+            .map(|message| Self::assign_message(conversation_id, message, &mut meta))
+            .collect())
+    }
+
+    fn persist_current_meta(&self) -> Result<()> {
+        let meta = self.authority.meta.lock().map_err(poison)?;
+        self.persist_meta(&meta)
+    }
+
     fn cached_message(message: &StoredMessage, digest: [u8; 32]) -> CachedMessage {
         CachedMessage {
             id: message.id,
@@ -707,11 +789,7 @@ impl FileConversationStore {
         }
     }
 
-    fn create_conversation_locked(
-        &self,
-        conv: NewConversation,
-        meta: &mut StoreMeta,
-    ) -> Result<Conversation> {
+    fn create_conversation_sync(&self, conv: NewConversation) -> Result<Conversation> {
         if self.read_manifest(&conv.conversation_id)?.is_some() {
             return Err(MemoryError::IoError(format!(
                 "conversation already exists: {}",
@@ -719,7 +797,10 @@ impl FileConversationStore {
             ))
             .into());
         }
-        let id = meta.take_id();
+        let id = {
+            let mut meta = self.authority.meta.lock().map_err(poison)?;
+            meta.take_id()
+        };
         let now = now_rfc3339();
         let conversation = Conversation {
             id,
@@ -741,7 +822,7 @@ impl FileConversationStore {
         let log_path = self.message_log_path(&record.conversation.conversation_id, 1)?;
         echo_core::utils::fs::atomic_write(&log_path, &[])
             .map_err(|error| MemoryError::IoError(format!("create message log: {error}")))?;
-        self.persist_meta(meta)?;
+        self.persist_current_meta()?;
         self.write_manifest(&record)?;
         Ok(conversation)
     }
@@ -780,9 +861,10 @@ fn poison<T>(_: std::sync::PoisonError<T>) -> MemoryError {
 
 impl ConversationStore for FileConversationStore {
     fn create_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
-        self.run_blocking(move |store| {
-            let mut state = store.authority.state.lock().map_err(poison)?;
-            store.create_conversation_locked(conv, &mut state.meta)
+        let scope = Self::conversation_scope(conv.conversation_id.clone());
+        self.run_blocking(scope, move |store| {
+            let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+            store.create_conversation_sync(conv)
         })
     }
 
@@ -791,58 +873,64 @@ impl ConversationStore for FileConversationStore {
         conversation_id: &'a str,
     ) -> BoxFut<'a, Option<Conversation>> {
         let conversation_id = conversation_id.to_string();
-        self.run_blocking(move |store| {
-            let _guard = store.authority.state.lock().map_err(poison)?;
-            Ok(store
-                .read_manifest(&conversation_id)?
-                .map(|record| record.conversation))
-        })
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                Ok(store
+                    .read_manifest(&conversation_id)?
+                    .map(|record| record.conversation))
+            },
+        )
     }
 
     fn list_conversations<'a>(
         &'a self,
         filter: ConversationFilter,
     ) -> BoxFut<'a, Vec<ConversationMeta>> {
-        self.run_blocking(move |store| {
-            let _g = store.authority.state.lock().map_err(poison)?;
-            let mut metas: Vec<ConversationMeta> = store
-                .read_all_manifests()?
-                .into_iter()
-                .filter(|r| {
-                    filter
-                        .user_id
-                        .as_deref()
-                        .is_none_or(|u| r.conversation.user_id == u)
-                })
-                .filter(|r| {
-                    filter
-                        .agent_type
-                        .as_deref()
-                        .is_none_or(|a| r.conversation.agent_type.as_deref() == Some(a))
-                })
-                .map(|r| {
-                    let message_count = r
-                        .message_log
-                        .as_ref()
-                        .map_or(r.messages.len(), |log| log.message_count);
-                    ConversationMeta {
-                        id: r.conversation.id,
-                        conversation_id: r.conversation.conversation_id,
-                        user_id: r.conversation.user_id,
-                        title: r.conversation.title,
-                        message_count,
-                        created_at: r.conversation.created_at,
-                        updated_at: r.conversation.updated_at,
-                    }
-                })
-                .collect();
-            // ORDER BY updated_at DESC.
-            metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-            // OFFSET then LIMIT without indexing into the collection.
-            let offset = filter.offset.unwrap_or(0);
-            let limit = filter.limit.unwrap_or(usize::MAX);
-            Ok(metas.into_iter().skip(offset).take(limit).collect())
-        })
+        self.run_blocking(
+            BlockingFileOperationScope::Collection("list".to_string()),
+            move |store| {
+                let _scan = store.authority.scan_barrier.write().map_err(poison)?;
+                let mut metas: Vec<ConversationMeta> = store
+                    .read_all_manifests()?
+                    .into_iter()
+                    .filter(|r| {
+                        filter
+                            .user_id
+                            .as_deref()
+                            .is_none_or(|u| r.conversation.user_id == u)
+                    })
+                    .filter(|r| {
+                        filter
+                            .agent_type
+                            .as_deref()
+                            .is_none_or(|a| r.conversation.agent_type.as_deref() == Some(a))
+                    })
+                    .map(|r| {
+                        let message_count = r
+                            .message_log
+                            .as_ref()
+                            .map_or(r.messages.len(), |log| log.message_count);
+                        ConversationMeta {
+                            id: r.conversation.id,
+                            conversation_id: r.conversation.conversation_id,
+                            user_id: r.conversation.user_id,
+                            title: r.conversation.title,
+                            message_count,
+                            created_at: r.conversation.created_at,
+                            updated_at: r.conversation.updated_at,
+                        }
+                    })
+                    .collect();
+                // ORDER BY updated_at DESC.
+                metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                // OFFSET then LIMIT without indexing into the collection.
+                let offset = filter.offset.unwrap_or(0);
+                let limit = filter.limit.unwrap_or(usize::MAX);
+                Ok(metas.into_iter().skip(offset).take(limit).collect())
+            },
+        )
     }
 
     fn update_conversation<'a>(
@@ -855,54 +943,67 @@ impl ConversationStore for FileConversationStore {
         let conversation_id = conversation_id.to_string();
         let title = title.map(str::to_string);
         let summary = summary.map(str::to_string);
-        self.run_blocking(move |store| {
-            let _guard = store.authority.state.lock().map_err(poison)?;
-            let mut record = match store.read_manifest(&conversation_id)? {
-                Some(r) => r,
-                None => return Ok(()), // matches SQL UPDATE on 0 rows.
-            };
-            if title.is_some() || summary.is_some() || compressed_before_id.is_some() {
-                if let Some(t) = title {
-                    record.conversation.title = Some(t.clone());
-                    if let Some(filter) = record.search_filter.as_mut() {
-                        filter.insert_text(&t);
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                let mut record = match store.read_manifest(&conversation_id)? {
+                    Some(r) => r,
+                    None => return Ok(()), // matches SQL UPDATE on 0 rows.
+                };
+                if title.is_some() || summary.is_some() || compressed_before_id.is_some() {
+                    if let Some(t) = title {
+                        record.conversation.title = Some(t.clone());
+                        if let Some(filter) = record.search_filter.as_mut() {
+                            filter.insert_text(&t);
+                        }
                     }
+                    if let Some(s) = summary {
+                        record.conversation.summary = Some(s);
+                    }
+                    if let Some(cbid) = compressed_before_id {
+                        record.conversation.compressed_before_id = Some(cbid);
+                    }
+                    record.conversation.updated_at = now_rfc3339();
+                    store.write_manifest(&record)?;
                 }
-                if let Some(s) = summary {
-                    record.conversation.summary = Some(s);
-                }
-                if let Some(cbid) = compressed_before_id {
-                    record.conversation.compressed_before_id = Some(cbid);
-                }
-                record.conversation.updated_at = now_rfc3339();
-                store.write_manifest(&record)?;
-            }
-            Ok(())
-        })
+                Ok(())
+            },
+        )
     }
 
     fn delete_conversation<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, ()> {
         let conversation_id = conversation_id.to_string();
-        self.run_blocking(move |store| {
-            let mut state = store.authority.state.lock().map_err(poison)?;
-            let manifest = store.read_manifest(&conversation_id)?;
-            let path = store.conv_path(&conversation_id)?;
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(MemoryError::IoError(format!("delete conversation: {e}")).into());
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                let manifest = store.read_manifest(&conversation_id)?;
+                let path = store.conv_path(&conversation_id)?;
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(
+                            MemoryError::IoError(format!("delete conversation: {e}")).into()
+                        );
+                    }
                 }
-            }
-            state.conversations.remove(&conversation_id);
-            store.remove_replaced_log(
-                &conversation_id,
-                manifest
-                    .as_ref()
-                    .and_then(|record| record.message_log.as_ref()),
-            );
-            Ok(())
-        })
+                store
+                    .authority
+                    .conversations
+                    .lock()
+                    .map_err(poison)?
+                    .remove(&conversation_id);
+                store.remove_replaced_log(
+                    &conversation_id,
+                    manifest
+                        .as_ref()
+                        .and_then(|record| record.message_log.as_ref()),
+                );
+                Ok(())
+            },
+        )
     }
 
     fn save_messages<'a>(
@@ -912,181 +1013,207 @@ impl ConversationStore for FileConversationStore {
     ) -> BoxFut<'a, ()> {
         let conversation_id = conversation_id.to_string();
         let messages = messages.to_vec();
-        self.run_blocking(move |store| {
-            let mut state = store.authority.state.lock().map_err(poison)?;
-            let mut record = store
-                .read_manifest(&conversation_id)?
-                .ok_or_else(|| MemoryError::NotFound(format!("conversation: {conversation_id}")))?;
-            let cache = match state.conversations.remove(&conversation_id) {
-                Some(cache) if cache.log == record.message_log => cache,
-                _ => {
-                    if let Some(log) = record.message_log.as_ref() {
-                        record.messages = store.read_message_log(&conversation_id, log)?;
-                    }
-                    Self::cache_from_record(&record)?
-                }
-            };
-            let digests = messages
-                .iter()
-                .map(Self::semantic_digest)
-                .collect::<Result<Vec<_>>>()?;
-            let append_suffix =
-                record.message_log.is_some() && Self::prefix_matches(&cache, &messages, &digests);
-            record.conversation.updated_at = now_rfc3339();
-
-            let updated_cache = if append_suffix {
-                let mut updated_cache = cache;
-                let mut suffix = Vec::new();
-                let mut cached_suffix = Vec::new();
-                for (incoming, digest) in messages
-                    .iter()
-                    .skip(updated_cache.messages.len())
-                    .zip(digests.iter().skip(updated_cache.messages.len()))
-                {
-                    let assigned =
-                        Self::assign_message(&conversation_id, incoming, &mut state.meta);
-                    cached_suffix.push(Self::cached_message(&assigned, *digest));
-                    suffix.push(assigned);
-                }
-                let bytes = Self::serialize_message_log(&suffix)?;
-                let mut log = record.message_log.clone().ok_or_else(|| {
-                    MemoryError::SerializationError(
-                        "append path is missing its message-log manifest".into(),
-                    )
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                let mut record = store.read_manifest(&conversation_id)?.ok_or_else(|| {
+                    MemoryError::NotFound(format!("conversation: {conversation_id}"))
                 })?;
-                let path = store.prepare_log_for_append(&conversation_id, &log)?;
-                if !bytes.is_empty() {
-                    echo_core::utils::fs::append_existing(
-                        &path,
-                        &bytes,
-                        echo_core::utils::fs::FileDurability::SyncData,
-                    )
-                    .map_err(|error| {
+                let cache = match store
+                    .authority
+                    .conversations
+                    .lock()
+                    .map_err(poison)?
+                    .remove(&conversation_id)
+                {
+                    Some(cache) if cache.log == record.message_log => cache,
+                    _ => {
+                        if let Some(log) = record.message_log.as_ref() {
+                            record.messages = store.read_message_log(&conversation_id, log)?;
+                        }
+                        Self::cache_from_record(&record)?
+                    }
+                };
+                let digests = messages
+                    .iter()
+                    .map(Self::semantic_digest)
+                    .collect::<Result<Vec<_>>>()?;
+                let append_suffix = record.message_log.is_some()
+                    && Self::prefix_matches(&cache, &messages, &digests);
+                record.conversation.updated_at = now_rfc3339();
+
+                let updated_cache = if append_suffix {
+                    let mut updated_cache = cache;
+                    let incoming_suffix = messages
+                        .iter()
+                        .skip(updated_cache.messages.len())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let suffix = store.reserve_messages(&conversation_id, &incoming_suffix)?;
+                    let mut cached_suffix = Vec::new();
+                    for (assigned, digest) in suffix
+                        .iter()
+                        .zip(digests.iter().skip(updated_cache.messages.len()))
+                    {
+                        cached_suffix.push(Self::cached_message(assigned, *digest));
+                    }
+                    let bytes = Self::serialize_message_log(&suffix)?;
+                    let mut log = record.message_log.clone().ok_or_else(|| {
+                        MemoryError::SerializationError(
+                            "append path is missing its message-log manifest".into(),
+                        )
+                    })?;
+                    let path = store.prepare_log_for_append(&conversation_id, &log)?;
+                    if !bytes.is_empty() {
+                        echo_core::utils::fs::append_existing(
+                            &path,
+                            &bytes,
+                            echo_core::utils::fs::FileDurability::SyncData,
+                        )
+                        .map_err(|error| {
+                            MemoryError::IoError(format!(
+                                "append conversation message log {}: {error}",
+                                path.display()
+                            ))
+                        })?;
+                    }
+                    let added_bytes = u64::try_from(bytes.len()).map_err(|error| {
+                        MemoryError::Unsupported(format!(
+                            "message log length is unsupported: {error}"
+                        ))
+                    })?;
+                    log.committed_bytes =
+                        log.committed_bytes
+                            .checked_add(added_bytes)
+                            .ok_or_else(|| {
+                                MemoryError::Unsupported(
+                                    "conversation message log size exhausted".into(),
+                                )
+                            })?;
+                    log.message_count = messages.len();
+                    log.max_message_id = log
+                        .max_message_id
+                        .max(suffix.iter().filter_map(|message| message.id).max());
+                    let had_search_filter = record.search_filter.is_some();
+                    let mut search_filter = record.search_filter.take().unwrap_or_else(|| {
+                        SearchFilter::from_conversation(&record.conversation, &messages)
+                    });
+                    if had_search_filter {
+                        for message in &suffix {
+                            search_filter.insert_message(message);
+                        }
+                    }
+                    updated_cache.messages.extend(cached_suffix);
+                    updated_cache.log = Some(log.clone());
+                    record.message_log = Some(log);
+                    record.search_filter = Some(search_filter);
+                    record.messages.clear();
+                    store.persist_current_meta()?;
+                    store.write_manifest(&record)?;
+                    updated_cache
+                } else {
+                    let assigned = store.reserve_messages(&conversation_id, &messages)?;
+                    let generation = Self::next_generation(record.message_log.as_ref())?;
+                    let bytes = Self::serialize_message_log(&assigned)?;
+                    let path = store.message_log_path(&conversation_id, generation)?;
+                    echo_core::utils::fs::atomic_write(&path, &bytes).map_err(|error| {
                         MemoryError::IoError(format!(
-                            "append conversation message log {}: {error}",
+                            "replace conversation message log {}: {error}",
                             path.display()
                         ))
                     })?;
-                }
-                let added_bytes = u64::try_from(bytes.len()).map_err(|error| {
-                    MemoryError::Unsupported(format!("message log length is unsupported: {error}"))
-                })?;
-                log.committed_bytes =
-                    log.committed_bytes
-                        .checked_add(added_bytes)
-                        .ok_or_else(|| {
-                            MemoryError::Unsupported(
-                                "conversation message log size exhausted".into(),
-                            )
-                        })?;
-                log.message_count = messages.len();
-                log.max_message_id = log
-                    .max_message_id
-                    .max(suffix.iter().filter_map(|message| message.id).max());
-                let had_search_filter = record.search_filter.is_some();
-                let mut search_filter = record.search_filter.take().unwrap_or_else(|| {
-                    SearchFilter::from_conversation(&record.conversation, &messages)
-                });
-                if had_search_filter {
-                    for message in &suffix {
-                        search_filter.insert_message(message);
-                    }
-                }
-                updated_cache.messages.extend(cached_suffix);
-                updated_cache.log = Some(log.clone());
-                record.message_log = Some(log);
-                record.search_filter = Some(search_filter);
-                record.messages.clear();
-                store.persist_meta(&state.meta)?;
-                store.write_manifest(&record)?;
-                updated_cache
-            } else {
-                let mut assigned = Vec::with_capacity(messages.len());
-                for incoming in &messages {
-                    assigned.push(Self::assign_message(
-                        &conversation_id,
-                        incoming,
-                        &mut state.meta,
+                    let committed_bytes = u64::try_from(bytes.len()).map_err(|error| {
+                        MemoryError::Unsupported(format!(
+                            "message log length is unsupported: {error}"
+                        ))
+                    })?;
+                    let log = MessageLogMeta {
+                        generation,
+                        committed_bytes,
+                        message_count: assigned.len(),
+                        max_message_id: assigned.iter().filter_map(|message| message.id).max(),
+                    };
+                    let replaced = record.message_log.clone();
+                    record.messages.clear();
+                    record.message_log = Some(log.clone());
+                    record.search_filter = Some(SearchFilter::from_conversation(
+                        &record.conversation,
+                        &assigned,
                     ));
-                }
-                let generation = Self::next_generation(record.message_log.as_ref())?;
-                let bytes = Self::serialize_message_log(&assigned)?;
-                let path = store.message_log_path(&conversation_id, generation)?;
-                echo_core::utils::fs::atomic_write(&path, &bytes).map_err(|error| {
-                    MemoryError::IoError(format!(
-                        "replace conversation message log {}: {error}",
-                        path.display()
-                    ))
-                })?;
-                let committed_bytes = u64::try_from(bytes.len()).map_err(|error| {
-                    MemoryError::Unsupported(format!("message log length is unsupported: {error}"))
-                })?;
-                let log = MessageLogMeta {
-                    generation,
-                    committed_bytes,
-                    message_count: assigned.len(),
-                    max_message_id: assigned.iter().filter_map(|message| message.id).max(),
+                    store.persist_current_meta()?;
+                    store.write_manifest(&record)?;
+                    store.remove_replaced_log(&conversation_id, replaced.as_ref());
+                    let cached_messages = assigned
+                        .iter()
+                        .zip(digests.iter())
+                        .map(|(message, digest)| Self::cached_message(message, *digest))
+                        .collect();
+                    store
+                        .authority
+                        .conversations
+                        .lock()
+                        .map_err(poison)?
+                        .insert(
+                            conversation_id.clone(),
+                            ConversationCache {
+                                log: Some(log),
+                                messages: cached_messages,
+                            },
+                        );
+                    return Ok(());
                 };
-                let replaced = record.message_log.clone();
-                record.messages.clear();
-                record.message_log = Some(log.clone());
-                record.search_filter = Some(SearchFilter::from_conversation(
-                    &record.conversation,
-                    &assigned,
-                ));
-                store.persist_meta(&state.meta)?;
-                store.write_manifest(&record)?;
-                store.remove_replaced_log(&conversation_id, replaced.as_ref());
-                let cached_messages = assigned
-                    .iter()
-                    .zip(digests.iter())
-                    .map(|(message, digest)| Self::cached_message(message, *digest))
-                    .collect();
-                state.conversations.insert(
-                    conversation_id.clone(),
-                    ConversationCache {
-                        log: Some(log),
-                        messages: cached_messages,
-                    },
-                );
-                return Ok(());
-            };
 
-            state.conversations.insert(conversation_id, updated_cache);
-            Ok(())
-        })
+                store
+                    .authority
+                    .conversations
+                    .lock()
+                    .map_err(poison)?
+                    .insert(conversation_id, updated_cache);
+                Ok(())
+            },
+        )
     }
 
     fn get_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, Vec<StoredMessage>> {
         let conversation_id = conversation_id.to_string();
-        self.run_blocking(move |store| {
-            let mut state = store.authority.state.lock().map_err(poison)?;
-            let record = store.read_record(&conversation_id)?;
-            if let Some(record) = record {
-                state
-                    .conversations
-                    .insert(conversation_id, Self::cache_from_record(&record)?);
-                Ok(record.messages)
-            } else {
-                Ok(Vec::new())
-            }
-        })
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                let record = store.read_record(&conversation_id)?;
+                if let Some(record) = record {
+                    store
+                        .authority
+                        .conversations
+                        .lock()
+                        .map_err(poison)?
+                        .insert(conversation_id, Self::cache_from_record(&record)?);
+                    Ok(record.messages)
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+        )
     }
 
     fn count_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFut<'a, usize> {
         let conversation_id = conversation_id.to_string();
-        self.run_blocking(move |store| {
-            let _guard = store.authority.state.lock().map_err(poison)?;
-            Ok(store
-                .read_manifest(&conversation_id)?
-                .map(|record| {
-                    record
-                        .message_log
-                        .as_ref()
-                        .map_or(record.messages.len(), |log| log.message_count)
-                })
-                .unwrap_or(0))
-        })
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                Ok(store
+                    .read_manifest(&conversation_id)?
+                    .map(|record| {
+                        record
+                            .message_log
+                            .as_ref()
+                            .map_or(record.messages.len(), |log| log.message_count)
+                    })
+                    .unwrap_or(0))
+            },
+        )
     }
 
     fn search_conversations<'a>(
@@ -1095,67 +1222,74 @@ impl ConversationStore for FileConversationStore {
         limit: usize,
     ) -> BoxFut<'a, Vec<ConversationMeta>> {
         let query = query.to_string();
-        self.run_blocking(move |store| {
-            let _guard = store.authority.state.lock().map_err(poison)?;
-            let needle = query.to_lowercase();
-            let mut results = Vec::new();
-            for mut record in store.read_all_manifests()? {
-                let title_hit = record
-                    .conversation
-                    .title
-                    .as_deref()
-                    .is_some_and(|title| title.to_lowercase().contains(&needle));
-                let candidate = title_hit
-                    || record
-                        .search_filter
-                        .as_ref()
-                        .is_none_or(|filter| filter.might_contain(&query));
-                if !candidate {
-                    continue;
-                }
-                if !title_hit {
-                    if let Some(log) = record.message_log.as_ref() {
-                        record.messages =
-                            store.read_message_log(&record.conversation.conversation_id, log)?;
-                    }
-                    let message_hit = record.messages.iter().any(|message| {
-                        message
-                            .content
-                            .as_deref()
-                            .is_some_and(|content| content.to_lowercase().contains(&needle))
-                    });
-                    if !message_hit {
+        self.run_blocking(
+            BlockingFileOperationScope::Collection("search".to_string()),
+            move |store| {
+                let _scan = store.authority.scan_barrier.write().map_err(poison)?;
+                let needle = query.to_lowercase();
+                let mut results = Vec::new();
+                let records = store.read_all_manifests()?;
+                #[cfg(test)]
+                store.pause_search_after_snapshot()?;
+                for mut record in records {
+                    let title_hit = record
+                        .conversation
+                        .title
+                        .as_deref()
+                        .is_some_and(|title| title.to_lowercase().contains(&needle));
+                    let candidate = title_hit
+                        || record
+                            .search_filter
+                            .as_ref()
+                            .is_none_or(|filter| filter.might_contain(&query));
+                    if !candidate {
                         continue;
                     }
+                    if !title_hit {
+                        if let Some(log) = record.message_log.as_ref() {
+                            record.messages = store
+                                .read_message_log(&record.conversation.conversation_id, log)?;
+                        }
+                        let message_hit = record.messages.iter().any(|message| {
+                            message
+                                .content
+                                .as_deref()
+                                .is_some_and(|content| content.to_lowercase().contains(&needle))
+                        });
+                        if !message_hit {
+                            continue;
+                        }
+                    }
+                    let message_count = record
+                        .message_log
+                        .as_ref()
+                        .map_or(record.messages.len(), |log| log.message_count);
+                    results.push(ConversationMeta {
+                        id: record.conversation.id,
+                        conversation_id: record.conversation.conversation_id,
+                        user_id: record.conversation.user_id,
+                        title: record.conversation.title,
+                        message_count,
+                        created_at: record.conversation.created_at,
+                        updated_at: record.conversation.updated_at,
+                    });
                 }
-                let message_count = record
-                    .message_log
-                    .as_ref()
-                    .map_or(record.messages.len(), |log| log.message_count);
-                results.push(ConversationMeta {
-                    id: record.conversation.id,
-                    conversation_id: record.conversation.conversation_id,
-                    user_id: record.conversation.user_id,
-                    title: record.conversation.title,
-                    message_count,
-                    created_at: record.conversation.created_at,
-                    updated_at: record.conversation.updated_at,
-                });
-            }
-            // ORDER BY updated_at DESC, then LIMIT.
-            results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-            results.truncate(limit);
-            Ok(results)
-        })
+                // ORDER BY updated_at DESC, then LIMIT.
+                results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                results.truncate(limit);
+                Ok(results)
+            },
+        )
     }
 
     fn ensure_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
-        self.run_blocking(move |store| {
-            let mut state = store.authority.state.lock().map_err(poison)?;
+        let scope = Self::conversation_scope(conv.conversation_id.clone());
+        self.run_blocking(scope, move |store| {
+            let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
             if let Some(existing) = store.read_manifest(&conv.conversation_id)? {
                 return Ok(existing.conversation);
             }
-            store.create_conversation_locked(conv, &mut state.meta)
+            store.create_conversation_sync(conv)
         })
     }
 }
@@ -1164,21 +1298,13 @@ fn now_rfc3339() -> String {
     echo_core::utils::time::now_local().to_rfc3339()
 }
 
-/// Sanitize an arbitrary id string into a single safe filesystem segment.
-///
-/// Rejects empty, path separators (`/`, `\`), the traversal segment `..`, and
-/// control characters. This prevents `<conversation_id>.json` from escaping the
-/// `conversations/` directory via `../foo` or absolute paths.
-///
-/// Character-safe (no byte slicing); the allowed set is ASCII so the check is
-/// char-boundary-correct by construction.
+/// Validate an id and encode its exact UTF-8 bytes as one safe path segment.
 fn safe_segment(id: &str) -> Result<String> {
-    echo_core::utils::fs::validate_path_segment(id)
-        .map_err(|error| MemoryError::Unsupported(error.to_string()))?;
     if id == "_meta" {
         return Err(MemoryError::Unsupported("conversation id is reserved: _meta".into()).into());
     }
-    Ok(id.to_string())
+    echo_core::utils::fs::encode_path_segment_identity(id)
+        .map_err(|error| MemoryError::Unsupported(error.to_string()).into())
 }
 
 fn is_message_log_file_name(file_name: &str) -> bool {
@@ -1196,6 +1322,7 @@ fn is_message_log_file_name(file_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -1270,10 +1397,267 @@ mod tests {
         let store = FileConversationStore::new(&base)?;
         let runtime_thread = std::thread::current().id();
         let io_thread = store
-            .run_blocking(|_| Ok(std::thread::current().id()))
+            .run_blocking(
+                FileConversationStore::conversation_scope("thread-check"),
+                |_| Ok(std::thread::current().id()),
+            )
             .await?;
 
         assert_ne!(io_thread, runtime_thread);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_create_survives_caller_abort_without_stalling_runtime() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let caller_store = store.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let caller = tokio::spawn(async move {
+            caller_store
+                .run_blocking(
+                    FileConversationStore::conversation_scope("abort-create"),
+                    move |store| {
+                        let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                        let _ignored = entered_tx.send(());
+                        release_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .map_err(|error| {
+                                MemoryError::IoError(format!("release create: {error}"))
+                            })?;
+                        store.create_conversation_sync(new_conv("abort-create", Some("durable")))
+                    },
+                )
+                .await
+        });
+        entered_rx.await?;
+        tokio::time::timeout(Duration::from_millis(250), async {
+            for _ in 0..64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| std::io::Error::other("runtime heartbeat stalled"))?;
+        caller.abort();
+        release_tx.send(())?;
+
+        let created = tokio::time::timeout(
+            Duration::from_secs(2),
+            store.get_conversation("abort-create"),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("accepted create did not settle"))??
+        .ok_or_else(|| std::io::Error::other("accepted create was cancelled"))?;
+        assert_eq!(created.title.as_deref(), Some("durable"));
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn corrupt_read_and_delete_race_fails_closed() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        store
+            .create_conversation(new_conv("corrupt-race", None))
+            .await?;
+        let manifest_path = store.conv_path("corrupt-race")?;
+        std::fs::write(&manifest_path, b"{ invalid json")?;
+
+        let blocker_store = store.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::spawn(async move {
+            blocker_store
+                .run_blocking(
+                    FileConversationStore::conversation_scope("corrupt-race"),
+                    move |_| {
+                        let _ignored = entered_tx.send(());
+                        release_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .map_err(|error| {
+                                MemoryError::IoError(format!("release corrupt race: {error}"))
+                            })?;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+        entered_rx.await?;
+        let read_store = store.clone();
+        let read = tokio::spawn(async move { read_store.get_conversation("corrupt-race").await });
+        tokio::task::yield_now().await;
+        let delete_store = store.clone();
+        let delete =
+            tokio::spawn(async move { delete_store.delete_conversation("corrupt-race").await });
+        tokio::task::yield_now().await;
+        release_tx.send(())?;
+
+        blocker.await??;
+        assert!(read.await?.is_err());
+        assert!(delete.await?.is_err());
+        assert!(manifest_path.exists());
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_utf8_ids_do_not_alias_on_case_folding_filesystems() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let ids = ["A", "a", "é", "e\u{301}"];
+        let paths = ids
+            .iter()
+            .map(|id| store.conv_path(id))
+            .collect::<Result<Vec<_>>>()?;
+        let unique = paths.iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), paths.len());
+
+        let (upper, lower, composed, decomposed) = tokio::join!(
+            store.create_conversation(new_conv("A", Some("upper"))),
+            store.create_conversation(new_conv("a", Some("lower"))),
+            store.create_conversation(new_conv("é", Some("composed"))),
+            store.create_conversation(new_conv("e\u{301}", Some("decomposed"))),
+        );
+        upper?;
+        lower?;
+        composed?;
+        decomposed?;
+        let upper_messages = [stored("user", "upper")];
+        let lower_messages = [stored("user", "lower")];
+        let composed_messages = [stored("user", "composed")];
+        let decomposed_messages = [stored("user", "decomposed")];
+        let (upper, lower, composed, decomposed) = tokio::join!(
+            store.save_messages("A", &upper_messages),
+            store.save_messages("a", &lower_messages),
+            store.save_messages("é", &composed_messages),
+            store.save_messages("e\u{301}", &decomposed_messages),
+        );
+        upper?;
+        lower?;
+        composed?;
+        decomposed?;
+
+        for (id, expected) in [
+            ("A", "upper"),
+            ("a", "lower"),
+            ("é", "composed"),
+            ("e\u{301}", "decomposed"),
+        ] {
+            let conversation = store
+                .get_conversation(id)
+                .await?
+                .ok_or_else(|| std::io::Error::other("aliased conversation is missing"))?;
+            assert_eq!(conversation.conversation_id, id);
+            let messages = store.get_messages(id).await?;
+            assert_eq!(
+                messages
+                    .first()
+                    .and_then(|message| message.content.as_deref()),
+                Some(expected)
+            );
+        }
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn different_conversations_run_in_parallel_blocking_slots() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let first_store = store.clone();
+        let second_store = store.clone();
+        let (first_entered_tx, first_entered_rx) = tokio::sync::oneshot::channel();
+        let (second_entered_tx, second_entered_rx) = tokio::sync::oneshot::channel();
+        let (first_release_tx, first_release_rx) = std::sync::mpsc::channel();
+        let (second_release_tx, second_release_rx) = std::sync::mpsc::channel();
+        let first = tokio::spawn(async move {
+            first_store
+                .run_blocking(
+                    FileConversationStore::conversation_scope("parallel-first"),
+                    move |_| {
+                        let _ignored = first_entered_tx.send(());
+                        first_release_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .map_err(|error| {
+                                MemoryError::IoError(format!("release first: {error}"))
+                            })?;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+        let second = tokio::spawn(async move {
+            second_store
+                .run_blocking(
+                    FileConversationStore::conversation_scope("parallel-second"),
+                    move |_| {
+                        let _ignored = second_entered_tx.send(());
+                        second_release_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .map_err(|error| {
+                                MemoryError::IoError(format!("release second: {error}"))
+                            })?;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            first_entered_rx.await?;
+            second_entered_rx.await
+        })
+        .await
+        .map_err(|_| std::io::Error::other("distinct conversations were serialized"))??;
+        first_release_tx.send(())?;
+        second_release_tx.send(())?;
+        first.await??;
+        second.await??;
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replacement_waits_for_search_snapshot_using_old_generation() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        store.create_conversation(new_conv("c1", None)).await?;
+        store.save_messages("c1", &[stored("user", "old")]).await?;
+        let old_log = log_meta(&manifest(&store, "c1")?)?;
+        let old_log_path = store.message_log_path("c1", old_log.generation)?;
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        store.install_search_snapshot_hook(captured_tx, release_rx)?;
+        let scan_store = store.clone();
+        let scan = tokio::spawn(async move { scan_store.search_conversations("old", 1).await });
+        captured_rx.await?;
+        let replacement_store = store.clone();
+        let replacement = tokio::spawn(async move {
+            replacement_store
+                .save_messages("c1", &[stored("assistant", "replacement")])
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!replacement.is_finished());
+        assert!(old_log_path.exists());
+        release_tx.send(())?;
+        let old_results = scan.await??;
+        assert_eq!(
+            old_results
+                .first()
+                .map(|conversation| conversation.conversation_id.as_str()),
+            Some("c1")
+        );
+        replacement.await??;
+        assert!(!old_log_path.exists());
+        let found = store.search_conversations("replacement", 1).await?;
+        assert_eq!(
+            found
+                .first()
+                .map(|conversation| conversation.conversation_id.as_str()),
+            Some("c1")
+        );
         std::fs::remove_dir_all(base)?;
         Ok(())
     }
@@ -1374,7 +1758,7 @@ mod tests {
             .await
             .unwrap();
         // Corrupt the record file on disk.
-        let path = base.join("conversations").join("c1.json");
+        let path = store.conv_path("c1").unwrap();
         std::fs::write(&path, b"{ not valid json").unwrap();
 
         let err = store.get_conversation("c1").await.unwrap_err();

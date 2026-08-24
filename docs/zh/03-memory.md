@@ -28,7 +28,7 @@ LLM 的上下文窗口在每次请求结束后就消失了，进程也可能在�
 conversation_id: "user-123-chat-5"
                 │
                 ▼
-SqliteRuntimeStateStore (~/.echo-agent/state.db):
+FileRuntimeStateStore (./agent-data/runtime_state/):
 {
   "user-123-chat-5": {
     "messages_json":  "...完整消息历史...",
@@ -44,10 +44,11 @@ SqliteRuntimeStateStore (~/.echo-agent/state.db):
 
 ```rust,no_run
 use echo_agent::prelude::*;
+use echo_agent::state::FileRuntimeStateStore;
 use std::sync::Arc;
 
 # async fn demo() -> echo_agent::error::Result<()> {
-let state_store = Arc::new(SqliteRuntimeStateStore::open("./state.db").await?);
+let state_store = Arc::new(FileRuntimeStateStore::new("./agent-data")?);
 
 let agent = ReactAgentBuilder::new()
     .model("qwen3-max")
@@ -61,7 +62,7 @@ let _ = agent.execute("你好").await?;
 # }
 ```
 
-trait 与 `SqliteRuntimeStateStore` 实现位于 `echo-agent/src/state/mod.rs`。
+trait、文件实现和可选 SQLite 实现位于 `echo-agent/src/state/mod.rs`。
 
 ---
 
@@ -89,6 +90,25 @@ let agent = ReactAgentBuilder::new()
 # Ok(())
 # }
 ```
+
+### 文件后端的异步语义
+
+`FileRuntimeStateStore` 与 `FileConversationStore` 保持 public API 和原有持久化
+语义，但文件系统操作不再占用 Tokio runtime 线程。同一 `conversation_id` 的
+操作仍严格有序，不同 conversation 可在进程级上限内并发。文件操作一旦被
+接纳，即使调用方 future 被取消，owner 仍会完成不可中断的持久化写入；后续
+同 conversation 操作会按顺序观察到结果。逻辑 ID 的原始 UTF-8 bytes 会编码为
+无碰撞的 ASCII 文件名，文件系统大小写折叠或 Unicode normalization 不会合并
+两个 conversation。损坏的 UTF-8/JSON 与文件系统错误仍返回类型化错误，不会
+静默降级。
+
+两个 `new(...)` 构造函数仍是同步 bootstrap API：它们会创建并 canonicalize
+目录，`FileConversationStore::new` 还会获取 lease、核对已有 manifest。应在进入
+延迟敏感的 async 路径前构造，或放进 blocking setup task；只有 async trait 方法
+使用进程级文件操作 owner。
+
+ownership 与并发设计见 [ADR 0004](../adr/0004-async-file-store-ownership.md)。
+SQLite 仍是框架可选且未改变的后端。
 
 ---
 

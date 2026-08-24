@@ -86,24 +86,7 @@ impl ReactAgent {
         // context while this invocation is queued, but this snapshot belongs
         // to the invocation that entered here.
         let legacy_runtime = if invocation.is_none() {
-            Some((
-                self.current_run_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
-                self.external_cancel
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
-                self.external_trace_sink
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
-                *self
-                    .external_delegation_policy
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-            ))
+            Some(self.capture_legacy_external_context())
         } else {
             None
         };
@@ -137,7 +120,24 @@ impl ReactAgent {
                             tracing::warn!(%error, "Failed to log guard audit event");
                         }
                     }
-                    let trace_run_id = self.start_trace_run("[input blocked by guard]").await;
+                    let trace_run_id = if let Some(runtime) = invocation
+                        .as_ref()
+                        .and_then(|context| context.runtime.as_ref())
+                    {
+                        self.start_scoped_trace_run(
+                            "[input blocked by guard]",
+                            runtime.run_id.as_deref(),
+                            runtime.conversation_id.as_deref(),
+                            runtime.turn_id.as_deref(),
+                            runtime.execution_id.as_deref(),
+                        )
+                        .await
+                    } else if let Some(legacy) = legacy_runtime.as_ref() {
+                        self.start_legacy_trace_run("[input blocked by guard]", legacy)
+                            .await
+                    } else {
+                        None
+                    };
                     let _ = tx
                         .send(Ok(AgentEvent::FinalAnswer(format!(
                             "Request blocked by safety guard: {reason}"
@@ -193,17 +193,24 @@ impl ReactAgent {
                 )
                 .await;
         } else {
-            trace_run_id = self.start_trace_run(&text).await;
+            trace_run_id = match legacy_runtime.as_ref() {
+                Some(legacy) => self.start_legacy_trace_run(&text, legacy).await,
+                None => None,
+            };
         }
         let turn_id = invocation
             .as_ref()
             .and_then(|value| value.runtime.as_ref())
             .and_then(|runtime| runtime.turn_id.clone().or_else(|| runtime.run_id.clone()))
             .or_else(|| {
-                self.current_run_id
-                    .lock()
-                    .ok()
-                    .and_then(|value| value.clone())
+                legacy_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.turn_id.clone())
+                    .or_else(|| {
+                        legacy_runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.current_run_id.clone())
+                    })
             })
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let active_turn_lease = self.turn_steer_mailbox.begin(turn_id.clone());
@@ -229,9 +236,10 @@ impl ReactAgent {
                 .as_ref()
                 .and_then(|context| context.cancel.clone())
                 .or_else(|| {
-                    legacy_runtime.as_ref().and_then(|(_, token, _, _)| {
-                        token.as_ref().map(|token| token.as_ref().clone())
-                    })
+                    legacy_runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.cancel.as_ref())
+                        .map(|token| token.as_ref().clone())
                 })
                 .unwrap_or_default();
             let intent = router.classify_with_cancel(&text, &messages, cancel).await;
@@ -271,24 +279,13 @@ impl ReactAgent {
             }
         }
 
-        let mut snap = if let Some(invocation) = invocation.as_ref() {
-            AgentSnapshot::from_agent_with_invocation(self, invocation)
-        } else {
-            make_snapshot(self)
+        let mut snap = match (invocation.as_ref(), legacy_runtime.as_ref()) {
+            (Some(invocation), _) => AgentSnapshot::from_agent_with_invocation(self, invocation),
+            (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
+            (None, None) => make_snapshot(self),
         };
-        if let Some((
-            current_run_id,
-            external_cancel,
-            external_trace_sink,
-            external_delegation_policy,
-        )) = legacy_runtime.as_ref()
-        {
-            snap.current_run_id = current_run_id.clone();
-            snap.external_cancel = external_cancel.clone();
-            snap.external_trace_sink = external_trace_sink.clone();
-            snap.external_delegation_policy = *external_delegation_policy;
-        }
         snap.current_turn_id = Some(turn_id);
+        snap.turn_steer_incarnation = Some(active_turn_lease.incarnation());
         snap.current_message = message.clone();
         snap.trace_run_id = trace_run_id;
         let consumer_cancel = snap
@@ -300,6 +297,7 @@ impl ReactAgent {
         snap.cancel_token = Some(consumer_cancel.clone());
         snap.external_cancel = Some(Arc::new(consumer_cancel.clone()));
         active_turn_lease.set_steerable(true);
+        let terminal_cancel = consumer_cancel.clone();
 
         let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
             crate::error::ReactError::Other(format!(
@@ -309,8 +307,7 @@ impl ReactAgent {
         let task = runtime.spawn(async move {
             // Move the guard into the spawned task — held for full stream duration
             let _execution_guard = execution_guard;
-            let _active_turn_lease = active_turn_lease;
-            if let Err(e) = snap
+            match snap
                 .run_core_loop(
                     context,
                     text,
@@ -323,7 +320,18 @@ impl ReactAgent {
                 )
                 .await
             {
-                let _ = tx.send(Ok(AgentEvent::from_error("react_loop", &e))).await;
+                Ok(outcome) => active_turn_lease.settle(outcome),
+                Err(error) => {
+                    let outcome = if terminal_cancel.is_cancelled() {
+                        crate::agent::AgentSteerTurnOutcome::Cancelled
+                    } else {
+                        crate::agent::AgentSteerTurnOutcome::Failed
+                    };
+                    active_turn_lease.settle(outcome);
+                    let _ = tx
+                        .send(Ok(AgentEvent::from_error("react_loop", &error)))
+                        .await;
+                }
             }
         });
 
@@ -367,6 +375,22 @@ fn make_snapshot(agent: &ReactAgent) -> AgentSnapshot {
 }
 
 impl AgentSnapshot {
+    fn failure_terminal(&self) -> crate::agent::AgentSteerTurnOutcome {
+        if self
+            .cancel_token
+            .as_ref()
+            .is_some_and(crate::agent::CancellationToken::is_cancelled)
+            || self
+                .external_cancel
+                .as_deref()
+                .is_some_and(crate::agent::CancellationToken::is_cancelled)
+        {
+            crate::agent::AgentSteerTurnOutcome::Cancelled
+        } else {
+            crate::agent::AgentSteerTurnOutcome::Failed
+        }
+    }
+
     async fn drain_steer_into_context(
         &self,
         context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
@@ -375,18 +399,22 @@ impl AgentSnapshot {
         let Some(turn_id) = self.current_turn_id.as_deref() else {
             return 0;
         };
-        let pending = self.turn_steer_mailbox.drain(turn_id);
+        let Some(incarnation) = self.turn_steer_incarnation.as_ref() else {
+            return 0;
+        };
+        let mut guard = context.lock().await;
+        let pending = self.turn_steer_mailbox.take_pending(turn_id, incarnation);
         if pending.is_empty() {
             return 0;
         }
         let count = pending.len();
-        let mut guard = context.lock().await;
         if let Some(draft) = assistant_draft {
             guard.push(draft);
         }
-        for message in pending {
-            guard.push(message);
+        for message in pending.messages() {
+            guard.push(message.clone());
         }
+        pending.mark_drained();
         count
     }
 
@@ -412,7 +440,7 @@ impl AgentSnapshot {
         recalled: usize,
         user_prompt_hook_already_run: bool,
         tx: mpsc::Sender<Result<AgentEvent>>,
-    ) -> Result<()> {
+    ) -> Result<crate::agent::AgentSteerTurnOutcome> {
         // NOTE: execution_mutex is already held by the spawned task
         // (acquired in run_stream_channel via lock_owned()), so we don't
         // need to lock again here.
@@ -431,7 +459,9 @@ impl AgentSnapshot {
         .await?
         {
             PrepareOutcome::Continue => LoopState::new(),
-            PrepareOutcome::BlockedAndDone => return Ok(()),
+            PrepareOutcome::BlockedAndDone => {
+                return Ok(crate::agent::AgentSteerTurnOutcome::Failed);
+            }
             PrepareOutcome::Abandoned => {
                 self.finalize_run(
                     crate::trace::RunStatus::Cancelled,
@@ -439,7 +469,7 @@ impl AgentSnapshot {
                     Some("event consumer disconnected during preparation"),
                 )
                 .await;
-                return Ok(());
+                return Ok(crate::agent::AgentSteerTurnOutcome::Cancelled);
             }
         };
 
@@ -519,16 +549,18 @@ impl AgentSnapshot {
                             Some("event consumer disconnected during compaction"),
                         )
                         .await;
-                        return Ok(());
+                        return Ok(crate::agent::AgentSteerTurnOutcome::Cancelled);
                     }
                     phases::CompactOutcome::Failed => {
-                        self.finalize_run(
-                            crate::trace::RunStatus::Failed,
-                            None,
-                            Some("context preparation failed"),
-                        )
-                        .await;
-                        return Ok(());
+                        let outcome = self.failure_terminal();
+                        let status = if outcome == crate::agent::AgentSteerTurnOutcome::Cancelled {
+                            crate::trace::RunStatus::Cancelled
+                        } else {
+                            crate::trace::RunStatus::Failed
+                        };
+                        self.finalize_run(status, None, Some("context preparation failed"))
+                            .await;
+                        return Ok(outcome);
                     }
                 };
 
@@ -537,17 +569,26 @@ impl AgentSnapshot {
             let think =
                 match phases::think::run_think(&self, &context, &tx, messages, final_only).await? {
                     phases::ThinkOutcome::Continue(t) => t,
-                    phases::ThinkOutcome::Abandoned | phases::ThinkOutcome::Blocked => {
+                    phases::ThinkOutcome::Abandoned => {
                         self.finalize_run(
                             crate::trace::RunStatus::Cancelled,
                             None,
                             Some("event consumer disconnected or intervention blocked the run"),
                         )
                         .await;
-                        return Ok(());
+                        return Ok(crate::agent::AgentSteerTurnOutcome::Cancelled);
+                    }
+                    phases::ThinkOutcome::Blocked => {
+                        self.finalize_run(
+                            crate::trace::RunStatus::Failed,
+                            None,
+                            Some("intervention blocked the run"),
+                        )
+                        .await;
+                        return Ok(crate::agent::AgentSteerTurnOutcome::Failed);
                     }
                     phases::ThinkOutcome::Cancelled => {
-                        return Ok(());
+                        return Ok(crate::agent::AgentSteerTurnOutcome::Cancelled);
                     }
                     phases::ThinkOutcome::Failed => {
                         self.finalize_run(
@@ -556,7 +597,7 @@ impl AgentSnapshot {
                             Some("model response failed"),
                         )
                         .await;
-                        return Ok(());
+                        return Ok(self.failure_terminal());
                     }
                 };
 
@@ -646,7 +687,9 @@ impl AgentSnapshot {
                         .await?
                         {
                             ControlFlow::Continue(()) => continue,
-                            ControlFlow::Break(()) => return Ok(()),
+                            ControlFlow::Break(()) => {
+                                return Ok(crate::agent::AgentSteerTurnOutcome::Completed);
+                            }
                         }
                     }
                     other => other,
@@ -672,7 +715,9 @@ impl AgentSnapshot {
                             state.stop_hook_continued = true;
                             continue;
                         }
-                        ControlFlow::Break(()) => return Ok(()),
+                        ControlFlow::Break(()) => {
+                            return Ok(crate::agent::AgentSteerTurnOutcome::Completed);
+                        }
                     }
                 }
                 // FinalText is only produced by verify_final_text and is
@@ -702,11 +747,14 @@ impl AgentSnapshot {
                     .await?
                     {
                         ControlFlow::Continue(()) => continue,
-                        ControlFlow::Break(()) => return Ok(()),
+                        ControlFlow::Break(()) => {
+                            return Ok(crate::agent::AgentSteerTurnOutcome::Completed);
+                        }
                     }
                 }
                 IterOutcome::NoResponse => {
-                    return phases::finalize::finalize_no_response(&self, tx).await;
+                    phases::finalize::finalize_no_response(&self, tx).await?;
+                    return Ok(crate::agent::AgentSteerTurnOutcome::Failed);
                 }
                 IterOutcome::Abandoned => {
                     self.finalize_run(
@@ -715,13 +763,14 @@ impl AgentSnapshot {
                         Some("event consumer disconnected or tool batch was abandoned"),
                     )
                     .await;
-                    return Ok(());
+                    return Ok(crate::agent::AgentSteerTurnOutcome::Cancelled);
                 }
             }
         }
 
         // ── Post-loop: max iterations exceeded ───────────────────────
-        phases::finalize::finalize_max_iterations(&self, &context, tx).await
+        phases::finalize::finalize_max_iterations(&self, &context, tx).await?;
+        Ok(crate::agent::AgentSteerTurnOutcome::Failed)
     }
 }
 
@@ -873,6 +922,49 @@ mod tests {
             }
             other => panic!("expected FinalAnswer, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_guard_block_trace_uses_captured_context() -> Result<()> {
+        let mut agent = agent_with_blocking_guard();
+        let store = Arc::new(crate::trace::InMemoryRunStore::new());
+        agent.set_run_store(store.clone());
+        agent.set_external_context(&echo_core::tools::ExternalRunContext {
+            conversation_id: Some("blocked-conversation".to_string()),
+            run_id: Some("blocked-parent".to_string()),
+            turn_id: Some("blocked-turn".to_string()),
+            execution_id: Some("blocked-execution".to_string()),
+            isolation_id: None,
+            message_id: Some("blocked-message".to_string()),
+            cancel: None,
+            trace_sink: None,
+            delegation_policy: None,
+            resource_guards: Vec::new(),
+        });
+
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "blocked input".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        let _: Vec<_> = stream.collect().await;
+        agent.clear_external_context();
+
+        let traces = crate::trace::RunStore::list_all(store.as_ref(), 10).await?;
+        let trace = traces
+            .first()
+            .ok_or_else(|| ReactError::Other("blocked trace missing".to_string()))?;
+        assert_eq!(trace.parent_run_id.as_deref(), Some("blocked-parent"));
+        assert_eq!(trace.session_id, "blocked-conversation");
+        assert_eq!(trace.turn_id.as_deref(), Some("blocked-turn"));
+        assert_eq!(trace.execution_id.as_deref(), Some("blocked-execution"));
+        Ok(())
     }
 
     /// After a guard blocks one stream, the execution mutex must be released so
@@ -1145,6 +1237,7 @@ mod tests {
                     delegate_depth: 1,
                     max_delegate_depth: 2,
                 }),
+                resource_guards: Vec::new(),
             }),
             runtime_state_id: None,
             transcript_generation_id: None,
@@ -1154,6 +1247,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
         let first_stream = agent
             .execute_stream_with_invocation_context(
@@ -1186,6 +1280,7 @@ mod tests {
                     delegate_depth: 2,
                     max_delegate_depth: 3,
                 }),
+                resource_guards: Vec::new(),
             }),
             runtime_state_id: None,
             transcript_generation_id: None,
@@ -1195,6 +1290,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
         let mut queued = Box::pin(agent.execute_stream_with_invocation_context(
             "second",
@@ -1242,6 +1338,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             runtime_state_id: None,
             transcript_generation_id: None,
@@ -1251,6 +1348,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
 
         let stream = agent
@@ -1303,6 +1401,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             runtime_state_id: None,
             transcript_generation_id: None,
@@ -1312,6 +1411,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
 
         let stream = agent
@@ -2573,6 +2673,7 @@ mod tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             runtime_state_id: None,
             transcript_generation_id: None,
@@ -2582,6 +2683,7 @@ mod tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: Vec::new(),
         };
         let stream = agent
             .run_stream_channel(
@@ -2596,13 +2698,14 @@ mod tests {
             .await?;
 
         tokio::time::sleep(Duration::from_millis(30)).await;
-        let accepted = agent
-            .steer_input(
+        let mut receipt = agent
+            .steer_input_tracked(
                 Some("turn-steer-1"),
                 Message::user("steer correction".to_string()),
             )
             .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
-        assert_eq!(accepted, "turn-steer-1");
+        assert_eq!(receipt.turn_id(), "turn-steer-1");
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
 
         let events = stream.collect::<Vec<_>>().await;
         assert!(events.iter().any(|event| {
@@ -2620,6 +2723,296 @@ mod tests {
                 message.content.as_text().as_deref() == Some("steer correction")
             })
         );
+        assert_eq!(
+            receipt.wait_for_turn_settled().await,
+            crate::agent::AgentSteerState::TurnSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                drained: true,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tracked_steer_reports_drain_before_provider_failure_terminal() -> Result<()> {
+        use futures::StreamExt;
+        use std::time::Duration;
+
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .with_response("draft before failure")
+                .with_network_error("provider disconnected")
+                .with_delay(Duration::from_millis(100)),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm)
+            .system_prompt("You are a test assistant.")
+            .build()?;
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: None,
+                run_id: Some("tracked-provider-failure".to_string()),
+                turn_id: Some("tracked-provider-failure".to_string()),
+                execution_id: None,
+                isolation_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+                resource_guards: Vec::new(),
+            }),
+            working_dir: None,
+            cancel: None,
+            disabled_tools: None,
+            visible_tools: None,
+            run_budget: None,
+            history: None,
+            resource_guards: Vec::new(),
+        };
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "initial request".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: Some(invocation),
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut receipt = agent
+            .steer_input_tracked(
+                Some("tracked-provider-failure"),
+                Message::user("consume before provider failure".to_string()),
+            )
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+
+        assert_eq!(
+            receipt.wait_for_drained().await,
+            crate::agent::AgentSteerState::Drained
+        );
+        let events = stream.collect::<Vec<_>>().await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::Error { .. })))
+        );
+        assert_eq!(
+            receipt.wait_for_turn_settled().await,
+            crate::agent::AgentSteerState::TurnSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+                drained: true,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tracked_steer_reports_cancelled_after_real_drain() -> Result<()> {
+        use futures::StreamExt;
+        use std::time::Duration;
+
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .with_responses(["draft before cancellation", "unused final"])
+                .with_delay(Duration::from_millis(100)),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm)
+            .system_prompt("You are a test assistant.")
+            .build()?;
+        let cancel = crate::agent::CancellationToken::new();
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: None,
+                run_id: Some("tracked-cancel".to_string()),
+                turn_id: Some("tracked-cancel".to_string()),
+                execution_id: None,
+                isolation_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+                resource_guards: Vec::new(),
+            }),
+            working_dir: None,
+            cancel: Some(cancel.clone()),
+            disabled_tools: None,
+            visible_tools: None,
+            run_budget: None,
+            history: None,
+            resource_guards: Vec::new(),
+        };
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "initial request".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: Some(invocation),
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut receipt = agent
+            .steer_input_tracked(
+                Some("tracked-cancel"),
+                Message::user("consume before cancellation".to_string()),
+            )
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+
+        assert_eq!(
+            receipt.wait_for_drained().await,
+            crate::agent::AgentSteerState::Drained
+        );
+        cancel.cancel();
+        let events = stream.collect::<Vec<_>>().await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(_))))
+        );
+        assert_eq!(
+            receipt.wait_for_turn_settled().await,
+            crate::agent::AgentSteerState::TurnSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                drained: true,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tracked_steer_stays_accepted_behind_context_barrier() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
+        let lease = agent
+            .turn_steer_mailbox
+            .begin("context-barrier".to_string());
+        lease.set_steerable(true);
+        let mut snapshot = AgentSnapshot::from_agent(&agent);
+        snapshot.current_turn_id = Some("context-barrier".to_string());
+        snapshot.turn_steer_incarnation = Some(lease.incarnation());
+        let snapshot = Arc::new(snapshot);
+        let context = agent.memory.context.clone();
+        let context_guard = context.lock().await;
+        let mut receipt = agent
+            .steer_input_tracked(
+                Some("context-barrier"),
+                Message::user("barrier input".to_string()),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let drain = {
+            let snapshot = snapshot.clone();
+            let context = context.clone();
+            tokio::spawn(async move { snapshot.drain_steer_into_context(&context, None).await })
+        };
+
+        tokio::task::yield_now().await;
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
+        assert!(!drain.is_finished());
+        drop(context_guard);
+        assert_eq!(
+            drain
+                .await
+                .map_err(|error| ReactError::Other(format!("drain task failed: {error}")))?,
+            1
+        );
+        assert_eq!(
+            receipt.wait_for_drained().await,
+            crate::agent::AgentSteerState::Drained
+        );
+        lease.settle(crate::agent::AgentSteerTurnOutcome::Completed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tracked_turn_settlement_wins_before_blocked_context_drain() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
+        let lease = agent
+            .turn_steer_mailbox
+            .begin("settle-before-context".to_string());
+        lease.set_steerable(true);
+        let mut snapshot = AgentSnapshot::from_agent(&agent);
+        snapshot.current_turn_id = Some("settle-before-context".to_string());
+        snapshot.turn_steer_incarnation = Some(lease.incarnation());
+        let snapshot = Arc::new(snapshot);
+        let context = agent.memory.context.clone();
+        let context_guard = context.lock().await;
+        let mut receipt = agent
+            .steer_input_tracked(
+                Some("settle-before-context"),
+                Message::user("must remain unconsumed".to_string()),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let drain = {
+            let snapshot = snapshot.clone();
+            let context = context.clone();
+            tokio::spawn(async move { snapshot.drain_steer_into_context(&context, None).await })
+        };
+
+        tokio::task::yield_now().await;
+        lease.settle(crate::agent::AgentSteerTurnOutcome::Cancelled);
+        assert_eq!(
+            receipt.wait_for_turn_settled().await,
+            crate::agent::AgentSteerState::TurnSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                drained: false,
+            }
+        );
+        drop(context_guard);
+        assert_eq!(
+            drain
+                .await
+                .map_err(|error| ReactError::Other(format!("drain task failed: {error}")))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tracked_steer_same_id_stale_snapshot_cannot_drain_new_incarnation() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
+        let stale_lease = agent.turn_steer_mailbox.begin("same-id-drain".to_string());
+        stale_lease.set_steerable(true);
+        let mut stale_snapshot = AgentSnapshot::from_agent(&agent);
+        stale_snapshot.current_turn_id = Some("same-id-drain".to_string());
+        stale_snapshot.turn_steer_incarnation = Some(stale_lease.incarnation());
+
+        let current_lease = agent.turn_steer_mailbox.begin("same-id-drain".to_string());
+        current_lease.set_steerable(true);
+        let mut receipt = agent
+            .steer_input_tracked(
+                Some("same-id-drain"),
+                Message::user("new incarnation input".to_string()),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let context = agent.memory.context.clone();
+
+        assert_eq!(
+            stale_snapshot
+                .drain_steer_into_context(&context, None)
+                .await,
+            0
+        );
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
+
+        let mut current_snapshot = AgentSnapshot::from_agent(&agent);
+        current_snapshot.current_turn_id = Some("same-id-drain".to_string());
+        current_snapshot.turn_steer_incarnation = Some(current_lease.incarnation());
+        assert_eq!(
+            current_snapshot
+                .drain_steer_into_context(&context, None)
+                .await,
+            1
+        );
+        assert_eq!(
+            receipt.wait_for_drained().await,
+            crate::agent::AgentSteerState::Drained
+        );
+        current_lease.settle(crate::agent::AgentSteerTurnOutcome::Completed);
+        drop(stale_lease);
         Ok(())
     }
 

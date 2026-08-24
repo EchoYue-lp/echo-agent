@@ -259,8 +259,9 @@ mod tests {
         agent.set_compressor(SlidingWindowCompressor::new(1)).await;
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
         agent.set_run_store(store.clone());
+        let legacy = agent.capture_legacy_external_context();
         let trace_run_id = agent
-            .start_trace_run("compress")
+            .start_legacy_trace_run("compress", &legacy)
             .await
             .ok_or_else(|| crate::error::ReactError::Other("trace run missing".to_string()))?;
         {

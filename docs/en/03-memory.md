@@ -28,7 +28,7 @@ An LLM's context window vanishes after each request ends, and a process can cras
 conversation_id: "user-123-chat-5"
                 │
                 ▼
-SqliteRuntimeStateStore (~/.echo-agent/state.db):
+FileRuntimeStateStore (./agent-data/runtime_state/):
 {
   "user-123-chat-5": {
     "messages_json":  "...full message history...",
@@ -44,10 +44,11 @@ SqliteRuntimeStateStore (~/.echo-agent/state.db):
 
 ```rust,no_run
 use echo_agent::prelude::*;
+use echo_agent::state::FileRuntimeStateStore;
 use std::sync::Arc;
 
 # async fn demo() -> echo_agent::error::Result<()> {
-let state_store = Arc::new(SqliteRuntimeStateStore::open("./state.db").await?);
+let state_store = Arc::new(FileRuntimeStateStore::new("./agent-data")?);
 
 let agent = ReactAgentBuilder::new()
     .model("qwen3-max")
@@ -61,7 +62,8 @@ let _ = agent.execute("Hello").await?;
 # }
 ```
 
-See `echo-agent/src/state/mod.rs` for the trait and `SqliteRuntimeStateStore` implementation.
+See `echo-agent/src/state/mod.rs` for the trait and its file-backed and optional
+SQLite implementations.
 
 ---
 
@@ -89,6 +91,27 @@ let agent = ReactAgentBuilder::new()
 # Ok(())
 # }
 ```
+
+### Async behavior of file backends
+
+`FileRuntimeStateStore` and `FileConversationStore` keep their public APIs and
+durability rules while running filesystem work outside Tokio runtime threads.
+Operations for one `conversation_id` remain ordered. Independent conversations
+may run concurrently within a process-wide bound. Once a file operation is
+accepted, dropping its caller does not abort a partially completed durable
+write; the owner finishes and later same-conversation operations observe it in
+order. Exact UTF-8 IDs are encoded into collision-free ASCII filenames, so case
+folding and Unicode normalization do not merge conversations. Corrupt UTF-8/JSON
+and filesystem failures still return typed errors.
+
+Both `new(...)` constructors remain synchronous bootstrap APIs: they create and
+canonicalize directories, and `FileConversationStore::new` also acquires its
+lease and reconciles existing manifests. Construct them before latency-sensitive
+async work or from a blocking setup task. Only their async trait methods use the
+process file-operation owner.
+
+See [ADR 0004](../adr/0004-async-file-store-ownership.md) for ownership and
+concurrency details. SQLite remains an optional, unchanged framework backend.
 
 ---
 

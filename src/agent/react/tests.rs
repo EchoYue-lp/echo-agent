@@ -17,7 +17,61 @@ use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
 use crate::testing::{FailingMockAgent, MockAgent, MockTool};
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+fn external_context_with_guards(
+    resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
+) -> echo_core::tools::ExternalRunContext {
+    echo_core::tools::ExternalRunContext {
+        conversation_id: None,
+        run_id: None,
+        turn_id: None,
+        execution_id: None,
+        isolation_id: None,
+        message_id: None,
+        cancel: None,
+        trace_sink: None,
+        delegation_policy: None,
+        resource_guards,
+    }
+}
+
+struct ReentrantGuardProbe {
+    agent: std::sync::Weak<ReactAgent>,
+    observed_unlocked: Arc<AtomicBool>,
+}
+
+impl Drop for ReentrantGuardProbe {
+    fn drop(&mut self) {
+        let observed = self.agent.upgrade().is_some_and(|agent| {
+            agent
+                .external_resource_guards
+                .try_lock()
+                .map(|guard| {
+                    drop(guard);
+                    true
+                })
+                .unwrap_or(false)
+        });
+        self.observed_unlocked.store(observed, Ordering::SeqCst);
+    }
+}
+
+struct SlowGuardDrop {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Drop for SlowGuardDrop {
+    fn drop(&mut self) {
+        let _ = self.entered.send(());
+        let _ = self
+            .release
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .recv_timeout(std::time::Duration::from_secs(2));
+    }
+}
 
 fn test_llm_config(model: &str) -> crate::llm::LlmConfig {
     crate::llm::LlmConfig {
@@ -2239,10 +2293,12 @@ async fn invocation_history_is_inserted_before_current_input() -> Result<(), Str
 #[tokio::test]
 async fn q_flt_v07_corrupt_checkpoint_fails_closed_without_overwrite() -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let checkpoint_dir = temp
-        .path()
-        .join("runtime_state")
-        .join("corrupt-conversation");
+    let checkpoint_dir =
+        temp.path()
+            .join("runtime_state")
+            .join(echo_core::utils::fs::encode_utf8_path_identity(
+                "corrupt-conversation",
+            ));
     std::fs::create_dir_all(&checkpoint_dir).map_err(|error| error.to_string())?;
     let checkpoint_path = checkpoint_dir.join("checkpoint.json");
     let corrupt = b"{ truncated checkpoint";
@@ -2745,4 +2801,284 @@ async fn save_transcript_projection_writes_to_conversation_store() {
         store2.saves.lock().unwrap().is_empty(),
         "without conversation_id, save_transcript_projection must early-return without saving"
     );
+}
+
+#[cfg(feature = "subagent")]
+#[test]
+fn legacy_runtime_context_preserves_anonymous_resource_guards() -> Result<(), String> {
+    let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
+    let context =
+        external_context_with_guards(vec![echo_core::tools::InvocationResourceGuard::new(
+            "anonymous-lease".to_string(),
+        )]);
+    agent.set_external_context(&context);
+    drop(context);
+
+    let runtime = agent
+        .build_runtime_context()
+        .ok_or_else(|| "legacy builder dropped a guard-only context".to_string())?;
+    assert!(runtime.run_id.is_none());
+    assert!(runtime.turn_id.is_none());
+    assert_eq!(runtime.resource_guards.len(), 1);
+    Ok(())
+}
+
+#[cfg(feature = "subagent")]
+#[test]
+fn legacy_runtime_context_preserves_conversation_only() -> Result<(), String> {
+    let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
+    let mut context = external_context_with_guards(Vec::new());
+    context.conversation_id = Some("conversation-only".to_string());
+    agent.set_external_context(&context);
+
+    let runtime = agent
+        .build_runtime_context()
+        .ok_or_else(|| "conversation-only context was dropped".to_string())?;
+    assert_eq!(
+        runtime.conversation_id.as_deref(),
+        Some("conversation-only")
+    );
+    agent.clear_external_context();
+    Ok(())
+}
+
+#[cfg(feature = "subagent")]
+#[test]
+fn direct_delegate_runtime_preserves_configured_conversation_only() -> Result<(), String> {
+    let agent = ReactAgent::new(
+        AgentConfig::new("test-model", "agent", "system")
+            .conversation_id("configured-conversation"),
+    );
+
+    let runtime = agent
+        .build_runtime_context()
+        .ok_or_else(|| "configured conversation-only delegate context was dropped".to_string())?;
+    assert_eq!(
+        runtime.conversation_id.as_deref(),
+        Some("configured-conversation")
+    );
+    Ok(())
+}
+
+#[cfg(feature = "subagent")]
+#[test]
+fn legacy_runtime_context_preserves_cancel_and_trace_only() -> Result<(), String> {
+    let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
+    let cancel = Arc::new(crate::agent::CancellationToken::new());
+    let trace: echo_core::tools::TraceSinkFn = Arc::new(|_| {});
+    let mut context = external_context_with_guards(Vec::new());
+    context.cancel = Some(Arc::clone(&cancel));
+    context.trace_sink = Some(Arc::clone(&trace));
+    agent.set_external_context(&context);
+
+    let runtime = agent
+        .build_runtime_context()
+        .ok_or_else(|| "cancel/trace-only context was dropped".to_string())?;
+    assert!(
+        runtime
+            .cancel
+            .as_ref()
+            .is_some_and(|value| Arc::ptr_eq(value, &cancel))
+    );
+    assert!(
+        runtime
+            .trace_sink
+            .as_ref()
+            .is_some_and(|value| Arc::ptr_eq(value, &trace))
+    );
+    agent.clear_external_context();
+    Ok(())
+}
+
+#[test]
+fn replacing_external_guards_drops_reentrant_resources_outside_mutex() {
+    let agent = Arc::new(ReactAgent::new(AgentConfig::new(
+        "test-model",
+        "agent",
+        "system",
+    )));
+    let observed_unlocked = Arc::new(AtomicBool::new(false));
+    let context =
+        external_context_with_guards(vec![echo_core::tools::InvocationResourceGuard::new(
+            ReentrantGuardProbe {
+                agent: Arc::downgrade(&agent),
+                observed_unlocked: Arc::clone(&observed_unlocked),
+            },
+        )]);
+    agent.set_external_context(&context);
+    drop(context);
+
+    agent.set_external_context(&external_context_with_guards(Vec::new()));
+    assert!(observed_unlocked.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn slow_external_guard_drop_does_not_block_guard_mutex() -> Result<(), String> {
+    let agent = Arc::new(ReactAgent::new(AgentConfig::new(
+        "test-model",
+        "agent",
+        "system",
+    )));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let context =
+        external_context_with_guards(vec![echo_core::tools::InvocationResourceGuard::new(
+            SlowGuardDrop {
+                entered: entered_tx,
+                release: std::sync::Mutex::new(release_rx),
+            },
+        )]);
+    agent.set_external_context(&context);
+    drop(context);
+
+    let replacing = {
+        let agent = Arc::clone(&agent);
+        tokio::task::spawn_blocking(move || {
+            agent.set_external_context(&external_context_with_guards(Vec::new()));
+        })
+    };
+    tokio::task::spawn_blocking(move || {
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("slow-drop start waiter failed: {error}"))??;
+
+    let concurrent = {
+        let agent = Arc::clone(&agent);
+        tokio::task::spawn_blocking(move || {
+            agent.set_external_context(&external_context_with_guards(Vec::new()));
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(1), concurrent)
+        .await
+        .map_err(|_| "guard mutex remained locked during application Drop".to_string())?
+        .map_err(|error| format!("concurrent setter failed: {error}"))?;
+
+    release_tx
+        .send(())
+        .map_err(|_| "slow guard release channel closed".to_string())?;
+    replacing
+        .await
+        .map_err(|error| format!("slow guard replacement failed: {error}"))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_context_epoch_never_exposes_mixed_fields() -> Result<(), String> {
+    let agent = Arc::new(ReactAgent::new(AgentConfig::new(
+        "test-model",
+        "agent",
+        "system",
+    )));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let a_trace: echo_core::tools::TraceSinkFn = Arc::new({
+        let slow_drop = SlowGuardDrop {
+            entered: entered_tx,
+            release: std::sync::Mutex::new(release_rx),
+        };
+        move |_| {
+            let _ = &slow_drop;
+        }
+    });
+    let a_context = echo_core::tools::ExternalRunContext {
+        conversation_id: Some("conversation-a".to_string()),
+        run_id: Some("run-a".to_string()),
+        turn_id: Some("turn-a".to_string()),
+        execution_id: Some("execution-a".to_string()),
+        isolation_id: Some("isolation-a".to_string()),
+        message_id: Some("message-a".to_string()),
+        cancel: Some(Arc::new(crate::agent::CancellationToken::new())),
+        trace_sink: Some(a_trace),
+        delegation_policy: Some(echo_core::tools::NestedDelegationPolicy {
+            can_spawn_subagents: true,
+            delegate_depth: 1,
+            max_delegate_depth: 3,
+        }),
+        resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(1_u64)],
+    };
+    agent.set_external_context(&a_context);
+    drop(a_context);
+
+    let b_cancel = Arc::new(crate::agent::CancellationToken::new());
+    let b_trace: echo_core::tools::TraceSinkFn = Arc::new(|_| {});
+    let b_context = echo_core::tools::ExternalRunContext {
+        conversation_id: Some("conversation-b".to_string()),
+        run_id: Some("run-b".to_string()),
+        turn_id: Some("turn-b".to_string()),
+        execution_id: Some("execution-b".to_string()),
+        isolation_id: Some("isolation-b".to_string()),
+        message_id: Some("message-b".to_string()),
+        cancel: Some(Arc::clone(&b_cancel)),
+        trace_sink: Some(Arc::clone(&b_trace)),
+        delegation_policy: Some(echo_core::tools::NestedDelegationPolicy {
+            can_spawn_subagents: true,
+            delegate_depth: 2,
+            max_delegate_depth: 4,
+        }),
+        resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+            "guard-b".to_string(),
+        )],
+    };
+    let setting = {
+        let agent = Arc::clone(&agent);
+        tokio::task::spawn_blocking(move || agent.set_external_context(&b_context))
+    };
+    tokio::task::spawn_blocking(move || {
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("epoch test drop waiter failed: {error}"))??;
+
+    let capture = {
+        let agent = Arc::clone(&agent);
+        tokio::task::spawn_blocking(move || agent.capture_legacy_external_context())
+    };
+    let captured = tokio::time::timeout(std::time::Duration::from_secs(1), capture).await;
+    let _ = release_tx.send(());
+    let captured = captured
+        .map_err(|_| "context capture waited on an application destructor".to_string())?
+        .map_err(|error| format!("context capture task failed: {error}"))?;
+    setting
+        .await
+        .map_err(|error| format!("epoch setter failed: {error}"))?;
+
+    assert_eq!(captured.conversation_id.as_deref(), Some("conversation-b"));
+    assert_eq!(captured.current_run_id.as_deref(), Some("run-b"));
+    assert_eq!(captured.turn_id.as_deref(), Some("turn-b"));
+    assert_eq!(captured.execution_id.as_deref(), Some("execution-b"));
+    assert_eq!(captured.isolation_id.as_deref(), Some("isolation-b"));
+    assert_eq!(captured.message_id.as_deref(), Some("message-b"));
+    assert!(
+        captured
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| Arc::ptr_eq(cancel, &b_cancel))
+    );
+    assert!(
+        captured
+            .trace_sink
+            .as_ref()
+            .is_some_and(|sink| Arc::ptr_eq(sink, &b_trace))
+    );
+    assert_eq!(
+        captured.delegation_policy,
+        Some(echo_core::tools::NestedDelegationPolicy {
+            can_spawn_subagents: true,
+            delegate_depth: 2,
+            max_delegate_depth: 4,
+        })
+    );
+    assert!(
+        captured
+            .resource_guards
+            .first()
+            .is_some_and(echo_core::tools::InvocationResourceGuard::retains::<String>)
+    );
+    agent.clear_external_context();
+    Ok(())
 }

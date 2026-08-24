@@ -1592,8 +1592,9 @@ mod tests {
         let mut agent = ReactAgent::new(config);
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
         agent.set_run_store(store.clone());
+        let legacy = agent.capture_legacy_external_context();
         let trace_run_id = agent
-            .start_trace_run("manual compress")
+            .start_legacy_trace_run("manual compress", &legacy)
             .await
             .ok_or_else(|| crate::error::ReactError::Other("trace run missing".to_string()))?;
         agent

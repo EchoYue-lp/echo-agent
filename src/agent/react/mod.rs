@@ -95,6 +95,59 @@ pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
 
 // ── ReactAgent struct ───────────────────────────────────────────────────────────
 
+#[derive(Clone, Default)]
+pub(crate) struct LegacyExternalContextSnapshot {
+    pub conversation_id: Option<String>,
+    pub current_run_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub execution_id: Option<String>,
+    pub isolation_id: Option<String>,
+    pub message_id: Option<String>,
+    pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
+    pub trace_sink: Option<echo_core::tools::TraceSinkFn>,
+    pub delegation_policy: Option<echo_core::tools::NestedDelegationPolicy>,
+    pub resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
+}
+
+impl LegacyExternalContextSnapshot {
+    #[cfg(feature = "subagent")]
+    fn is_empty(&self) -> bool {
+        self.conversation_id.is_none()
+            && self.current_run_id.is_none()
+            && self.turn_id.is_none()
+            && self.execution_id.is_none()
+            && self.isolation_id.is_none()
+            && self.message_id.is_none()
+            && self.cancel.is_none()
+            && self.trace_sink.is_none()
+            && self.delegation_policy.is_none()
+            && self.resource_guards.is_empty()
+    }
+
+    #[cfg(feature = "subagent")]
+    fn to_runtime_context(
+        &self,
+        conversation_id: Option<String>,
+    ) -> Option<echo_core::tools::ExternalRunContext> {
+        let effective_conversation_id = self.conversation_id.clone().or(conversation_id);
+        if self.is_empty() && effective_conversation_id.is_none() {
+            return None;
+        }
+        Some(echo_core::tools::ExternalRunContext {
+            conversation_id: effective_conversation_id,
+            run_id: self.current_run_id.clone(),
+            turn_id: self.turn_id.clone(),
+            execution_id: self.execution_id.clone(),
+            isolation_id: self.isolation_id.clone(),
+            message_id: self.message_id.clone(),
+            cancel: self.cancel.clone(),
+            trace_sink: self.trace_sink.clone(),
+            delegation_policy: self.delegation_policy,
+            resource_guards: self.resource_guards.clone(),
+        })
+    }
+}
+
 /// ReAct (Reasoning + Acting) Agent implementation.
 ///
 /// An autonomous agent based on the ReAct paradigm, supporting tool calling,
@@ -144,10 +197,10 @@ pub struct ReactAgent {
     pub run_store: Option<Arc<dyn crate::trace::RunStore>>,
 
     /// Product/business run ID propagated into tools and projections.
-    pub current_run_id: std::sync::Mutex<Option<String>>,
+    current_run_id: std::sync::Mutex<Option<String>>,
 
     /// Unique trace invocation ID used only by the framework run store.
-    pub current_trace_run_id: std::sync::Mutex<Option<String>>,
+    current_trace_run_id: std::sync::Mutex<Option<String>>,
 
     /// 外部 run 级上下文（跨 spawn 安全，值传递）。
     ///
@@ -156,23 +209,24 @@ pub struct ReactAgent {
     /// cancel / trace_sink 全部丢失。这里改用 Mutex 字段承载
     /// （set_external_context 设置，pipeline 构造 ToolContext 时读取），是跨
     /// spawn 安全的值传递通路。
-    pub external_cancel:
-        std::sync::Mutex<Option<std::sync::Arc<tokio_util::sync::CancellationToken>>>,
-    pub external_trace_sink: std::sync::Mutex<Option<echo_core::tools::TraceSinkFn>>,
-    pub external_delegation_policy:
-        std::sync::Mutex<Option<echo_core::tools::NestedDelegationPolicy>>,
+    external_context_epoch: std::sync::Mutex<()>,
+    external_conversation_id: std::sync::Mutex<Option<String>>,
+    external_cancel: std::sync::Mutex<Option<std::sync::Arc<tokio_util::sync::CancellationToken>>>,
+    external_trace_sink: std::sync::Mutex<Option<echo_core::tools::TraceSinkFn>>,
+    external_delegation_policy: std::sync::Mutex<Option<echo_core::tools::NestedDelegationPolicy>>,
+    external_resource_guards: std::sync::Mutex<Vec<echo_core::tools::InvocationResourceGuard>>,
     /// Stable execution id (`{task_id}:{attempt}`) set by the app layer before
     /// dispatching a subagent, so `SubagentEvent.execution_id` carries a stable
     /// identifier instead of bridge-side temp allocation. Carried as a Mutex
     /// field (same cross-spawn pattern as the other external_* fields).
-    pub external_execution_id: std::sync::Mutex<Option<String>>,
+    external_execution_id: std::sync::Mutex<Option<String>>,
     /// Stable identity for reusable worktree/workspace isolation resources.
-    pub external_isolation_id: std::sync::Mutex<Option<String>>,
-    pub external_turn_id: std::sync::Mutex<Option<String>>,
+    external_isolation_id: std::sync::Mutex<Option<String>>,
+    external_turn_id: std::sync::Mutex<Option<String>>,
     /// Chat message id that triggered the run, forwarded to
     /// `SubagentEvent::DispatchStarted.message_id` so the frontend can pin a
     /// subagent stream to the right chat message block.
-    pub external_message_id: std::sync::Mutex<Option<String>>,
+    external_message_id: std::sync::Mutex<Option<String>>,
 
     /// Optional tool execution pipeline. When absent, the standard pipeline is used.
     pub(crate) tool_execution_pipeline: Option<Arc<run::pipeline::ToolExecutionPipeline>>,
@@ -258,6 +312,16 @@ impl ReactAgent {
         message: crate::llm::types::Message,
     ) -> std::result::Result<String, crate::agent::TurnSteerError> {
         self.turn_steer_mailbox.steer(expected_turn_id, message)
+    }
+
+    /// Inject user input and observe when the active turn drains and settles it.
+    pub fn steer_input_tracked(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<crate::agent::AgentSteerReceipt, crate::agent::TurnSteerError> {
+        self.turn_steer_mailbox
+            .steer_tracked(expected_turn_id, message)
     }
 
     /// Chain-of-thought preamble auto-injected before tool calls.
@@ -570,9 +634,12 @@ impl ReactAgent {
             run_store: None,
             current_run_id: std::sync::Mutex::new(None),
             current_trace_run_id: std::sync::Mutex::new(None),
+            external_context_epoch: std::sync::Mutex::new(()),
+            external_conversation_id: std::sync::Mutex::new(None),
             external_cancel: std::sync::Mutex::new(None),
             external_trace_sink: std::sync::Mutex::new(None),
             external_delegation_policy: std::sync::Mutex::new(None),
+            external_resource_guards: std::sync::Mutex::new(Vec::new()),
             external_execution_id: std::sync::Mutex::new(None),
             external_isolation_id: std::sync::Mutex::new(None),
             external_turn_id: std::sync::Mutex::new(None),
@@ -1880,15 +1947,22 @@ impl ReactAgent {
         }
     }
 
-    /// Start a unique trace invocation while preserving any product run ID.
-    pub(crate) async fn start_trace_run(&self, input: &str) -> Option<String> {
-        let parent_run_id = self
-            .current_run_id
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
+    pub(crate) async fn start_legacy_trace_run(
+        &self,
+        input: &str,
+        legacy: &LegacyExternalContextSnapshot,
+    ) -> Option<String> {
         let trace_run_id = self
-            .start_scoped_trace_run(input, parent_run_id.as_deref(), None, None, None)
+            .start_scoped_trace_run(
+                input,
+                legacy.current_run_id.as_deref(),
+                legacy
+                    .conversation_id
+                    .as_deref()
+                    .or(self.config.conversation_id.as_deref()),
+                legacy.turn_id.as_deref(),
+                legacy.execution_id.as_deref(),
+            )
             .await?;
         *self
             .current_trace_run_id
@@ -2079,13 +2153,13 @@ impl ReactAgent {
                 .first()
                 .map(|d| d.name.clone())
                 .unwrap_or_else(|| "default".to_string());
-            let cancel = self
-                .external_cancel
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
+            let legacy = self.capture_legacy_external_context();
+            let cancel = legacy
+                .cancel
                 .as_ref()
                 .map(|token| token.as_ref().child_token())
                 .unwrap_or_default();
+            let runtime_context = legacy.to_runtime_context(self.config.conversation_id.clone());
 
             let req = DispatchRequest {
                 agent_name,
@@ -2102,7 +2176,7 @@ impl ReactAgent {
                     )
                     .await,
                 delegation_policy: DispatchRequest::policy_from_depth(depth),
-                runtime_context: self.build_runtime_context(),
+                runtime_context,
                 message: None,
                 prompt_payload: None,
                 constraints: Vec::new(),
@@ -2154,13 +2228,13 @@ impl ReactAgent {
 
         let mode = ExecutionMode::Fork;
         let inheritance = crate::agent::subagent::context::ContextInheritance::fresh_default();
-        let cancel = self
-            .external_cancel
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        let legacy = self.capture_legacy_external_context();
+        let cancel = legacy
+            .cancel
             .as_ref()
             .map(|token| token.as_ref().child_token())
             .unwrap_or_default();
+        let runtime_context = legacy.to_runtime_context(self.config.conversation_id.clone());
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
@@ -2172,7 +2246,7 @@ impl ReactAgent {
             parent_agent: self.config.agent_name.clone(),
             parent_context: self.build_parent_context_with(&inheritance).await,
             delegation_policy: DispatchRequest::policy_from_depth(depth),
-            runtime_context: self.build_runtime_context(),
+            runtime_context,
             message: None,
             prompt_payload: None,
             constraints: Vec::new(),
@@ -2632,59 +2706,173 @@ impl ReactAgent {
         Ok(result)
     }
 
-    /// 从当前 agent 的 external_* 字段构造 ExternalRunContext（透传给 subagent）。
-    ///
-    /// 这样主 agent 委派 subagent、subagent 委派 sub-subagent 时,run context 自动继承
-    /// （嵌套自然继承)。current_run_id 为 None 时返回 None（无 run 上下文,旧行为）。
-    #[cfg(feature = "subagent")]
-    fn build_runtime_context(&self) -> Option<echo_core::tools::ExternalRunContext> {
-        let run_id = self
-            .current_run_id
+    pub(crate) fn capture_legacy_external_context(&self) -> LegacyExternalContextSnapshot {
+        let _epoch = self
+            .external_context_epoch
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let turn_id = self
-            .external_turn_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if run_id.is_none() && turn_id.is_none() {
-            return None;
-        }
-        Some(echo_core::tools::ExternalRunContext {
-            conversation_id: self.config.conversation_id.clone(),
-            run_id,
-            turn_id,
+            .unwrap_or_else(|error| error.into_inner());
+        LegacyExternalContextSnapshot {
+            conversation_id: self
+                .external_conversation_id
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+            current_run_id: self
+                .current_run_id
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+            turn_id: self
+                .external_turn_id
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
             execution_id: self
                 .external_execution_id
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|error| error.into_inner())
                 .clone(),
             isolation_id: self
                 .external_isolation_id
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|error| error.into_inner())
                 .clone(),
             message_id: self
                 .external_message_id
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|error| error.into_inner())
                 .clone(),
             cancel: self
                 .external_cancel
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|error| error.into_inner())
                 .clone(),
             trace_sink: self
                 .external_trace_sink
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|error| error.into_inner())
                 .clone(),
             delegation_policy: *self
                 .external_delegation_policy
                 .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        })
+                .unwrap_or_else(|error| error.into_inner()),
+            resource_guards: self
+                .external_resource_guards
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+        }
+    }
+
+    pub(crate) fn capture_current_trace_run_id(&self) -> Option<String> {
+        self.current_trace_run_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn swap_legacy_external_context(
+        &self,
+        next: LegacyExternalContextSnapshot,
+    ) -> LegacyExternalContextSnapshot {
+        let _epoch = self
+            .external_context_epoch
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let LegacyExternalContextSnapshot {
+            conversation_id,
+            current_run_id,
+            turn_id,
+            execution_id,
+            isolation_id,
+            message_id,
+            cancel,
+            trace_sink,
+            delegation_policy,
+            resource_guards,
+        } = next;
+        LegacyExternalContextSnapshot {
+            conversation_id: std::mem::replace(
+                &mut *self
+                    .external_conversation_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                conversation_id,
+            ),
+            current_run_id: std::mem::replace(
+                &mut *self
+                    .current_run_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                current_run_id,
+            ),
+            turn_id: std::mem::replace(
+                &mut *self
+                    .external_turn_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                turn_id,
+            ),
+            execution_id: std::mem::replace(
+                &mut *self
+                    .external_execution_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                execution_id,
+            ),
+            isolation_id: std::mem::replace(
+                &mut *self
+                    .external_isolation_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                isolation_id,
+            ),
+            message_id: std::mem::replace(
+                &mut *self
+                    .external_message_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                message_id,
+            ),
+            cancel: std::mem::replace(
+                &mut *self
+                    .external_cancel
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                cancel,
+            ),
+            trace_sink: std::mem::replace(
+                &mut *self
+                    .external_trace_sink
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                trace_sink,
+            ),
+            delegation_policy: std::mem::replace(
+                &mut *self
+                    .external_delegation_policy
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                delegation_policy,
+            ),
+            resource_guards: std::mem::replace(
+                &mut *self
+                    .external_resource_guards
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                resource_guards,
+            ),
+        }
+    }
+
+    /// 从当前 agent 的 external_* 字段构造 ExternalRunContext（透传给 subagent）。
+    ///
+    /// 这样主 agent 委派 subagent、subagent 委派 sub-subagent 时,run context 自动继承
+    /// （嵌套自然继承)。没有标识且没有资源 guard 时返回 None。
+    #[cfg(feature = "subagent")]
+    fn build_runtime_context(&self) -> Option<echo_core::tools::ExternalRunContext> {
+        let context = self.capture_legacy_external_context();
+        context.to_runtime_context(self.config.conversation_id.clone())
     }
 
     /// Build parent context using an explicit inheritance policy.
@@ -2764,6 +2952,15 @@ impl Agent for ReactAgent {
         ReactAgent::steer_input(self, expected_turn_id, message)
     }
 
+    fn steer_input_tracked(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<crate::agent::AgentSteerReceipt, echo_core::agent::AgentSteerError>
+    {
+        ReactAgent::steer_input_tracked(self, expected_turn_id, message)
+    }
+
     fn current_run_id(&self) -> Option<String> {
         self.current_run_id
             .lock()
@@ -2772,73 +2969,24 @@ impl Agent for ReactAgent {
     }
 
     fn set_external_context(&self, ctx: &echo_core::tools::ExternalRunContext) {
-        *self
-            .current_run_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ctx.run_id.clone();
-        *self
-            .external_turn_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ctx.turn_id.clone();
-        *self
-            .external_cancel
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ctx.cancel.clone();
-        *self
-            .external_trace_sink
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ctx.trace_sink.clone();
-        *self
-            .external_delegation_policy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ctx.delegation_policy;
-        *self
-            .external_execution_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ctx.execution_id.clone();
-        *self
-            .external_isolation_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ctx.isolation_id.clone();
-        *self
-            .external_message_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ctx.message_id.clone();
+        let previous = self.swap_legacy_external_context(LegacyExternalContextSnapshot {
+            conversation_id: ctx.conversation_id.clone(),
+            current_run_id: ctx.run_id.clone(),
+            turn_id: ctx.turn_id.clone(),
+            execution_id: ctx.execution_id.clone(),
+            isolation_id: ctx.isolation_id.clone(),
+            message_id: ctx.message_id.clone(),
+            cancel: ctx.cancel.clone(),
+            trace_sink: ctx.trace_sink.clone(),
+            delegation_policy: ctx.delegation_policy,
+            resource_guards: ctx.resource_guards.clone(),
+        });
+        drop(previous);
     }
 
     fn clear_external_context(&self) {
-        *self
-            .current_run_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        *self
-            .external_turn_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        *self
-            .external_cancel
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        *self
-            .external_trace_sink
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        *self
-            .external_delegation_policy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        *self
-            .external_execution_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        *self
-            .external_isolation_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        *self
-            .external_message_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        let previous = self.swap_legacy_external_context(LegacyExternalContextSnapshot::default());
+        drop(previous);
     }
 
     fn set_working_dir(&self, path: Option<std::path::PathBuf>) {

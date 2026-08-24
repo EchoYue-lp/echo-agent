@@ -153,6 +153,43 @@ async fn chat_stream(
 
 ---
 
+## 可跟踪的同轮 Steering
+
+`steer_input()` 只证明活动 turn 的 mailbox 已接收输入。需要可靠持久化的应用应使用
+`steer_input_tracked()`，明确区分 mailbox 接收、写入模型上下文和 root turn 终态：
+
+```rust
+use echo_agent::prelude::{AgentSteerState, Message};
+
+let mut receipt = agent_handle
+    .steer_input_tracked(
+        Some("turn-42"),
+        Message::user("同时检查生成的文件。".to_string()),
+    )
+    .await?;
+
+match receipt.wait_for_drained().await {
+    AgentSteerState::Drained
+    | AgentSteerState::TurnSettled { drained: true, .. } => {
+        // 输入已经进入活动模型上下文，durable inbox 可以确认消费。
+    }
+    AgentSteerState::TurnSettled { drained: false, .. } => {
+        // turn 在消费前结束，应保留输入等待重放。
+    }
+    AgentSteerState::Accepted => {}
+}
+
+let _terminal = receipt.wait_for_turn_settled().await;
+```
+
+`Drained` 不是成功终态。所属 turn 之后仍可能完成、失败、取消或被 drop。receipt 的
+转换由 framework 的真实 mailbox drain 和 active-turn lease 触发；调用方不应根据
+渲染 token 或 transcript 写入时机自行推断。Hook block 结算为 `Failed`。生命周期
+信号异常关闭时，所有 receipt clone 会收敛为 `Dropped`，同时保留最后确认的 drain
+事实。
+
+---
+
 ## 流式超时机制（规划中）
 
 > **注意：** 以下 API 为设计规划，尚未在当前版本中实现。流式超时通过 LLM 客户端层的请求超时控制。

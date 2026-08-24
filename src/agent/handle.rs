@@ -205,6 +205,19 @@ impl Agent for RwLockAgentWrapper {
         guard.steer_input(expected_turn_id, message)
     }
 
+    fn steer_input_tracked(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<echo_core::agent::AgentSteerReceipt, echo_core::agent::AgentSteerError>
+    {
+        let guard = self
+            .inner
+            .try_read()
+            .map_err(|_| echo_core::agent::AgentSteerError::StateUnavailable)?;
+        guard.steer_input_tracked(expected_turn_id, message)
+    }
+
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         let inner = self.inner.clone();
         let task = task.to_string();
@@ -343,6 +356,17 @@ impl AgentHandle {
     ) -> std::result::Result<String, crate::agent::TurnSteerError> {
         let guard = self.agent.read().await;
         guard.steer_input(expected_turn_id, message)
+    }
+
+    /// Inject input and retain a receipt driven by the active turn's real
+    /// mailbox-drain and terminal boundaries.
+    pub async fn steer_input_tracked(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<crate::agent::AgentSteerReceipt, crate::agent::TurnSteerError> {
+        let guard = self.agent.read().await;
+        guard.steer_input_tracked(expected_turn_id, message)
     }
 
     /// Wrap an existing `Arc<RwLock<ReactAgent>>`.

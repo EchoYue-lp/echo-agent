@@ -637,6 +637,8 @@ pub struct AgentRunSnapshot {
     pub trace_run_id: Option<String>,
     /// Current user-input/agent turn ID.
     pub current_turn_id: Option<String>,
+    /// Private authority for draining the exact active turn incarnation.
+    pub(crate) turn_steer_incarnation: Option<Arc<()>>,
     /// Message that triggered the current invocation.
     pub current_message_id: Option<String>,
     /// Typed active user message, including any attachments.
@@ -648,6 +650,8 @@ pub struct AgentRunSnapshot {
     pub external_cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     pub external_trace_sink: Option<echo_core::tools::TraceSinkFn>,
     pub external_delegation_policy: Option<echo_core::tools::NestedDelegationPolicy>,
+    /// Opaque ownership tokens retained for this invocation and its tools.
+    pub resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
     /// Permission service (human-in-the-loop).
     #[cfg(feature = "human-loop")]
     pub permission_service: Option<Arc<crate::human_loop::PermissionService>>,
@@ -686,7 +690,15 @@ pub struct AgentRunSnapshot {
 impl AgentRunSnapshot {
     /// Create a snapshot from a [`super::ReactAgent`].
     pub fn from_agent(agent: &super::ReactAgent) -> Self {
-        Self::from_agent_source(agent, None)
+        let legacy = agent.capture_legacy_external_context();
+        Self::from_agent_source(agent, None, Some(&legacy))
+    }
+
+    pub(crate) fn from_agent_with_legacy_context(
+        agent: &super::ReactAgent,
+        legacy: &crate::agent::react::LegacyExternalContextSnapshot,
+    ) -> Self {
+        Self::from_agent_source(agent, None, Some(legacy))
     }
 
     /// Create a snapshot whose run-scoped fields come from one invocation value.
@@ -694,12 +706,13 @@ impl AgentRunSnapshot {
         agent: &super::ReactAgent,
         invocation: &echo_core::agent::AgentInvocationContext,
     ) -> Self {
-        Self::from_agent_source(agent, Some(invocation))
+        Self::from_agent_source(agent, Some(invocation), None)
     }
 
     fn from_agent_source(
         agent: &super::ReactAgent,
         invocation: Option<&echo_core::agent::AgentInvocationContext>,
+        legacy: Option<&crate::agent::react::LegacyExternalContextSnapshot>,
     ) -> Self {
         let mut config = RuntimeConfig::from_agent_config(&agent.config);
         config.input_modalities = agent
@@ -713,6 +726,12 @@ impl AgentRunSnapshot {
         }
         let runtime = invocation.and_then(|context| context.runtime.as_ref());
         if let Some(conversation_id) = runtime.and_then(|context| context.conversation_id.clone()) {
+            config.conversation_id = Some(conversation_id.clone());
+            config.runtime_state_id = Some(conversation_id);
+        } else if invocation.is_none()
+            && let Some(conversation_id) =
+                legacy.and_then(|context| context.conversation_id.clone())
+        {
             config.conversation_id = Some(conversation_id.clone());
             config.runtime_state_id = Some(conversation_id);
         }
@@ -750,60 +769,57 @@ impl AgentRunSnapshot {
             current_run_id: if invocation.is_some() {
                 runtime.and_then(|context| context.run_id.clone())
             } else {
-                agent
-                    .current_run_id
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()
+                legacy.and_then(|context| context.current_run_id.clone())
             },
             trace_run_id: if invocation.is_some() {
                 None
             } else {
-                agent
-                    .current_trace_run_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone()
+                agent.capture_current_trace_run_id()
             },
-            current_turn_id: runtime.and_then(|context| context.turn_id.clone()),
+            current_turn_id: if invocation.is_some() {
+                runtime.and_then(|context| context.turn_id.clone())
+            } else {
+                legacy.and_then(|context| context.turn_id.clone())
+            },
+            turn_steer_incarnation: None,
             current_message_id: if invocation.is_some() {
                 runtime.and_then(|context| context.message_id.clone())
             } else {
-                agent
-                    .external_message_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone()
+                legacy.and_then(|context| context.message_id.clone())
             },
             current_message: None,
-            current_execution_id: runtime.and_then(|context| context.execution_id.clone()),
+            current_execution_id: if invocation.is_some() {
+                runtime.and_then(|context| context.execution_id.clone())
+            } else {
+                legacy.and_then(|context| context.execution_id.clone())
+            },
             external_cancel: if let Some(context) = invocation {
                 runtime
                     .and_then(|value| value.cancel.clone())
                     .or_else(|| context.cancel.clone().map(Arc::new))
             } else {
-                agent
-                    .external_cancel
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()
+                legacy.and_then(|context| context.cancel.clone())
             },
             external_trace_sink: if invocation.is_some() {
                 runtime.and_then(|context| context.trace_sink.clone())
             } else {
-                agent
-                    .external_trace_sink
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()
+                legacy.and_then(|context| context.trace_sink.clone())
             },
             external_delegation_policy: if invocation.is_some() {
                 runtime.and_then(|context| context.delegation_policy)
             } else {
-                *agent
-                    .external_delegation_policy
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                legacy.and_then(|context| context.delegation_policy)
+            },
+            resource_guards: if let Some(context) = invocation {
+                let mut guards = runtime
+                    .map(|runtime| runtime.resource_guards.clone())
+                    .unwrap_or_default();
+                guards.extend(context.resource_guards.iter().cloned());
+                guards
+            } else {
+                legacy
+                    .map(|context| context.resource_guards.clone())
+                    .unwrap_or_default()
             },
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
@@ -2123,6 +2139,9 @@ mod transcript_filter_tests {
                     delegate_depth: 3,
                     max_delegate_depth: 4,
                 }),
+                resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                    "runtime-guard".to_string(),
+                )],
             }),
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-atomic")),
             cancel: None,
@@ -2130,6 +2149,9 @@ mod transcript_filter_tests {
             visible_tools: None,
             run_budget: None,
             history: None,
+            resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                "invocation-guard".to_string(),
+            )],
         };
 
         let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
@@ -2158,6 +2180,7 @@ mod transcript_filter_tests {
                 max_delegate_depth: 4,
             })
         );
+        assert_eq!(snapshot.resource_guards.len(), 2);
         Ok(())
     }
 

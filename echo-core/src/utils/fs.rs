@@ -154,6 +154,29 @@ pub fn validate_path_segment(value: &str) -> std::io::Result<&str> {
     Ok(value)
 }
 
+/// Encode exact UTF-8 bytes as a filesystem-collation-independent identity.
+///
+/// The output uses only lowercase hexadecimal ASCII, so case folding and
+/// Unicode normalization performed by a filesystem cannot alias distinct input
+/// strings. This function is total and does not validate whether `value` is an
+/// accepted external identifier.
+pub fn encode_utf8_path_identity(value: &str) -> String {
+    let capacity = value.len().saturating_mul(2).saturating_add(3);
+    let mut encoded = String::with_capacity(capacity);
+    encoded.push_str("id-");
+    for byte in value.as_bytes() {
+        encoded.push(char::from_digit(u32::from(*byte >> 4), 16).unwrap_or('0'));
+        encoded.push(char::from_digit(u32::from(*byte & 0x0f), 16).unwrap_or('0'));
+    }
+    encoded
+}
+
+/// Validate an external identifier and encode its exact filesystem identity.
+pub fn encode_path_segment_identity(value: &str) -> std::io::Result<String> {
+    validate_path_segment(value)?;
+    Ok(encode_utf8_path_identity(value))
+}
+
 /// Join a validated external identifier beneath `root`.
 pub fn join_path_segment(root: &Path, value: &str) -> std::io::Result<PathBuf> {
     let joined = root.join(validate_path_segment(value)?);
