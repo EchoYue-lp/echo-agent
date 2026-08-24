@@ -1880,6 +1880,7 @@ mod transcript_filter_tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             ..Default::default()
         };
@@ -1913,6 +1914,7 @@ mod transcript_filter_tests {
                 cancel: None,
                 trace_sink: None,
                 delegation_policy: None,
+                resource_guards: Vec::new(),
             }),
             ..Default::default()
         };
@@ -1993,7 +1995,10 @@ mod transcript_filter_tests {
         )?;
         let after_compact = restored_cursor.assign("new-runtime-incarnation", &compacted)?;
         assert_eq!(after_compact.len(), 3);
-        assert_eq!(after_compact.get(0).map(|message| message.ordinal), Some(0));
+        assert_eq!(
+            after_compact.first().map(|message| message.ordinal),
+            Some(0)
+        );
         assert_eq!(after_compact.get(1).map(|message| message.ordinal), Some(1));
         assert_eq!(after_compact.get(2).map(|message| message.ordinal), Some(2));
 

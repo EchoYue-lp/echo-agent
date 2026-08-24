@@ -2749,6 +2749,8 @@ mod tests {
             .system_prompt("You are a test assistant.")
             .build()?;
         let invocation = echo_core::agent::AgentInvocationContext {
+            runtime_state_id: None,
+            transcript_generation_id: None,
             runtime: Some(echo_core::tools::ExternalRunContext {
                 conversation_id: None,
                 run_id: Some("tracked-provider-failure".to_string()),
@@ -2824,6 +2826,8 @@ mod tests {
             .build()?;
         let cancel = crate::agent::CancellationToken::new();
         let invocation = echo_core::agent::AgentInvocationContext {
+            runtime_state_id: None,
+            transcript_generation_id: None,
             runtime: Some(echo_core::tools::ExternalRunContext {
                 conversation_id: None,
                 run_id: Some("tracked-cancel".to_string()),
