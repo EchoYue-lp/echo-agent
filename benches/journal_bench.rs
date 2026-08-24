@@ -7,10 +7,11 @@
 //! recovery ratio (the reason `CheckpointedReducer` exists is that a 100k
 //! recovery should replay only the tail, not the whole journal).
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use echo_agent::state::journal::{
     CheckpointStore, CheckpointedReducer, EventJournal, EventReducer, FileCheckpointStore,
-    FileEventJournal, MemoryCheckpointStore, MemoryEventJournal, SegmentedFileEventJournal,
+    FileEventJournal, MemoryCheckpointStore, MemoryEventJournal, PreparedJournalBatch,
+    SegmentedFileEventJournal,
 };
 use echo_agent::utils::fs::FileDurability;
 use std::sync::Arc;
@@ -31,20 +32,100 @@ impl EventReducer for BenchReducer {
     }
 }
 
+fn prepared_batches(total: usize, batch_size: usize) -> Vec<PreparedJournalBatch<u64>> {
+    (0..total)
+        .collect::<Vec<_>>()
+        .chunks(batch_size)
+        .map(|chunk| {
+            let events = chunk
+                .iter()
+                .map(|value| u64::try_from(*value).unwrap_or(u64::MAX))
+                .collect::<Vec<_>>();
+            PreparedJournalBatch::new(events).expect("prepare benchmark batch")
+        })
+        .collect()
+}
+
 fn bench_journal(c: &mut Criterion) {
     const RECOVERY_EVENTS: u64 = 105_321;
     const CHECKPOINT_CADENCE: u64 = 10_000;
     let mut group = c.benchmark_group("journal");
 
-    group.bench_function("memory_append", |b| {
-        b.iter(|| {
-            let journal = MemoryEventJournal::<u64>::new();
-            for value in 0..10_000u64 {
-                journal.append(value).expect("append");
-            }
-            journal.last_sequence()
-        })
-    });
+    const BENCH_EVENTS: usize = 128;
+    for batch_size in [1_usize, 2, 8, 32, 128] {
+        group.bench_with_input(
+            BenchmarkId::new("memory_append_total_128", batch_size),
+            &batch_size,
+            |b, size| {
+                b.iter_batched(
+                    || {
+                        (
+                            MemoryEventJournal::new(),
+                            prepared_batches(BENCH_EVENTS, *size),
+                        )
+                    },
+                    |(journal, batches)| {
+                        for batch in batches {
+                            journal.append_batch(batch).expect("memory batch");
+                        }
+                        journal.last_sequence()
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("file_append_total_128_flush", batch_size),
+            &batch_size,
+            |b, size| {
+                b.iter_batched(
+                    || {
+                        let directory = tempfile::tempdir().expect("batch tempdir");
+                        let journal = FileEventJournal::open(
+                            directory.path().join("events.jsonl"),
+                            FileDurability::Flush,
+                        )
+                        .expect("open file batch journal");
+                        let batches = prepared_batches(BENCH_EVENTS, *size);
+                        (directory, journal, batches)
+                    },
+                    |(_directory, journal, batches)| {
+                        for batch in batches {
+                            journal.append_batch(batch).expect("file batch");
+                        }
+                        journal.last_sequence()
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("segmented_append_total_128_flush", batch_size),
+            &batch_size,
+            |b, size| {
+                b.iter_batched(
+                    || {
+                        let directory = tempfile::tempdir().expect("segmented batch tempdir");
+                        let journal = SegmentedFileEventJournal::open(
+                            directory.path().join("segments"),
+                            64 * 1024,
+                            FileDurability::Flush,
+                        )
+                        .expect("open segmented batch journal");
+                        let batches = prepared_batches(BENCH_EVENTS, *size);
+                        (directory, journal, batches)
+                    },
+                    |(_directory, journal, batches)| {
+                        for batch in batches {
+                            journal.append_batch(batch).expect("segmented batch");
+                        }
+                        journal.last_sequence()
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
+    }
 
     group.bench_function("memory_replay_after_zero_10k", |b| {
         b.iter_batched(
@@ -58,21 +139,6 @@ fn bench_journal(c: &mut Criterion) {
             |journal| journal.replay_after(0, usize::MAX).expect("replay").len(),
             criterion::BatchSize::LargeInput,
         )
-    });
-
-    group.bench_function("file_append_flush_10k", |b| {
-        b.iter(|| {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let journal = FileEventJournal::<u64>::open(
-                dir.path().join("events.jsonl"),
-                FileDurability::Flush,
-            )
-            .expect("open journal");
-            for value in 0..10_000u64 {
-                journal.append(value).expect("append");
-            }
-            journal.last_sequence()
-        })
     });
 
     group.bench_function("file_replay_after_zero_10k", |b| {
@@ -92,22 +158,6 @@ fn bench_journal(c: &mut Criterion) {
             |(_dir, journal)| journal.replay_after(0, usize::MAX).expect("replay").len(),
             criterion::BatchSize::LargeInput,
         )
-    });
-
-    group.bench_function("segmented_append_flush_10k", |b| {
-        b.iter(|| {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let journal = SegmentedFileEventJournal::<u64>::open(
-                dir.path().join("segments"),
-                64 * 1024,
-                FileDurability::Flush,
-            )
-            .expect("open segmented journal");
-            for value in 0..10_000u64 {
-                journal.append(value).expect("append");
-            }
-            journal.last_sequence()
-        })
     });
 
     group.bench_function("segmented_replay_after_zero_10k", |b| {

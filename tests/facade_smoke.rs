@@ -2,7 +2,9 @@ use echo_agent::config::FrameworkConfig;
 use echo_agent::paths::DataRoot;
 use echo_agent::runtime::{AgentTurnDriver, TurnMode};
 use echo_agent::state::journal::{
-    EventJournal, JournalDurabilityStatus, MemoryEventJournal, SegmentedFileEventJournal,
+    EventJournal, JournalAppendError, JournalBatchAppendError, JournalBatchCommitStatus,
+    JournalBatchLookup, JournalDurabilityStatus, MemoryEventJournal, PreparedJournalBatch,
+    SegmentedFileEventJournal,
 };
 use echo_agent::tasks::{
     RuntimeDagController, RuntimeInterruptionDisposition, RuntimeInterruptionReceipt,
@@ -34,6 +36,27 @@ fn runtime_state_and_task_primitives_are_available_from_the_facade() {
     let receipt = journal.append("facade-event".to_string()).expect("append");
     assert_eq!(receipt.record.sequence, 1);
     assert_eq!(receipt.durability, JournalDurabilityStatus::Confirmed);
+
+    let batch = journal
+        .append_batch(
+            PreparedJournalBatch::new(vec!["second".to_string(), "third".to_string()])
+                .expect("prepare facade batch"),
+        )
+        .expect("append facade batch");
+    assert_eq!(batch.records().len(), 2);
+    assert_eq!(batch.commit_status(), JournalBatchCommitStatus::Committed);
+    assert_eq!(
+        batch.records().first().map(|record| record.sequence),
+        Some(2)
+    );
+    let _typed_batch_error: Option<JournalBatchAppendError<String>> = None;
+    let _typed_single_error: Option<JournalAppendError<String>> = None;
+    let prepared =
+        PreparedJournalBatch::new(vec!["absent".to_string()]).expect("prepare facade lookup");
+    assert!(matches!(
+        journal.lookup_batch(&prepared).expect("facade lookup"),
+        JournalBatchLookup::Absent
+    ));
 
     let _driver = AgentTurnDriver;
     let _mode = TurnMode::Chat;

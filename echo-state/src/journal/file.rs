@@ -1,14 +1,16 @@
 //! File-backed journal and checkpoint implementations.
 //!
-//! [`FileEventJournal`] persists one JSON line per record. On open it scans the
-//! file, validates 1-based contiguous sequences, tolerates one torn trailing
-//! record (partial write after a crash) by truncating it, and rejects gaps or
+//! [`FileEventJournal`] persists one JSON line per atomic batch frame. On open
+//! it scans the file, validates 1-based contiguous sequences, tolerates one
+//! torn trailing frame by truncating the entire batch, and rejects gaps or
 //! mid-file corruption loudly. [`FileCheckpointStore`] writes one atomic
 //! snapshot file that pairs the reducer state with its applied sequence.
 
 use super::{
-    CheckpointFrame, CheckpointStore, EventJournal, JournalAppendReceipt, JournalDurabilityStatus,
-    JournalEvent, JournalRecord, WeakRegistry,
+    BatchIdentity, CheckpointFrame, CheckpointStore, EventJournal, JournalBatchAppendError,
+    JournalBatchAppendReceipt, JournalBatchAppendResult, JournalBatchCommitStatus,
+    JournalBatchLookup, JournalDurabilityStatus, JournalEvent, JournalRecord, PreparedJournalBatch,
+    WeakRegistry, decode_journal_batch, prepare_journal_frame, verify_journal_batch_sequence,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
@@ -23,6 +25,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::any::TypeId;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -52,52 +55,72 @@ fn finish_new_journal_creation(
 
 /// Scanned state of a journal file on open.
 struct ScannedJournal {
-    /// Byte length of the valid prefix (records plus their newlines).
+    /// Byte length of the valid prefix (batch frames plus their newlines).
     valid_len: u64,
     /// Next sequence a fresh append should assign.
     next_sequence: u64,
-    /// Byte offset of every record, indexed by `sequence - 1`.
+    /// Byte offset of every record's batch frame, indexed by `sequence - 1`.
     record_offsets: Vec<u64>,
+    batches: HashMap<String, FileBatchIndex>,
 }
 
-/// Parse the journal bytes and validate sequencing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileBatchIndex {
+    identity: BatchIdentity,
+    frame_offset: u64,
+}
+
+/// Parse the journal batch frames and validate sequencing.
 ///
 /// Returns the valid prefix length, the next sequence, and whether the file
-/// ended with a torn record that should be truncated. An empty line in the
-/// middle is corruption; a missing trailing newline only invalidates the last
-/// record.
+/// ended with a torn frame that should be truncated. A missing trailing newline
+/// invalidates the complete final batch; corruption in a complete frame fails
+/// closed.
 fn scan_journal<E: JournalEvent>(context: &str, bytes: &[u8]) -> Result<ScannedJournal> {
     let mut valid_len: u64 = 0;
     let mut next_sequence: u64 = 1;
     let mut offset: usize = 0;
     let mut record_offsets = Vec::new();
+    let mut batches = HashMap::new();
     while offset < bytes.len() {
-        let Some(newline) = bytes[offset..].iter().position(|byte| *byte == b'\n') else {
-            // Trailing chunk without a newline: a torn write. It is only
-            // tolerated as the final record; drop it.
+        let suffix = bytes
+            .get(offset..)
+            .ok_or_else(|| ReactError::Other(format!("{context}: invalid journal byte offset")))?;
+        let Some(newline) = suffix.iter().position(|byte| *byte == b'\n') else {
+            // A partial physical frame makes none of its records visible.
             break;
         };
         let line_end = offset
             .checked_add(newline)
             .ok_or_else(|| ReactError::Other(format!("{context}: journal byte offset overflow")))?;
-        let line = &bytes[offset..line_end];
-        let record: JournalRecord<E> = serde_json::from_slice(line).map_err(|error| {
-            ReactError::Other(format!(
-                "{context}: corrupt journal record at sequence {next_sequence}: {error}"
-            ))
+        let line = bytes.get(offset..line_end).ok_or_else(|| {
+            ReactError::Other(format!("{context}: invalid journal batch byte range"))
         })?;
-        if record.sequence != next_sequence {
+        let frame = decode_journal_batch::<E>(context, line)?;
+        if batches.contains_key(frame.batch_id()) {
             return Err(ReactError::Other(format!(
-                "{context}: journal sequence gap, expected {next_sequence} but found {}",
-                record.sequence
+                "{context}: duplicate physical batch identity {}",
+                frame.batch_id()
             )));
         }
-        record_offsets.push(u64::try_from(offset).map_err(|_| {
-            ReactError::Other(format!("{context}: journal exceeds supported size"))
-        })?);
-        next_sequence = record
-            .sequence
-            .checked_add(1)
+        verify_journal_batch_sequence(context, next_sequence, &frame)?;
+        let frame_offset = u64::try_from(offset)
+            .map_err(|_| ReactError::Other(format!("{context}: journal exceeds supported size")))?;
+        record_offsets.extend(std::iter::repeat_n(frame_offset, frame.records().len()));
+        let record_count = u64::try_from(frame.records().len()).map_err(|_| {
+            ReactError::Other(format!(
+                "{context}: journal batch count exceeds supported range"
+            ))
+        })?;
+        batches.insert(
+            frame.batch_id().to_string(),
+            FileBatchIndex {
+                identity: frame.identity()?,
+                frame_offset,
+            },
+        );
+        next_sequence = next_sequence
+            .checked_add(record_count)
             .ok_or_else(|| ReactError::Other(format!("{context}: journal sequence exhausted")))?;
         let next_offset = line_end
             .checked_add(1)
@@ -110,6 +133,7 @@ fn scan_journal<E: JournalEvent>(context: &str, bytes: &[u8]) -> Result<ScannedJ
         valid_len,
         next_sequence,
         record_offsets,
+        batches,
     })
 }
 
@@ -118,6 +142,7 @@ struct FileJournalState {
     next_sequence: u64,
     valid_len: u64,
     record_offsets: Vec<u64>,
+    batches: HashMap<String, FileBatchIndex>,
     poison: Option<String>,
 }
 
@@ -182,10 +207,10 @@ fn ensure_journal_file(path: &Path, parent: &Path, context: &str) -> Result<()> 
     }
 }
 
-/// JSONL-backed [`EventJournal`].
+/// JSONL-backed atomic-batch [`EventJournal`].
 ///
-/// Appends serialize one [`JournalRecord`] per line with the caller-selected
-/// durability policy; `Flush` survives process crashes, `SyncData` additionally
+/// Appends serialize one digest-protected batch frame per line with the
+/// caller-selected durability policy; `Flush` survives process crashes, `SyncData` additionally
 /// survives power loss. Open validates the complete file once and records byte
 /// offsets; replay then seeks directly to the requested sequence suffix. A
 /// canonical in-process authority shares sequencing across handles and holds a
@@ -199,6 +224,10 @@ pub struct FileEventJournal<E> {
     append_fault: Mutex<Option<AppendFault>>,
     #[cfg(test)]
     sync_fault: Mutex<bool>,
+    #[cfg(test)]
+    truncate_barrier_fault: Mutex<bool>,
+    #[cfg(test)]
+    reconcile_read_fault: Mutex<bool>,
     _event: PhantomData<fn() -> E>,
 }
 
@@ -221,9 +250,14 @@ impl<E> Drop for FileEventJournal<E> {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 enum AppendFault {
+    ZeroWriteInvalidData,
     FullWrite,
+    FullWriteInvalidData,
     PartialWrite { bytes: usize },
+    PartialWriteInvalidData { bytes: usize },
+    MissingLastByteInvalidData,
     UnrecognizedSuffix,
+    UnrecognizedSuffixInvalidData,
 }
 
 impl<E: JournalEvent> FileEventJournal<E> {
@@ -241,8 +275,8 @@ impl<E: JournalEvent> FileEventJournal<E> {
 
     /// Open (or create) the journal at `path`.
     ///
-    /// A torn trailing record from an interrupted append is truncated; gaps
-    /// and mid-file corruption are errors.
+    /// A torn trailing batch frame from an interrupted append is truncated as
+    /// one unit; gaps and complete-frame corruption are errors.
     pub fn open(path: impl Into<PathBuf>, durability: FileDurability) -> Result<Self> {
         let path = path.into();
         let context = format!("journal open {}", path.display());
@@ -293,6 +327,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
             if scanned.next_sequence != state.next_sequence
                 || scanned.valid_len != state.valid_len
                 || scanned.record_offsets != state.record_offsets
+                || scanned.batches != state.batches
             {
                 return Err(ReactError::Other(format!(
                     "{context}: disk prefix diverged from the live authority; close it before verified reopen"
@@ -313,6 +348,10 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 append_fault: Mutex::new(None),
                 #[cfg(test)]
                 sync_fault: Mutex::new(false),
+                #[cfg(test)]
+                truncate_barrier_fault: Mutex::new(false),
+                #[cfg(test)]
+                reconcile_read_fault: Mutex::new(false),
                 _event: PhantomData,
             });
         }
@@ -330,6 +369,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 next_sequence: scanned.next_sequence,
                 valid_len: scanned.valid_len,
                 record_offsets: scanned.record_offsets,
+                batches: scanned.batches,
                 poison: None,
             }),
             file_guard,
@@ -344,6 +384,10 @@ impl<E: JournalEvent> FileEventJournal<E> {
             append_fault: Mutex::new(None),
             #[cfg(test)]
             sync_fault: Mutex::new(false),
+            #[cfg(test)]
+            truncate_barrier_fault: Mutex::new(false),
+            #[cfg(test)]
+            reconcile_read_fault: Mutex::new(false),
             _event: PhantomData,
         })
     }
@@ -357,7 +401,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
     ///
     /// Use this after an append returns
     /// [`JournalDurabilityStatus::Degraded`]. The record in that receipt
-    /// already owns its sequence and must not be appended again; retry this
+    /// already owns all of its sequences and must not be appended again; retry this
     /// barrier instead. The operation is serialized with append and replay,
     /// does not write an event or advance the sequence, and refuses a poisoned
     /// authority until it is reopened and repaired.
@@ -421,12 +465,28 @@ impl<E: JournalEvent> FileEventJournal<E> {
             .unwrap_or_else(|error| error.into_inner())
             .take()
         {
-            let bytes = match fault {
-                AppendFault::FullWrite => line,
-                AppendFault::PartialWrite { bytes } => {
-                    line.get(..bytes.min(line.len())).unwrap_or(line)
+            let (bytes, error_kind) = match fault {
+                AppendFault::ZeroWriteInvalidData => {
+                    (b"".as_slice(), std::io::ErrorKind::InvalidData)
                 }
-                AppendFault::UnrecognizedSuffix => b"x",
+                AppendFault::FullWrite => (line, std::io::ErrorKind::Other),
+                AppendFault::FullWriteInvalidData => (line, std::io::ErrorKind::InvalidData),
+                AppendFault::PartialWrite { bytes } => (
+                    line.get(..bytes.min(line.len())).unwrap_or(line),
+                    std::io::ErrorKind::Other,
+                ),
+                AppendFault::PartialWriteInvalidData { bytes } => (
+                    line.get(..bytes.min(line.len())).unwrap_or(line),
+                    std::io::ErrorKind::InvalidData,
+                ),
+                AppendFault::MissingLastByteInvalidData => (
+                    line.get(..line.len().saturating_sub(1)).unwrap_or(line),
+                    std::io::ErrorKind::InvalidData,
+                ),
+                AppendFault::UnrecognizedSuffix => (b"x".as_slice(), std::io::ErrorKind::Other),
+                AppendFault::UnrecognizedSuffixInvalidData => {
+                    (b"x".as_slice(), std::io::ErrorKind::InvalidData)
+                }
             };
             append_existing_matching(
                 &self.path,
@@ -435,7 +495,10 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 bytes,
                 FileDurability::Flush,
             )?;
-            return Err(std::io::Error::other("injected append durability failure"));
+            return Err(std::io::Error::new(
+                error_kind,
+                "injected append durability failure",
+            ));
         }
 
         append_existing_matching(
@@ -448,8 +511,8 @@ impl<E: JournalEvent> FileEventJournal<E> {
     }
 
     /// Reconcile the suffix after an append error. `Some` means the complete
-    /// record committed despite the durability error; `None` means no record
-    /// committed and any partial suffix was removed.
+    /// batch committed despite the durability error; `None` means no record
+    /// committed and the entire partial frame was removed durably.
     fn reconcile_failed_append(
         &self,
         state: &mut FileJournalState,
@@ -458,6 +521,22 @@ impl<E: JournalEvent> FileEventJournal<E> {
         append_error: &std::io::Error,
     ) -> Result<Option<JournalDurabilityStatus>> {
         let shared = self.shared()?;
+        #[cfg(test)]
+        {
+            let mut fail = self
+                .reconcile_read_fault
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if std::mem::take(&mut *fail) {
+                return Err(io_error(
+                    context,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "injected reconciliation read failure",
+                    ),
+                ));
+            }
+        }
         let suffix = read_existing_from_matching(&self.path, &shared.file_guard, state.valid_len)
             .map_err(|error| io_error(context, error))?;
         if suffix == line {
@@ -473,8 +552,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 let current_len = state.valid_len.checked_add(suffix_len).ok_or_else(|| {
                     ReactError::Other(format!("{context}: journal byte length exhausted"))
                 })?;
-                truncate_existing_matching(
-                    &self.path,
+                self.truncate_partial_suffix(
                     &shared.file_guard,
                     current_len,
                     state.valid_len,
@@ -489,12 +567,227 @@ impl<E: JournalEvent> FileEventJournal<E> {
             suffix.len()
         )))
     }
+
+    fn truncate_partial_suffix(
+        &self,
+        file_guard: &ExistingRegularFileGuard,
+        current_len: u64,
+        valid_len: u64,
+        durability: FileDurability,
+    ) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let mut fail = self
+                .truncate_barrier_fault
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if std::mem::take(&mut *fail) {
+                truncate_existing_matching(
+                    &self.path,
+                    file_guard,
+                    current_len,
+                    valid_len,
+                    FileDurability::Flush,
+                )?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "injected truncate durability barrier failure",
+                ));
+            }
+        }
+        truncate_existing_matching(&self.path, file_guard, current_len, valid_len, durability)
+    }
+
+    fn read_indexed_batch(
+        &self,
+        state: &FileJournalState,
+        index: &FileBatchIndex,
+        context: &str,
+        confirm_durability: bool,
+    ) -> Result<JournalBatchAppendReceipt<E>> {
+        let shared = self.shared()?;
+        let bytes = read_existing_lines_from_matching(
+            &self.path,
+            &shared.file_guard,
+            state.valid_len,
+            index.frame_offset,
+            1,
+        )
+        .map_err(|error| io_error(context, error))?;
+        let line = bytes
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .ok_or_else(|| {
+                ReactError::Other(format!("{context}: indexed batch frame is missing"))
+            })?;
+        let frame = decode_journal_batch::<E>(context, line)?;
+        verify_journal_batch_sequence(context, index.identity.first_sequence, &frame)?;
+        if frame.identity()? != index.identity {
+            return Err(ReactError::Other(format!(
+                "{context}: indexed batch identity changed"
+            )));
+        }
+        let durability = if confirm_durability {
+            match self.sync_journal_data(state.valid_len) {
+                Ok(()) => JournalDurabilityStatus::Confirmed,
+                Err(error) => JournalDurabilityStatus::Degraded {
+                    error: error.to_string(),
+                },
+            }
+        } else {
+            JournalDurabilityStatus::Unconfirmed
+        };
+        Ok(JournalBatchAppendReceipt {
+            batch_id: frame.batch_id().to_string(),
+            records: frame.into_records().into(),
+            durability,
+            commit: JournalBatchCommitStatus::AlreadyCommitted,
+        })
+    }
 }
 
 impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
-    fn append(&self, event: E) -> Result<JournalAppendReceipt<E>> {
-        // The lock spans encoding + write + advance so concurrent appends
-        // cannot observe or reuse an in-flight sequence.
+    fn append_batch(&self, batch: PreparedJournalBatch<E>) -> JournalBatchAppendResult<E> {
+        if let Err(error) = batch.validate_payload_integrity() {
+            return Err(JournalBatchAppendError::prepared_mutation(
+                batch,
+                error.to_string(),
+            ));
+        }
+        let shared = match self.shared() {
+            Ok(shared) => shared,
+            Err(error) => {
+                return Err(JournalBatchAppendError::not_committed(
+                    batch,
+                    error.to_string(),
+                ));
+            }
+        };
+        let mut state = shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = &state.poison {
+            return Err(JournalBatchAppendError::authority_poisoned(
+                batch,
+                format!(
+                    "journal append {} refused because the handle is poisoned: {reason}; reopen the journal to recover",
+                    self.path.display()
+                ),
+            ));
+        }
+        let context = format!("journal append {}", self.path.display());
+        if let Err(error) = self.verify_current_file(&state, &context) {
+            return Err(JournalBatchAppendError::not_committed(
+                batch,
+                error.to_string(),
+            ));
+        }
+        if let Some(existing) = state.batches.get(batch.batch_id()).cloned() {
+            if existing.identity.payload_digest != batch.payload_digest()
+                || existing.identity.record_count != u64::try_from(batch.len()).unwrap_or(u64::MAX)
+            {
+                let reason = format!(
+                    "batch identity {} conflicts with an existing committed payload",
+                    batch.batch_id()
+                );
+                state.poison = Some(reason.clone());
+                return Err(JournalBatchAppendError::identity_conflict(
+                    batch,
+                    existing.identity.first_sequence,
+                    existing.identity.record_count,
+                    reason,
+                ));
+            }
+            return match self.read_indexed_batch(&state, &existing, &context, true) {
+                Ok(receipt) => Ok(receipt),
+                Err(error) => {
+                    let reason = format!("failed to verify already committed batch: {error}");
+                    state.poison = Some(reason.clone());
+                    Err(JournalBatchAppendError::outcome_unknown(batch, reason))
+                }
+            };
+        }
+        let prepared = match prepare_journal_frame(&batch, state.next_sequence) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(JournalBatchAppendError::not_committed(
+                    batch,
+                    error.to_string(),
+                ));
+            }
+        };
+        let line_len = match u64::try_from(prepared.line.len()) {
+            Ok(line_len) => line_len,
+            Err(_) => {
+                return Err(JournalBatchAppendError::not_committed(
+                    batch,
+                    "journal batch frame exceeds supported size",
+                ));
+            }
+        };
+        let valid_len = match state.valid_len.checked_add(line_len) {
+            Some(valid_len) => valid_len,
+            None => {
+                return Err(JournalBatchAppendError::not_committed(
+                    batch,
+                    "journal byte length exhausted before append",
+                ));
+            }
+        };
+        let durability = match self.append_line(state.valid_len, &prepared.line) {
+            Ok(()) => JournalDurabilityStatus::Confirmed,
+            Err(error) => {
+                match self.reconcile_failed_append(&mut state, &prepared.line, &context, &error) {
+                    Ok(Some(status)) => status,
+                    Ok(None) => {
+                        return Err(JournalBatchAppendError::not_committed(
+                            batch,
+                            io_error(&context, error).to_string(),
+                        ));
+                    }
+                    Err(repair_error) => {
+                        let reason = format!(
+                            "append failed ({error}); reconciliation failed ({repair_error})"
+                        );
+                        state.poison = Some(reason.clone());
+                        return Err(JournalBatchAppendError::outcome_unknown(
+                            batch,
+                            format!("{context}: {reason}; handle poisoned until reopen"),
+                        ));
+                    }
+                }
+            }
+        };
+        let record_offset = state.valid_len;
+        state
+            .record_offsets
+            .extend(std::iter::repeat_n(record_offset, prepared.records.len()));
+        state.valid_len = valid_len;
+        state.next_sequence = prepared.next_sequence;
+        let batch_id = batch.batch_id;
+        state.batches.insert(
+            batch_id.clone(),
+            FileBatchIndex {
+                identity: prepared.identity,
+                frame_offset: record_offset,
+            },
+        );
+        Ok(JournalBatchAppendReceipt {
+            batch_id,
+            records: prepared.records,
+            durability,
+            commit: JournalBatchCommitStatus::Committed,
+        })
+    }
+
+    fn lookup_batch(&self, batch: &PreparedJournalBatch<E>) -> Result<JournalBatchLookup<E>> {
+        if let Err(error) = batch.validate_payload_integrity() {
+            return Ok(JournalBatchLookup::Conflict {
+                error: error.to_string(),
+            });
+        }
+        let context = format!("journal batch lookup {}", self.path.display());
         let shared = self.shared()?;
         let mut state = shared
             .state
@@ -502,56 +795,30 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
             .unwrap_or_else(|error| error.into_inner());
         if let Some(reason) = &state.poison {
             return Err(ReactError::Other(format!(
-                "journal append {} refused because the handle is poisoned: {reason}; reopen the journal to recover",
-                self.path.display()
+                "{context}: lookup refused because the handle is poisoned: {reason}; reopen required"
             )));
         }
-        let context = format!("journal append {}", self.path.display());
         self.verify_current_file(&state, &context)?;
-        let next_sequence = state.next_sequence.checked_add(1).ok_or_else(|| {
-            ReactError::Other("journal sequence exhausted before append".to_string())
-        })?;
-        let record = JournalRecord {
-            sequence: state.next_sequence,
-            event: Arc::new(event),
+        let Some(existing) = state.batches.get(batch.batch_id()).cloned() else {
+            return Ok(JournalBatchLookup::Absent);
         };
-        let mut line = serde_json::to_vec(&record).map_err(|error| {
-            ReactError::Other(format!("failed to encode journal record: {error}"))
-        })?;
-        line.push(b'\n');
-        let line_len = u64::try_from(line.len())
-            .map_err(|_| ReactError::Other("journal record exceeds supported size".to_string()))?;
-        let valid_len = state.valid_len.checked_add(line_len).ok_or_else(|| {
-            ReactError::Other("journal byte length exhausted before append".to_string())
-        })?;
-        let durability = match self.append_line(state.valid_len, &line) {
-            Ok(()) => JournalDurabilityStatus::Confirmed,
-            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                return Err(io_error(&context, error));
+        if existing.identity.payload_digest != batch.payload_digest()
+            || existing.identity.record_count != u64::try_from(batch.len()).unwrap_or(u64::MAX)
+        {
+            let reason = format!(
+                "batch identity {} conflicts with an existing committed payload",
+                batch.batch_id()
+            );
+            state.poison = Some(reason.clone());
+            return Ok(JournalBatchLookup::Conflict { error: reason });
+        }
+        match self.read_indexed_batch(&state, &existing, &context, false) {
+            Ok(receipt) => Ok(JournalBatchLookup::AlreadyCommitted(receipt)),
+            Err(error) => {
+                state.poison = Some(error.to_string());
+                Err(error)
             }
-            Err(error) => match self.reconcile_failed_append(&mut state, &line, &context, &error) {
-                Ok(Some(status)) => status,
-                Ok(None) => return Err(io_error(&context, error)),
-                Err(repair_error) => {
-                    if matching_existing_regular_len(&self.path, &shared.file_guard).is_err() {
-                        return Err(ReactError::Other(format!(
-                            "{context}: append failed ({error}); authority verification failed during reconciliation ({repair_error}); verified reopen required"
-                        )));
-                    }
-                    let reason =
-                        format!("append failed ({error}); reconciliation failed ({repair_error})");
-                    state.poison = Some(reason.clone());
-                    return Err(ReactError::Other(format!(
-                        "{context}: {reason}; handle poisoned until reopen"
-                    )));
-                }
-            },
-        };
-        let record_offset = state.valid_len;
-        state.record_offsets.push(record_offset);
-        state.valid_len = valid_len;
-        state.next_sequence = next_sequence;
-        Ok(JournalAppendReceipt { record, durability })
+        }
     }
 
     fn next_sequence(&self) -> u64 {
@@ -577,8 +844,7 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
         }
         let context = format!("journal replay {}", self.path.display());
         // The state lock serializes replay with append and gives O(1) access to
-        // the first byte after `after_sequence`. Open already validated the
-        // complete prefix, so replay only decodes the requested suffix.
+        // the batch frame containing the first requested record.
         let shared = self.shared()?;
         let state = shared
             .state
@@ -600,6 +866,18 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
                     "{context}: missing byte offset after sequence {after_sequence}"
                 ))
             })?;
+        let mut batch_start_index = offset_index;
+        while batch_start_index > 0 {
+            let previous_index = batch_start_index.saturating_sub(1);
+            if state.record_offsets.get(previous_index).copied() != Some(start_offset) {
+                break;
+            }
+            batch_start_index = previous_index;
+        }
+        let mut expected = u64::try_from(batch_start_index)
+            .map_err(|_| ReactError::Other(format!("{context}: sequence exceeds supported index")))?
+            .checked_add(1)
+            .ok_or_else(|| ReactError::Other(format!("{context}: journal sequence exhausted")))?;
         let bytes = read_existing_lines_from_matching(
             &self.path,
             &shared.file_guard,
@@ -608,29 +886,40 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
             limit,
         )
         .map_err(|error| io_error(&context, error))?;
-        let mut expected = after_sequence
-            .checked_add(1)
-            .ok_or_else(|| ReactError::Other(format!("{context}: journal sequence exhausted")))?;
         let mut records = Vec::new();
         for line in bytes
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
         {
-            let record: JournalRecord<E> = serde_json::from_slice(line).map_err(|error| {
-                ReactError::Other(format!("{context}: corrupt journal record: {error}"))
+            let frame = decode_journal_batch::<E>(&context, line)?;
+            verify_journal_batch_sequence(&context, expected, &frame)?;
+            let indexed = state.batches.get(frame.batch_id()).ok_or_else(|| {
+                ReactError::Other(format!(
+                    "{context}: replayed batch {} is absent from the authority index",
+                    frame.batch_id()
+                ))
             })?;
-            if record.sequence != expected {
+            if frame.identity()? != indexed.identity {
                 return Err(ReactError::Other(format!(
-                    "{context}: journal sequence gap, expected {expected} but found {}",
-                    record.sequence
+                    "{context}: replayed batch {} conflicts with the authority index",
+                    frame.batch_id()
                 )));
             }
-            expected = expected.checked_add(1).ok_or_else(|| {
+            let frame_count = u64::try_from(frame.records().len()).map_err(|_| {
+                ReactError::Other(format!(
+                    "{context}: journal batch count exceeds supported range"
+                ))
+            })?;
+            expected = expected.checked_add(frame_count).ok_or_else(|| {
                 ReactError::Other(format!("{context}: journal sequence exhausted"))
             })?;
-            records.push(record);
-            if records.len() >= limit {
-                break;
+            for record in frame.into_records() {
+                if record.sequence > after_sequence {
+                    records.push(record);
+                    if records.len() >= limit {
+                        return Ok(records);
+                    }
+                }
             }
         }
         Ok(records)
@@ -805,6 +1094,10 @@ mod tests {
         journal.shared.as_ref().expect("live file journal handle")
     }
 
+    fn batch<E: JournalEvent>(events: Vec<E>) -> PreparedJournalBatch<E> {
+        PreparedJournalBatch::new(events).expect("prepare test batch")
+    }
+
     #[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
     struct LensReducer {
         applied: u64,
@@ -816,9 +1109,141 @@ mod tests {
         max: u128,
     }
 
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct NonCloneBatchEvent {
+        value: String,
+    }
+
+    #[derive(Debug)]
+    struct MutableBatchEvent {
+        value: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Serialize for MutableBatchEvent {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_u64(
+                u64::try_from(self.value.load(std::sync::atomic::Ordering::SeqCst))
+                    .unwrap_or(u64::MAX),
+            )
+        }
+    }
+
+    impl<'de> Deserialize<'de> for MutableBatchEvent {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value = usize::deserialize(deserializer)?;
+            Ok(Self {
+                value: std::sync::atomic::AtomicUsize::new(value),
+            })
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum FrameTamper {
+        Schema,
+        BatchId,
+        FirstSequence,
+        RecordBatchId,
+        RecordSequence,
+        Payload,
+        Digest,
+    }
+
+    fn tampered_frame(tamper: FrameTamper) -> Vec<u8> {
+        let prepared = prepare_journal_frame(&batch(vec!["original".to_string()]), 1)
+            .expect("prepare tamper frame");
+        let mut frame: serde_json::Value =
+            serde_json::from_slice(&prepared.line).expect("decode tamper frame");
+        match tamper {
+            FrameTamper::Schema => {
+                if let Some(value) = frame.get_mut("schema_version") {
+                    *value = serde_json::json!(99);
+                }
+            }
+            FrameTamper::BatchId => {
+                if let Some(value) = frame.get_mut("batch_id") {
+                    *value = serde_json::json!(uuid::Uuid::new_v4().to_string());
+                }
+            }
+            FrameTamper::FirstSequence => {
+                if let Some(value) = frame.get_mut("first_sequence") {
+                    *value = serde_json::json!(2);
+                }
+            }
+            FrameTamper::RecordBatchId => {
+                if let Some(value) = frame
+                    .get_mut("records")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|records| records.first_mut())
+                    .and_then(|record| record.get_mut("batch_id"))
+                {
+                    *value = serde_json::json!(uuid::Uuid::new_v4().to_string());
+                }
+            }
+            FrameTamper::RecordSequence => {
+                if let Some(value) = frame
+                    .get_mut("records")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|records| records.first_mut())
+                    .and_then(|record| record.get_mut("sequence"))
+                {
+                    *value = serde_json::json!(2);
+                }
+            }
+            FrameTamper::Payload => {
+                if let Some(value) = frame
+                    .get_mut("records")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|records| records.first_mut())
+                    .and_then(|record| record.get_mut("event"))
+                {
+                    *value = serde_json::json!("changed");
+                }
+            }
+            FrameTamper::Digest => {
+                if let Some(value) = frame.get_mut("digest") {
+                    *value = serde_json::json!("0".repeat(64));
+                }
+            }
+        }
+        let mut bytes = serde_json::to_vec(&frame).expect("encode tamper frame");
+        bytes.push(b'\n');
+        bytes
+    }
+
     struct VisibleFailureCheckpointStore {
         inner: FileCheckpointStore<LensReducer>,
         fail_once: std::sync::atomic::AtomicBool,
+    }
+
+    struct CountingCheckpointStore {
+        saves: std::sync::atomic::AtomicUsize,
+        inner: super::super::MemoryCheckpointStore<LensReducer>,
+    }
+
+    impl CountingCheckpointStore {
+        fn new() -> Self {
+            Self {
+                saves: std::sync::atomic::AtomicUsize::new(0),
+                inner: super::super::MemoryCheckpointStore::new(),
+            }
+        }
+    }
+
+    impl CheckpointStore<LensReducer> for CountingCheckpointStore {
+        fn save(&self, state: &LensReducer, through_sequence: u64) -> Result<()> {
+            self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.save(state, through_sequence)
+        }
+
+        fn load(&self) -> Result<Option<CheckpointFrame<LensReducer>>> {
+            self.inner.load()
+        }
     }
 
     impl VisibleFailureCheckpointStore {
@@ -931,7 +1356,9 @@ mod tests {
                 barrier.wait();
                 let mut sequences = Vec::new();
                 for index in 0..APPENDS_PER_HANDLE {
-                    let receipt = journal.append(format!("{label}-{index}"))?;
+                    let receipt = journal
+                        .append(format!("{label}-{index}"))
+                        .map_err(|error| ReactError::Other(error.to_string()))?;
                     sequences.push(receipt.record.sequence);
                 }
                 Ok::<Vec<u64>, ReactError>(sequences)
@@ -964,6 +1391,64 @@ mod tests {
             .expect("replay reopened journal");
         assert_eq!(records.len(), expected_count);
         drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concurrent_file_batches_commit_as_contiguous_non_interleaved_ranges() {
+        const BATCHES: usize = 12;
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = Arc::new(
+            FileEventJournal::<i32>::open(&path, FileDurability::Flush).expect("open journal"),
+        );
+        let barrier = Arc::new(std::sync::Barrier::new(BATCHES));
+        let mut handles = Vec::new();
+        for index in 0..BATCHES {
+            let journal = Arc::clone(&journal);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let base = i32::try_from(index).unwrap_or(i32::MAX).saturating_mul(10);
+                journal.append_batch(batch(vec![
+                    base,
+                    base.saturating_add(1),
+                    base.saturating_add(2),
+                ]))
+            }));
+        }
+        let mut receipts = Vec::new();
+        for handle in handles {
+            receipts.push(
+                handle
+                    .join()
+                    .ok()
+                    .and_then(std::result::Result::ok)
+                    .expect("concurrent file batch"),
+            );
+        }
+        let replay = journal.replay_after(0, usize::MAX).expect("replay batches");
+        for receipt in receipts {
+            let first = receipt
+                .records
+                .first()
+                .map(|record| record.sequence)
+                .expect("first batch record");
+            let record_count = u64::try_from(receipt.records.len()).unwrap_or(u64::MAX);
+            let values = replay
+                .iter()
+                .filter(|record| {
+                    record.sequence >= first && record.sequence < first.saturating_add(record_count)
+                })
+                .map(|record| *record.event)
+                .collect::<Vec<_>>();
+            assert!(values.windows(2).all(|pair| {
+                pair.first()
+                    .zip(pair.get(1))
+                    .is_some_and(|(left, right)| left.saturating_add(1) == *right)
+            }));
+        }
+        drop(journal);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1068,6 +1553,8 @@ mod tests {
             .append("second".to_string())
             .expect_err("poisoned handle must reject append");
         assert!(second_error.to_string().contains("handle is poisoned"));
+        assert!(!second_error.is_retry_safe());
+        assert!(second_error.requires_reopen());
         let barrier_error = journal
             .sync_data()
             .expect_err("poisoned handle must reject durability barrier");
@@ -1079,6 +1566,496 @@ mod tests {
         let committed = reopened.append("recovered".to_string()).expect("append");
         assert_eq!(committed.record.sequence, 1);
         drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_batch_fault_matrix_is_typed_and_never_partially_visible() {
+        let full_root = temp_root();
+        let full_path = full_root.join("events.jsonl");
+        let full = FileEventJournal::<String>::open(&full_path, FileDurability::SyncData)
+            .expect("open full fault journal");
+        let empty = PreparedJournalBatch::new(Vec::<String>::new())
+            .expect_err("empty file batch must fail preflight");
+        assert!(empty.error.contains("at least one"));
+        assert!(read_existing(&full_path).expect("empty journal").is_empty());
+        *full
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWriteInvalidData);
+        let committed = full
+            .append_batch(batch(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ]))
+            .expect("full frame owns the whole batch");
+        assert_eq!(committed.records.len(), 3);
+        assert!(matches!(
+            committed.durability,
+            JournalDurabilityStatus::Degraded { .. }
+        ));
+        assert_eq!(full.next_sequence(), 4);
+        drop(full);
+        let full_reopened = FileEventJournal::<String>::open(&full_path, FileDurability::SyncData)
+            .expect("reopen committed batch");
+        assert_eq!(
+            full_reopened
+                .replay_after(0, usize::MAX)
+                .expect("cold replay committed batch")
+                .len(),
+            3
+        );
+        assert_eq!(
+            full_reopened
+                .replay_after(1, 1)
+                .expect("replay inside committed batch")
+                .first()
+                .map(|record| record.event.as_str()),
+            Some("b")
+        );
+        assert_eq!(
+            full_reopened
+                .replay_after(0, usize::MAX)
+                .expect("lookup committed batch")
+                .iter()
+                .filter(|record| record.batch_id == committed.batch_id)
+                .count(),
+            3
+        );
+        drop(full_reopened);
+
+        let full_unknown_root = temp_root();
+        let full_unknown_path = full_unknown_root.join("events.jsonl");
+        let full_unknown =
+            FileEventJournal::<String>::open(&full_unknown_path, FileDurability::SyncData)
+                .expect("open full unknown journal");
+        *full_unknown
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWriteInvalidData);
+        *full_unknown
+            .reconcile_read_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let full_unknown_prepared = batch(vec!["a".to_string(), "b".to_string()]);
+        let full_unknown_id = full_unknown_prepared.batch_id().to_string();
+        let full_unknown_error = full_unknown
+            .append_batch(full_unknown_prepared)
+            .expect_err("full write without reconciliation proof is unknown");
+        assert!(matches!(
+            full_unknown_error,
+            JournalBatchAppendError::OutcomeUnknown { .. }
+        ));
+        let full_unknown_returned = full_unknown_error
+            .into_prepared()
+            .expect("unknown outcome retains prepared batch");
+        drop(full_unknown);
+        let full_unknown_reopened =
+            FileEventJournal::<String>::open(&full_unknown_path, FileDurability::SyncData)
+                .expect("reopen full unknown journal");
+        *full_unknown_reopened
+            .sync_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let lookup = full_unknown_reopened
+            .lookup_batch(&full_unknown_returned)
+            .expect("lookup full unknown batch");
+        let (reconciled_id, reconciled_len, lookup_durability) = match lookup {
+            JournalBatchLookup::AlreadyCommitted(receipt) => (
+                receipt.batch_id().to_string(),
+                receipt.records().len(),
+                receipt.durability().clone(),
+            ),
+            JournalBatchLookup::Absent | JournalBatchLookup::Conflict { .. } => {
+                (String::new(), 0, JournalDurabilityStatus::Confirmed)
+            }
+        };
+        assert_eq!(reconciled_id, full_unknown_id);
+        assert_eq!(reconciled_len, 2);
+        assert_eq!(lookup_durability, JournalDurabilityStatus::Unconfirmed);
+        drop(full_unknown_reopened);
+
+        let partial_root = temp_root();
+        let partial_path = partial_root.join("events.jsonl");
+        let partial = FileEventJournal::<String>::open(&partial_path, FileDurability::SyncData)
+            .expect("open partial fault journal");
+        *partial
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::PartialWriteInvalidData { bytes: 17 });
+        let not_committed = partial
+            .append_batch(batch(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ]))
+            .expect_err("partial frame must be removed as one batch");
+        assert!(matches!(
+            not_committed,
+            JournalBatchAppendError::NotCommitted { .. }
+        ));
+        assert!(not_committed.is_retry_safe());
+        assert_eq!(partial.next_sequence(), 1);
+        assert!(
+            read_existing(&partial_path)
+                .expect("repaired file")
+                .is_empty()
+        );
+        drop(partial);
+
+        let short_root = temp_root();
+        let short_path = short_root.join("events.jsonl");
+        let short = FileEventJournal::<String>::open(&short_path, FileDurability::SyncData)
+            .expect("open missing-last-byte journal");
+        *short
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::MissingLastByteInvalidData);
+        let short_prepared = batch(vec!["one".to_string(), "two".to_string()]);
+        let short_id = short_prepared.batch_id().to_string();
+        let short_error = short
+            .append_batch(short_prepared)
+            .expect_err("line len minus one must repair the full batch");
+        assert!(short_error.is_retry_safe());
+        assert!(
+            read_existing(&short_path)
+                .expect("short repaired")
+                .is_empty()
+        );
+        let short_retry = short
+            .append_batch(short_error.into_prepared().expect("retryable short batch"))
+            .expect("retry short batch");
+        assert_eq!(short_retry.batch_id, short_id);
+        drop(short);
+
+        let barrier_root = temp_root();
+        let barrier_path = barrier_root.join("events.jsonl");
+        let barrier = FileEventJournal::<String>::open(&barrier_path, FileDurability::SyncData)
+            .expect("open truncate barrier journal");
+        *barrier
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::PartialWriteInvalidData { bytes: 23 });
+        *barrier
+            .truncate_barrier_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let barrier_prepared = batch(vec!["one".to_string(), "two".to_string()]);
+        let barrier_id = barrier_prepared.batch_id().to_string();
+        let barrier_error = barrier
+            .append_batch(barrier_prepared)
+            .expect_err("truncate barrier ambiguity must poison");
+        assert!(matches!(
+            barrier_error,
+            JournalBatchAppendError::OutcomeUnknown { .. }
+        ));
+        assert_eq!(barrier_error.batch_id(), barrier_id);
+        let barrier_returned = barrier_error
+            .into_prepared()
+            .expect("truncate ambiguity retains prepared batch");
+        drop(barrier);
+        let barrier_reopened =
+            FileEventJournal::<String>::open(&barrier_path, FileDurability::SyncData)
+                .expect("reopen truncate ambiguity");
+        assert!(matches!(
+            barrier_reopened
+                .lookup_batch(&barrier_returned)
+                .expect("lookup absent ambiguous batch"),
+            JournalBatchLookup::Absent
+        ));
+        let barrier_retry = barrier_reopened
+            .append_batch(barrier_returned)
+            .expect("retry proven absent batch");
+        assert_eq!(barrier_retry.batch_id(), barrier_id);
+        drop(barrier_reopened);
+
+        let unknown_root = temp_root();
+        let unknown_path = unknown_root.join("events.jsonl");
+        let unknown = FileEventJournal::<String>::open(&unknown_path, FileDurability::Flush)
+            .expect("open unknown fault journal");
+        *unknown
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(AppendFault::UnrecognizedSuffixInvalidData);
+        let outcome = unknown
+            .append_batch(batch(vec!["a".to_string(), "b".to_string()]))
+            .expect_err("unrecognized suffix has unknown outcome");
+        assert!(matches!(
+            outcome,
+            JournalBatchAppendError::OutcomeUnknown { .. }
+        ));
+        assert!(!outcome.is_retry_safe());
+        assert!(outcome.requires_reopen());
+        let refused = unknown
+            .append_batch(batch(vec!["retry".to_string()]))
+            .expect_err("poisoned authority forbids blind retry");
+        assert!(matches!(
+            &refused,
+            JournalBatchAppendError::AuthorityPoisoned { .. }
+        ));
+        assert!(!refused.is_retry_safe());
+        assert!(refused.requires_reopen());
+        drop(unknown);
+
+        std::fs::remove_dir_all(full_root).ok();
+        std::fs::remove_dir_all(full_unknown_root).ok();
+        std::fs::remove_dir_all(partial_root).ok();
+        std::fs::remove_dir_all(short_root).ok();
+        std::fs::remove_dir_all(barrier_root).ok();
+        std::fs::remove_dir_all(unknown_root).ok();
+    }
+
+    #[test]
+    fn zero_write_not_committed_returns_same_non_clone_prepared_batch() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = FileEventJournal::<NonCloneBatchEvent>::open(&path, FileDurability::SyncData)
+            .expect("open non-clone batch journal");
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::ZeroWriteInvalidData);
+        let not_committed = journal
+            .append(NonCloneBatchEvent {
+                value: "owned-once".to_string(),
+            })
+            .expect_err("zero-byte write error must be retryable");
+        assert!(not_committed.is_retry_safe());
+        assert!(read_existing(&path).expect("zero-write file").is_empty());
+        let returned = not_committed
+            .into_prepared()
+            .expect("returned prepared batch");
+        let batch_id = returned.batch_id().to_string();
+        let payload = returned
+            .events()
+            .first()
+            .cloned()
+            .expect("returned payload");
+        assert_eq!(returned.batch_id(), batch_id);
+        assert!(
+            returned
+                .events()
+                .first()
+                .is_some_and(|event| Arc::ptr_eq(event, &payload))
+        );
+        let committed = journal.append_batch(returned).expect("retry same batch");
+        assert_eq!(committed.batch_id(), batch_id);
+        assert_eq!(
+            committed.records().first().map(JournalRecord::batch_id),
+            Some(batch_id.as_str())
+        );
+        assert!(
+            committed
+                .records()
+                .first()
+                .is_some_and(|record| Arc::ptr_eq(&record.event, &payload))
+        );
+
+        let duplicate = PreparedJournalBatch::with_test_identity(
+            batch_id.clone(),
+            vec![NonCloneBatchEvent {
+                value: "owned-once".to_string(),
+            }],
+        )
+        .expect("same identity duplicate");
+        let idempotent = journal
+            .append_batch(duplicate)
+            .expect("idempotent duplicate");
+        assert_eq!(
+            idempotent.commit_status(),
+            JournalBatchCommitStatus::AlreadyCommitted
+        );
+        assert_eq!(journal.last_sequence(), 1);
+
+        let conflict = PreparedJournalBatch::with_test_identity(
+            batch_id,
+            vec![NonCloneBatchEvent {
+                value: "different".to_string(),
+            }],
+        )
+        .expect("conflicting identity");
+        let conflict_error = journal
+            .append_batch(conflict)
+            .expect_err("same id different payload must poison");
+        assert!(conflict_error.to_string().contains("conflicts"));
+        assert!(!conflict_error.is_retry_safe());
+        drop(journal);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn single_non_clone_unknown_outcome_retains_identity_for_cold_lookup() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = FileEventJournal::<NonCloneBatchEvent>::open(&path, FileDurability::SyncData)
+            .expect("open single unknown journal");
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWriteInvalidData);
+        *journal
+            .reconcile_read_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let error = journal
+            .append(NonCloneBatchEvent {
+                value: "unknown-once".to_string(),
+            })
+            .expect_err("single full-write ambiguity must remain typed");
+        assert!(!error.is_retry_safe());
+        let batch_id = error.batch_id().to_string();
+        let returned = error
+            .into_prepared()
+            .expect("unknown single retains prepared payload");
+        drop(journal);
+
+        let reopened =
+            FileEventJournal::<NonCloneBatchEvent>::open(&path, FileDurability::SyncData)
+                .expect("reopen single unknown journal");
+        let lookup = reopened
+            .lookup_batch(&returned)
+            .expect("lookup unknown single");
+        let (resolved_id, resolved_sequence) = match lookup {
+            JournalBatchLookup::AlreadyCommitted(receipt) => (
+                receipt.batch_id().to_string(),
+                receipt.records().first().map(|record| record.sequence),
+            ),
+            JournalBatchLookup::Absent | JournalBatchLookup::Conflict { .. } => {
+                (String::new(), None)
+            }
+        };
+        assert_eq!(resolved_id, batch_id);
+        assert_eq!(resolved_sequence, Some(1));
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_rejects_mutated_unknown_payload_before_cold_idempotent_match() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = FileEventJournal::<MutableBatchEvent>::open(&path, FileDurability::SyncData)
+            .expect("open mutable unknown journal");
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWriteInvalidData);
+        *journal
+            .reconcile_read_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let prepared = batch(vec![MutableBatchEvent {
+            value: std::sync::atomic::AtomicUsize::new(1),
+        }]);
+        let batch_id = prepared.batch_id().to_string();
+        let unknown = journal
+            .append_batch(prepared)
+            .expect_err("full write ambiguity retains mutable payload");
+        let mutated = unknown.into_prepared().expect("returned mutable payload");
+        if let Some(event) = mutated.events().first() {
+            event.value.store(2, std::sync::atomic::Ordering::SeqCst);
+        }
+        drop(journal);
+
+        let reopened = FileEventJournal::<MutableBatchEvent>::open(&path, FileDurability::SyncData)
+            .expect("reopen mutable unknown journal");
+        assert!(matches!(
+            reopened
+                .lookup_batch(&mutated)
+                .expect("lookup mutated payload"),
+            JournalBatchLookup::Conflict { .. }
+        ));
+        let mutation = reopened
+            .append_batch(mutated)
+            .expect_err("mutated payload must not match old commit");
+        assert!(matches!(
+            mutation,
+            JournalBatchAppendError::PreparedMutation { .. }
+        ));
+        assert!(!mutation.is_retry_safe());
+        assert_eq!(reopened.last_sequence(), 1);
+
+        let original = PreparedJournalBatch::with_test_identity(
+            batch_id,
+            vec![MutableBatchEvent {
+                value: std::sync::atomic::AtomicUsize::new(1),
+            }],
+        )
+        .expect("prepare original payload lookup");
+        assert!(matches!(
+            reopened.lookup_batch(&original).expect("lookup old digest"),
+            JournalBatchLookup::AlreadyCommitted(_)
+        ));
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reducer_does_not_refold_already_committed_batch_after_cold_recovery() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = Arc::new(
+            FileEventJournal::<String>::open(&path, FileDurability::SyncData)
+                .expect("open reducer unknown journal"),
+        );
+        let checkpoints = Arc::new(CountingCheckpointStore::new());
+        let writer = CheckpointedReducer::<_, LensReducer>::new(
+            Arc::clone(&journal),
+            Arc::clone(&checkpoints) as Arc<dyn CheckpointStore<LensReducer>>,
+            1,
+        );
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWriteInvalidData);
+        *journal
+            .reconcile_read_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let error = writer
+            .apply_batch(batch(vec!["one".to_string(), "two".to_string()]))
+            .expect_err("full write ambiguity must stay typed through reducer");
+        assert_eq!(writer.last_applied_sequence(), 0);
+        let returned = error
+            .into_prepared()
+            .expect("reducer error retains prepared batch");
+        drop(writer);
+        drop(journal);
+
+        let reopened = Arc::new(
+            FileEventJournal::<String>::open(&path, FileDurability::SyncData)
+                .expect("reopen reducer journal"),
+        );
+        let recovered = CheckpointedReducer::<_, LensReducer>::new(
+            reopened,
+            Arc::clone(&checkpoints) as Arc<dyn CheckpointStore<LensReducer>>,
+            1,
+        );
+        assert_eq!(
+            recovered
+                .recover()
+                .expect("recover committed batch")
+                .last_applied_sequence,
+            2
+        );
+        let saves_before = checkpoints.saves.load(std::sync::atomic::Ordering::SeqCst);
+        let applied_before = recovered.with_state(|state| state.applied);
+        let receipt = recovered
+            .apply_batch(returned)
+            .expect("idempotent reducer apply");
+        assert_eq!(receipt.commit, JournalBatchCommitStatus::AlreadyCommitted);
+        assert_eq!(receipt.checkpoint, CheckpointApplyStatus::NotDue);
+        assert_eq!(recovered.last_applied_sequence(), 2);
+        assert_eq!(recovered.with_state(|state| state.applied), applied_before);
+        assert_eq!(
+            checkpoints.saves.load(std::sync::atomic::Ordering::SeqCst),
+            saves_before
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1122,12 +2099,9 @@ mod tests {
             FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
         journal.append("one".to_string()).expect("append original");
         let original = read_existing(&path).expect("read original record");
-        let mut replacement = serde_json::to_vec(&JournalRecord {
-            sequence: 1,
-            event: Arc::new("two".to_string()),
-        })
-        .expect("encode replacement record");
-        replacement.push(b'\n');
+        let replacement = prepare_journal_frame(&batch(vec!["two".to_string()]), 1)
+            .expect("encode replacement batch frame")
+            .line;
         assert_eq!(replacement.len(), original.len());
         std::fs::remove_file(&path).expect("remove journal fixture");
         let missing_open = FileEventJournal::<String>::open(&path, FileDurability::Flush)
@@ -1278,6 +2252,43 @@ mod tests {
     }
 
     #[test]
+    fn cold_recovery_discards_every_record_in_a_partial_batch_frame() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = FileEventJournal::<String>::open(&path, FileDurability::SyncData)
+            .expect("open journal");
+        drop(journal);
+        let prepared = prepare_journal_frame(
+            &batch(vec![
+                "one".to_string(),
+                "two".to_string(),
+                "three".to_string(),
+            ]),
+            1,
+        )
+        .expect("prepare batch frame");
+        let partial_len = prepared.line.len().saturating_sub(1).max(1) / 2;
+        let partial = prepared
+            .line
+            .get(..partial_len)
+            .expect("partial frame range");
+        append_existing(&path, partial, FileDurability::Flush).expect("write partial frame");
+
+        let reopened =
+            FileEventJournal::<String>::open(&path, FileDurability::SyncData).expect("repair open");
+        assert_eq!(reopened.next_sequence(), 1);
+        assert!(
+            reopened
+                .replay_after(0, usize::MAX)
+                .expect("replay")
+                .is_empty()
+        );
+        assert!(read_existing(&path).expect("read repaired").is_empty());
+        drop(reopened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn mid_file_corruption_is_an_error() {
         let root = temp_root();
         let path = root.join("events.jsonl");
@@ -1305,7 +2316,46 @@ mod tests {
 
         let error = FileEventJournal::<String>::open(&path, FileDurability::Flush)
             .expect_err("corruption must fail");
-        assert!(error.to_string().contains("corrupt journal record"));
+        assert!(error.to_string().contains("corrupt journal batch"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_batch_frame_rejects_every_integrity_field_tamper() {
+        for tamper in [
+            FrameTamper::Schema,
+            FrameTamper::BatchId,
+            FrameTamper::FirstSequence,
+            FrameTamper::RecordBatchId,
+            FrameTamper::RecordSequence,
+            FrameTamper::Payload,
+            FrameTamper::Digest,
+        ] {
+            let root = temp_root();
+            let path = root.join("events.jsonl");
+            std::fs::write(&path, tampered_frame(tamper)).expect("write tampered frame");
+            let result = FileEventJournal::<String>::open(&path, FileDurability::SyncData);
+            assert!(result.is_err());
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn file_cold_scan_rejects_a_duplicated_complete_batch_frame() {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let frame = prepare_journal_frame(&batch(vec!["one".to_string()]), 1)
+            .expect("prepare duplicate frame");
+        let mut duplicated = frame.line.clone();
+        duplicated.extend_from_slice(&frame.line);
+        std::fs::write(&path, duplicated).expect("write duplicated frame");
+        let error = FileEventJournal::<String>::open(&path, FileDurability::SyncData)
+            .expect_err("duplicate physical identity must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate physical batch identity")
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1313,11 +2363,13 @@ mod tests {
     fn sequence_gap_is_an_error() {
         let root = temp_root();
         let path = root.join("events.jsonl");
-        std::fs::write(
-            &path,
-            b"{\"sequence\":1,\"event\":\"a\"}\n{\"sequence\":3,\"event\":\"c\"}\n",
-        )
-        .expect("write gap");
+        let first =
+            prepare_journal_frame(&batch(vec!["a".to_string()]), 1).expect("first batch frame");
+        let third =
+            prepare_journal_frame(&batch(vec!["c".to_string()]), 3).expect("third batch frame");
+        let mut gap = first.line;
+        gap.extend_from_slice(&third.line);
+        std::fs::write(&path, gap).expect("write gap");
         let error = FileEventJournal::<String>::open(&path, FileDurability::Flush)
             .expect_err("gap must fail");
         assert!(error.to_string().contains("sequence gap"));

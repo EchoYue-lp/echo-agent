@@ -17,8 +17,16 @@
 //! - LangGraph persistence: execution progress is saved as
 //!   checkpoint/thread-identity pairs, and resume continues from the persisted
 //!   fact rather than replaying the whole history.
-//! - Apache Kafka's log storage: immutable segment files divide physical I/O
-//!   while records retain one global ordered offset space.
+//! - EventStoreDB/KurrentDB expected-version appends: a batch is accepted as
+//!   one ordered commit or rejected without exposing a record prefix.
+//! - RocksDB `WriteBatch`: one batch is the physical atomicity boundary, not a
+//!   loop over independently visible writes.
+//! - Apache Kafka's log and commit-marker model: immutable segments divide
+//!   physical I/O while commit boundaries control visibility in one global
+//!   offset space.
+//! - Rust [`std::fs::File::sync_data`]: a completed write and its requested
+//!   durability barrier are separate outcomes, which is why receipts can be
+//!   committed but durability-degraded.
 //! - Classic event sourcing snapshots: fold events into state and periodically
 //!   persist `(state, applied_sequence)` so recovery replays only the tail.
 //!
@@ -40,9 +48,9 @@
 //!   silently mis-replaying.
 //! - Journal implementations serialize their append authority. File-backed
 //!   implementations additionally hold an exclusive process-lifetime lease.
-//! - A torn trailing record (partial write followed by a crash) is tolerated
-//!   and truncated on the next open. Corruption before the trailing record is
-//!   an error.
+//! - Every physical line is one digest-protected batch frame. A torn trailing
+//!   frame makes the complete batch invisible and is truncated on next open;
+//!   corruption in any complete frame fails closed.
 //! - [`EventReducer::apply`] is infallible: journal events are validated before
 //!   append, and projection code must remain total over its own event type.
 //! - One [`CheckpointedReducer`] is the single projection owner for its journal.
@@ -54,7 +62,7 @@
 //! ```
 //! use echo_state::journal::{
 //!     CheckpointStore, CheckpointedReducer, EventReducer, MemoryCheckpointStore,
-//!     MemoryEventJournal,
+//!     MemoryEventJournal, PreparedJournalBatch,
 //! };
 //! use std::sync::Arc;
 //!
@@ -76,9 +84,15 @@
 //!     Arc::new(MemoryCheckpointStore::new());
 //! let reducer = CheckpointedReducer::new(Arc::clone(&journal), Arc::clone(&checkpoints), 2);
 //!
-//! reducer.apply("one".to_string())?;
-//! reducer.apply("two".to_string())?; // checkpoint compounding fires here
-//! reducer.apply("three".to_string())?;
+//! let batch = PreparedJournalBatch::new(vec!["one".to_string(), "two".to_string()])
+//!     .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?;
+//! let committed = reducer
+//!     .apply_batch(batch)
+//!     .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?;
+//! assert_eq!(committed.record_count, 2); // one physical commit frame
+//! reducer
+//!     .apply("three".to_string())
+//!     .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?;
 //! assert_eq!(reducer.last_applied_sequence(), 3);
 //!
 //! // Recovery loads the checkpoint and replays only the tail.
@@ -100,12 +114,17 @@ pub use segmented::{
 };
 
 use echo_core::error::{ReactError, Result};
+use echo_core::utils::canonical_json::canonical_json_bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+
+const JOURNAL_BATCH_SCHEMA_VERSION: u16 = 1;
 
 // File-backed runtime caches normally keep far fewer authorities live. The
 // soft range scans at a fixed cadence; the hard limit scans immediately to
@@ -220,10 +239,12 @@ impl<T> JournalEvent for T where
 {
 }
 
-/// One durable journal entry with its assigned sequence.
+/// One journal entry with its assigned sequence.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JournalRecord<E> {
+    /// Identity of the physical batch frame containing this record.
+    batch_id: String,
     /// 1-based contiguous sequence assigned by the journal.
     pub sequence: u64,
     /// The persisted event payload.
@@ -233,47 +254,835 @@ pub struct JournalRecord<E> {
 impl<E> Clone for JournalRecord<E> {
     fn clone(&self) -> Self {
         Self {
+            batch_id: self.batch_id.clone(),
             sequence: self.sequence,
             event: Arc::clone(&self.event),
         }
     }
 }
 
-/// Durability result for one record that is present in the journal file.
+impl<E> JournalRecord<E> {
+    /// Stable identity of the physical batch frame containing this record.
+    pub fn batch_id(&self) -> &str {
+        &self.batch_id
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct BatchIntegrity<'a, E> {
+    schema_version: u16,
+    batch_id: &'a str,
+    first_sequence: u64,
+    records: &'a [JournalRecord<E>],
+}
+
+#[derive(Debug, Serialize)]
+struct StoredBatchFrameRef<'a, E> {
+    schema_version: u16,
+    batch_id: &'a str,
+    first_sequence: u64,
+    records: &'a [JournalRecord<E>],
+    digest: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StoredBatchFrame<E> {
+    schema_version: u16,
+    batch_id: String,
+    first_sequence: u64,
+    records: Vec<JournalRecord<E>>,
+    digest: String,
+    #[serde(skip)]
+    payload_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BatchIdentity {
+    pub first_sequence: u64,
+    pub record_count: u64,
+    pub payload_digest: String,
+    pub frame_digest: String,
+}
+
+/// A stable, prevalidated batch that owns non-clone event payloads.
+///
+/// Prepare once, then pass the value to [`EventJournal::append_batch`]. A
+/// [`JournalBatchAppendError::NotCommitted`] returns this exact value, including
+/// its original `batch_id` and payload `Arc`s, so retry never invents a new
+/// identity or requires `E: Clone`.
+pub struct PreparedJournalBatch<E> {
+    batch_id: String,
+    events: Arc<[Arc<E>]>,
+    payload_digest: String,
+}
+
+impl<E: fmt::Debug> fmt::Debug for PreparedJournalBatch<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedJournalBatch")
+            .field("batch_id", &self.batch_id)
+            .field("event_count", &self.events.len())
+            .field("payload_digest", &self.payload_digest)
+            .finish()
+    }
+}
+
+pub(super) struct PreparedJournalFrame<E> {
+    pub next_sequence: u64,
+    pub records: Arc<[JournalRecord<E>]>,
+    pub line: Vec<u8>,
+    pub identity: BatchIdentity,
+}
+
+fn lower_hex_digit(nibble: u8) -> char {
+    match nibble {
+        0..=9 => char::from(b'0'.saturating_add(nibble)),
+        _ => char::from(b'a'.saturating_add(nibble.saturating_sub(10))),
+    }
+}
+
+fn batch_digest<E: Serialize>(
+    batch_id: &str,
+    first_sequence: u64,
+    records: &[JournalRecord<E>],
+) -> Result<String> {
+    let bytes = canonical_json_bytes(&BatchIntegrity {
+        schema_version: JOURNAL_BATCH_SCHEMA_VERSION,
+        batch_id,
+        first_sequence,
+        records,
+    })
+    .map_err(|error| {
+        ReactError::Other(format!(
+            "failed to encode journal batch integrity input: {error}"
+        ))
+    })?;
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len().saturating_mul(2));
+    for byte in digest {
+        encoded.push(lower_hex_digit(byte >> 4));
+        encoded.push(lower_hex_digit(byte & 0x0f));
+    }
+    Ok(encoded)
+}
+
+/// Failure to form a stable batch before any journal mutation is attempted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalBatchPrepareError {
+    batch_id: String,
+    error: String,
+}
+
+impl JournalBatchPrepareError {
+    /// Stable identity allocated to the batch whose preflight failed.
+    pub fn batch_id(&self) -> &str {
+        &self.batch_id
+    }
+
+    /// Human-readable preflight failure.
+    pub fn error(&self) -> &str {
+        &self.error
+    }
+}
+
+impl fmt::Display for JournalBatchPrepareError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "journal batch {} failed preflight: {}",
+            self.batch_id, self.error
+        )
+    }
+}
+
+impl std::error::Error for JournalBatchPrepareError {}
+
+#[derive(Serialize)]
+struct PreparedPayloads<'a, E> {
+    batch_id: &'a str,
+    events: &'a [Arc<E>],
+}
+
+fn payload_digest<E: Serialize>(batch_id: &str, events: &[Arc<E>]) -> Result<String> {
+    let bytes = canonical_json_bytes(&PreparedPayloads { batch_id, events }).map_err(|error| {
+        ReactError::Other(format!("failed to encode journal batch payloads: {error}"))
+    })?;
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len().saturating_mul(2));
+    for byte in digest {
+        encoded.push(lower_hex_digit(byte >> 4));
+        encoded.push(lower_hex_digit(byte & 0x0f));
+    }
+    Ok(encoded)
+}
+
+impl<E: JournalEvent> PreparedJournalBatch<E> {
+    /// Own a non-empty ordered event set and prevalidate its serialization.
+    pub fn new(events: Vec<E>) -> std::result::Result<Self, JournalBatchPrepareError> {
+        let batch_id = uuid::Uuid::new_v4().to_string();
+        if events.is_empty() {
+            return Err(JournalBatchPrepareError {
+                batch_id,
+                error: "journal batch must contain at least one event".to_string(),
+            });
+        }
+        u64::try_from(events.len()).map_err(|_| JournalBatchPrepareError {
+            batch_id: batch_id.clone(),
+            error: "journal batch event count exceeds supported range".to_string(),
+        })?;
+        let events: Arc<[Arc<E>]> = events.into_iter().map(Arc::new).collect::<Vec<_>>().into();
+        let payload_digest = payload_digest(&batch_id, events.as_ref()).map_err(|error| {
+            JournalBatchPrepareError {
+                batch_id: batch_id.clone(),
+                error: error.to_string(),
+            }
+        })?;
+        Ok(Self {
+            batch_id,
+            events,
+            payload_digest,
+        })
+    }
+
+    /// Stable idempotency identity retained across retry and reconciliation.
+    pub fn batch_id(&self) -> &str {
+        &self.batch_id
+    }
+
+    /// Number of ordered payloads in this indivisible batch.
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Whether this batch is empty. Successful preparation always returns false.
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// Digest of the prevalidated payload view and batch identity.
+    pub fn payload_digest(&self) -> &str {
+        &self.payload_digest
+    }
+
+    /// Read-only ordered payload view.
+    ///
+    /// Interior mutation must not alter serialization; append and lookup
+    /// recompute the digest and reject a changed payload before idempotency.
+    pub fn events(&self) -> &[Arc<E>] {
+        self.events.as_ref()
+    }
+
+    fn validate_payload_integrity(&self) -> Result<()> {
+        let current = payload_digest(&self.batch_id, self.events.as_ref())?;
+        if current != self.payload_digest {
+            return Err(ReactError::Other(format!(
+                "prepared journal batch {} payload changed after preflight",
+                self.batch_id
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn with_test_identity(
+        batch_id: String,
+        events: Vec<E>,
+    ) -> std::result::Result<Self, JournalBatchPrepareError> {
+        let mut prepared = Self::new(events)?;
+        prepared.batch_id = batch_id;
+        prepared.payload_digest = payload_digest(&prepared.batch_id, prepared.events.as_ref())
+            .map_err(|error| JournalBatchPrepareError {
+                batch_id: prepared.batch_id.clone(),
+                error: error.to_string(),
+            })?;
+        Ok(prepared)
+    }
+}
+
+pub(super) fn prepare_journal_frame<E: JournalEvent>(
+    prepared: &PreparedJournalBatch<E>,
+    first_sequence: u64,
+) -> Result<PreparedJournalFrame<E>> {
+    prepared.validate_payload_integrity()?;
+    let count = u64::try_from(prepared.events.len()).map_err(|_| {
+        ReactError::Other("journal batch event count exceeds supported range".to_string())
+    })?;
+    let next_sequence = first_sequence.checked_add(count).ok_or_else(|| {
+        ReactError::Other("journal sequence exhausted before batch append".to_string())
+    })?;
+    let mut records = Vec::with_capacity(prepared.events.len());
+    for (index, event) in prepared.events.iter().enumerate() {
+        let index = u64::try_from(index).map_err(|_| {
+            ReactError::Other("journal batch index exceeds supported range".to_string())
+        })?;
+        let sequence = first_sequence.checked_add(index).ok_or_else(|| {
+            ReactError::Other("journal sequence exhausted while preparing batch".to_string())
+        })?;
+        records.push(JournalRecord {
+            batch_id: prepared.batch_id.clone(),
+            sequence,
+            event: Arc::clone(event),
+        });
+    }
+    let records: Arc<[JournalRecord<E>]> = records.into();
+    let digest = batch_digest(&prepared.batch_id, first_sequence, records.as_ref())?;
+    let stored = StoredBatchFrameRef {
+        schema_version: JOURNAL_BATCH_SCHEMA_VERSION,
+        batch_id: &prepared.batch_id,
+        first_sequence,
+        records: records.as_ref(),
+        digest: &digest,
+    };
+    let mut line = serde_json::to_vec(&stored)
+        .map_err(|error| ReactError::Other(format!("failed to encode journal batch: {error}")))?;
+    line.push(b'\n');
+    u64::try_from(line.len())
+        .map_err(|_| ReactError::Other("journal batch frame exceeds supported size".to_string()))?;
+    Ok(PreparedJournalFrame {
+        next_sequence,
+        records,
+        line,
+        identity: BatchIdentity {
+            first_sequence,
+            record_count: count,
+            payload_digest: prepared.payload_digest.clone(),
+            frame_digest: digest,
+        },
+    })
+}
+
+pub(super) fn decode_journal_batch<E: JournalEvent>(
+    context: &str,
+    line: &[u8],
+) -> Result<StoredBatchFrame<E>> {
+    let frame: StoredBatchFrame<E> = serde_json::from_slice(line)
+        .map_err(|error| ReactError::Other(format!("{context}: corrupt journal batch: {error}")))?;
+    if frame.schema_version != JOURNAL_BATCH_SCHEMA_VERSION {
+        return Err(ReactError::Other(format!(
+            "{context}: unsupported journal batch schema {}",
+            frame.schema_version
+        )));
+    }
+    if uuid::Uuid::parse_str(&frame.batch_id).is_err() {
+        return Err(ReactError::Other(format!(
+            "{context}: journal batch id is not a UUID"
+        )));
+    }
+    if frame.records.is_empty() {
+        return Err(ReactError::Other(format!(
+            "{context}: journal batch contains no records"
+        )));
+    }
+    for (index, record) in frame.records.iter().enumerate() {
+        if record.batch_id != frame.batch_id {
+            return Err(ReactError::Other(format!(
+                "{context}: record batch identity does not match frame {}",
+                frame.batch_id
+            )));
+        }
+        let index = u64::try_from(index).map_err(|_| {
+            ReactError::Other(format!(
+                "{context}: journal batch index exceeds supported range"
+            ))
+        })?;
+        let expected = frame.first_sequence.checked_add(index).ok_or_else(|| {
+            ReactError::Other(format!("{context}: journal sequence exhausted in batch"))
+        })?;
+        if record.sequence != expected {
+            return Err(ReactError::Other(format!(
+                "{context}: journal batch sequence gap, expected {expected} but found {}",
+                record.sequence
+            )));
+        }
+    }
+    let expected_digest = batch_digest(&frame.batch_id, frame.first_sequence, &frame.records)?;
+    if frame.digest != expected_digest {
+        return Err(ReactError::Other(format!(
+            "{context}: journal batch digest mismatch at sequence {}",
+            frame.first_sequence
+        )));
+    }
+    let events = frame
+        .records
+        .iter()
+        .map(|record| Arc::clone(&record.event))
+        .collect::<Vec<_>>();
+    let computed_payload_digest = payload_digest(&frame.batch_id, &events)?;
+    Ok(StoredBatchFrame {
+        payload_digest: computed_payload_digest,
+        ..frame
+    })
+}
+
+impl<E> StoredBatchFrame<E> {
+    pub(super) fn batch_id(&self) -> &str {
+        &self.batch_id
+    }
+
+    pub(super) fn identity(&self) -> Result<BatchIdentity> {
+        let record_count = u64::try_from(self.records.len()).map_err(|_| {
+            ReactError::Other("journal batch count exceeds supported range".to_string())
+        })?;
+        Ok(BatchIdentity {
+            first_sequence: self.first_sequence,
+            record_count,
+            payload_digest: self.payload_digest.clone(),
+            frame_digest: self.digest.clone(),
+        })
+    }
+    pub(super) fn records(&self) -> &[JournalRecord<E>] {
+        &self.records
+    }
+
+    pub(super) fn into_records(self) -> Vec<JournalRecord<E>> {
+        self.records
+    }
+}
+
+pub(super) fn verify_journal_batch_sequence<E>(
+    context: &str,
+    expected_sequence: u64,
+    frame: &StoredBatchFrame<E>,
+) -> Result<()> {
+    if frame.first_sequence != expected_sequence {
+        return Err(ReactError::Other(format!(
+            "{context}: journal sequence gap, expected {expected_sequence} but batch starts at {}",
+            frame.first_sequence
+        )));
+    }
+    Ok(())
+}
+
+/// A batch append failure with an explicit retry contract.
+#[derive(Debug)]
+pub enum JournalBatchAppendError<E> {
+    /// No record in the batch committed; retrying the whole batch is safe.
+    NotCommitted {
+        batch: PreparedJournalBatch<E>,
+        error: String,
+    },
+    /// The writer cannot prove whether the batch committed. The authority is
+    /// poisoned and callers must reopen and inspect recovery before retrying.
+    OutcomeUnknown {
+        batch: PreparedJournalBatch<E>,
+        error: String,
+    },
+    /// The identity is already bound to a different payload or shape. Reusing
+    /// it can never be retried safely, and the live authority is poisoned.
+    IdentityConflict {
+        batch: PreparedJournalBatch<E>,
+        existing_first_sequence: u64,
+        existing_record_count: u64,
+        error: String,
+    },
+    /// Interior mutation changed a prepared payload after preflight. The
+    /// stable identity remains reserved for the original digest and this value
+    /// must not be retried.
+    PreparedMutation {
+        batch: PreparedJournalBatch<E>,
+        error: String,
+    },
+    /// The live authority cannot accept writes until it is closed and reopened.
+    AuthorityPoisoned {
+        batch: PreparedJournalBatch<E>,
+        error: String,
+    },
+}
+
+impl<E> JournalBatchAppendError<E> {
+    /// Construct a retryable pre-mutation failure that returns ownership.
+    pub fn not_committed(batch: PreparedJournalBatch<E>, error: impl Into<String>) -> Self {
+        Self::NotCommitted {
+            batch,
+            error: error.into(),
+        }
+    }
+
+    /// Construct an unknown outcome that retains ownership and requires reopen.
+    pub fn outcome_unknown(batch: PreparedJournalBatch<E>, error: impl Into<String>) -> Self {
+        Self::OutcomeUnknown {
+            batch,
+            error: error.into(),
+        }
+    }
+
+    /// Construct a permanent collision with an existing committed identity.
+    pub fn identity_conflict(
+        batch: PreparedJournalBatch<E>,
+        existing_first_sequence: u64,
+        existing_record_count: u64,
+        error: impl Into<String>,
+    ) -> Self {
+        Self::IdentityConflict {
+            batch,
+            existing_first_sequence,
+            existing_record_count,
+            error: error.into(),
+        }
+    }
+
+    /// Construct a non-retryable payload mutation failure.
+    pub fn prepared_mutation(batch: PreparedJournalBatch<E>, error: impl Into<String>) -> Self {
+        Self::PreparedMutation {
+            batch,
+            error: error.into(),
+        }
+    }
+
+    /// Construct a refusal from a live authority that must be reopened.
+    pub fn authority_poisoned(batch: PreparedJournalBatch<E>, error: impl Into<String>) -> Self {
+        Self::AuthorityPoisoned {
+            batch,
+            error: error.into(),
+        }
+    }
+
+    /// Stable identity involved in this failure.
+    pub fn batch_id(&self) -> &str {
+        match self {
+            Self::NotCommitted { batch, .. } => &batch.batch_id,
+            Self::OutcomeUnknown { batch, .. }
+            | Self::IdentityConflict { batch, .. }
+            | Self::PreparedMutation { batch, .. }
+            | Self::AuthorityPoisoned { batch, .. } => &batch.batch_id,
+        }
+    }
+
+    /// Whether the returned prepared batch may be retried immediately.
+    pub fn is_retry_safe(&self) -> bool {
+        matches!(self, Self::NotCommitted { .. })
+    }
+
+    /// Borrow the retained prepared batch for diagnostics or lookup.
+    pub fn prepared(&self) -> Option<&PreparedJournalBatch<E>> {
+        match self {
+            Self::NotCommitted { batch, .. }
+            | Self::OutcomeUnknown { batch, .. }
+            | Self::IdentityConflict { batch, .. }
+            | Self::PreparedMutation { batch, .. }
+            | Self::AuthorityPoisoned { batch, .. } => Some(batch),
+        }
+    }
+
+    /// Recover ownership. Non-retryable variants still require the action
+    /// indicated by [`Self::requires_reopen`] or a new identity.
+    pub fn into_prepared(self) -> Option<PreparedJournalBatch<E>> {
+        match self {
+            Self::NotCommitted { batch, .. }
+            | Self::OutcomeUnknown { batch, .. }
+            | Self::IdentityConflict { batch, .. }
+            | Self::PreparedMutation { batch, .. }
+            | Self::AuthorityPoisoned { batch, .. } => Some(batch),
+        }
+    }
+
+    /// Whether this result must be resolved with a fresh authority and
+    /// [`EventJournal::lookup_batch`] before any retry.
+    pub fn requires_reopen(&self) -> bool {
+        matches!(
+            self,
+            Self::OutcomeUnknown { .. }
+                | Self::IdentityConflict { .. }
+                | Self::AuthorityPoisoned { .. }
+        )
+    }
+}
+
+impl<E> fmt::Display for JournalBatchAppendError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotCommitted { batch, error } => {
+                write!(
+                    formatter,
+                    "journal batch {} was not committed: {error}",
+                    batch.batch_id
+                )
+            }
+            Self::OutcomeUnknown { batch, error } => write!(
+                formatter,
+                "journal batch {} has unknown commit outcome: {error}; reopen before retry",
+                batch.batch_id
+            ),
+            Self::IdentityConflict {
+                batch,
+                existing_first_sequence,
+                existing_record_count,
+                error,
+            } => write!(
+                formatter,
+                "journal batch {} conflicts with the committed batch at sequence {} ({} records): {error}",
+                batch.batch_id, existing_first_sequence, existing_record_count
+            ),
+            Self::PreparedMutation { batch, error } => write!(
+                formatter,
+                "prepared journal batch {} changed after preflight: {error}",
+                batch.batch_id
+            ),
+            Self::AuthorityPoisoned { batch, error } => write!(
+                formatter,
+                "journal authority is poisoned for batch {}: {error}; reopen required",
+                batch.batch_id
+            ),
+        }
+    }
+}
+
+impl<E: fmt::Debug> std::error::Error for JournalBatchAppendError<E> {}
+
+pub type JournalBatchAppendResult<E> =
+    std::result::Result<JournalBatchAppendReceipt<E>, JournalBatchAppendError<E>>;
+
+/// Durability result for one complete batch frame present in the journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JournalDurabilityStatus {
+    /// A read-only lookup proved the frame identity but intentionally did not
+    /// execute a new durability barrier.
+    Unconfirmed,
     /// The append and requested durability operation both completed.
     Confirmed,
-    /// The complete record is present and owns its sequence, but the requested
-    /// durability barrier reported an error. Callers must not retry the event.
+    /// The complete batch frame is present and owns all assigned sequences, but
+    /// the requested durability barrier reported an error. Callers must not
+    /// retry the batch.
     Degraded { error: String },
+}
+
+/// Whether an append created a frame or resolved an existing identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalBatchCommitStatus {
+    /// This call committed the physical frame.
+    Committed,
+    /// The identity was already committed; no second frame was written.
+    AlreadyCommitted,
 }
 
 /// Receipt for one committed journal append.
 #[derive(Debug)]
 pub struct JournalAppendReceipt<E> {
+    batch_id: String,
     pub record: JournalRecord<E>,
     pub durability: JournalDurabilityStatus,
+    pub commit: JournalBatchCommitStatus,
 }
 
 impl<E> Clone for JournalAppendReceipt<E> {
     fn clone(&self) -> Self {
         Self {
+            batch_id: self.batch_id.clone(),
             record: self.record.clone(),
             durability: self.durability.clone(),
+            commit: self.commit,
         }
     }
 }
 
-/// Append-only sequenced journal of events.
+impl<E> JournalAppendReceipt<E> {
+    /// Stable batch identity for this single-record receipt.
+    pub fn batch_id(&self) -> &str {
+        &self.batch_id
+    }
+}
+
+/// Receipt for one atomically committed journal batch.
+#[derive(Debug)]
+pub struct JournalBatchAppendReceipt<E> {
+    /// Stable identity of the physical commit frame.
+    batch_id: String,
+    /// Ordered records committed by the frame. Payloads remain shared through
+    /// [`Arc`] and never require `E: Clone`.
+    records: Arc<[JournalRecord<E>]>,
+    /// One durability outcome covers the complete frame.
+    durability: JournalDurabilityStatus,
+    commit: JournalBatchCommitStatus,
+}
+
+impl<E> Clone for JournalBatchAppendReceipt<E> {
+    fn clone(&self) -> Self {
+        Self {
+            batch_id: self.batch_id.clone(),
+            records: Arc::clone(&self.records),
+            durability: self.durability.clone(),
+            commit: self.commit,
+        }
+    }
+}
+
+impl<E> JournalBatchAppendReceipt<E> {
+    /// Stable committed or idempotently resolved batch identity.
+    pub fn batch_id(&self) -> &str {
+        &self.batch_id
+    }
+
+    /// Ordered committed records as a read-only shared slice.
+    pub fn records(&self) -> &[JournalRecord<E>] {
+        self.records.as_ref()
+    }
+
+    /// Durability knowledge produced by append or read-only lookup.
+    pub fn durability(&self) -> &JournalDurabilityStatus {
+        &self.durability
+    }
+
+    /// Whether this call created or idempotently resolved the frame.
+    pub fn commit_status(&self) -> JournalBatchCommitStatus {
+        self.commit
+    }
+}
+
+/// Read-only identity reconciliation result. File-backed lookup never writes
+/// and never executes a durability barrier.
+#[derive(Debug)]
+pub enum JournalBatchLookup<E> {
+    /// No retained frame owns this identity and digest.
+    Absent,
+    /// The unique retained frame matches and supplies its original sequences.
+    AlreadyCommitted(JournalBatchAppendReceipt<E>),
+    /// Identity, shape, digest, or current prepared serialization conflicts.
+    Conflict { error: String },
+}
+
+/// Typed single-event failure preserving prepared ownership after mutation starts.
+#[derive(Debug)]
+pub enum JournalAppendError<E> {
+    /// Preparation failed before reaching a journal authority.
+    Prepare(JournalBatchPrepareError),
+    /// The single-element prepared batch reached the journal authority.
+    Commit(JournalBatchAppendError<E>),
+}
+
+impl<E> JournalAppendError<E> {
+    /// Stable identity allocated for this single event.
+    pub fn batch_id(&self) -> &str {
+        match self {
+            Self::Prepare(error) => &error.batch_id,
+            Self::Commit(error) => error.batch_id(),
+        }
+    }
+
+    /// Whether the retained prepared value may be retried immediately.
+    pub fn is_retry_safe(&self) -> bool {
+        matches!(self, Self::Commit(error) if error.is_retry_safe())
+    }
+
+    /// Recover the single-element prepared batch after a commit-stage error.
+    pub fn into_prepared(self) -> Option<PreparedJournalBatch<E>> {
+        match self {
+            Self::Prepare(_) => None,
+            Self::Commit(error) => error.into_prepared(),
+        }
+    }
+
+    /// Whether the live authority must be reopened before reconciliation.
+    pub fn requires_reopen(&self) -> bool {
+        matches!(self, Self::Commit(error) if error.requires_reopen())
+    }
+}
+
+impl<E> fmt::Display for JournalAppendError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Prepare(error) => error.fmt(formatter),
+            Self::Commit(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: fmt::Debug> std::error::Error for JournalAppendError<E> {}
+
+pub type JournalAppendResult<E> =
+    std::result::Result<JournalAppendReceipt<E>, JournalAppendError<E>>;
+
+/// Typed checkpointed-reducer failure.
+#[derive(Debug)]
+pub enum CheckpointedApplyError<E> {
+    /// Preparation failed before journal mutation.
+    Prepare(JournalBatchPrepareError),
+    /// The journal returned a typed ownership-preserving outcome.
+    Journal(JournalBatchAppendError<E>),
+    /// A committed receipt violated projection sequence invariants.
+    CommittedInvariant { batch_id: String, error: String },
+}
+
+impl<E> CheckpointedApplyError<E> {
+    /// Stable identity involved in this reducer apply.
+    pub fn batch_id(&self) -> &str {
+        match self {
+            Self::Prepare(error) => &error.batch_id,
+            Self::Journal(error) => error.batch_id(),
+            Self::CommittedInvariant { batch_id, .. } => batch_id,
+        }
+    }
+
+    /// Recover the prepared batch from a journal-stage failure.
+    pub fn into_prepared(self) -> Option<PreparedJournalBatch<E>> {
+        match self {
+            Self::Journal(error) => error.into_prepared(),
+            Self::Prepare(_) | Self::CommittedInvariant { .. } => None,
+        }
+    }
+
+    /// Whether the journal authority must be reopened before reconciliation.
+    pub fn requires_reopen(&self) -> bool {
+        matches!(self, Self::Journal(error) if error.requires_reopen())
+    }
+}
+
+impl<E> fmt::Display for CheckpointedApplyError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Prepare(error) => error.fmt(formatter),
+            Self::Journal(error) => error.fmt(formatter),
+            Self::CommittedInvariant { batch_id, error } => write!(
+                formatter,
+                "committed journal batch {batch_id} violated reducer receipt invariant: {error}"
+            ),
+        }
+    }
+}
+
+impl<E: fmt::Debug> std::error::Error for CheckpointedApplyError<E> {}
+
+/// Append-only sequenced journal with atomic batch commits.
 ///
 /// Implementations assign contiguous 1-based sequences at append time and can
 /// replay any suffix of the journal in order.
 pub trait EventJournal<E: JournalEvent>: Send + Sync {
+    /// Commit a non-empty ordered event batch as one physical frame.
+    ///
+    /// [`JournalBatchAppendError::NotCommitted`] permits retrying the complete
+    /// batch. [`JournalBatchAppendError::OutcomeUnknown`] poisons file-backed
+    /// authorities and forbids blind retry until verified reopen.
+    fn append_batch(&self, batch: PreparedJournalBatch<E>) -> JournalBatchAppendResult<E>;
+
+    /// Reconcile a prepared identity after an unknown commit outcome without
+    /// writing. `Absent` permits retrying the retained prepared value;
+    /// `AlreadyCommitted` returns the original sequence range.
+    fn lookup_batch(&self, batch: &PreparedJournalBatch<E>) -> Result<JournalBatchLookup<E>>;
+
     /// Consume one event and report both its shared owned record and durability
     /// outcome. A [`JournalDurabilityStatus::Degraded`] receipt means the full
     /// record owns its sequence and must not be retried.
-    fn append(&self, event: E) -> Result<JournalAppendReceipt<E>>;
+    fn append(&self, event: E) -> JournalAppendResult<E> {
+        let batch = PreparedJournalBatch::new(vec![event]).map_err(JournalAppendError::Prepare)?;
+        let appended = self
+            .append_batch(batch)
+            .map_err(JournalAppendError::Commit)?;
+        let record = appended.records.first().cloned().ok_or_else(|| {
+            JournalAppendError::Prepare(JournalBatchPrepareError {
+                batch_id: appended.batch_id.clone(),
+                error: format!(
+                    "journal batch {} committed without a record",
+                    appended.batch_id
+                ),
+            })
+        })?;
+        Ok(JournalAppendReceipt {
+            batch_id: appended.batch_id,
+            record,
+            durability: appended.durability,
+            commit: appended.commit,
+        })
+    }
 
     /// Sequence that the next append will assign.
     fn next_sequence(&self) -> u64;
@@ -304,6 +1113,14 @@ pub struct MemoryEventJournal<E> {
 struct MemoryInner<E> {
     next_sequence: u64,
     records: Vec<JournalRecord<E>>,
+    batches: HashMap<String, MemoryCommittedBatch<E>>,
+    poison: Option<String>,
+}
+
+#[derive(Debug)]
+struct MemoryCommittedBatch<E> {
+    payload_digest: String,
+    receipt: JournalBatchAppendReceipt<E>,
 }
 
 impl<E: JournalEvent> Default for MemoryEventJournal<E> {
@@ -318,27 +1135,106 @@ impl<E: JournalEvent> MemoryEventJournal<E> {
             inner: Mutex::new(MemoryInner {
                 next_sequence: 1,
                 records: Vec::new(),
+                batches: HashMap::new(),
+                poison: None,
             }),
         }
     }
 }
 
 impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
-    fn append(&self, event: E) -> Result<JournalAppendReceipt<E>> {
+    fn append_batch(&self, batch: PreparedJournalBatch<E>) -> JournalBatchAppendResult<E> {
+        if let Err(error) = batch.validate_payload_integrity() {
+            return Err(JournalBatchAppendError::prepared_mutation(
+                batch,
+                error.to_string(),
+            ));
+        }
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        let next_sequence = inner.next_sequence.checked_add(1).ok_or_else(|| {
-            ReactError::Other("journal sequence exhausted before append".to_string())
-        })?;
-        let record = JournalRecord {
-            sequence: inner.next_sequence,
-            event: Arc::new(event),
+        if let Some(reason) = &inner.poison {
+            return Err(JournalBatchAppendError::authority_poisoned(
+                batch,
+                format!("memory journal is poisoned: {reason}"),
+            ));
+        }
+        if let Some(existing) = inner.batches.get(batch.batch_id()) {
+            if existing.payload_digest == batch.payload_digest()
+                && existing.receipt.records().len() == batch.len()
+            {
+                let mut receipt = existing.receipt.clone();
+                receipt.commit = JournalBatchCommitStatus::AlreadyCommitted;
+                return Ok(receipt);
+            }
+            let reason = format!(
+                "batch identity {} conflicts with an existing committed payload",
+                batch.batch_id()
+            );
+            let existing_first_sequence = existing
+                .receipt
+                .records()
+                .first()
+                .map(|record| record.sequence)
+                .unwrap_or(0);
+            let existing_record_count =
+                u64::try_from(existing.receipt.records().len()).unwrap_or(u64::MAX);
+            inner.poison = Some(reason.clone());
+            return Err(JournalBatchAppendError::identity_conflict(
+                batch,
+                existing_first_sequence,
+                existing_record_count,
+                reason,
+            ));
+        }
+        let prepared = match prepare_journal_frame(&batch, inner.next_sequence) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(JournalBatchAppendError::not_committed(
+                    batch,
+                    error.to_string(),
+                ));
+            }
         };
-        inner.next_sequence = next_sequence;
-        inner.records.push(record.clone());
-        Ok(JournalAppendReceipt {
-            record,
+        inner.next_sequence = prepared.next_sequence;
+        inner.records.extend(prepared.records.iter().cloned());
+        let receipt = JournalBatchAppendReceipt {
+            batch_id: batch.batch_id,
+            records: prepared.records,
             durability: JournalDurabilityStatus::Confirmed,
-        })
+            commit: JournalBatchCommitStatus::Committed,
+        };
+        inner.batches.insert(
+            receipt.batch_id.clone(),
+            MemoryCommittedBatch {
+                payload_digest: batch.payload_digest,
+                receipt: receipt.clone(),
+            },
+        );
+        Ok(receipt)
+    }
+
+    fn lookup_batch(&self, batch: &PreparedJournalBatch<E>) -> Result<JournalBatchLookup<E>> {
+        if let Err(error) = batch.validate_payload_integrity() {
+            return Ok(JournalBatchLookup::Conflict {
+                error: error.to_string(),
+            });
+        }
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(existing) = inner.batches.get(batch.batch_id()) else {
+            return Ok(JournalBatchLookup::Absent);
+        };
+        if existing.payload_digest == batch.payload_digest()
+            && existing.receipt.records().len() == batch.len()
+        {
+            let mut receipt = existing.receipt.clone();
+            receipt.commit = JournalBatchCommitStatus::AlreadyCommitted;
+            return Ok(JournalBatchLookup::AlreadyCommitted(receipt));
+        }
+        let reason = format!(
+            "batch identity {} conflicts with an existing committed payload",
+            batch.batch_id()
+        );
+        inner.poison = Some(reason.clone());
+        Ok(JournalBatchLookup::Conflict { error: reason })
     }
 
     fn next_sequence(&self) -> u64 {
@@ -401,11 +1297,26 @@ pub enum CheckpointApplyStatus {
 /// Commit receipt for one journaled projection update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyReceipt {
+    /// Identity of the one-record physical batch frame.
+    pub batch_id: String,
     /// Sequence committed to the authoritative journal.
     pub sequence: u64,
     /// Outcome of the authoritative journal append.
     pub journal: JournalDurabilityStatus,
+    pub commit: JournalBatchCommitStatus,
     /// Outcome of optional checkpoint compounding.
+    pub checkpoint: CheckpointApplyStatus,
+}
+
+/// Commit receipt for one journaled projection batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyBatchReceipt {
+    pub batch_id: String,
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub record_count: u64,
+    pub journal: JournalDurabilityStatus,
+    pub commit: JournalBatchCommitStatus,
     pub checkpoint: CheckpointApplyStatus,
 }
 
@@ -528,9 +1439,9 @@ const RECOVER_BATCH: usize = 512;
 /// Folds journal events into a reducer state and compounds checkpoints.
 ///
 /// `apply` appends to the journal first (durability before projection), then
-/// folds the returned record. Every `checkpoint_every` applies, the current
-/// state is saved through the checkpoint store so later recovery replays only
-/// the tail. `checkpoint_every == 0` disables automatic compounding; call
+/// folds all returned records in order. When a batch crosses
+/// `checkpoint_every`, the current state is saved once at the batch boundary so
+/// later recovery replays only the tail. `checkpoint_every == 0` disables automatic compounding; call
 /// [`Self::checkpoint`] manually instead.
 pub struct CheckpointedReducer<J, R> {
     journal: Arc<J>,
@@ -561,33 +1472,156 @@ where
         }
     }
 
-    /// Append one event, fold it, and maybe compound a checkpoint.
-    ///
-    /// Returns the journal sequence assigned to the event.
-    pub fn apply(&self, event: R::Event) -> Result<ApplyReceipt> {
+    /// Append a non-empty batch, fold committed records in order, and compound
+    /// at most one checkpoint at the batch boundary.
+    pub fn apply_batch(
+        &self,
+        batch: PreparedJournalBatch<R::Event>,
+    ) -> std::result::Result<ApplyBatchReceipt, CheckpointedApplyError<R::Event>> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        let appended = self.journal.append(event)?;
-        inner.state.apply_record(&appended.record);
-        inner.last_applied = appended.record.sequence;
-        inner.since_checkpoint = inner.since_checkpoint.saturating_add(1);
-        let checkpoint =
-            if self.checkpoint_every != 0 && inner.since_checkpoint >= self.checkpoint_every {
-                match self.checkpoints.save(&inner.state, inner.last_applied) {
-                    Ok(()) => {
-                        inner.since_checkpoint = 0;
-                        CheckpointApplyStatus::Saved
-                    }
-                    Err(error) => CheckpointApplyStatus::Degraded {
-                        error: error.to_string(),
-                    },
+        let appended = self
+            .journal
+            .append_batch(batch)
+            .map_err(CheckpointedApplyError::Journal)?;
+        let record_count = u64::try_from(appended.records.len()).map_err(|_| {
+            CheckpointedApplyError::CommittedInvariant {
+                batch_id: appended.batch_id.clone(),
+                error: "record count exceeds supported range".to_string(),
+            }
+        })?;
+        let first_sequence = appended
+            .records
+            .first()
+            .map(|record| record.sequence)
+            .ok_or_else(|| CheckpointedApplyError::CommittedInvariant {
+                batch_id: appended.batch_id.clone(),
+                error: "receipt contains no records".to_string(),
+            })?;
+        let last_sequence = appended
+            .records
+            .last()
+            .map(|record| record.sequence)
+            .ok_or_else(|| CheckpointedApplyError::CommittedInvariant {
+                batch_id: appended.batch_id.clone(),
+                error: "receipt contains no records".to_string(),
+            })?;
+        if first_sequence == 0 {
+            return Err(CheckpointedApplyError::CommittedInvariant {
+                batch_id: appended.batch_id,
+                error: "receipt sequence must be positive".to_string(),
+            });
+        }
+        let mut expected_sequence = first_sequence;
+        for record in appended.records.iter() {
+            if record.batch_id() != appended.batch_id || record.sequence != expected_sequence {
+                return Err(CheckpointedApplyError::CommittedInvariant {
+                    batch_id: appended.batch_id,
+                    error: format!(
+                        "receipt is not one contiguous batch at sequence {expected_sequence}"
+                    ),
+                });
+            }
+            expected_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
+                CheckpointedApplyError::CommittedInvariant {
+                    batch_id: appended.batch_id.clone(),
+                    error: "receipt sequence exhausted".to_string(),
                 }
-            } else {
-                CheckpointApplyStatus::NotDue
-            };
-        Ok(ApplyReceipt {
-            sequence: appended.record.sequence,
+            })?;
+        }
+        if last_sequence <= inner.last_applied
+            && appended.commit != JournalBatchCommitStatus::AlreadyCommitted
+        {
+            return Err(CheckpointedApplyError::CommittedInvariant {
+                batch_id: appended.batch_id,
+                error: "new commit is entirely behind the applied projection".to_string(),
+            });
+        }
+        let first_unapplied = appended
+            .records
+            .iter()
+            .position(|record| record.sequence > inner.last_applied);
+        let folded_count = match first_unapplied {
+            None => 0,
+            Some(index) => {
+                let required = inner.last_applied.checked_add(1).ok_or_else(|| {
+                    CheckpointedApplyError::CommittedInvariant {
+                        batch_id: appended.batch_id.clone(),
+                        error: "projection sequence exhausted before receipt suffix".to_string(),
+                    }
+                })?;
+                let first_suffix = appended.records.get(index).ok_or_else(|| {
+                    CheckpointedApplyError::CommittedInvariant {
+                        batch_id: appended.batch_id.clone(),
+                        error: "receipt suffix index is missing".to_string(),
+                    }
+                })?;
+                if first_suffix.sequence != required {
+                    return Err(CheckpointedApplyError::CommittedInvariant {
+                        batch_id: appended.batch_id,
+                        error: format!(
+                            "projection gap: expected sequence {required} but receipt suffix starts at {}",
+                            first_suffix.sequence
+                        ),
+                    });
+                }
+                if index > 0 && appended.commit != JournalBatchCommitStatus::AlreadyCommitted {
+                    return Err(CheckpointedApplyError::CommittedInvariant {
+                        batch_id: appended.batch_id,
+                        error: "new commit illegally overlaps the applied projection".to_string(),
+                    });
+                }
+                let mut folded = 0_u64;
+                for record in appended.records.iter().skip(index) {
+                    inner.state.apply_record(record);
+                    inner.last_applied = record.sequence;
+                    folded = folded.saturating_add(1);
+                }
+                folded
+            }
+        };
+        inner.since_checkpoint = inner.since_checkpoint.saturating_add(folded_count);
+        let checkpoint = if folded_count != 0
+            && self.checkpoint_every != 0
+            && inner.since_checkpoint >= self.checkpoint_every
+        {
+            match self.checkpoints.save(&inner.state, inner.last_applied) {
+                Ok(()) => {
+                    inner.since_checkpoint = 0;
+                    CheckpointApplyStatus::Saved
+                }
+                Err(error) => CheckpointApplyStatus::Degraded {
+                    error: error.to_string(),
+                },
+            }
+        } else {
+            CheckpointApplyStatus::NotDue
+        };
+        Ok(ApplyBatchReceipt {
+            batch_id: appended.batch_id,
+            first_sequence,
+            last_sequence,
+            record_count,
             journal: appended.durability,
+            commit: appended.commit,
             checkpoint,
+        })
+    }
+
+    /// Append one event through the batch authority, fold it, and maybe
+    /// compound a checkpoint.
+    pub fn apply(
+        &self,
+        event: R::Event,
+    ) -> std::result::Result<ApplyReceipt, CheckpointedApplyError<R::Event>> {
+        let batch =
+            PreparedJournalBatch::new(vec![event]).map_err(CheckpointedApplyError::Prepare)?;
+        let receipt = self.apply_batch(batch)?;
+        Ok(ApplyReceipt {
+            batch_id: receipt.batch_id,
+            sequence: receipt.first_sequence,
+            journal: receipt.journal,
+            commit: receipt.commit,
+            checkpoint: receipt.checkpoint,
         })
     }
 
@@ -760,6 +1794,47 @@ mod tests {
         events: Vec<i32>,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct FailingEvent;
+
+    impl Serialize for FailingEvent {
+        fn serialize<S>(&self, _serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(<S::Error as serde::ser::Error>::custom(
+                "injected event serialization failure",
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct MutableEvent {
+        value: AtomicUsize,
+    }
+
+    impl Serialize for MutableEvent {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer
+                .serialize_u64(u64::try_from(self.value.load(Ordering::SeqCst)).unwrap_or(u64::MAX))
+        }
+    }
+
+    impl<'de> Deserialize<'de> for MutableEvent {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value = usize::deserialize(deserializer)?;
+            Ok(Self {
+                value: AtomicUsize::new(value),
+            })
+        }
+    }
+
     impl EventReducer for SumReducer {
         type Event = i32;
 
@@ -792,8 +1867,15 @@ mod tests {
     }
 
     impl EventJournal<i32> for TrackingJournal {
-        fn append(&self, event: i32) -> Result<JournalAppendReceipt<i32>> {
-            self.inner.append(event)
+        fn append_batch(&self, batch: PreparedJournalBatch<i32>) -> JournalBatchAppendResult<i32> {
+            self.inner.append_batch(batch)
+        }
+
+        fn lookup_batch(
+            &self,
+            batch: &PreparedJournalBatch<i32>,
+        ) -> Result<JournalBatchLookup<i32>> {
+            self.inner.lookup_batch(batch)
         }
 
         fn next_sequence(&self) -> u64 {
@@ -832,6 +1914,10 @@ mod tests {
         }
     }
 
+    fn batch<E: JournalEvent>(events: Vec<E>) -> PreparedJournalBatch<E> {
+        PreparedJournalBatch::new(events).expect("prepare test batch")
+    }
+
     #[test]
     fn memory_journal_assigns_contiguous_sequences_from_one() {
         let journal = MemoryEventJournal::new();
@@ -845,6 +1931,180 @@ mod tests {
         assert_eq!(second.durability, JournalDurabilityStatus::Confirmed);
         assert_eq!(journal.last_sequence(), 2);
         assert_eq!(journal.next_sequence(), 3);
+    }
+
+    #[test]
+    fn memory_batch_is_one_ordered_commit_and_empty_is_zero_write() {
+        let journal = MemoryEventJournal::new();
+        let empty = PreparedJournalBatch::new(Vec::<i32>::new())
+            .expect_err("empty batch must fail during preflight");
+        assert!(empty.error.contains("at least one"));
+        assert_eq!(journal.next_sequence(), 1);
+
+        let receipt = journal
+            .append_batch(batch(vec![10, 20, 30]))
+            .expect("append memory batch");
+        assert!(uuid::Uuid::parse_str(&receipt.batch_id).is_ok());
+        assert_eq!(receipt.records.len(), 3);
+        assert_eq!(
+            receipt
+                .records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        let replay = journal.replay_after(0, usize::MAX).expect("replay batch");
+        assert_eq!(replay.len(), 3);
+        assert_eq!(
+            journal
+                .replay_after(1, 1)
+                .expect("replay within batch")
+                .first()
+                .map(|record| *record.event),
+            Some(20)
+        );
+        assert!(
+            receipt
+                .records
+                .iter()
+                .zip(replay.iter())
+                .all(|(committed, replayed)| Arc::ptr_eq(&committed.event, &replayed.event))
+        );
+    }
+
+    #[test]
+    fn memory_batch_identity_is_idempotent_and_conflicts_poison() {
+        let journal = MemoryEventJournal::new();
+        let original = batch(vec![10, 20]);
+        let batch_id = original.batch_id().to_string();
+        let committed = journal.append_batch(original).expect("initial commit");
+        assert_eq!(
+            committed.commit_status(),
+            JournalBatchCommitStatus::Committed
+        );
+
+        let duplicate = PreparedJournalBatch::with_test_identity(batch_id.clone(), vec![10, 20])
+            .expect("same identity payload");
+        let idempotent = journal.append_batch(duplicate).expect("idempotent append");
+        assert_eq!(
+            idempotent.commit_status(),
+            JournalBatchCommitStatus::AlreadyCommitted
+        );
+        assert_eq!(
+            idempotent
+                .records()
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(journal.last_sequence(), 2);
+
+        let conflict = PreparedJournalBatch::with_test_identity(batch_id, vec![10, 99])
+            .expect("conflicting identity payload");
+        let error = journal
+            .append_batch(conflict)
+            .expect_err("identity conflict must fail closed");
+        assert!(error.to_string().contains("conflicts"));
+        assert!(!error.is_retry_safe());
+        let refused = journal
+            .append_batch(batch(vec![30]))
+            .expect_err("identity conflict poisons memory authority");
+        assert!(refused.to_string().contains("poisoned"));
+        assert!(!refused.is_retry_safe());
+        assert!(refused.requires_reopen());
+    }
+
+    #[test]
+    fn memory_rejects_interior_mutation_before_idempotent_lookup() {
+        let journal = MemoryEventJournal::new();
+        let original = batch(vec![MutableEvent {
+            value: AtomicUsize::new(1),
+        }]);
+        let batch_id = original.batch_id().to_string();
+        journal
+            .append_batch(original)
+            .expect("commit original payload");
+
+        let mutated = PreparedJournalBatch::with_test_identity(
+            batch_id.clone(),
+            vec![MutableEvent {
+                value: AtomicUsize::new(1),
+            }],
+        )
+        .expect("prepare mutable duplicate");
+        if let Some(event) = mutated.events().first() {
+            event.value.store(2, Ordering::SeqCst);
+        }
+        assert!(matches!(
+            journal
+                .lookup_batch(&mutated)
+                .expect("lookup mutated payload"),
+            JournalBatchLookup::Conflict { .. }
+        ));
+        let mutation = journal
+            .append_batch(mutated)
+            .expect_err("mutated prepared payload must not be idempotent");
+        assert!(matches!(
+            mutation,
+            JournalBatchAppendError::PreparedMutation { .. }
+        ));
+        assert!(!mutation.is_retry_safe());
+        assert_eq!(journal.last_sequence(), 1);
+
+        let original_lookup = PreparedJournalBatch::with_test_identity(
+            batch_id,
+            vec![MutableEvent {
+                value: AtomicUsize::new(1),
+            }],
+        )
+        .expect("prepare original digest lookup");
+        assert!(matches!(
+            journal
+                .lookup_batch(&original_lookup)
+                .expect("lookup original payload"),
+            JournalBatchLookup::AlreadyCommitted(_)
+        ));
+    }
+
+    #[test]
+    fn memory_batch_preflight_rejects_sequence_overflow_without_mutation() {
+        let journal = MemoryEventJournal::new();
+        journal
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .next_sequence = u64::MAX;
+        let error = journal
+            .append_batch(batch(vec![1]))
+            .expect_err("overflow must fail before mutation");
+        assert!(matches!(
+            error,
+            JournalBatchAppendError::NotCommitted { .. }
+        ));
+        assert_eq!(journal.next_sequence(), u64::MAX);
+        assert!(
+            journal
+                .replay_after(0, usize::MAX)
+                .expect("replay")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn memory_batch_serialization_failure_is_not_committed() {
+        let journal = MemoryEventJournal::<FailingEvent>::new();
+        let error = PreparedJournalBatch::new(vec![FailingEvent])
+            .expect_err("serialization must fail before mutation");
+        assert!(error.error.contains("serialization failure"));
+        assert_eq!(journal.next_sequence(), 1);
+        assert!(
+            journal
+                .replay_after(0, usize::MAX)
+                .expect("replay")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -889,6 +2149,59 @@ mod tests {
             .expect("checkpoint saved");
         assert_eq!(frame.sequence, 2);
         assert_eq!(frame.state.total, 3);
+    }
+
+    #[test]
+    fn batch_crossing_checkpoint_cadence_folds_then_saves_at_batch_end() {
+        let fixture = reducer_with(3);
+        fixture.reducer.apply(1).expect("seed event");
+        let receipt = fixture
+            .reducer
+            .apply_batch(batch(vec![2, 3, 4]))
+            .expect("apply batch");
+        assert_eq!(receipt.first_sequence, 2);
+        assert_eq!(receipt.last_sequence, 4);
+        assert_eq!(receipt.record_count, 3);
+        assert_eq!(receipt.checkpoint, CheckpointApplyStatus::Saved);
+        let frame = fixture
+            .checkpoints
+            .load()
+            .expect("load checkpoint")
+            .expect("batch checkpoint");
+        assert_eq!(frame.sequence, 4);
+        assert_eq!(frame.state.events, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn already_committed_partial_overlap_folds_only_contiguous_suffix() {
+        let journal = Arc::new(MemoryEventJournal::new());
+        let original = batch(vec![1, 2, 3]);
+        let batch_id = original.batch_id().to_string();
+        let committed = journal.append_batch(original).expect("commit source batch");
+        let reducer = CheckpointedReducer::<_, SumReducer>::new(
+            Arc::clone(&journal),
+            Arc::new(MemoryCheckpointStore::new()),
+            0,
+        );
+        {
+            let mut inner = reducer
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(first) = committed.records().first() {
+                inner.state.apply_record(first);
+                inner.last_applied = first.sequence;
+                inner.since_checkpoint = 1;
+            }
+        }
+        let duplicate = PreparedJournalBatch::with_test_identity(batch_id, vec![1, 2, 3])
+            .expect("prepare idempotent overlap");
+        let receipt = reducer
+            .apply_batch(duplicate)
+            .expect("fold idempotent suffix");
+        assert_eq!(receipt.commit, JournalBatchCommitStatus::AlreadyCommitted);
+        assert_eq!(reducer.last_applied_sequence(), 3);
+        reducer.with_state(|state| assert_eq!(state.events, vec![1, 2, 3]));
     }
 
     #[test]
@@ -1004,33 +2317,36 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_failure_returns_committed_degraded_receipt_without_retrying_event() {
+    fn checkpoint_failure_returns_committed_batch_with_degraded_checkpoint() {
         let journal = Arc::new(MemoryEventJournal::new());
         let checkpoints = Arc::new(FailOnceCheckpointStore::new());
         let reducer = CheckpointedReducer::new(
             Arc::clone(&journal),
             Arc::clone(&checkpoints) as Arc<dyn CheckpointStore<SumReducer>>,
-            1,
+            2,
         );
 
-        let first = reducer.apply(7).expect("event append must commit");
-        assert_eq!(first.sequence, 1);
+        let first = reducer
+            .apply_batch(batch(vec![7, 8, 9]))
+            .expect("event batch must commit");
+        assert_eq!(first.first_sequence, 1);
+        assert_eq!(first.last_sequence, 3);
         assert!(matches!(
             first.checkpoint,
             CheckpointApplyStatus::Degraded { .. }
         ));
-        assert_eq!(journal.last_sequence(), 1);
-        reducer.with_state(|state| assert_eq!(state.events, vec![7]));
+        assert_eq!(journal.last_sequence(), 3);
+        reducer.with_state(|state| assert_eq!(state.events, vec![7, 8, 9]));
 
-        let second = reducer.apply(9).expect("later append retries checkpoint");
-        assert_eq!(second.sequence, 2);
+        let second = reducer.apply(10).expect("later append retries checkpoint");
+        assert_eq!(second.sequence, 4);
         assert_eq!(second.checkpoint, CheckpointApplyStatus::Saved);
         let frame = checkpoints
             .load()
             .expect("checkpoint load")
             .expect("checkpoint repaired");
-        assert_eq!(frame.sequence, 2);
-        assert_eq!(frame.state.events, vec![7, 9]);
+        assert_eq!(frame.sequence, 4);
+        assert_eq!(frame.state.events, vec![7, 8, 9, 10]);
     }
 
     #[test]
@@ -1068,6 +2384,58 @@ mod tests {
             reducer.last_applied_sequence(),
             u64::try_from(THREADS).unwrap_or(u64::MAX)
         );
+    }
+
+    #[test]
+    fn concurrent_memory_batches_never_interleave_records() {
+        const THREADS: usize = 16;
+        let journal = Arc::new(MemoryEventJournal::new());
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for index in 0..THREADS {
+            let journal = Arc::clone(&journal);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let base = i32::try_from(index).unwrap_or(i32::MAX).saturating_mul(10);
+                journal.append_batch(batch(vec![
+                    base,
+                    base.saturating_add(1),
+                    base.saturating_add(2),
+                ]))
+            }));
+        }
+        let mut receipts = Vec::new();
+        for handle in handles {
+            let receipt = handle
+                .join()
+                .ok()
+                .and_then(std::result::Result::ok)
+                .expect("concurrent batch");
+            receipts.push(receipt);
+        }
+        let replay = journal.replay_after(0, usize::MAX).expect("replay");
+        for receipt in receipts {
+            let first = receipt
+                .records
+                .first()
+                .map(|record| record.sequence)
+                .expect("batch first sequence");
+            let record_count = u64::try_from(receipt.records.len()).unwrap_or(u64::MAX);
+            let values = replay
+                .iter()
+                .filter(|record| {
+                    record.sequence >= first && record.sequence < first.saturating_add(record_count)
+                })
+                .map(|record| *record.event)
+                .collect::<Vec<_>>();
+            assert_eq!(values.len(), 3);
+            assert!(values.windows(2).all(|pair| {
+                pair.first()
+                    .zip(pair.get(1))
+                    .is_some_and(|(left, right)| left.saturating_add(1) == *right)
+            }));
+        }
     }
 
     #[test]
