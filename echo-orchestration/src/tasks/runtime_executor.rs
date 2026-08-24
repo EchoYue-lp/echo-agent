@@ -16,8 +16,12 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::runtime::{
-    DagExecutionState, NestedDelegationPolicy, Task, TaskClaim, TaskId, TaskStatus,
-    TaskSubagentContext,
+    DagDependencyState, DagExecutionState, NestedDelegationPolicy, RuntimeInterruptionDisposition,
+    Task, TaskClaim, TaskId, TaskStatus, TaskSubagentContext,
+};
+use super::runtime_service::{
+    RuntimeInterruptionSettlementOutcome, RuntimeTaskSettlementOutcome,
+    validate_runtime_snapshot_claims,
 };
 use crate::planning::PlanValidator;
 
@@ -35,7 +39,26 @@ pub enum RuntimeStopDisposition {
     Pause,
 }
 
-/// Application resolution of one completed dispatch attempt.
+/// Uncommitted application assessment of one completed dispatch attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeTaskResolutionRequest {
+    Completed,
+    Requeue {
+        failure_fingerprint: Option<String>,
+        error: String,
+    },
+    Skipped,
+    Failed {
+        error: String,
+    },
+    Blocked {
+        error: String,
+        disposition: RuntimeStopDisposition,
+    },
+    Cancelled,
+}
+
+/// Committed result of applying a typed resolution request to one exact claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeTaskResolution {
     Completed,
@@ -49,7 +72,6 @@ pub enum RuntimeTaskResolution {
         disposition: RuntimeStopDisposition,
     },
     Cancelled,
-    /// The dispatch completed after its durable claim was replaced or cleared.
     Superseded,
 }
 
@@ -65,7 +87,11 @@ pub enum RuntimeTaskClaimOutcome {
 /// Terminal settlement for a claim that cannot reach normal resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeClaimAbandonment {
-    Cancelled,
+    /// The run stopped and this still-owned claim follows the typed stop policy.
+    Interrupted {
+        disposition: RuntimeInterruptionDisposition,
+    },
+    /// Dispatch or settlement infrastructure failed before normal resolution.
     Failed { error: String },
 }
 
@@ -78,17 +104,21 @@ pub enum RuntimeDagOutcome {
         error: String,
     },
     Paused {
-        failed_task_id: TaskId,
-        error: String,
+        task_id: Option<TaskId>,
+        reason: String,
+    },
+    Stalled {
+        reason: String,
     },
     Cancelled,
 }
 
-/// Persistence, dispatch, and product-policy adapter for [`RuntimeDagExecutor`].
+/// Persistence, dispatch, and product-policy adapter for [`super::RuntimeTaskService`].
 ///
-/// `resolve_dispatch` owns application-specific review and persistence. It must
-/// commit the returned task state before completing so the next safe-point
-/// snapshot remains authoritative.
+/// `resolve_dispatch` owns application-specific review but returns an
+/// uncommitted request. `settle_resolution` provides the adapter transaction
+/// boundary and must apply [`super::settle_runtime_resolution`] rather than
+/// reimplementing claim, retry, or terminal transitions.
 #[async_trait]
 pub trait RuntimeDagController: Send + Sync + 'static {
     type DispatchOutput: Send + 'static;
@@ -103,6 +133,14 @@ pub trait RuntimeDagController: Send + Sync + 'static {
         task: &Task,
         expected_revision: u64,
     ) -> Result<RuntimeTaskClaimOutcome>;
+
+    /// Verify whether one exact physical claim still owns its task.
+    async fn claim_is_current(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> Result<bool>;
 
     /// Select a conflict-free subset of the ready frontier.
     ///
@@ -126,6 +164,16 @@ pub trait RuntimeDagController: Send + Sync + 'static {
         claim: TaskClaim,
         task: Task,
         dispatch: Result<Self::DispatchOutput>,
+    ) -> Result<RuntimeTaskResolutionRequest>;
+
+    /// Atomically apply one framework-owned resolution request and return its
+    /// typed committed receipt.
+    async fn settle_resolution(
+        &self,
+        run_id: &str,
+        claim: &TaskClaim,
+        task: &Task,
+        request: RuntimeTaskResolutionRequest,
     ) -> Result<RuntimeTaskResolution>;
 
     /// Settle a claim whose dispatch cannot reach normal resolution. The
@@ -137,9 +185,7 @@ pub trait RuntimeDagController: Send + Sync + 'static {
         claim: &TaskClaim,
         task: &Task,
         abandonment: RuntimeClaimAbandonment,
-    ) -> Result<()>;
-
-    async fn block_task(&self, run_id: &str, task: &Task, reason: &str) -> Result<()>;
+    ) -> Result<RuntimeTaskSettlementOutcome>;
 
     async fn failed_task_disposition(
         &self,
@@ -154,18 +200,33 @@ pub trait RuntimeDagController: Send + Sync + 'static {
         })
     }
 
-    async fn interruption_outcome(&self, _run_id: &str) -> Result<RuntimeDagOutcome> {
-        Ok(RuntimeDagOutcome::Cancelled)
+    /// Map a cancellation-token stop request to product-neutral cancellation or
+    /// resumable pause. Framework task settlement remains authoritative.
+    async fn interruption_disposition(
+        &self,
+        _run_id: &str,
+    ) -> Result<RuntimeInterruptionDisposition> {
+        Ok(RuntimeInterruptionDisposition::Cancelled)
     }
+
+    /// Atomically settle unfinished tasks at an interruption safe point using
+    /// [`super::settle_runtime_interruption`]. A revision mismatch must return
+    /// `ReloadSnapshot`; adapters must not recreate claim or retry semantics.
+    async fn settle_interruption(
+        &self,
+        run_id: &str,
+        expected_revision: u64,
+        disposition: RuntimeInterruptionDisposition,
+    ) -> Result<RuntimeInterruptionSettlementOutcome>;
 
     async fn note_stalled(&self, _run_id: &str, _reason: &str) -> Result<()> {
         Ok(())
     }
 }
 
-/// Configuration for the dynamic runtime DAG executor.
+/// Execution configuration accepted by [`super::RuntimeTaskService`].
 #[derive(Debug, Clone)]
-pub struct RuntimeDagExecutorConfig {
+pub struct RuntimeTaskServiceConfig {
     pub max_concurrent_subagents: usize,
     pub external_progress_poll_interval: Duration,
     /// Maximum time to let cancellation-aware Subagents finish their durable
@@ -174,7 +235,7 @@ pub struct RuntimeDagExecutorConfig {
     pub delegation_policy: NestedDelegationPolicy,
 }
 
-impl Default for RuntimeDagExecutorConfig {
+impl Default for RuntimeTaskServiceConfig {
     fn default() -> Self {
         Self {
             max_concurrent_subagents: 4,
@@ -190,14 +251,20 @@ impl Default for RuntimeDagExecutorConfig {
 }
 
 /// The framework's executor for revisioned dynamic Agent plans.
-pub struct RuntimeDagExecutor<C: RuntimeDagController> {
+pub(crate) struct RuntimeDagExecutor<C: RuntimeDagController> {
     controller: Arc<C>,
-    config: RuntimeDagExecutorConfig,
+    config: RuntimeTaskServiceConfig,
     validator: PlanValidator,
 }
 
+enum InterruptionBoundary {
+    Outcome(RuntimeDagOutcome),
+    ReloadSnapshot,
+    NoUnfinishedWork,
+}
+
 impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
-    pub fn new(controller: Arc<C>, config: RuntimeDagExecutorConfig) -> Self {
+    pub(crate) fn new(controller: Arc<C>, config: RuntimeTaskServiceConfig) -> Self {
         Self {
             controller,
             config,
@@ -206,12 +273,12 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
     }
 
     /// Override structural limits while retaining the canonical validator.
-    pub fn with_validator(mut self, validator: PlanValidator) -> Self {
+    pub(crate) fn with_validator(mut self, validator: PlanValidator) -> Self {
         self.validator = validator;
         self
     }
 
-    pub async fn execute(
+    pub(crate) async fn execute(
         &self,
         run_id: &str,
         cancel: CancellationToken,
@@ -222,10 +289,6 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
         let mut failure_errors: HashMap<TaskId, String> = HashMap::new();
 
         loop {
-            if cancel.is_cancelled() {
-                return self.controller.interruption_outcome(run_id).await;
-            }
-
             // Every loop boundary is a safe point: all locally-dispatched
             // handles from the previous wave have been joined and resolved.
             let snapshot = self.controller.load_snapshot(run_id).await?;
@@ -235,6 +298,9 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     errors.join("; ")
                 )));
             }
+            validate_runtime_snapshot_claims(&snapshot).map_err(|error| {
+                ReactError::Other(format!("invalid runtime claim snapshot: {error}"))
+            })?;
             if active_revision != Some(snapshot.revision) {
                 if let Some(previous) = active_revision {
                     tracing::info!(
@@ -250,18 +316,77 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             let tasks = snapshot.tasks;
             let state = DagExecutionState::from_tasks(&tasks);
 
+            if !state.cancelled.is_empty() {
+                match self
+                    .settle_interruption_boundary(
+                        run_id,
+                        snapshot.revision,
+                        RuntimeInterruptionDisposition::Cancelled,
+                        false,
+                    )
+                    .await?
+                {
+                    InterruptionBoundary::Outcome(outcome) => return Ok(outcome),
+                    InterruptionBoundary::ReloadSnapshot => continue,
+                    InterruptionBoundary::NoUnfinishedWork => {}
+                }
+            }
+
+            if state.all_completed(&tasks) {
+                return Ok(RuntimeDagOutcome::Completed);
+            }
+
+            let durable_pause = tasks
+                .iter()
+                .find(|task| matches!(task.execution.status, TaskStatus::Paused(_)))
+                .map(|paused_task| RuntimeInterruptionDisposition::Paused {
+                    reason: persisted_status_error(&paused_task.execution.status)
+                        .unwrap_or_else(|| "runtime task paused".to_string()),
+                });
+            let requested_interruption = if cancel.is_cancelled() {
+                Some(self.controller.interruption_disposition(run_id).await?)
+            } else {
+                None
+            };
+            let interruption =
+                prioritize_interruption(durable_pause.clone(), requested_interruption);
+            if let Some(disposition) = interruption {
+                match self
+                    .settle_interruption_boundary(
+                        run_id,
+                        snapshot.revision,
+                        disposition,
+                        durable_pause.is_none(),
+                    )
+                    .await?
+                {
+                    InterruptionBoundary::Outcome(outcome) => return Ok(outcome),
+                    InterruptionBoundary::ReloadSnapshot => continue,
+                    InterruptionBoundary::NoUnfinishedWork => {}
+                }
+            }
+
             if let Some(failed_task) = tasks
                 .iter()
                 .find(|task| state.failed.contains(&task.spec.id))
             {
-                for blocked_id in state.blocked_by_failures(&tasks) {
-                    if let Some(blocked_task) = tasks.iter().find(|task| task.spec.id == blocked_id)
-                    {
-                        self.controller
-                            .block_task(run_id, blocked_task, "blocked: upstream task failed")
-                            .await?;
-                    }
-                }
+                let dependency_states = state.dependency_states(&tasks);
+                let derived_blocked: Vec<_> = dependency_states
+                    .iter()
+                    .filter_map(|(task_id, dependency_state)| {
+                        matches!(
+                            dependency_state,
+                            DagDependencyState::BlockedByFailure { .. }
+                        )
+                        .then_some(task_id)
+                    })
+                    .collect();
+                tracing::debug!(
+                    run_id,
+                    failed_task_id = %failed_task.spec.id,
+                    derived_blocked_task_ids = ?derived_blocked,
+                    "runtime DAG derived dependency blockers from the current snapshot"
+                );
 
                 let error = failure_errors
                     .remove(&failed_task.spec.id)
@@ -282,24 +407,25 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 ));
             }
 
-            if !state.cancelled.is_empty() {
-                return self.controller.interruption_outcome(run_id).await;
-            }
-
-            if !state.paused.is_empty() {
-                return self.controller.interruption_outcome(run_id).await;
-            }
-
-            if state.all_completed(&tasks) {
-                return Ok(RuntimeDagOutcome::Completed);
-            }
-
             let ready_task_ids = state.ready_task_ids(&tasks);
             if ready_task_ids.is_empty() {
                 if !state.in_flight.is_empty() {
                     tokio::select! {
                         _ = cancel.cancelled() => {
-                            return self.controller.interruption_outcome(run_id).await;
+                            let disposition = self.controller.interruption_disposition(run_id).await?;
+                            match self
+                                .settle_interruption_boundary(
+                                    run_id,
+                                    snapshot.revision,
+                                    disposition,
+                                    true,
+                                )
+                                .await?
+                            {
+                                InterruptionBoundary::Outcome(outcome) => return Ok(outcome),
+                                InterruptionBoundary::ReloadSnapshot
+                                | InterruptionBoundary::NoUnfinishedWork => {}
+                            }
                         }
                         _ = tokio::time::sleep(self.config.external_progress_poll_interval) => {}
                     }
@@ -329,9 +455,8 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
 
                 let reason = "DAG stalled with unfinished tasks (cycle or blocked)";
                 self.controller.note_stalled(run_id, reason).await?;
-                return Ok(RuntimeDagOutcome::Failed {
-                    failed_task_id: "<none>".to_string(),
-                    error: reason.to_string(),
+                return Ok(RuntimeDagOutcome::Stalled {
+                    reason: reason.to_string(),
                 });
             }
 
@@ -340,6 +465,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 .select_ready_wave(&tasks, ready_task_ids.clone());
             let selected_ids = validate_selected_wave(&ready_task_ids, selected_ids)?;
             let selected_set: HashSet<&str> = selected_ids.iter().map(String::as_str).collect();
+            let dependency_states = state.dependency_states(&tasks);
             let selected_tasks: Vec<Task> = tasks
                 .iter()
                 .filter(|task| selected_set.contains(task.spec.id.as_str()))
@@ -384,12 +510,19 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 outstanding_claims.insert(claim_id.clone(), (task.clone(), claim.clone()));
                 let dispatch_run_id = run_id.to_string();
                 let delegation_policy = self.config.delegation_policy;
+                let waived_dependency_ids = match dependency_states.get(&task.spec.id) {
+                    Some(DagDependencyState::Satisfied {
+                        waived_dependency_ids,
+                    }) => waived_dependency_ids.clone(),
+                    _ => Vec::new(),
+                };
                 join_set.spawn(async move {
                     let dispatch = match semaphore.acquire_owned().await {
                         Ok(permit) => {
                             let context = TaskSubagentContext::new(dispatch_run_id)
                                 .with_cancel(task_cancel)
-                                .with_delegation_policy(delegation_policy);
+                                .with_delegation_policy(delegation_policy)
+                                .with_waived_dependencies(waived_dependency_ids);
                             let result = controller.dispatch_task(context, claim, task).await;
                             drop(permit);
                             result
@@ -411,7 +544,10 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     biased;
                     joined = join_set.join_next() => {
                         match joined {
-                            Some(Ok(result)) => wave_results.push(result),
+                            Some(Ok(result)) => wave_results.push((
+                                result,
+                                !cancellation_observed && !cancel.is_cancelled(),
+                            )),
                             Some(Err(error)) => {
                                 wave_errors.push(format!(
                                     "Subagent dispatch task failed to join: {error}"
@@ -430,7 +566,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         join_set.abort_all();
                         while let Some(joined) = join_set.join_next().await {
                             match joined {
-                                Ok(result) => wave_results.push(result),
+                                Ok(result) => wave_results.push((result, false)),
                                 Err(error) if error.is_cancelled() => {}
                                 Err(error) => {
                                     wave_errors.push(format!(
@@ -444,13 +580,50 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 }
             }
 
-            let mut pending_outcome = cancellation_observed.then_some(RuntimeDagOutcome::Cancelled);
-            for (claim_id, dispatch) in wave_results {
+            let mut interruption_policy_failed = false;
+            let mut interruption_is_durable = false;
+            let mut interruption = if cancellation_observed || cancel.is_cancelled() {
+                match self.controller.interruption_disposition(run_id).await {
+                    Ok(disposition) => Some(disposition),
+                    Err(error) => {
+                        interruption_policy_failed = true;
+                        wave_errors.push(format!(
+                            "failed to resolve runtime interruption disposition: {error}"
+                        ));
+                        Some(RuntimeInterruptionDisposition::Paused {
+                            reason: format!(
+                                "interruption policy unavailable; preserved for resume: {error}"
+                            ),
+                        })
+                    }
+                }
+            } else {
+                None
+            };
+            let mut pending_outcome = None;
+            for ((claim_id, dispatch), completed_before_interruption) in wave_results {
                 let Some((task, claim)) = outstanding_claims.remove(&claim_id) else {
                     wave_errors.push(format!("dispatch returned unknown claim '{claim_id}'"));
                     continue;
                 };
-                let resolution = match self
+                if interruption.is_some() && !completed_before_interruption && dispatch.is_err() {
+                    let disposition = interruption
+                        .clone()
+                        .ok_or_else(|| ReactError::Other("interruption disappeared".to_string()))?;
+                    if let Err(error) = self
+                        .settle_abandonment(
+                            run_id,
+                            &claim,
+                            &task,
+                            RuntimeClaimAbandonment::Interrupted { disposition },
+                        )
+                        .await
+                    {
+                        wave_errors.push(error.to_string());
+                    }
+                    continue;
+                }
+                let request = match self
                     .controller
                     .resolve_dispatch(run_id, claim.clone(), task.clone(), dispatch)
                     .await
@@ -459,8 +632,31 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     Err(error) => {
                         let message = error.to_string();
                         if let Err(abandon_error) = self
-                            .controller
-                            .abandon_claim(
+                            .settle_abandonment(
+                                run_id,
+                                &claim,
+                                &task,
+                                RuntimeClaimAbandonment::Failed {
+                                    error: message.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            wave_errors.push(abandon_error.to_string());
+                        }
+                        wave_errors.push(message);
+                        continue;
+                    }
+                };
+                let resolution = match self
+                    .settle_dispatch_request(run_id, &claim, &task, request)
+                    .await
+                {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        let message = error.to_string();
+                        if let Err(abandon_error) = self
+                            .settle_abandonment(
                                 run_id,
                                 &claim,
                                 &task,
@@ -490,16 +686,40 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         }
                     }
                     RuntimeTaskResolution::Cancelled => {
-                        if pending_outcome.is_none() {
-                            pending_outcome = Some(RuntimeDagOutcome::Cancelled);
-                        }
+                        interruption = prioritize_interruption(
+                            interruption,
+                            Some(RuntimeInterruptionDisposition::Cancelled),
+                        );
+                        interruption_is_durable = true;
+                    }
+                }
+            }
+
+            if cancel.is_cancelled() && !interruption_policy_failed {
+                match self.controller.interruption_disposition(run_id).await {
+                    Ok(disposition) => {
+                        interruption = prioritize_interruption(interruption, Some(disposition));
+                    }
+                    Err(error) => {
+                        interruption_policy_failed = true;
+                        wave_errors.push(format!(
+                            "failed to resolve runtime interruption disposition at wave boundary: {error}"
+                        ));
+                        interruption = prioritize_interruption(
+                            interruption,
+                            Some(RuntimeInterruptionDisposition::Paused {
+                                reason: format!(
+                                    "interruption policy unavailable; preserved for resume: {error}"
+                                ),
+                            }),
+                        );
                     }
                 }
             }
 
             for (_claim_id, (task, claim)) in outstanding_claims {
-                let abandonment = if cancellation_observed || cancel.is_cancelled() {
-                    RuntimeClaimAbandonment::Cancelled
+                let abandonment = if let Some(disposition) = interruption.clone() {
+                    RuntimeClaimAbandonment::Interrupted { disposition }
                 } else {
                     RuntimeClaimAbandonment::Failed {
                         error: wave_errors
@@ -509,11 +729,31 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     }
                 };
                 if let Err(error) = self
-                    .controller
-                    .abandon_claim(run_id, &claim, &task, abandonment)
+                    .settle_abandonment(run_id, &claim, &task, abandonment)
                     .await
                 {
                     wave_errors.push(error.to_string());
+                }
+            }
+
+            if interruption_policy_failed {
+                let cleanup_disposition = interruption.clone().unwrap_or_else(|| {
+                    RuntimeInterruptionDisposition::Paused {
+                        reason: "interruption policy unavailable; preserved for resume".to_string(),
+                    }
+                });
+                match self
+                    .controller
+                    .settle_interruption(run_id, snapshot.revision, cleanup_disposition)
+                    .await
+                {
+                    Ok(RuntimeInterruptionSettlementOutcome::Settled(_)) => {}
+                    Ok(RuntimeInterruptionSettlementOutcome::ReloadSnapshot) => wave_errors.push(
+                        "runtime interruption cleanup lost its expected revision".to_string(),
+                    ),
+                    Err(error) => wave_errors.push(format!(
+                        "runtime interruption cleanup failed after policy error: {error}"
+                    )),
                 }
             }
 
@@ -523,10 +763,171 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
 
             // Resolve the whole wave before honoring a stop request so completed
             // siblings are never replayed after resume.
+            if let Some(disposition) = interruption {
+                match self
+                    .settle_interruption_boundary(
+                        run_id,
+                        snapshot.revision,
+                        disposition,
+                        !interruption_is_durable,
+                    )
+                    .await?
+                {
+                    InterruptionBoundary::Outcome(outcome) => return Ok(outcome),
+                    InterruptionBoundary::ReloadSnapshot
+                    | InterruptionBoundary::NoUnfinishedWork => {}
+                }
+            }
             if let Some(outcome) = pending_outcome {
                 return Ok(outcome);
             }
         }
+    }
+
+    async fn settle_interruption_boundary(
+        &self,
+        run_id: &str,
+        expected_revision: u64,
+        disposition: RuntimeInterruptionDisposition,
+        suppress_noop_outcome: bool,
+    ) -> Result<InterruptionBoundary> {
+        match self
+            .controller
+            .settle_interruption(run_id, expected_revision, disposition.clone())
+            .await?
+        {
+            RuntimeInterruptionSettlementOutcome::ReloadSnapshot => {
+                Ok(InterruptionBoundary::ReloadSnapshot)
+            }
+            RuntimeInterruptionSettlementOutcome::Settled(receipt) => {
+                if receipt.disposition != disposition {
+                    return Err(ReactError::Other(
+                        "runtime interruption receipt changed the requested disposition"
+                            .to_string(),
+                    ));
+                }
+                if suppress_noop_outcome
+                    && receipt.interrupted_task_ids.is_empty()
+                    && receipt.pending_task_ids.is_empty()
+                {
+                    return Ok(InterruptionBoundary::NoUnfinishedWork);
+                }
+                Ok(InterruptionBoundary::Outcome(match disposition {
+                    RuntimeInterruptionDisposition::Cancelled => RuntimeDagOutcome::Cancelled,
+                    RuntimeInterruptionDisposition::Paused { reason } => {
+                        RuntimeDagOutcome::Paused {
+                            task_id: None,
+                            reason,
+                        }
+                    }
+                }))
+            }
+        }
+    }
+
+    async fn settle_dispatch_request(
+        &self,
+        run_id: &str,
+        claim: &TaskClaim,
+        task: &Task,
+        request: RuntimeTaskResolutionRequest,
+    ) -> Result<RuntimeTaskResolution> {
+        let resolution = self
+            .controller
+            .settle_resolution(run_id, claim, task, request.clone())
+            .await?;
+        if !resolution_matches_request(&request, &resolution) {
+            return Err(ReactError::Other(format!(
+                "runtime settlement receipt {resolution:?} does not match request {request:?}"
+            )));
+        }
+        if self
+            .controller
+            .claim_is_current(run_id, &task.spec.id, claim)
+            .await?
+        {
+            return Err(ReactError::Other(format!(
+                "runtime settlement receipt {resolution:?} left claim '{}' active",
+                claim.claim_id
+            )));
+        }
+        Ok(resolution)
+    }
+
+    async fn settle_abandonment(
+        &self,
+        run_id: &str,
+        claim: &TaskClaim,
+        task: &Task,
+        abandonment: RuntimeClaimAbandonment,
+    ) -> Result<RuntimeTaskSettlementOutcome> {
+        let settlement = self
+            .controller
+            .abandon_claim(run_id, claim, task, abandonment)
+            .await?;
+        if self
+            .controller
+            .claim_is_current(run_id, &task.spec.id, claim)
+            .await?
+        {
+            return Err(ReactError::Other(format!(
+                "runtime claim abandonment {settlement:?} left claim '{}' active",
+                claim.claim_id
+            )));
+        }
+        Ok(settlement)
+    }
+}
+
+fn resolution_matches_request(
+    request: &RuntimeTaskResolutionRequest,
+    resolution: &RuntimeTaskResolution,
+) -> bool {
+    if resolution == &RuntimeTaskResolution::Superseded {
+        return true;
+    }
+    match (request, resolution) {
+        (RuntimeTaskResolutionRequest::Completed, RuntimeTaskResolution::Completed)
+        | (RuntimeTaskResolutionRequest::Skipped, RuntimeTaskResolution::Skipped)
+        | (RuntimeTaskResolutionRequest::Cancelled, RuntimeTaskResolution::Cancelled) => true,
+        (RuntimeTaskResolutionRequest::Requeue { .. }, RuntimeTaskResolution::Pending) => true,
+        (
+            RuntimeTaskResolutionRequest::Requeue {
+                error: requested, ..
+            },
+            RuntimeTaskResolution::Failed { error: settled },
+        )
+        | (
+            RuntimeTaskResolutionRequest::Failed { error: requested },
+            RuntimeTaskResolution::Failed { error: settled },
+        ) => requested == settled,
+        (
+            RuntimeTaskResolutionRequest::Blocked {
+                error: requested_error,
+                disposition: requested_disposition,
+            },
+            RuntimeTaskResolution::Blocked {
+                error: settled_error,
+                disposition: settled_disposition,
+            },
+        ) => requested_error == settled_error && requested_disposition == settled_disposition,
+        _ => false,
+    }
+}
+
+/// Merge durable and requested interruption signals with one explicit order:
+/// Cancelled is stronger than Paused, and the earlier Paused reason is stable.
+fn prioritize_interruption(
+    current: Option<RuntimeInterruptionDisposition>,
+    incoming: Option<RuntimeInterruptionDisposition>,
+) -> Option<RuntimeInterruptionDisposition> {
+    match (current, incoming) {
+        (Some(RuntimeInterruptionDisposition::Cancelled), _)
+        | (_, Some(RuntimeInterruptionDisposition::Cancelled)) => {
+            Some(RuntimeInterruptionDisposition::Cancelled)
+        }
+        (Some(paused @ RuntimeInterruptionDisposition::Paused { .. }), _) => Some(paused),
+        (None, disposition) => disposition,
     }
 }
 
@@ -583,8 +984,8 @@ fn stop_outcome(
             error,
         },
         RuntimeStopDisposition::Pause => RuntimeDagOutcome::Paused {
-            failed_task_id,
-            error,
+            task_id: Some(failed_task_id),
+            reason: error,
         },
     }
 }
@@ -601,11 +1002,15 @@ mod tests {
         snapshot: Mutex<Option<RuntimePlanSnapshot>>,
         order: Mutex<Vec<TaskId>>,
         fail: Mutex<HashMap<TaskId, String>>,
-        dispatch_delay: Mutex<HashMap<TaskId, Duration>>,
+        blocked: Mutex<HashMap<TaskId, (String, RuntimeStopDisposition)>>,
         wait_for_cancel: Mutex<HashSet<TaskId>>,
         ignore_cancel: Mutex<HashSet<TaskId>>,
         insert_after: Mutex<Option<TaskId>>,
         reload_claim_once: Mutex<bool>,
+        interruption: Mutex<RuntimeInterruptionDisposition>,
+        interruption_error: Mutex<Option<String>>,
+        dispatch_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+        cancel_after_dispatch: Mutex<HashMap<TaskId, CancellationToken>>,
     }
 
     impl ScriptedController {
@@ -666,27 +1071,25 @@ mod tests {
             let snapshot = snapshot
                 .as_mut()
                 .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
-            if snapshot.revision != expected_revision {
-                return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
-            }
-            let Some(current) = snapshot
-                .tasks
-                .iter_mut()
-                .find(|current| current.spec.id == task.spec.id)
-            else {
-                return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
-            };
-            if current.spec != task.spec || current.execution.status != TaskStatus::Pending {
-                return Ok(RuntimeTaskClaimOutcome::ReloadSnapshot);
-            }
-            let claim = TaskClaim::new(
-                expected_revision,
-                current.execution.retry_count.saturating_add(1),
-                current.spec.stable_hash().map_err(ReactError::Other)?,
-            );
-            current.execution.status = TaskStatus::Running;
-            current.execution.claim = Some(claim.clone());
-            Ok(RuntimeTaskClaimOutcome::Claimed(claim))
+            super::super::runtime_service::claim_runtime_task(snapshot, task, expected_revision)
+                .map_err(|error| ReactError::Other(error.to_string()))
+        }
+
+        async fn claim_is_current(
+            &self,
+            _run_id: &str,
+            task_id: &str,
+            claim: &TaskClaim,
+        ) -> Result<bool> {
+            let snapshot = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let snapshot = snapshot
+                .as_ref()
+                .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
+            super::super::runtime_service::runtime_claim_is_current(snapshot, task_id, claim)
+                .map_err(|error| ReactError::Other(error.to_string()))
         }
 
         async fn dispatch_task(
@@ -699,6 +1102,14 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(task.spec.id.clone());
+            let barrier = self
+                .dispatch_barrier
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
             let wait_for_cancel = self
                 .wait_for_cancel
                 .lock()
@@ -718,33 +1129,70 @@ mod tests {
             if ignore_cancel {
                 std::future::pending::<()>().await;
             }
-            let delay = self
-                .dispatch_delay
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(&task.spec.id)
-                .copied();
-            if let Some(delay) = delay {
-                tokio::time::sleep(delay).await;
-            }
             let failure = self
                 .fail
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .get(&task.spec.id)
                 .cloned();
-            match failure {
+            let task_id = task.spec.id.clone();
+            let result = match failure {
                 Some(error) => Err(ReactError::Other(error)),
-                None => Ok(task.spec.id),
+                None => Ok(task_id.clone()),
+            };
+            if let Some(cancel) = self
+                .cancel_after_dispatch
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&task_id)
+            {
+                cancel.cancel();
             }
+            result
         }
 
         async fn resolve_dispatch(
             &self,
             _run_id: &str,
-            claim: TaskClaim,
+            _claim: TaskClaim,
             task: Task,
             dispatch: Result<Self::DispatchOutput>,
+        ) -> Result<RuntimeTaskResolutionRequest> {
+            let blocked = self
+                .blocked
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&task.spec.id)
+                .cloned();
+            Ok(match dispatch {
+                Ok(_) if blocked.is_some() => {
+                    let (error, disposition) = blocked.ok_or_else(|| {
+                        ReactError::Other("scripted blocker disappeared".to_string())
+                    })?;
+                    RuntimeTaskResolutionRequest::Blocked { error, disposition }
+                }
+                Ok(_) => RuntimeTaskResolutionRequest::Completed,
+                Err(ReactError::Agent(error))
+                    if matches!(
+                        error.as_ref(),
+                        echo_core::error::AgentError::Cancelled(_)
+                            | echo_core::error::AgentError::Interrupted
+                    ) =>
+                {
+                    RuntimeTaskResolutionRequest::Cancelled
+                }
+                Err(error) => RuntimeTaskResolutionRequest::Failed {
+                    error: error.to_string(),
+                },
+            })
+        }
+
+        async fn settle_resolution(
+            &self,
+            _run_id: &str,
+            claim: &TaskClaim,
+            task: &Task,
+            request: RuntimeTaskResolutionRequest,
         ) -> Result<RuntimeTaskResolution> {
             let mut snapshot = self
                 .snapshot
@@ -753,60 +1201,31 @@ mod tests {
             let snapshot = snapshot
                 .as_mut()
                 .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
-            if let Some(current) = snapshot
-                .tasks
-                .iter_mut()
-                .find(|current| current.spec.id == task.spec.id)
-            {
-                if current.execution.claim.as_ref() != Some(&claim)
-                    || current.execution.status != TaskStatus::Running
-                {
-                    return Ok(RuntimeTaskResolution::Superseded);
-                }
-                current.execution.status = match &dispatch {
-                    Ok(_) => TaskStatus::Completed,
-                    Err(ReactError::Agent(error))
-                        if matches!(
-                            error.as_ref(),
-                            echo_core::error::AgentError::Cancelled(_)
-                                | echo_core::error::AgentError::Interrupted
-                        ) =>
-                    {
-                        TaskStatus::Cancelled
-                    }
-                    Err(error) => TaskStatus::Failed(error.to_string()),
-                };
-            }
-
+            let resolution = super::super::runtime_service::settle_runtime_resolution(
+                snapshot,
+                &task.spec.id,
+                claim,
+                request,
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
             let insert_after = self
                 .insert_after
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take();
-            if insert_after.as_deref() == Some(task.spec.id.as_str()) {
-                snapshot.revision = snapshot.revision.saturating_add(1);
+            if resolution != RuntimeTaskResolution::Superseded
+                && insert_after.as_deref() == Some(task.spec.id.as_str())
+            {
+                snapshot.revision = snapshot.revision.checked_add(1).ok_or_else(|| {
+                    ReactError::Other("scripted snapshot revision overflowed".to_string())
+                })?;
                 snapshot.tasks.push(runtime_task(
                     "inserted",
                     TaskStatus::Pending,
                     &[task.spec.id.as_str()],
                 ));
             }
-
-            Ok(match dispatch {
-                Ok(_) => RuntimeTaskResolution::Completed,
-                Err(ReactError::Agent(error))
-                    if matches!(
-                        error.as_ref(),
-                        echo_core::error::AgentError::Cancelled(_)
-                            | echo_core::error::AgentError::Interrupted
-                    ) =>
-                {
-                    RuntimeTaskResolution::Cancelled
-                }
-                Err(error) => RuntimeTaskResolution::Failed {
-                    error: error.to_string(),
-                },
-            })
+            Ok(resolution)
         }
 
         async fn abandon_claim(
@@ -815,7 +1234,7 @@ mod tests {
             claim: &TaskClaim,
             task: &Task,
             abandonment: RuntimeClaimAbandonment,
-        ) -> Result<()> {
+        ) -> Result<RuntimeTaskSettlementOutcome> {
             let mut snapshot = self
                 .snapshot
                 .lock()
@@ -823,40 +1242,60 @@ mod tests {
             let snapshot = snapshot
                 .as_mut()
                 .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
-            let Some(current) = snapshot
-                .tasks
-                .iter_mut()
-                .find(|current| current.spec.id == task.spec.id)
-            else {
-                return Ok(());
-            };
-            if current.execution.claim.as_ref() != Some(claim)
-                || current.execution.status != TaskStatus::Running
-            {
-                return Ok(());
-            }
-            current.execution.status = match abandonment {
-                RuntimeClaimAbandonment::Cancelled => TaskStatus::Cancelled,
+            let status = match abandonment {
+                RuntimeClaimAbandonment::Interrupted { disposition } => match disposition {
+                    RuntimeInterruptionDisposition::Cancelled => TaskStatus::Cancelled,
+                    RuntimeInterruptionDisposition::Paused { reason } => TaskStatus::Paused(reason),
+                },
                 RuntimeClaimAbandonment::Failed { error } => TaskStatus::Failed(error),
             };
-            current.execution.claim = None;
-            Ok(())
+            super::super::runtime_service::settle_runtime_claim(
+                snapshot,
+                &task.spec.id,
+                claim,
+                status,
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))
         }
 
-        async fn block_task(&self, _run_id: &str, task: &Task, reason: &str) -> Result<()> {
+        async fn interruption_disposition(
+            &self,
+            _run_id: &str,
+        ) -> Result<RuntimeInterruptionDisposition> {
+            if let Some(error) = self
+                .interruption_error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+            {
+                return Err(ReactError::Other(error));
+            }
+            Ok(self
+                .interruption
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone())
+        }
+
+        async fn settle_interruption(
+            &self,
+            _run_id: &str,
+            expected_revision: u64,
+            disposition: RuntimeInterruptionDisposition,
+        ) -> Result<RuntimeInterruptionSettlementOutcome> {
             let mut snapshot = self
                 .snapshot
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(current) = snapshot.as_mut().and_then(|snapshot| {
-                snapshot
-                    .tasks
-                    .iter_mut()
-                    .find(|item| item.spec.id == task.spec.id)
-            }) {
-                current.execution.status = TaskStatus::Blocked(reason.to_string());
-            }
-            Ok(())
+            let snapshot = snapshot
+                .as_mut()
+                .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
+            super::super::runtime_service::settle_runtime_interruption(
+                snapshot,
+                expected_revision,
+                disposition,
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))
         }
     }
 
@@ -894,7 +1333,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("a".to_string());
         let executor =
-            RuntimeDagExecutor::new(controller.clone(), RuntimeDagExecutorConfig::default());
+            RuntimeDagExecutor::new(controller.clone(), RuntimeTaskServiceConfig::default());
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
@@ -928,11 +1367,38 @@ mod tests {
             TaskStatus::Skipped,
             &[],
         )]));
-        let executor = RuntimeDagExecutor::new(controller, RuntimeDagExecutorConfig::default());
+        let executor = RuntimeDagExecutor::new(controller, RuntimeTaskServiceConfig::default());
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
         assert_eq!(outcome, RuntimeDagOutcome::Completed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn executor_rejects_claims_attached_to_inactive_statuses() -> Result<()> {
+        for status in [TaskStatus::Pending, TaskStatus::Completed] {
+            let mut invalid = runtime_task("invalid", status, &[]);
+            invalid.execution.claim = Some(TaskClaim::new(
+                1,
+                1,
+                invalid.spec.stable_hash().map_err(ReactError::Other)?,
+            ));
+            let controller = Arc::new(ScriptedController::with_tasks(vec![invalid]));
+            let service = super::super::RuntimeTaskService::new(
+                controller,
+                RuntimeTaskServiceConfig::default(),
+            );
+
+            let error = service
+                .execute("invalid-claim", CancellationToken::new())
+                .await
+                .err()
+                .ok_or_else(|| {
+                    ReactError::Other("inactive claim snapshot unexpectedly executed".to_string())
+                })?;
+            assert!(error.to_string().contains("invalid runtime claim snapshot"));
+        }
         Ok(())
     }
 
@@ -943,11 +1409,226 @@ mod tests {
             TaskStatus::Cancelled,
             &[],
         )]));
-        let executor = RuntimeDagExecutor::new(controller, RuntimeDagExecutorConfig::default());
+        let executor = RuntimeDagExecutor::new(controller, RuntimeTaskServiceConfig::default());
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
         assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovered_interruption_takes_precedence_over_retained_failure() -> Result<()> {
+        let cancelled = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("failed", TaskStatus::Failed("old failure".to_string()), &[]),
+            runtime_task("cancelled", TaskStatus::Cancelled, &[]),
+            runtime_task("pending", TaskStatus::Pending, &[]),
+        ]));
+        let cancelled_service = super::super::RuntimeTaskService::new(
+            cancelled.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+        *cancelled
+            .interruption
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            RuntimeInterruptionDisposition::Paused {
+                reason: "weaker requested pause".to_string(),
+            };
+        let requested_pause = CancellationToken::new();
+        requested_pause.cancel();
+        assert_eq!(
+            cancelled_service
+                .execute("cancelled-run", requested_pause)
+                .await?,
+            RuntimeDagOutcome::Cancelled
+        );
+        let cancelled_statuses = cancelled.statuses();
+        assert_eq!(
+            cancelled_statuses.get("failed"),
+            Some(&TaskStatus::Failed("old failure".to_string()))
+        );
+        assert_eq!(
+            cancelled_statuses.get("pending"),
+            Some(&TaskStatus::Cancelled)
+        );
+
+        let paused = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("failed", TaskStatus::Failed("old failure".to_string()), &[]),
+            runtime_task(
+                "paused",
+                TaskStatus::Paused("resume later".to_string()),
+                &[],
+            ),
+            runtime_task("pending", TaskStatus::Pending, &[]),
+        ]));
+        let paused_service = super::super::RuntimeTaskService::new(
+            paused.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+        assert_eq!(
+            paused_service
+                .execute("paused-run", CancellationToken::new())
+                .await?,
+            RuntimeDagOutcome::Paused {
+                task_id: None,
+                reason: "resume later".to_string(),
+            }
+        );
+        assert_eq!(paused.statuses().get("pending"), Some(&TaskStatus::Pending));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_snapshot_wins_over_late_cancellation_request() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("completed", TaskStatus::Completed, &[]),
+            runtime_task("skipped", TaskStatus::Skipped, &[]),
+        ]));
+        let service =
+            super::super::RuntimeTaskService::new(controller, RuntimeTaskServiceConfig::default());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        assert_eq!(
+            service.execute("completed-run", cancel).await?,
+            RuntimeDagOutcome::Completed
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn last_success_settlement_wins_over_same_boundary_cancellation() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "last",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let cancel = CancellationToken::new();
+        controller
+            .cancel_after_dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("last".to_string(), cancel.clone());
+        let service = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+
+        assert_eq!(
+            service.execute("last-success", cancel).await?,
+            RuntimeDagOutcome::Completed
+        );
+        assert_eq!(
+            controller.statuses().get("last"),
+            Some(&TaskStatus::Completed)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn late_cancellation_overrides_blocked_resolution_at_boundary() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "blocked",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        controller
+            .blocked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                "blocked".to_string(),
+                ("await review".to_string(), RuntimeStopDisposition::Pause),
+            );
+        let cancel = CancellationToken::new();
+        controller
+            .cancel_after_dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("blocked".to_string(), cancel.clone());
+        let service = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+
+        assert_eq!(
+            service.execute("blocked-cancel", cancel).await?,
+            RuntimeDagOutcome::Cancelled
+        );
+        assert_eq!(
+            controller.statuses().get("blocked"),
+            Some(&TaskStatus::Cancelled)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_settles_pre_wave_cancellation_without_dispatch() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("a", TaskStatus::Pending, &[]),
+            runtime_task("b", TaskStatus::Pending, &[]),
+        ]));
+        let runtime_tasks = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let outcome = runtime_tasks.execute("run", cancel).await?;
+
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert!(
+            controller
+                .order
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+        assert!(
+            controller
+                .statuses()
+                .values()
+                .all(|status| status == &TaskStatus::Cancelled)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_settles_pre_wave_pause_without_retry_or_dispatch() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "pending",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        *controller
+            .interruption
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            RuntimeInterruptionDisposition::Paused {
+                reason: "deterministic pause".to_string(),
+            };
+        let runtime_tasks = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let outcome = runtime_tasks.execute("run", cancel).await?;
+
+        assert_eq!(
+            outcome,
+            RuntimeDagOutcome::Paused {
+                task_id: None,
+                reason: "deterministic pause".to_string(),
+            }
+        );
+        assert_eq!(
+            controller.statuses().get("pending"),
+            Some(&TaskStatus::Pending)
+        );
         Ok(())
     }
 
@@ -958,55 +1639,186 @@ mod tests {
             runtime_task("slow", TaskStatus::Pending, &[]),
         ]));
         controller
-            .dispatch_delay
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert("fast".to_string(), Duration::from_millis(10));
-        controller
             .wait_for_cancel
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert("slow".to_string());
-        let executor = RuntimeDagExecutor::new(
+        *controller
+            .dispatch_barrier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(tokio::sync::Barrier::new(2)));
+        let cancel = CancellationToken::new();
+        controller
+            .cancel_after_dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("fast".to_string(), cancel.clone());
+        let runtime_tasks = super::super::RuntimeTaskService::new(
             controller.clone(),
-            RuntimeDagExecutorConfig {
+            RuntimeTaskServiceConfig {
                 cancellation_grace_period: Duration::from_millis(200),
-                ..RuntimeDagExecutorConfig::default()
+                ..RuntimeTaskServiceConfig::default()
             },
         );
-        let cancel = CancellationToken::new();
-        let run_cancel = cancel.clone();
-        let run = tokio::spawn(async move { executor.execute("run", run_cancel).await });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let dispatched = controller
-                    .order
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .len();
-                if dispatched == 2 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|_| ReactError::Other("tasks were not dispatched".to_string()))?;
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        cancel.cancel();
-
-        let outcome = tokio::time::timeout(Duration::from_secs(1), run)
-            .await
-            .map_err(|_| ReactError::Other("executor cancellation timed out".to_string()))?
-            .map_err(|error| {
-                ReactError::Other(format!("executor task failed to join: {error}"))
-            })??;
+        let outcome = runtime_tasks.execute("run", cancel).await?;
 
         assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
         let statuses = controller.statuses();
         assert_eq!(statuses.get("fast"), Some(&TaskStatus::Completed));
         assert_eq!(statuses.get("slow"), Some(&TaskStatus::Cancelled));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mid_wave_pause_preserves_completed_sibling_and_pauses_interrupted_claim() -> Result<()>
+    {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("fast", TaskStatus::Pending, &[]),
+            runtime_task("slow", TaskStatus::Pending, &[]),
+        ]));
+        controller
+            .wait_for_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("slow".to_string());
+        *controller
+            .dispatch_barrier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(tokio::sync::Barrier::new(2)));
+        *controller
+            .interruption
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            RuntimeInterruptionDisposition::Paused {
+                reason: "pause at wave barrier".to_string(),
+            };
+        let cancel = CancellationToken::new();
+        controller
+            .cancel_after_dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("fast".to_string(), cancel.clone());
+        let runtime_tasks = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                cancellation_grace_period: Duration::from_millis(200),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        );
+
+        let outcome = runtime_tasks.execute("run", cancel).await?;
+
+        assert_eq!(
+            outcome,
+            RuntimeDagOutcome::Paused {
+                task_id: None,
+                reason: "pause at wave barrier".to_string(),
+            }
+        );
+        let snapshot = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| ReactError::Other("missing paused snapshot".to_string()))?;
+        let fast = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.spec.id == "fast")
+            .ok_or_else(|| ReactError::Other("fast task is missing".to_string()))?;
+        let slow = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.spec.id == "slow")
+            .ok_or_else(|| ReactError::Other("slow task is missing".to_string()))?;
+        assert_eq!(fast.execution.status, TaskStatus::Completed);
+        assert_eq!(
+            slow.execution.status,
+            TaskStatus::Paused("pause at wave barrier".to_string())
+        );
+        assert!(slow.execution.claim.is_none());
+        assert_eq!(slow.execution.retry_count, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interruption_policy_error_cleans_every_claim_before_returning_error() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("fast", TaskStatus::Pending, &[]),
+            runtime_task("slow", TaskStatus::Pending, &[]),
+        ]));
+        controller
+            .wait_for_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("slow".to_string());
+        *controller
+            .dispatch_barrier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(tokio::sync::Barrier::new(2)));
+        *controller
+            .interruption_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some("interruption authority unavailable".to_string());
+        let cancel = CancellationToken::new();
+        controller
+            .cancel_after_dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("fast".to_string(), cancel.clone());
+        let service = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                cancellation_grace_period: Duration::from_millis(200),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        );
+
+        let error = service
+            .execute("policy-error", cancel)
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("policy error unexpectedly succeeded".to_string()))?;
+        assert!(
+            error
+                .to_string()
+                .contains("interruption authority unavailable")
+        );
+        let snapshot = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| ReactError::Other("policy-error snapshot missing".to_string()))?;
+        assert!(
+            snapshot
+                .tasks
+                .iter()
+                .all(|task| task.execution.claim.is_none())
+        );
+        assert!(snapshot.tasks.iter().all(|task| {
+            matches!(
+                task.execution.status,
+                TaskStatus::Completed | TaskStatus::Paused(_) | TaskStatus::Pending
+            )
+        }));
+        assert!(
+            snapshot
+                .tasks
+                .iter()
+                .any(|task| matches!(task.execution.status, TaskStatus::Paused(_)))
+        );
+        assert!(
+            snapshot
+                .tasks
+                .iter()
+                .all(|task| task.execution.status != TaskStatus::Cancelled)
+        );
         Ok(())
     }
 
@@ -1036,9 +1848,9 @@ mod tests {
             .insert("stuck".to_string());
         let executor = RuntimeDagExecutor::new(
             controller.clone(),
-            RuntimeDagExecutorConfig {
+            RuntimeTaskServiceConfig {
                 cancellation_grace_period: Duration::from_millis(10),
-                ..RuntimeDagExecutorConfig::default()
+                ..RuntimeTaskServiceConfig::default()
             },
         );
         let cancel = CancellationToken::new();
@@ -1083,7 +1895,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         let executor =
-            RuntimeDagExecutor::new(controller.clone(), RuntimeDagExecutorConfig::default());
+            RuntimeDagExecutor::new(controller.clone(), RuntimeTaskServiceConfig::default());
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
@@ -1117,7 +1929,7 @@ mod tests {
                 status,
                 &[],
             )]));
-            let executor = RuntimeDagExecutor::new(controller, RuntimeDagExecutorConfig::default());
+            let executor = RuntimeDagExecutor::new(controller, RuntimeTaskServiceConfig::default());
 
             let outcome = executor.execute("run", CancellationToken::new()).await?;
 
@@ -1133,7 +1945,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executor_blocks_downstream_and_fails_exhausted_graph() -> Result<()> {
+    async fn executor_derives_downstream_block_without_persisting_it() -> Result<()> {
         let controller = Arc::new(ScriptedController::with_tasks(vec![
             runtime_task("a", TaskStatus::Pending, &[]),
             runtime_task("b", TaskStatus::Pending, &["a"]),
@@ -1144,7 +1956,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert("a".to_string(), "boom".to_string());
         let executor =
-            RuntimeDagExecutor::new(controller.clone(), RuntimeDagExecutorConfig::default());
+            RuntimeDagExecutor::new(controller.clone(), RuntimeTaskServiceConfig::default());
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
@@ -1155,17 +1967,25 @@ mod tests {
                 error: "boom".to_string(),
             }
         );
-        assert_eq!(
-            controller.statuses().get("b"),
-            Some(&TaskStatus::Blocked(
-                "blocked: upstream task failed".to_string()
-            ))
-        );
+        assert_eq!(controller.statuses().get("b"), Some(&TaskStatus::Pending));
+        let tasks = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|snapshot| snapshot.tasks.clone())
+            .ok_or_else(|| ReactError::Other("missing derived-block snapshot".to_string()))?;
+        assert!(matches!(
+            DagExecutionState::from_tasks(&tasks)
+                .dependency_states(&tasks)
+                .get("b"),
+            Some(DagDependencyState::BlockedByFailure { .. })
+        ));
         Ok(())
     }
 
     #[tokio::test]
-    async fn executor_blocks_transitive_downstream_chain() -> Result<()> {
+    async fn executor_derives_transitive_downstream_chain_without_persistence() -> Result<()> {
         let controller = Arc::new(ScriptedController::with_tasks(vec![
             runtime_task("a", TaskStatus::Pending, &[]),
             runtime_task("b", TaskStatus::Pending, &["a"]),
@@ -1177,13 +1997,27 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert("a".to_string(), "boom".to_string());
         let executor =
-            RuntimeDagExecutor::new(controller.clone(), RuntimeDagExecutorConfig::default());
+            RuntimeDagExecutor::new(controller.clone(), RuntimeTaskServiceConfig::default());
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
         assert!(matches!(outcome, RuntimeDagOutcome::Failed { .. }));
         let statuses = controller.statuses();
         for id in ["b", "c"] {
-            assert!(matches!(statuses.get(id), Some(TaskStatus::Blocked(_))));
+            assert_eq!(statuses.get(id), Some(&TaskStatus::Pending));
+        }
+        let tasks = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|snapshot| snapshot.tasks.clone())
+            .ok_or_else(|| ReactError::Other("missing transitive snapshot".to_string()))?;
+        let dependencies = DagExecutionState::from_tasks(&tasks).dependency_states(&tasks);
+        for id in ["b", "c"] {
+            assert!(matches!(
+                dependencies.get(id),
+                Some(DagDependencyState::BlockedByFailure { .. })
+            ));
         }
         Ok(())
     }

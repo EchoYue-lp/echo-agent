@@ -2,7 +2,7 @@
 //!
 //! [`RuntimeStateStore`] persists the ReAct checkpoint only. Task dependency and
 //! lifecycle state is owned by `echo_orchestration::tasks::TaskRevisionService`
-//! and `RuntimeDagExecutor`, so this module deliberately has no task graph API.
+//! and `RuntimeTaskService`, so this module deliberately has no task graph API.
 //!
 //! # Quick Start
 //!

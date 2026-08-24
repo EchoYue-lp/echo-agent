@@ -7,7 +7,7 @@ one revisioned task graph. There is no separate task-manager state machine.
 
 - `TaskRevisionService` is the only CRUD, relation, validation, and revision
   authority.
-- `RuntimeDagExecutor` is the only dependency execution kernel.
+- `RuntimeTaskService` is the only public dependency execution entry point.
 - `TaskSpawner` tracks process-local background futures only; it does not own
   durable task relationships.
 - A plan is an editable, versioned artifact over the graph. It is not an
@@ -74,24 +74,30 @@ but generic patch semantics and DAG validation stay in the framework.
 
 ## Runtime Execution
 
-`RuntimeDagExecutor<C>` repeatedly loads a committed `RuntimePlanSnapshot`
-from its `RuntimeDagController`:
+`RuntimeTaskService<C>` repeatedly loads a committed `RuntimePlanSnapshot`
+through its thin `RuntimeDagController` adapter:
 
 1. Validate the complete snapshot and detect cycles.
 2. Compute the ready frontier from committed dependencies and statuses.
 3. Atomically claim tasks with revision, attempt, spec hash, and unique claim id.
 4. Dispatch a bounded, conflict-free Subagent wave.
 5. Resolve or abandon every claim with compare-and-set semantics.
-6. Reload at the next safe point so a newer revision can take effect.
+6. Settle typed cancellation or resumable pause receipts at the wave boundary.
+7. Reload at the next safe point so a newer revision can take effect.
 
 The controller is a thin application adapter for persistence, Subagent
 dispatch, review, and product-specific resource policy. It must not implement
 a second ready-frontier loop or dependency state machine.
 
-The executor handles transitive failure blocking, skip and pause states,
-bounded retries, cancellation settlement, superseded claims, and stall
-detection. Attempt-scoped claim identity prevents an old dispatch from
-overwriting a reclaimed attempt.
+The service handles transitive failure blocking, skip and pause states, bounded
+retries, cancellation settlement, superseded claims, and stall detection.
+Dependency failure is a typed `DagDependencyState` projection; it is not
+persisted as `TaskStatus::Blocked`, so retrying an ancestor removes the derived
+block automatically. `Blocked` remains available for explicit product policy,
+such as review or missing input. A paused claim clears ownership and resumes to
+Pending without consuming retry budget. A Skipped dependency is carried to the
+Subagent as a typed waiver rather than a fabricated output. Attempt-scoped
+claim identity prevents an old dispatch from overwriting a reclaimed attempt.
 
 ## Projection and Progress
 
@@ -100,5 +106,5 @@ may derive richer todo, evidence, and UI data from the committed task extension,
 but the next runtime decision is always made from a committed revision loaded
 through the canonical service/controller boundary.
 
-See `demo48_personal_assistant` for direct service use and the
-`runtime_executor` tests for a deterministic controller implementation.
+See `tests/facade_smoke.rs` for public service construction and the private
+`runtime_executor` tests for deterministic controller behavior.

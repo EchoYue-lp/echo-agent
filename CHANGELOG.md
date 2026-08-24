@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SandboxManager` 默认 `local_only()`。
 - Task graph mutation and execution now have one authority:
   `TaskRevisionService` owns CRUD and relation commits, while
-  `RuntimeDagExecutor` owns ready-frontier, retry, cancellation, and terminal
+  `RuntimeTaskService` owns ready-frontier, retry, cancellation, and terminal
   settlement. The legacy `ManagedTask`/`PlanSpec`/`Verifier` parallel model was
   removed; product fields round-trip through `TaskSpec::extension`.
 - `TaskToolPolicy` implementations must now provide the idempotent
@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   composed from concrete Agent instances with `TeamAgentBuilder`. Programmatic
   members are registered into the same `SubagentRegistry` and executed by the
   same `SubagentExecutor`; both entry points compile into the revisioned Task
-  graph and run through `RuntimeDagExecutor`.
+  graph and run through `RuntimeTaskService`.
 - `JsonlChangeLog::new` and `MemoryRuntimeIntegrationBuilder` initialization
   now return `Result` and fail closed on complete-record corruption. Stable
   audit IDs can be replayed through `ChangeLog::record_idempotent`; identical
@@ -102,14 +102,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The parallel legacy Task authority was removed: `TaskManager`, `TaskStore`,
   `SqliteTaskStore`, `TaskExecutor`, `TaskScheduler`, composite execution,
   Task hooks, and replanners. Migrate graph CRUD to `TaskRevisionService`, DAG
-  execution to `RuntimeDagExecutor`, and independent background futures to
+  execution to `RuntimeTaskService`, and independent background futures to
   `TaskSpawner`.
 - Runtime-state `TaskNode` / `TaskNodeStatus` APIs were removed. ReAct
   `RuntimeStateStore` checkpoints now contain only resumable Agent state;
   revisioned task progress remains in the canonical Task graph.
 - The Team-specific `TaskNode` checkpoint format and manager-owned ready/fan-out
   loop were removed. Dynamic manager plans are committed as a new revision by
-  `TaskRevisionService`, then executed by `RuntimeDagExecutor`. The public
+  `TaskRevisionService`, then executed by `RuntimeTaskService`. The public
   `Team`, `TeamMember`, `TeamRole`, `TeamAgentBuilder`, and `TeamStrategy`
   composition APIs remain available as thin adapters. Shared Agent objects now
   enter directly through `register_shared` / `add_shared_member`; the obsolete

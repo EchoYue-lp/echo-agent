@@ -89,13 +89,13 @@ manager 必须返回 typed JSON 任务计划。未知字段、未知 Subagent、
 TeamSpec 或 TeamAgentBuilder
   -> TeamRuntime（默认内存实现，或调用方持久 adapter）
   -> TaskRevisionService
-  -> RuntimeDagExecutor
+  -> RuntimeTaskService
   -> SubagentExecutor
   -> typed SubagentResult
   -> 在同一 revisioned graph 中精确结算 claim
 ```
 
-`RuntimeDagExecutor` 唯一负责 ready frontier、依赖阻塞、并发 wave、取消和终态
+`RuntimeTaskService` 唯一负责 ready frontier、派生依赖阻塞、并发 wave、取消和终态
 选择。Team 代码只编译意图并提供薄 dispatch adapter。ReAct checkpoint 不再
 重复保存 task node 或任务生命周期状态。
 

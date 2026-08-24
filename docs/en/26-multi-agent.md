@@ -95,13 +95,13 @@ The production flow is:
 TeamSpec or TeamAgentBuilder
   -> TeamRuntime (default in-memory or caller-owned persistent adapter)
   -> TaskRevisionService
-  -> RuntimeDagExecutor
+  -> RuntimeTaskService
   -> SubagentExecutor
   -> typed SubagentResult
   -> exact claim settlement in the same revisioned graph
 ```
 
-`RuntimeDagExecutor` exclusively owns ready-frontier traversal, dependency
+`RuntimeTaskService` exclusively owns ready-frontier traversal, derived dependency
 blocking, bounded waves, cancellation, and terminal outcome selection. Team
 code only compiles intent and supplies a thin dispatch adapter. ReAct
 checkpoints do not duplicate task nodes or task lifecycle state.

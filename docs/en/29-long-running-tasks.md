@@ -6,7 +6,7 @@ echo-agent exposes two complementary mechanisms:
 
 | Mechanism | Authority | Use |
 |-----------|-----------|-----|
-| `TaskRevisionService` + `RuntimeDagExecutor` | Durable revisioned graph and dependency lifecycle | Multi-step Agent plans |
+| `TaskRevisionService` + `RuntimeTaskService` | Durable revisioned graph and dependency lifecycle | Multi-step Agent plans |
 | `TaskSpawner` + `BackgroundTask<T>` | Process-local async handles | Polling, waiting for, or cancelling one future |
 
 `TaskSpawner` is deliberately not a durable graph store. Restart recovery,

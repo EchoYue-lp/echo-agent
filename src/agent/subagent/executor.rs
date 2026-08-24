@@ -1139,7 +1139,7 @@ impl SubagentExecutor {
     }
 
     /// Compile Team intent to one revisioned graph and execute it through the
-    /// canonical `RuntimeDagExecutor`.
+    /// canonical `RuntimeTaskService`.
     async fn dispatch_team(&self, req: &DispatchRequest) -> Result<SubagentResult> {
         let registered =
             self.registry.get(&req.agent_name).await.ok_or_else(|| {

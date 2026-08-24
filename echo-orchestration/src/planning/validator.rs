@@ -38,6 +38,12 @@ impl PlanValidator {
                     task.spec.id, task.execution.task_id
                 ));
             }
+            if task.execution.retry_count > task.spec.max_retries {
+                errors.push(format!(
+                    "task '{}' retry_count {} exceeds max_retries {}",
+                    task.spec.id, task.execution.retry_count, task.spec.max_retries
+                ));
+            }
         }
         if let Err(spec_errors) = self.validate_task_specs(
             &tasks

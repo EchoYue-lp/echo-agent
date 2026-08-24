@@ -6,7 +6,7 @@ echo-agent 提供两种互补机制：
 
 | 机制 | 权威范围 | 用途 |
 |------|----------|------|
-| `TaskRevisionService` + `RuntimeDagExecutor` | 持久版本化任务图与依赖生命周期 | 多步骤 Agent 计划 |
+| `TaskRevisionService` + `RuntimeTaskService` | 持久版本化任务图与依赖生命周期 | 多步骤 Agent 计划 |
 | `TaskSpawner` + `BackgroundTask<T>` | 进程内异步句柄 | 轮询、等待或取消单个 Future |
 
 `TaskSpawner` 明确不是持久任务图 store。重启恢复、依赖关系、claim、重试和

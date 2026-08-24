@@ -126,7 +126,7 @@ Plan-and-Execute 由 Wei et al. 提出 [2]，将复杂任务分解为显式的**
 │   │              │              │                               │   │
 │   │              └──▶ step_3 ──┘                               │   │
 │   │                                                              │   │
-│   │  [RuntimeDagExecutor] 驱动已提交任务版本                    │   │
+│   │  [RuntimeTaskService] 驱动已提交任务版本                   │   │
 │   └─────────────────────────────────────────────────────────────┘   │
 │                                                                      │
 │   Phase 3: Replanning (on failure)                                  │

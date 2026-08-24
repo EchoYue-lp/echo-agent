@@ -9,11 +9,25 @@ use echo_core::error::Result;
 pub use echo_core::tools::NestedDelegationPolicy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tokio_util::sync::CancellationToken;
 
 /// Stable task identifier used by runtime DAG primitives.
 pub type TaskId = String;
+
+/// Product-neutral disposition for a requested runtime interruption.
+///
+/// The framework owns how claims and unfinished tasks are settled. An
+/// application only decides whether its current stop request is a terminal
+/// cancellation or a resumable pause, and supplies the pause reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RuntimeInterruptionDisposition {
+    /// Stop the run permanently and cancel every unfinished task.
+    #[default]
+    Cancelled,
+    /// Stop dispatching while retaining unstarted tasks for an explicit resume.
+    Paused { reason: String },
+}
 
 /// Generic lifecycle state shared by task specifications and managed records.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -74,6 +88,7 @@ impl TaskStatus {
                     | Self::TimedOut { .. }
                     | Self::Retrying { .. }
                     | Self::Blocked(_)
+                    | Self::Skipped
                     | Self::Paused(_)
             ),
             Self::Retrying { .. } => matches!(
@@ -84,9 +99,10 @@ impl TaskStatus {
                     | Self::Failed(_)
                     | Self::TimedOut { .. }
                     | Self::Retrying { .. }
+                    | Self::Paused(_)
             ),
             Self::Blocked(_) => matches!(target, Self::Pending | Self::Cancelled),
-            Self::Paused(_) => matches!(target, Self::Running | Self::Cancelled),
+            Self::Paused(_) => matches!(target, Self::Pending | Self::Cancelled),
             Self::Completed
             | Self::Failed(_)
             | Self::TimedOut { .. }
@@ -199,6 +215,9 @@ pub struct TaskSubagentContext {
     pub run_id: String,
     pub cancel: CancellationToken,
     pub delegation_policy: NestedDelegationPolicy,
+    /// Dependencies explicitly waived by a Skipped lifecycle rather than a
+    /// reusable successful output.
+    pub waived_dependency_ids: Vec<TaskId>,
 }
 
 impl TaskSubagentContext {
@@ -207,6 +226,7 @@ impl TaskSubagentContext {
             run_id: run_id.into(),
             cancel: CancellationToken::new(),
             delegation_policy: NestedDelegationPolicy::default(),
+            waived_dependency_ids: Vec::new(),
         }
     }
 
@@ -220,6 +240,11 @@ impl TaskSubagentContext {
         self
     }
 
+    pub fn with_waived_dependencies(mut self, dependency_ids: Vec<TaskId>) -> Self {
+        self.waived_dependency_ids = dependency_ids;
+        self
+    }
+
     pub fn child_delegation_context(&self) -> Option<Self> {
         self.delegation_policy
             .child_policy()
@@ -227,12 +252,13 @@ impl TaskSubagentContext {
                 run_id: self.run_id.clone(),
                 cancel: self.cancel.child_token(),
                 delegation_policy,
+                waived_dependency_ids: self.waived_dependency_ids.clone(),
             })
     }
 }
 
 /// A bounded follow-up task proposed by a Subagent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SuggestedTask {
     pub title: String,
     pub description: String,
@@ -245,20 +271,21 @@ pub struct SuggestedTask {
 }
 
 /// Compact per-task execution summary produced at task boundaries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskExecutionSummary {
     pub run_id: String,
     pub task_id: TaskId,
     pub subagent_name: String,
     pub completed_work: Vec<String>,
-    pub files_read: Vec<String>,
-    pub files_changed: Vec<String>,
     pub decisions: Vec<String>,
     pub failures: Vec<String>,
     pub verification: Vec<String>,
     pub next_implications: Vec<String>,
     #[serde(default)]
     pub suggested_tasks: Vec<SuggestedTask>,
+    /// Product-owned evidence, artifacts, touched resources, or UI metadata.
+    #[serde(default)]
+    pub extension: serde_json::Value,
     #[serde(with = "echo_core::utils::time::local_rfc3339")]
     pub created_at: DateTime<Utc>,
 }
@@ -286,6 +313,28 @@ pub struct DagExecutionState {
     pub skipped: HashSet<TaskId>,
     pub cancelled: HashSet<TaskId>,
     pub paused: HashSet<TaskId>,
+}
+
+/// Derived dependency state for one task in a committed graph snapshot.
+///
+/// This is a projection, never a persisted task lifecycle. In particular,
+/// [`BlockedByFailure`](Self::BlockedByFailure) disappears automatically when
+/// its failed ancestor is retried in a newer snapshot. Applications may still
+/// persist [`TaskStatus::Blocked`] for product-owned review or input policy,
+/// but dependency traversal must not encode this projection as a status string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DagDependencyState {
+    /// Every dependency completed successfully or was explicitly waived.
+    Satisfied {
+        /// Dependencies explicitly waived because they were Skipped.
+        waived_dependency_ids: Vec<TaskId>,
+    },
+    /// No dependency failed, but at least one has not completed yet.
+    Waiting {
+        unresolved_dependency_ids: Vec<TaskId>,
+    },
+    /// One or more transitive ancestors failed or timed out.
+    BlockedByFailure { failed_ancestor_ids: Vec<TaskId> },
 }
 
 impl DagExecutionState {
@@ -383,6 +432,7 @@ impl DagExecutionState {
 
     /// Task ids that are ready to dispatch in the next wave.
     pub fn ready_task_ids(&self, tasks: &[Task]) -> Vec<TaskId> {
+        let dependencies = self.dependency_states(tasks);
         tasks
             .iter()
             .filter(|task| {
@@ -394,36 +444,49 @@ impl DagExecutionState {
             })
             .filter(|task| {
                 task.execution.status == TaskStatus::Pending
-                    && task
-                        .spec
-                        .depends_on
-                        .iter()
-                        .all(|dep| self.completed.contains(dep))
+                    && matches!(
+                        dependencies.get(&task.spec.id),
+                        Some(DagDependencyState::Satisfied { .. })
+                    )
             })
             .map(|task| task.spec.id.clone())
             .collect()
     }
 
-    /// Downstream task ids blocked by failed dependencies.
-    pub fn blocked_by_failures(&self, tasks: &[Task]) -> Vec<TaskId> {
-        let mut failed_or_blocked = self.failed.clone();
+    /// Derive dependency state for every task without mutating the snapshot.
+    pub fn dependency_states(&self, tasks: &[Task]) -> HashMap<TaskId, DagDependencyState> {
+        let mut failed_ancestors: HashMap<TaskId, HashSet<TaskId>> = self
+            .failed
+            .iter()
+            .map(|task_id| (task_id.clone(), HashSet::from([task_id.clone()])))
+            .collect();
         loop {
             let mut changed = false;
             for task in tasks {
                 if self.completed.contains(&task.spec.id)
                     || self.skipped.contains(&task.spec.id)
                     || self.cancelled.contains(&task.spec.id)
-                    || failed_or_blocked.contains(&task.spec.id)
+                    || self.failed.contains(&task.spec.id)
                 {
                     continue;
                 }
-                if task
-                    .spec
-                    .depends_on
-                    .iter()
-                    .any(|dependency| failed_or_blocked.contains(dependency))
-                {
-                    changed |= failed_or_blocked.insert(task.spec.id.clone());
+                let mut inherited = failed_ancestors
+                    .get(&task.spec.id)
+                    .cloned()
+                    .unwrap_or_default();
+                for dependency in &task.spec.depends_on {
+                    if let Some(ancestors) = failed_ancestors.get(dependency) {
+                        inherited.extend(ancestors.iter().cloned());
+                    }
+                }
+                if inherited.is_empty() {
+                    continue;
+                }
+                let entry = failed_ancestors.entry(task.spec.id.clone()).or_default();
+                let before = entry.len();
+                entry.extend(inherited);
+                if entry.len() != before {
+                    changed = true;
                 }
             }
             if !changed {
@@ -432,10 +495,80 @@ impl DagExecutionState {
         }
         tasks
             .iter()
-            .filter(|task| {
-                failed_or_blocked.contains(&task.spec.id) && !self.failed.contains(&task.spec.id)
+            .map(|task| {
+                let state = if !self.failed.contains(&task.spec.id) {
+                    match failed_ancestors.get(&task.spec.id) {
+                        Some(ancestors) if !ancestors.is_empty() => {
+                            let mut failed_ancestor_ids: Vec<_> =
+                                ancestors.iter().cloned().collect();
+                            failed_ancestor_ids.sort();
+                            DagDependencyState::BlockedByFailure {
+                                failed_ancestor_ids,
+                            }
+                        }
+                        _ => {
+                            let mut unresolved_dependency_ids: Vec<_> = task
+                                .spec
+                                .depends_on
+                                .iter()
+                                .filter(|dependency| {
+                                    !self.completed.contains(*dependency)
+                                        && !self.skipped.contains(*dependency)
+                                })
+                                .cloned()
+                                .collect();
+                            unresolved_dependency_ids.sort();
+                            if unresolved_dependency_ids.is_empty() {
+                                let mut waived_dependency_ids: Vec<_> = task
+                                    .spec
+                                    .depends_on
+                                    .iter()
+                                    .filter(|dependency| self.skipped.contains(*dependency))
+                                    .cloned()
+                                    .collect();
+                                waived_dependency_ids.sort();
+                                DagDependencyState::Satisfied {
+                                    waived_dependency_ids,
+                                }
+                            } else {
+                                DagDependencyState::Waiting {
+                                    unresolved_dependency_ids,
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let mut unresolved_dependency_ids: Vec<_> = task
+                        .spec
+                        .depends_on
+                        .iter()
+                        .filter(|dependency| {
+                            !self.completed.contains(*dependency)
+                                && !self.skipped.contains(*dependency)
+                        })
+                        .cloned()
+                        .collect();
+                    unresolved_dependency_ids.sort();
+                    if unresolved_dependency_ids.is_empty() {
+                        let mut waived_dependency_ids: Vec<_> = task
+                            .spec
+                            .depends_on
+                            .iter()
+                            .filter(|dependency| self.skipped.contains(*dependency))
+                            .cloned()
+                            .collect();
+                        waived_dependency_ids.sort();
+                        DagDependencyState::Satisfied {
+                            waived_dependency_ids,
+                        }
+                    } else {
+                        DagDependencyState::Waiting {
+                            unresolved_dependency_ids,
+                        }
+                    }
+                };
+                (task.spec.id.clone(), state)
             })
-            .map(|task| task.spec.id.clone())
             .collect()
     }
 
@@ -447,13 +580,16 @@ impl DagExecutionState {
     /// Whether every unfinished task is either failed or blocked by a failed
     /// dependency.
     pub fn all_unfinished_failed_or_blocked(&self, tasks: &[Task]) -> bool {
-        let blocked: HashSet<TaskId> = self.blocked_by_failures(tasks).into_iter().collect();
+        let dependencies = self.dependency_states(tasks);
         tasks.iter().all(|task| {
             self.completed.contains(&task.spec.id)
                 || self.skipped.contains(&task.spec.id)
                 || self.cancelled.contains(&task.spec.id)
                 || self.failed.contains(&task.spec.id)
-                || blocked.contains(&task.spec.id)
+                || matches!(
+                    dependencies.get(&task.spec.id),
+                    Some(DagDependencyState::BlockedByFailure { .. })
+                )
                 || matches!(task.execution.status, TaskStatus::Blocked(_))
         })
     }
@@ -469,7 +605,10 @@ pub struct DagRefresh {
 
 #[cfg(test)]
 mod tests {
-    use super::{NestedDelegationPolicy, TaskExecution, TaskSpec, TaskStatus, TaskSubagentContext};
+    use super::{
+        DagDependencyState, NestedDelegationPolicy, TaskExecution, TaskExecutionSummary, TaskSpec,
+        TaskStatus, TaskSubagentContext,
+    };
     use crate::tasks::runtime::{DagExecutionState, Task};
 
     #[test]
@@ -511,6 +650,35 @@ mod tests {
         assert_eq!(child.run_id, "run-1");
         assert_eq!(child.delegation_policy.delegate_depth, 1);
         assert!(!child.delegation_policy.can_delegate());
+    }
+
+    #[test]
+    fn task_execution_summary_extension_round_trips_product_evidence() -> Result<(), String> {
+        let summary = TaskExecutionSummary {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            subagent_name: "researcher".to_string(),
+            completed_work: vec!["inspected runtime".to_string()],
+            decisions: Vec::new(),
+            failures: Vec::new(),
+            verification: vec!["tests passed".to_string()],
+            next_implications: Vec::new(),
+            suggested_tasks: Vec::new(),
+            extension: serde_json::json!({
+                "touched_files": {
+                    "read": ["src/lib.rs"],
+                    "written": ["src/tasks.rs"]
+                }
+            }),
+            created_at: chrono::Utc::now(),
+        };
+
+        let encoded = serde_json::to_value(&summary).map_err(|error| error.to_string())?;
+        let decoded: TaskExecutionSummary =
+            serde_json::from_value(encoded).map_err(|error| error.to_string())?;
+
+        assert_eq!(decoded, summary);
+        Ok(())
     }
 
     fn runtime_task(id: &str, status: TaskStatus, deps: &[&str]) -> Task {
@@ -569,6 +737,29 @@ mod tests {
         let state = DagExecutionState::from_tasks(&tasks);
 
         assert_eq!(state.ready_task_ids(&tasks), vec!["b".to_string()]);
+        assert_eq!(
+            state.dependency_states(&tasks).get("b"),
+            Some(&DagDependencyState::Satisfied {
+                waived_dependency_ids: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn skipped_dependency_is_resolved_for_ready_frontier() {
+        let tasks = vec![
+            runtime_task("a", TaskStatus::Skipped, &[]),
+            runtime_task("b", TaskStatus::Pending, &["a"]),
+        ];
+        let state = DagExecutionState::from_tasks(&tasks);
+
+        assert_eq!(state.ready_task_ids(&tasks), vec!["b".to_string()]);
+        assert_eq!(
+            state.dependency_states(&tasks).get("b"),
+            Some(&DagDependencyState::Satisfied {
+                waived_dependency_ids: vec!["a".to_string()],
+            })
+        );
     }
 
     #[test]
@@ -592,13 +783,18 @@ mod tests {
         ];
         let state = DagExecutionState::from_tasks(&tasks);
 
-        assert_eq!(state.blocked_by_failures(&tasks), vec!["b".to_string()]);
+        assert_eq!(
+            state.dependency_states(&tasks).get("b"),
+            Some(&DagDependencyState::BlockedByFailure {
+                failed_ancestor_ids: vec!["a".to_string()],
+            })
+        );
         assert!(state.all_unfinished_failed_or_blocked(&tasks));
     }
 
     #[test]
-    fn dag_failure_blocking_is_transitive() {
-        let tasks = vec![
+    fn dag_failure_blocking_is_transitive() -> Result<(), String> {
+        let mut tasks = vec![
             runtime_task("a", TaskStatus::Failed("boom".to_string()), &[]),
             runtime_task("b", TaskStatus::Pending, &["a"]),
             runtime_task("c", TaskStatus::Pending, &["b"]),
@@ -606,10 +802,29 @@ mod tests {
         ];
         let state = DagExecutionState::from_tasks(&tasks);
 
-        assert_eq!(
-            state.blocked_by_failures(&tasks),
-            vec!["b".to_string(), "c".to_string(), "d".to_string()]
-        );
+        let dependencies = state.dependency_states(&tasks);
+        for task_id in ["b", "c", "d"] {
+            assert_eq!(
+                dependencies.get(task_id),
+                Some(&DagDependencyState::BlockedByFailure {
+                    failed_ancestor_ids: vec!["a".to_string()],
+                })
+            );
+        }
         assert!(state.all_unfinished_failed_or_blocked(&tasks));
+
+        let upstream = tasks
+            .iter_mut()
+            .find(|task| task.spec.id == "a")
+            .ok_or_else(|| "upstream fixture is missing".to_string())?;
+        upstream.execution.status = TaskStatus::Pending;
+        let retried_state = DagExecutionState::from_tasks(&tasks);
+        assert!(
+            retried_state
+                .dependency_states(&tasks)
+                .values()
+                .all(|state| !matches!(state, DagDependencyState::BlockedByFailure { .. }))
+        );
+        Ok(())
     }
 }

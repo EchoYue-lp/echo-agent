@@ -1,13 +1,13 @@
 //! Revisioned task graph planning and execution primitives.
 //!
 //! [`TaskRevisionService`] is the single CRUD/relation authority and
-//! [`RuntimeDagExecutor`] is the single dependency execution kernel.
+//! [`RuntimeTaskService`] is the single dependency execution entry point.
 
 pub mod background_state;
 mod events;
 pub mod revisioned;
 pub mod runtime;
-pub mod runtime_executor;
+mod runtime_executor;
 pub mod runtime_service;
 pub mod task_tools;
 mod time;
@@ -38,19 +38,22 @@ pub use revisioned::{
     TaskUpdateInput,
 };
 pub use runtime::{
-    DagExecutionState, DagRefresh, NestedDelegationPolicy, SuggestedTask, Task, TaskClaim,
-    TaskExecution, TaskExecutionSummary, TaskId, TaskSpec, TaskStatus, TaskSubagent,
-    TaskSubagentContext,
+    DagDependencyState, DagExecutionState, DagRefresh, NestedDelegationPolicy,
+    RuntimeInterruptionDisposition, SuggestedTask, Task, TaskClaim, TaskExecution,
+    TaskExecutionSummary, TaskId, TaskSpec, TaskStatus, TaskSubagent, TaskSubagentContext,
 };
 pub use runtime_executor::{
-    RuntimeClaimAbandonment, RuntimeDagController, RuntimeDagExecutor, RuntimeDagExecutorConfig,
-    RuntimeDagOutcome, RuntimePlanSnapshot, RuntimeStopDisposition, RuntimeTaskClaimOutcome,
-    RuntimeTaskResolution,
+    RuntimeClaimAbandonment, RuntimeDagController, RuntimeDagOutcome, RuntimePlanSnapshot,
+    RuntimeStopDisposition, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
+    RuntimeTaskResolutionRequest, RuntimeTaskServiceConfig,
 };
 pub use runtime_service::{
-    RuntimeTaskMutationError, RuntimeTaskRequeueOutcome, RuntimeTaskRetryOutcome,
-    RuntimeTaskService, block_runtime_task, claim_runtime_task, requeue_runtime_claim,
-    retry_runtime_task, runtime_claim_is_current, settle_runtime_claim,
+    RuntimeInterruptionReceipt, RuntimeInterruptionSettlementOutcome, RuntimeTaskMutationError,
+    RuntimeTaskRequeueOutcome, RuntimeTaskResumeOutcome, RuntimeTaskRetryOutcome,
+    RuntimeTaskService, RuntimeTaskSettlementOutcome, cancel_unfinished_runtime_tasks,
+    claim_runtime_task, requeue_runtime_claim, resume_runtime_task, retry_runtime_task,
+    runtime_claim_is_current, settle_runtime_claim, settle_runtime_interruption,
+    settle_runtime_resolution, validate_runtime_snapshot_claims,
 };
 pub use task_tools::{
     TaskCreateTool, TaskListTool, TaskUpdateTool, build_task_create_tool, build_task_list_tool,

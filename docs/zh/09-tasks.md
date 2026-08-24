@@ -6,7 +6,7 @@ echo-agent 将单任务、Todo 风格列表和依赖 DAG 统一表示为一个�
 不存在另一套任务管理状态机。
 
 - `TaskRevisionService` 是唯一的 CRUD、关系、校验和版本权威。
-- `RuntimeDagExecutor` 是唯一的依赖执行内核。
+- `RuntimeTaskService` 是唯一公开的依赖执行入口。
 - `TaskSpawner` 只追踪进程内后台 Future，不拥有持久任务关系。
 - Plan 是任务图之上的可编辑、版本化 artifact，不进入审批状态机。
 
@@ -68,7 +68,7 @@ let agent = ReactAgentBuilder::new()
 
 ## 运行时执行
 
-`RuntimeDagExecutor<C>` 通过 `RuntimeDagController` 反复加载已提交的
+`RuntimeTaskService<C>` 通过薄 `RuntimeDagController` adapter 反复加载已提交的
 `RuntimePlanSnapshot`：
 
 1. 校验完整快照并检测环。
@@ -76,13 +76,18 @@ let agent = ReactAgentBuilder::new()
 3. 使用版本、attempt、规格 hash 和唯一 claim id 原子领取任务。
 4. 分派有界、无冲突的 Subagent wave。
 5. 以 compare-and-set 语义完成或放弃每个 claim。
-6. 在下一 safe point 重新加载，使新版本生效。
+6. 在 wave 边界结算 typed 取消或可恢复暂停 receipt。
+7. 在下一 safe point 重新加载，使新版本生效。
 
 controller 是持久化、Subagent 调度、review 和产品资源策略的薄应用适配器，
 不得重新实现 ready-frontier 主循环或第二套依赖状态机。
 
-执行器统一处理传递失败阻塞、跳过与暂停、有界重试、取消结算、过时 claim 和
-停滞检测。attempt 级 claim identity 可防止旧 dispatch 覆盖重新领取后的结果。
+服务统一处理传递失败阻塞、跳过与暂停、有界重试、取消结算、过时 claim 和
+停滞检测。依赖失败只形成 typed `DagDependencyState` 投影，不会持久化为
+`TaskStatus::Blocked`；重试失败祖先后，派生阻塞会自动消失。`Blocked` 仍可表达
+review、缺少输入等显式产品策略。暂停会清除 claim，恢复到 Pending 时不消耗 retry。
+Skipped 依赖以 typed waiver 传给 Subagent，不会伪造依赖输出。attempt 级 claim
+identity 可防止旧 dispatch 覆盖重新领取后的结果。
 
 ## 投影与进度
 
@@ -90,5 +95,5 @@ controller 是持久化、Subagent 调度、review 和产品资源策略的薄�
 派生 Todo、证据和 UI 数据；下一步运行时决策始终基于通过单一 service/controller
 边界加载的已提交版本。
 
-直接服务用法见 `demo48_personal_assistant`，确定性 controller 用法见
+公开 service 构造见 `tests/facade_smoke.rs`，确定性 controller 行为见私有
 `runtime_executor` 测试。

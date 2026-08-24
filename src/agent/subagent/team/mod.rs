@@ -3,7 +3,7 @@
 //! Declarative [`TeamSpec`] values and programmatic [`Team`] values both become
 //! one revisioned task graph. Programmatic composition may own Agent handles,
 //! but dependency state, ready-frontier selection, cancellation, and terminal
-//! settlement remain exclusively owned by [`RuntimeDagExecutor`].
+//! settlement remain exclusively owned by [`RuntimeTaskService`].
 
 mod manager_subagent;
 
@@ -22,10 +22,11 @@ use tokio_util::sync::CancellationToken;
 use echo_orchestration::tasks::{
     DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, NestedDelegationPolicy,
     RevisionedTaskGraph, RevisionedTaskStore, RuntimeClaimAbandonment, RuntimeDagController,
-    RuntimeDagExecutor, RuntimeDagExecutorConfig, RuntimeDagOutcome, RuntimePlanSnapshot,
-    RuntimeTaskClaimOutcome, RuntimeTaskResolution, Task, TaskClaim, TaskExecution,
-    TaskGraphContext, TaskGraphExecutionMode, TaskPlanPatch, TaskPlanPatchOp, TaskRevisionError,
-    TaskRevisionService, TaskSpec, TaskStatus, TaskSubagentContext,
+    RuntimeDagOutcome, RuntimeInterruptionDisposition, RuntimeInterruptionSettlementOutcome,
+    RuntimePlanSnapshot, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
+    RuntimeTaskResolutionRequest, RuntimeTaskService, RuntimeTaskServiceConfig, Task, TaskClaim,
+    TaskExecution, TaskGraphContext, TaskGraphExecutionMode, TaskPlanPatch, TaskPlanPatchOp,
+    TaskRevisionError, TaskRevisionService, TaskSpec, TaskStatus, TaskSubagentContext,
 };
 
 use super::executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig};
@@ -571,7 +572,7 @@ pub(super) struct CompiledTeamGraph {
 /// Canonical persistence and dispatch boundary for resumable Team execution.
 ///
 /// Implementations own storage and product-specific dispatch, while
-/// [`RuntimeDagExecutor`] remains the only dependency, claim, cancellation,
+/// [`RuntimeTaskService`] remains the only dependency, claim, cancellation,
 /// and settlement engine. A runtime must durably persist a successful
 /// [`SubagentResult`] before it exposes the corresponding task as Completed.
 #[async_trait]
@@ -664,11 +665,11 @@ where
     R: TeamRuntime,
 {
     let service = runtime.revisions();
-    let executor = RuntimeDagExecutor::new(
+    let runtime_tasks = RuntimeTaskService::new(
         runtime.clone(),
-        RuntimeDagExecutorConfig {
+        RuntimeTaskServiceConfig {
             max_concurrent_subagents: spec.config.max_concurrent.max(1),
-            ..RuntimeDagExecutorConfig::default()
+            ..RuntimeTaskServiceConfig::default()
         },
     );
     let graph_context = team_graph_context(spec, objective)?;
@@ -696,7 +697,7 @@ where
             validate_manager_graph(run_id, &graph, &initial.tasks, &expanded.tasks)?;
         } else {
             validate_team_graph_specs(run_id, &graph, &initial.tasks)?;
-            drive_team_graph(&executor, run_id, cancel.child_token()).await?;
+            drive_team_graph(&runtime_tasks, run_id, cancel.child_token()).await?;
             let plan =
                 manager_plan_output(runtime.as_ref(), run_id, &initial.terminal_task_id).await?;
             let expanded = manager_subagent::expand_graph(spec, objective, &plan)?;
@@ -718,7 +719,7 @@ where
             };
             validate_manager_graph(run_id, &committed, &initial.tasks, &expanded.tasks)?;
         }
-        drive_team_graph(&executor, run_id, cancel.child_token()).await?;
+        drive_team_graph(&runtime_tasks, run_id, cancel.child_token()).await?;
         synthesis_task_id.to_string()
     } else {
         let compiled = compile_team_graph(spec, objective)?;
@@ -731,7 +732,7 @@ where
         )
         .await?;
         validate_team_graph_specs(run_id, &graph, &compiled.tasks)?;
-        drive_team_graph(&executor, run_id, cancel).await?;
+        drive_team_graph(&runtime_tasks, run_id, cancel).await?;
         compiled.terminal_task_id
     };
 
@@ -936,17 +937,23 @@ fn validate_team_graph_identity(
 }
 
 async fn drive_team_graph<R>(
-    executor: &RuntimeDagExecutor<R>,
+    runtime_tasks: &RuntimeTaskService<R>,
     run_id: &str,
     cancel: CancellationToken,
 ) -> Result<()>
 where
     R: TeamRuntime,
 {
-    match executor.execute(run_id, cancel).await? {
+    match runtime_tasks.execute(run_id, cancel).await? {
         RuntimeDagOutcome::Completed => {}
-        RuntimeDagOutcome::Failed { error, .. } | RuntimeDagOutcome::Paused { error, .. } => {
+        RuntimeDagOutcome::Failed { error, .. } => {
             return Err(ReactError::Other(format!("Team graph failed: {error}")));
+        }
+        RuntimeDagOutcome::Paused { reason, .. } => {
+            return Err(ReactError::Other(format!("Team graph paused: {reason}")));
+        }
+        RuntimeDagOutcome::Stalled { reason } => {
+            return Err(ReactError::Other(format!("Team graph stalled: {reason}")));
         }
         RuntimeDagOutcome::Cancelled => {
             return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
@@ -1152,11 +1159,19 @@ fn set_team_task_phase(task: &mut Task, phase: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
+struct StagedTeamOutput {
+    run_id: String,
+    task_id: String,
+    output: SubagentResult,
+}
+
 struct TeamRuntimeController {
     store: Arc<InMemoryRevisionedTaskStore>,
     revisions: TaskRevisionService,
     dispatch: TeamDispatchFn,
     outputs: Mutex<HashMap<String, HashMap<String, SubagentResult>>>,
+    staged_outputs: Mutex<HashMap<String, StagedTeamOutput>>,
     settlement: Mutex<()>,
 }
 
@@ -1172,6 +1187,7 @@ impl TeamRuntimeController {
             revisions,
             dispatch,
             outputs: Mutex::new(HashMap::new()),
+            staged_outputs: Mutex::new(HashMap::new()),
             settlement: Mutex::new(()),
         }
     }
@@ -1202,6 +1218,18 @@ impl RuntimeDagController for TeamRuntimeController {
             .map_err(|error| ReactError::Other(error.to_string()))
     }
 
+    async fn claim_is_current(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> Result<bool> {
+        self.store
+            .runtime_claim_is_current(run_id, task_id, claim)
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))
+    }
+
     async fn dispatch_task(
         &self,
         context: TaskSubagentContext,
@@ -1211,7 +1239,15 @@ impl RuntimeDagController for TeamRuntimeController {
         let outputs = self.outputs.lock().await;
         let run_outputs = outputs.get(&context.run_id);
         let mut dependency_outputs = Vec::with_capacity(task.spec.depends_on.len());
+        let waived_dependencies: HashSet<&str> = context
+            .waived_dependency_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
         for dependency in &task.spec.depends_on {
+            if waived_dependencies.contains(dependency.as_str()) {
+                continue;
+            }
             let output = run_outputs
                 .and_then(|values| values.get(dependency))
                 .ok_or_else(|| {
@@ -1245,6 +1281,11 @@ impl RuntimeDagController for TeamRuntimeController {
         if pipeline_phase && task.spec.depends_on.is_empty() {
             prompt = task.spec.description.clone();
         }
+        for dependency in &context.waived_dependency_ids {
+            prompt.push_str("\n\nDependency '");
+            prompt.push_str(dependency);
+            prompt.push_str("' was explicitly skipped; no reusable output is available.");
+        }
         (self.dispatch)(extension.member, prompt, context.cancel)
             .await
             .map_err(ReactError::Other)
@@ -1256,72 +1297,97 @@ impl RuntimeDagController for TeamRuntimeController {
         claim: TaskClaim,
         task: Task,
         dispatch: Result<Self::DispatchOutput>,
-    ) -> Result<RuntimeTaskResolution> {
-        let _settlement = self.settlement.lock().await;
-        let (status, resolution, output) = match dispatch {
-            Ok(output) if output.outcome.status == SubagentStatus::Completed => (
-                TaskStatus::Completed,
-                RuntimeTaskResolution::Completed,
-                Some(output),
-            ),
-            Ok(output) if output.outcome.status == SubagentStatus::Cancelled => (
-                TaskStatus::Cancelled,
-                RuntimeTaskResolution::Cancelled,
-                None,
-            ),
+    ) -> Result<RuntimeTaskResolutionRequest> {
+        let (request, output) = match dispatch {
+            Ok(output) if output.outcome.status == SubagentStatus::Completed => {
+                (RuntimeTaskResolutionRequest::Completed, Some(output))
+            }
+            Ok(output) if output.outcome.status == SubagentStatus::Cancelled => {
+                (RuntimeTaskResolutionRequest::Cancelled, None)
+            }
             Ok(output) => {
                 let error = if output.outcome.summary.is_empty() {
                     output.output.clone()
                 } else {
                     output.outcome.summary.clone()
                 };
-                (
-                    TaskStatus::Failed(error.clone()),
-                    RuntimeTaskResolution::Failed { error },
-                    None,
-                )
+                (RuntimeTaskResolutionRequest::Failed { error }, None)
             }
             Err(error) => {
                 let message = error.to_string();
                 (
-                    TaskStatus::Failed(message.clone()),
-                    RuntimeTaskResolution::Failed { error: message },
+                    RuntimeTaskResolutionRequest::Failed { error: message },
                     None,
                 )
             }
         };
-        let staged_output = if let Some(output) = output {
-            Some(
-                self.outputs
-                    .lock()
-                    .await
-                    .entry(run_id.to_string())
-                    .or_default()
-                    .insert(task.spec.id.clone(), output),
-            )
+        if let Some(output) = output {
+            let mut staged_outputs = self.staged_outputs.lock().await;
+            if staged_outputs.contains_key(&claim.claim_id) {
+                return Err(ReactError::Other(format!(
+                    "Team result for claim '{}' was staged more than once",
+                    claim.claim_id
+                )));
+            }
+            staged_outputs.insert(
+                claim.claim_id.clone(),
+                StagedTeamOutput {
+                    run_id: run_id.to_string(),
+                    task_id: task.spec.id,
+                    output,
+                },
+            );
+        }
+        Ok(request)
+    }
+
+    async fn settle_resolution(
+        &self,
+        run_id: &str,
+        claim: &TaskClaim,
+        task: &Task,
+        request: RuntimeTaskResolutionRequest,
+    ) -> Result<RuntimeTaskResolution> {
+        let _settlement = self.settlement.lock().await;
+        let staged_candidate = self.staged_outputs.lock().await.remove(&claim.claim_id);
+        if request == RuntimeTaskResolutionRequest::Completed
+            && !staged_candidate
+                .as_ref()
+                .is_some_and(|staged| staged.run_id == run_id && staged.task_id == task.spec.id)
+        {
+            return Err(ReactError::Other(format!(
+                "Team result for claim '{}' was not staged before completion",
+                claim.claim_id
+            )));
+        }
+        let mut outputs = if staged_candidate.is_some() {
+            Some(self.outputs.lock().await)
         } else {
             None
         };
-        let applied = match self
+        let settlement = self
             .store
-            .settle_runtime_claim(run_id, &task.spec.id, &claim, status)
+            .settle_runtime_resolution(run_id, &task.spec.id, claim, request)
             .await
-        {
-            Ok(applied) => applied,
-            Err(error) => {
-                if let Some(previous) = staged_output {
-                    self.restore_output(run_id, &task.spec.id, previous).await;
-                }
-                return Err(ReactError::Other(error.to_string()));
-            }
-        };
-        if !applied {
-            if let Some(previous) = staged_output {
-                self.restore_output(run_id, &task.spec.id, previous).await;
-            }
-            return Ok(RuntimeTaskResolution::Superseded);
+            .map_err(|error| ReactError::Other(error.to_string()));
+        if matches!(&settlement, Ok(RuntimeTaskResolution::Completed)) {
+            // Candidate ownership and the output lock precede CAS. Keep the
+            // commit-to-publication section below free of cancellation points.
+            let staged = staged_candidate.ok_or_else(|| {
+                ReactError::Other(format!(
+                    "Team result for settled claim '{}' disappeared",
+                    claim.claim_id
+                ))
+            })?;
+            let outputs = outputs.as_mut().ok_or_else(|| {
+                ReactError::Other("Team output publication lock is unavailable".to_string())
+            })?;
+            outputs
+                .entry(staged.run_id)
+                .or_default()
+                .insert(staged.task_id, staged.output);
         }
-        Ok(resolution)
+        settlement
     }
 
     async fn abandon_claim(
@@ -1330,21 +1396,28 @@ impl RuntimeDagController for TeamRuntimeController {
         claim: &TaskClaim,
         task: &Task,
         abandonment: RuntimeClaimAbandonment,
-    ) -> Result<()> {
+    ) -> Result<echo_orchestration::tasks::RuntimeTaskSettlementOutcome> {
         let status = match abandonment {
-            RuntimeClaimAbandonment::Cancelled => TaskStatus::Cancelled,
+            RuntimeClaimAbandonment::Interrupted { disposition } => match disposition {
+                RuntimeInterruptionDisposition::Cancelled => TaskStatus::Cancelled,
+                RuntimeInterruptionDisposition::Paused { reason } => TaskStatus::Paused(reason),
+            },
             RuntimeClaimAbandonment::Failed { error } => TaskStatus::Failed(error),
         };
         self.store
             .settle_runtime_claim(run_id, &task.spec.id, claim, status)
             .await
-            .map_err(|error| ReactError::Other(error.to_string()))?;
-        Ok(())
+            .map_err(|error| ReactError::Other(error.to_string()))
     }
 
-    async fn block_task(&self, run_id: &str, task: &Task, reason: &str) -> Result<()> {
+    async fn settle_interruption(
+        &self,
+        run_id: &str,
+        expected_revision: u64,
+        disposition: RuntimeInterruptionDisposition,
+    ) -> Result<RuntimeInterruptionSettlementOutcome> {
         self.store
-            .block_runtime_task(run_id, &task.spec.id, reason)
+            .settle_runtime_interruption(run_id, expected_revision, disposition)
             .await
             .map_err(|error| ReactError::Other(error.to_string()))
     }
@@ -1374,24 +1447,6 @@ impl TeamRuntime for TeamRuntimeController {
             .get(run_id)
             .map(|outputs| outputs.values().cloned().collect())
             .unwrap_or_default())
-    }
-}
-
-impl TeamRuntimeController {
-    async fn restore_output(&self, run_id: &str, task_id: &str, previous: Option<SubagentResult>) {
-        let mut outputs = self.outputs.lock().await;
-        let run_outputs = outputs.entry(run_id.to_string()).or_default();
-        match previous {
-            Some(output) => {
-                run_outputs.insert(task_id.to_string(), output);
-            }
-            None => {
-                run_outputs.remove(task_id);
-            }
-        }
-        if run_outputs.is_empty() {
-            outputs.remove(run_id);
-        }
     }
 }
 
@@ -1746,13 +1801,16 @@ mod tests {
             active_claim.attempt,
             active_claim.spec_hash,
         );
-        let resolution = runtime
+        let request = runtime
             .resolve_dispatch(
                 "superseded-team",
-                stale_claim,
-                task,
+                stale_claim.clone(),
+                task.clone(),
                 Ok(successful_result("member".to_string(), "stale output")),
             )
+            .await?;
+        let resolution = runtime
+            .settle_resolution("superseded-team", &stale_claim, &task, request)
             .await?;
 
         assert_eq!(resolution, RuntimeTaskResolution::Superseded);
@@ -1767,70 +1825,95 @@ mod tests {
 
     #[tokio::test]
     async fn superseded_settlement_preserves_the_committed_team_result() -> Result<()> {
-        let dispatch: TeamDispatchFn = Arc::new(|name, task, _cancel| {
-            Box::pin(async move { Ok(successful_result(name, &task)) })
-        });
-        let runtime = TeamRuntimeController::new(dispatch);
-        let task = team_task(
-            "settlement-task",
-            "member",
-            "test result settlement".to_string(),
-            Vec::new(),
-        );
-        runtime
-            .revisions()
-            .create_prepared(
-                "settlement-team",
-                team_graph_context(
-                    &TeamSpec {
-                        strategy: TeamStrategy::Pipeline(vec!["member".to_string()]),
-                        manager: String::new(),
-                        subagents: Vec::new(),
-                        config: TeamConfig::default(),
-                    },
-                    "test result settlement",
-                )?,
-                vec![task.clone()],
-                "prepare result settlement test".to_string(),
-            )
-            .await
-            .map_err(|error| ReactError::Other(error.to_string()))?;
-        let active_claim = match runtime.claim_task("settlement-team", &task, 1).await? {
-            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
-            RuntimeTaskClaimOutcome::ReloadSnapshot => {
-                return Err(ReactError::Other(
-                    "claim unexpectedly requested a snapshot reload".to_string(),
-                ));
-            }
-        };
-        let stale_claim = TaskClaim::new(
-            active_claim.revision,
-            active_claim.attempt,
-            active_claim.spec_hash.clone(),
-        );
-        let committed = runtime
-            .resolve_dispatch(
-                "settlement-team",
-                active_claim,
-                task.clone(),
-                Ok(successful_result("member".to_string(), "committed")),
-            )
-            .await?;
-        assert_eq!(committed, RuntimeTaskResolution::Completed);
-        let stale = runtime
-            .resolve_dispatch(
-                "settlement-team",
-                stale_claim,
-                task,
-                Ok(successful_result("member".to_string(), "stale")),
-            )
-            .await?;
-        assert_eq!(stale, RuntimeTaskResolution::Superseded);
-        let output = runtime
-            .task_result("settlement-team", "settlement-task")
-            .await?
-            .ok_or_else(|| ReactError::Other("committed Team result missing".to_string()))?;
-        assert_eq!(output.output, "done: committed");
+        for current_first in [true, false] {
+            let dispatch: TeamDispatchFn = Arc::new(|name, task, _cancel| {
+                Box::pin(async move { Ok(successful_result(name, &task)) })
+            });
+            let runtime = TeamRuntimeController::new(dispatch);
+            let scope_id = if current_first {
+                "settlement-current-first"
+            } else {
+                "settlement-stale-first"
+            };
+            let task = team_task(
+                "settlement-task",
+                "member",
+                "test result settlement".to_string(),
+                Vec::new(),
+            );
+            runtime
+                .revisions()
+                .create_prepared(
+                    scope_id,
+                    team_graph_context(
+                        &TeamSpec {
+                            strategy: TeamStrategy::Pipeline(vec!["member".to_string()]),
+                            manager: String::new(),
+                            subagents: Vec::new(),
+                            config: TeamConfig::default(),
+                        },
+                        "test result settlement",
+                    )?,
+                    vec![task.clone()],
+                    "prepare result settlement test".to_string(),
+                )
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            let active_claim = match runtime.claim_task(scope_id, &task, 1).await? {
+                RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+                RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                    return Err(ReactError::Other(
+                        "claim unexpectedly requested a snapshot reload".to_string(),
+                    ));
+                }
+            };
+            let stale_claim = TaskClaim::new(
+                active_claim.revision,
+                active_claim.attempt,
+                active_claim.spec_hash.clone(),
+            );
+            let committed_request = runtime
+                .resolve_dispatch(
+                    scope_id,
+                    active_claim.clone(),
+                    task.clone(),
+                    Ok(successful_result("member".to_string(), "committed")),
+                )
+                .await?;
+            let stale_request = runtime
+                .resolve_dispatch(
+                    scope_id,
+                    stale_claim.clone(),
+                    task.clone(),
+                    Ok(successful_result("member".to_string(), "stale")),
+                )
+                .await?;
+
+            let (committed, stale) = if current_first {
+                let committed = runtime
+                    .settle_resolution(scope_id, &active_claim, &task, committed_request)
+                    .await?;
+                let stale = runtime
+                    .settle_resolution(scope_id, &stale_claim, &task, stale_request)
+                    .await?;
+                (committed, stale)
+            } else {
+                let stale = runtime
+                    .settle_resolution(scope_id, &stale_claim, &task, stale_request)
+                    .await?;
+                let committed = runtime
+                    .settle_resolution(scope_id, &active_claim, &task, committed_request)
+                    .await?;
+                (committed, stale)
+            };
+            assert_eq!(committed, RuntimeTaskResolution::Completed);
+            assert_eq!(stale, RuntimeTaskResolution::Superseded);
+            let output = runtime
+                .task_result(scope_id, "settlement-task")
+                .await?
+                .ok_or_else(|| ReactError::Other("committed Team result missing".to_string()))?;
+            assert_eq!(output.output, "done: committed");
+        }
         Ok(())
     }
 
@@ -1868,6 +1951,64 @@ mod tests {
             second_prompt,
             "done: Advance this pipeline objective:\npipeline objective"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn skipped_team_dependency_is_a_typed_waiver_without_required_output() -> Result<()> {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = calls.clone();
+        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                observed.lock().await.push(task.clone());
+                Ok(successful_result(name, &task))
+            })
+        });
+        let runtime = Arc::new(TeamRuntimeController::new(dispatch));
+        let mut waived = team_task(
+            "waived",
+            "first",
+            "waived pipeline stage".to_string(),
+            Vec::new(),
+        );
+        waived.execution.status = TaskStatus::Skipped;
+        let dependent = team_task(
+            "dependent",
+            "second",
+            "continue after waiver".to_string(),
+            vec!["waived".to_string()],
+        );
+        let spec = TeamSpec {
+            strategy: TeamStrategy::Pipeline(vec!["first".to_string(), "second".to_string()]),
+            manager: String::new(),
+            subagents: Vec::new(),
+            config: TeamConfig::default(),
+        };
+        runtime
+            .revisions()
+            .create_prepared(
+                "skip-waiver-team",
+                team_graph_context(&spec, "continue after waiver")?,
+                vec![waived, dependent],
+                "prepare skipped dependency waiver".to_string(),
+            )
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let service = RuntimeTaskService::new(runtime, RuntimeTaskServiceConfig::default());
+
+        assert_eq!(
+            service
+                .execute("skip-waiver-team", CancellationToken::new())
+                .await?,
+            RuntimeDagOutcome::Completed
+        );
+        let prompts = calls.lock().await;
+        assert_eq!(prompts.len(), 1);
+        let prompt = prompts
+            .first()
+            .ok_or_else(|| ReactError::Other("waiver prompt is missing".to_string()))?;
+        assert!(prompt.contains("Dependency 'waived' was explicitly skipped"));
         Ok(())
     }
 

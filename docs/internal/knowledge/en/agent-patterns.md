@@ -126,7 +126,7 @@ Plan-and-Execute was proposed by Wei et al. [2], decomposing complex tasks into 
 │   │              │              │                               │   │
 │   │              └──▶ step_3 ──┘                               │   │
 │   │                                                              │   │
-│   │  [RuntimeDagExecutor] Drives the committed task revision,   │   │
+│   │  [RuntimeTaskService] Drives the committed task revision,   │   │
 │   │  independent steps execute in parallel                       │   │
 │   └─────────────────────────────────────────────────────────────┘   │
 │                                                                      │

@@ -453,15 +453,14 @@ impl InMemoryRevisionedTaskStore {
             })
     }
 
-    /// Atomically settle the exact physical claim. `false` means the claim was
-    /// superseded and no state was changed.
+    /// Atomically settle the exact physical claim.
     pub async fn settle_runtime_claim(
         &self,
         scope_id: &str,
         task_id: &str,
         claim: &TaskClaim,
         status: TaskStatus,
-    ) -> Result<bool, RevisionedTaskStoreError> {
+    ) -> Result<super::RuntimeTaskSettlementOutcome, RevisionedTaskStoreError> {
         let mut graphs = self.graphs.write().await;
         let Some(graph) = graphs.get_mut(scope_id) else {
             return Err(RevisionedTaskStoreError::NotFound {
@@ -472,23 +471,6 @@ impl InMemoryRevisionedTaskStore {
             .map_err(|error| RevisionedTaskStoreError::Rejected {
                 message: error.to_string(),
             })
-    }
-
-    /// Block an unclaimed pending task in the authoritative runtime snapshot.
-    pub async fn block_runtime_task(
-        &self,
-        scope_id: &str,
-        task_id: &str,
-        reason: &str,
-    ) -> Result<(), RevisionedTaskStoreError> {
-        let mut graphs = self.graphs.write().await;
-        let Some(graph) = graphs.get_mut(scope_id) else {
-            return Err(RevisionedTaskStoreError::NotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
-        super::runtime_service::block_runtime_task(&mut graph.snapshot, task_id, reason);
-        Ok(())
     }
 
     /// Atomically requeue one exact claim using the canonical runtime mutation.
@@ -512,6 +494,31 @@ impl InMemoryRevisionedTaskStore {
             claim,
             failure_fingerprint,
             error,
+        )
+        .map_err(|error| RevisionedTaskStoreError::Rejected {
+            message: error.to_string(),
+        })
+    }
+
+    /// Atomically apply one framework-owned dispatch resolution request.
+    pub async fn settle_runtime_resolution(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        request: super::RuntimeTaskResolutionRequest,
+    ) -> Result<super::RuntimeTaskResolution, RevisionedTaskStoreError> {
+        let mut graphs = self.graphs.write().await;
+        let Some(graph) = graphs.get_mut(scope_id) else {
+            return Err(RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        super::runtime_service::settle_runtime_resolution(
+            &mut graph.snapshot,
+            task_id,
+            claim,
+            request,
         )
         .map_err(|error| RevisionedTaskStoreError::Rejected {
             message: error.to_string(),
@@ -542,6 +549,52 @@ impl InMemoryRevisionedTaskStore {
         })
     }
 
+    /// Atomically resume one paused task without consuming retry budget.
+    pub async fn resume_runtime_task(
+        &self,
+        scope_id: &str,
+        expected_task: &Task,
+        expected_revision: u64,
+    ) -> Result<super::RuntimeTaskResumeOutcome, RevisionedTaskStoreError> {
+        let mut graphs = self.graphs.write().await;
+        let Some(graph) = graphs.get_mut(scope_id) else {
+            return Err(RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        super::runtime_service::resume_runtime_task(
+            &mut graph.snapshot,
+            expected_task,
+            expected_revision,
+        )
+        .map_err(|error| RevisionedTaskStoreError::Rejected {
+            message: error.to_string(),
+        })
+    }
+
+    /// Atomically settle one run-level interruption at an exact graph revision.
+    pub async fn settle_runtime_interruption(
+        &self,
+        scope_id: &str,
+        expected_revision: u64,
+        disposition: super::RuntimeInterruptionDisposition,
+    ) -> Result<super::RuntimeInterruptionSettlementOutcome, RevisionedTaskStoreError> {
+        let mut graphs = self.graphs.write().await;
+        let Some(graph) = graphs.get_mut(scope_id) else {
+            return Err(RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        super::runtime_service::settle_runtime_interruption(
+            &mut graph.snapshot,
+            expected_revision,
+            disposition,
+        )
+        .map_err(|error| RevisionedTaskStoreError::Rejected {
+            message: error.to_string(),
+        })
+    }
+
     pub async fn runtime_claim_is_current(
         &self,
         scope_id: &str,
@@ -554,11 +607,11 @@ impl InMemoryRevisionedTaskStore {
                 scope_id: scope_id.to_string(),
             });
         };
-        Ok(super::runtime_service::runtime_claim_is_current(
-            &graph.snapshot,
-            task_id,
-            claim,
-        ))
+        super::runtime_service::runtime_claim_is_current(&graph.snapshot, task_id, claim).map_err(
+            |error| RevisionedTaskStoreError::Rejected {
+                message: error.to_string(),
+            },
+        )
     }
 }
 
@@ -785,9 +838,9 @@ impl TaskPatchEngine {
                             .status
                             .transition_to(status)
                             .map_err(|message| TaskRevisionError::InvalidPatch { message })?;
+                        task.execution.claim = None;
+                        effects.progressed_task_ids.push(task_id);
                     }
-                    task.execution.claim = None;
-                    effects.progressed_task_ids.push(task_id);
                 }
             }
         }
@@ -1570,7 +1623,7 @@ mod tests {
                 return Err("pending retry task requested reload".to_string());
             }
         };
-        assert!(
+        assert_eq!(
             store
                 .settle_runtime_claim(
                     "retry-scope",
@@ -1579,7 +1632,8 @@ mod tests {
                     TaskStatus::Blocked("acceptance pending".to_string()),
                 )
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?,
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled
         );
         let blocked = store
             .load("retry-scope")
@@ -1620,6 +1674,136 @@ mod tests {
         assert_eq!(task.execution.status, TaskStatus::Pending);
         assert_eq!(task.execution.retry_count, 1);
         assert!(task.execution.claim.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idempotent_running_patch_preserves_live_physical_claim() -> Result<(), String> {
+        let store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let service = TaskRevisionService::new(
+            store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new("claim-preservation")),
+        );
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let pending = store
+            .load("claim-preservation")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "claim preservation graph is missing".to_string())?;
+        let task = pending
+            .snapshot
+            .tasks
+            .first()
+            .cloned()
+            .ok_or_else(|| "claim preservation task is missing".to_string())?;
+        let claim = match store
+            .claim_runtime_task("claim-preservation", &task, pending.snapshot.revision)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+            RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                return Err("claim preservation unexpectedly reloaded".to_string());
+            }
+        };
+
+        let patched = service
+            .apply_patch(
+                "claim-preservation",
+                TaskPlanPatch {
+                    base_revision: pending.snapshot.revision,
+                    reason: "idempotent running observation".to_string(),
+                    operations: vec![TaskPlanPatchOp::SetStatus {
+                        task_id: "a".to_string(),
+                        status: TaskStatus::Running,
+                    }],
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let current = patched
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "patched claim task is missing".to_string())?;
+        assert_eq!(current.execution.claim.as_ref(), Some(&claim));
+        assert_eq!(
+            store
+                .settle_runtime_claim("claim-preservation", "a", &claim, TaskStatus::Completed,)
+                .await
+                .map_err(|error| error.to_string())?,
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_cannot_reduce_retry_budget_below_consumed_retries() -> Result<(), String> {
+        let store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let service = TaskRevisionService::new(
+            store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new("retry-budget")),
+        );
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        {
+            let mut graphs = store.graphs.write().await;
+            let graph = graphs
+                .get_mut("retry-budget")
+                .ok_or_else(|| "retry budget graph is missing".to_string())?;
+            let task = graph
+                .snapshot
+                .tasks
+                .first_mut()
+                .ok_or_else(|| "retry budget task is missing".to_string())?;
+            task.execution.status = TaskStatus::Blocked("review".to_string());
+            task.execution.retry_count = 2;
+        }
+
+        let error = service
+            .apply_patch(
+                "retry-budget",
+                TaskPlanPatch {
+                    base_revision: 1,
+                    reason: "invalid retry budget reduction".to_string(),
+                    operations: vec![TaskPlanPatchOp::Update {
+                        task_id: "a".to_string(),
+                        patch: TaskSpecPatch {
+                            max_retries: Some(1),
+                            ..TaskSpecPatch::default()
+                        },
+                    }],
+                },
+            )
+            .await
+            .err()
+            .ok_or_else(|| "invalid retry budget patch unexpectedly committed".to_string())?;
+        assert!(
+            error
+                .to_string()
+                .contains("retry_count 2 exceeds max_retries 1")
+        );
+        let current = store
+            .load("retry-budget")
+            .await
+            .map_err(|load_error| load_error.to_string())?
+            .ok_or_else(|| "retry budget graph disappeared".to_string())?;
+        let task = current
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "retry budget task disappeared".to_string())?;
+        assert_eq!(task.spec.max_retries, 3);
+        assert_eq!(task.execution.retry_count, 2);
+        assert_eq!(
+            task.execution.status,
+            TaskStatus::Blocked("review".to_string())
+        );
         Ok(())
     }
 
@@ -1672,14 +1856,15 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             RuntimeTaskClaimOutcome::Claimed(_)
         ));
-        assert!(
+        assert_eq!(
             store
                 .settle_runtime_claim("runtime-scope", "a", &claim_a, TaskStatus::Completed,)
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?,
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled
         );
-        assert!(
-            !store
+        assert_eq!(
+            store
                 .settle_runtime_claim(
                     "runtime-scope",
                     "a",
@@ -1687,7 +1872,8 @@ mod tests {
                     TaskStatus::Failed("late result".to_string()),
                 )
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?,
+            crate::tasks::RuntimeTaskSettlementOutcome::Superseded
         );
 
         let mut stale_next = stale.clone();
