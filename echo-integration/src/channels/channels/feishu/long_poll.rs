@@ -587,13 +587,16 @@ impl WsClient {
         let message = &event["event"]["message"];
         let sender = &event["event"]["sender"];
 
-        let sender_id = sender["sender_id"]["open_id"]
-            .as_str()
-            .or_else(|| sender["sender_id"]["user_id"].as_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let sender_id = super::sender_scope(
+            sender["sender_id"]["open_id"]
+                .as_str()
+                .filter(|value| !value.is_empty()),
+            sender["sender_id"]["user_id"]
+                .as_str()
+                .filter(|value| !value.is_empty()),
+        )?;
 
-        let chat_id = message["chat_id"].as_str().unwrap_or("").to_string();
+        let chat_id = require_conversation_id(message["chat_id"].as_str())?;
         let chat_type_str = message["chat_type"].as_str().unwrap_or("p2p");
         let message_id = message["message_id"].as_str().unwrap_or("").to_string();
 
@@ -735,6 +738,12 @@ fn rand_jitter(max: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::{WsClient, WsClientConfig};
+    use crate::channels::{ChatType, InboundMessage, MessageHandler, OutboundMessage};
+    use async_trait::async_trait;
+    use echo_core::error::{ChannelError, ReactError};
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn client() -> WsClient {
         WsClient::new(WsClientConfig::new(
@@ -767,5 +776,56 @@ mod tests {
             client.combine_fragments("same-id", 3, 1, Some(b"b".to_vec())),
             Some(Some(b"abc".to_vec()))
         );
+    }
+
+    struct CountingHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for CountingHandler {
+        async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                msg.reply_target(),
+                ChatType::Group,
+                "ok",
+            ))
+        }
+
+        async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_sender_never_reaches_feishu_long_poll_handler() -> Result<(), String> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: Arc<dyn MessageHandler> = Arc::new(CountingHandler {
+            calls: calls.clone(),
+        });
+        let event = json!({
+            "event": {
+                "sender": {"sender_id": {}},
+                "message": {
+                    "chat_id": "group-1",
+                    "chat_type": "group",
+                    "message_id": "m1",
+                    "message_type": "text",
+                    "content": "{\"text\":\"hello\"}"
+                }
+            }
+        });
+
+        let result = WsClient::process_im_message(event, handler).await;
+        if !matches!(result, Err(ReactError::Channel(ref error)) if matches!(error.as_ref(), ChannelError::Other(message) if message.contains("sender_id")))
+        {
+            return Err("Feishu long poll did not return a typed sender error".to_string());
+        }
+        if calls.load(Ordering::Acquire) != 0 {
+            return Err("Feishu long poll forwarded a message without a sender".to_string());
+        }
+        Ok(())
     }
 }

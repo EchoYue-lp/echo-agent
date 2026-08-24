@@ -74,7 +74,11 @@ impl MessageAttachment {
 pub struct InboundMessage {
     /// Channel ID: "qqbot" | "feishu"
     pub channel_id: String,
-    /// Sender identifier (QQ: openid / Feishu: open_id)
+    /// Canonical transport-scoped sender identity.
+    ///
+    /// QQ uses its raw openid. Feishu uses `open_id:{value}` or
+    /// `user_id:{value}` so distinct provider identity namespaces cannot
+    /// collide in session keys or callbacks.
     pub sender_id: String,
     /// Chat identifier (group_id for group chats, sender_id for direct messages)
     pub chat_id: String,
@@ -88,6 +92,47 @@ pub struct InboundMessage {
     pub timestamp: u64,
     /// Message attachments (images, files, audio, video, etc.)
     pub attachments: Vec<MessageAttachment>,
+}
+
+fn require_identity<'a>(
+    value: Option<&'a str>,
+    field: &str,
+) -> std::result::Result<&'a str, ChannelError> {
+    let value = value
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ChannelError::Other(format!("missing channel message {field}")))?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ChannelError::Other(format!(
+            "missing channel message {field}"
+        )));
+    }
+    if trimmed != value {
+        return Err(ChannelError::Other(format!(
+            "invalid channel message {field}: surrounding whitespace"
+        )));
+    }
+    Ok(value)
+}
+
+pub(crate) fn require_channel_id(value: Option<&str>) -> std::result::Result<&str, ChannelError> {
+    require_identity(value, "channel_id")
+}
+
+pub(crate) fn require_conversation_id(
+    value: Option<&str>,
+) -> std::result::Result<&str, ChannelError> {
+    require_identity(value, "conversation_id")
+}
+
+pub(crate) fn require_sender_id(value: Option<&str>) -> std::result::Result<&str, ChannelError> {
+    let sender_id = require_identity(value, "sender_id")?;
+    if sender_id.eq_ignore_ascii_case("unknown") {
+        return Err(ChannelError::Other(
+            "invalid channel message sender_id: unknown".to_string(),
+        ));
+    }
+    Ok(sender_id)
 }
 
 impl InboundMessage {

@@ -1,7 +1,8 @@
 //! Session Manager — IM channel session management
 //!
 //! Provides framework-level session lifecycle management:
-//! - Maintains independent sessions per conversation (isolated by channel_id + chat_id)
+//! - Maintains independent sessions per user and conversation
+//!   (isolated by channel_id + chat_id + sender_id)
 //! - Auto-reset on timeout (after idle period, next message starts a new session)
 //! - Keyword/command reset (user can reset by sending a specific command)
 //!
@@ -163,13 +164,30 @@ impl SessionConfig {
 
 // ── Session ──────────────────────────────────────────────────────────────────
 
-/// Session key: (channel_id, chat_id)
-type SessionKey = (String, String);
+/// Stable identity for one user's session within one channel conversation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SessionKey {
+    channel_id: String,
+    conversation_id: String,
+    sender_id: String,
+}
+
+impl SessionKey {
+    fn from_message(msg: &InboundMessage) -> echo_core::error::Result<Self> {
+        let channel_id = require_channel_id(Some(&msg.channel_id))?;
+        let conversation_id = require_conversation_id(Some(msg.conversation_id()))?;
+        let sender_id = require_sender_id(Some(&msg.sender_id))?;
+        Ok(Self {
+            channel_id: channel_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            sender_id: sender_id.to_string(),
+        })
+    }
+}
 
 /// Single user session
 struct Session {
     handler: Arc<dyn MessageHandler>,
-    sender_id: String,
     generation: Arc<SessionGeneration>,
 }
 
@@ -320,21 +338,22 @@ impl SessionHandler {
         self
     }
 
-    /// Get the current number of active sessions
+    /// Get the number of currently retained sender-scoped sessions.
+    ///
+    /// Each distinct `(channel_id, conversation_id, sender_id)` identity counts
+    /// separately, including different participants in the same group chat.
     pub fn active_sessions(&self) -> usize {
         self.sessions.len()
     }
 
     /// Get or create a session (atomic operation, uses DashMap entry API to prevent race conditions)
-    fn get_or_create(&self, key: &SessionKey, sender_id: &str) -> Arc<Mutex<Session>> {
+    fn get_or_create(&self, key: &SessionKey) -> Arc<Mutex<Session>> {
         let handler = self.factory.clone();
-        let sender_id = sender_id.to_string();
         self.sessions
             .entry(key.clone())
             .or_insert_with(|| {
                 Arc::new(Mutex::new(Session {
                     handler: Arc::from(handler.create()),
-                    sender_id,
                     generation: Arc::new(SessionGeneration::new()),
                 }))
             })
@@ -344,13 +363,9 @@ impl SessionHandler {
     /// Lock the authoritative map entry. A timeout prune can remove a session
     /// after `get_or_create` returns but before its async mutex is acquired, so
     /// identity must be rechecked under the same lock used by pruning.
-    async fn lock_current_session(
-        &self,
-        key: &SessionKey,
-        sender_id: &str,
-    ) -> OwnedMutexGuard<Session> {
+    async fn lock_current_session(&self, key: &SessionKey) -> OwnedMutexGuard<Session> {
         loop {
-            let session = self.get_or_create(key, sender_id);
+            let session = self.get_or_create(key);
             let guard = Arc::clone(&session).lock_owned().await;
             let is_current = self
                 .sessions
@@ -393,14 +408,18 @@ impl SessionHandler {
             if !guard.generation.is_idle_and_expired(self.config.timeout) {
                 continue;
             }
-            let sender_id = guard.sender_id.clone();
             let removed = self
                 .sessions
                 .remove_if(&key, |_, current| Arc::ptr_eq(current, &session))
                 .is_some();
             drop(guard);
             if removed {
-                self.notify_session_end(key.0, key.1, sender_id, SessionEndReason::TimeoutReplaced);
+                self.notify_session_end(
+                    key.channel_id,
+                    key.conversation_id,
+                    key.sender_id,
+                    SessionEndReason::TimeoutReplaced,
+                );
             }
         }
     }
@@ -410,12 +429,11 @@ impl SessionHandler {
 impl MessageHandler for SessionHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
         self.prune_expired().await;
-        let key = (msg.channel_id.clone(), msg.conversation_id().to_string());
-        let mut guard = self.lock_current_session(&key, &msg.sender_id).await;
+        let key = SessionKey::from_message(&msg)?;
+        let mut guard = self.lock_current_session(&key).await;
         if self.config.is_reset(&msg.text) {
             guard.handler = Arc::from(self.factory.create());
             guard.generation = Arc::new(SessionGeneration::new());
-            guard.sender_id = msg.sender_id.clone();
             drop(guard);
             self.notify_session_end(
                 msg.channel_id.clone(),
@@ -441,7 +459,6 @@ impl MessageHandler for SessionHandler {
             guard.generation = Arc::new(SessionGeneration::new());
         }
         guard.generation.touch();
-        guard.sender_id = msg.sender_id.clone();
         let result = guard.handler.handle(msg).await;
         guard.generation.touch();
         result
@@ -455,12 +472,11 @@ impl MessageHandler for SessionHandler {
     > {
         use futures::stream::StreamExt;
         self.prune_expired().await;
-        let key = (msg.channel_id.clone(), msg.conversation_id().to_string());
-        let mut guard = self.lock_current_session(&key, &msg.sender_id).await;
+        let key = SessionKey::from_message(&msg)?;
+        let mut guard = self.lock_current_session(&key).await;
         if self.config.is_reset(&msg.text) {
             guard.handler = Arc::from(self.factory.create());
             guard.generation = Arc::new(SessionGeneration::new());
-            guard.sender_id = msg.sender_id.clone();
             drop(guard);
             self.notify_session_end(
                 msg.channel_id.clone(),
@@ -482,7 +498,6 @@ impl MessageHandler for SessionHandler {
             guard.handler = Arc::from(self.factory.create());
             guard.generation = Arc::new(SessionGeneration::new());
         }
-        guard.sender_id = msg.sender_id.clone();
         let handler = guard.handler.clone();
         let Some(stream_receipt) = guard.generation.begin() else {
             return Err(echo_core::error::ReactError::Other(
@@ -783,6 +798,191 @@ mod tests {
         }
     }
 
+    struct SenderScopedHandler {
+        instance_id: usize,
+        mode: StdMutex<&'static str>,
+        hitl_pending: AtomicBool,
+        parked_started: Arc<Notify>,
+        release_parked: Arc<Notify>,
+    }
+
+    impl SenderScopedHandler {
+        fn lock_mode(&self) -> StdMutexGuard<'_, &'static str> {
+            match self.mode.lock() {
+                Ok(mode) => mode,
+                Err(poisoned) => poisoned.into_inner(),
+            }
+        }
+
+        fn state_text(&self) -> String {
+            format!(
+                "handler={};mode={};hitl={}",
+                self.instance_id,
+                *self.lock_mode(),
+                self.hitl_pending.load(Ordering::Acquire)
+            )
+        }
+    }
+
+    #[async_trait]
+    impl MessageHandler for SenderScopedHandler {
+        async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+            match msg.text.as_str() {
+                "park-handle" => {
+                    self.parked_started.notify_one();
+                    self.release_parked.notified().await;
+                }
+                "task-hitl" => {
+                    *self.lock_mode() = "task";
+                    self.hitl_pending.store(true, Ordering::Release);
+                }
+                "review" => {
+                    *self.lock_mode() = "review";
+                    self.hitl_pending.store(false, Ordering::Release);
+                }
+                _ => {}
+            }
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                msg.reply_target(),
+                msg.chat_type,
+                self.state_text(),
+            ))
+        }
+
+        async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct SenderScopedFactory {
+        created: Arc<AtomicUsize>,
+        parked_started: Arc<Notify>,
+        release_parked: Arc<Notify>,
+    }
+
+    impl SessionFactory for SenderScopedFactory {
+        fn create(&self) -> Box<dyn MessageHandler> {
+            let instance_id = self
+                .created
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current.checked_add(1)
+                })
+                .map(|previous| previous.saturating_add(1))
+                .unwrap_or(usize::MAX);
+            Box::new(SenderScopedHandler {
+                instance_id,
+                mode: StdMutex::new("chat"),
+                hitl_pending: AtomicBool::new(false),
+                parked_started: self.parked_started.clone(),
+                release_parked: self.release_parked.clone(),
+            })
+        }
+    }
+
+    fn group_message(sender_id: &str, text: &str, message_id: &str) -> InboundMessage {
+        scoped_group_message("qq", sender_id, "shared-group", text, message_id)
+    }
+
+    fn scoped_group_message(
+        channel_id: &str,
+        sender_id: &str,
+        conversation_id: &str,
+        text: &str,
+        message_id: &str,
+    ) -> InboundMessage {
+        InboundMessage::new(
+            channel_id,
+            sender_id,
+            conversation_id,
+            ChatType::Group,
+            text,
+            message_id,
+        )
+    }
+
+    async fn group_handle_text(
+        handler: &SessionHandler,
+        sender_id: &str,
+        text: &str,
+        message_id: &str,
+    ) -> Result<String, String> {
+        handler
+            .handle(group_message(sender_id, text, message_id))
+            .await
+            .map(|message| message.text)
+            .map_err(|error| error.to_string())
+    }
+
+    async fn group_stream_text(
+        handler: &SessionHandler,
+        sender_id: &str,
+        text: &str,
+        message_id: &str,
+    ) -> Result<String, String> {
+        stream_message_text(handler, group_message(sender_id, text, message_id)).await
+    }
+
+    async fn stream_message_text(
+        handler: &SessionHandler,
+        message: InboundMessage,
+    ) -> Result<String, String> {
+        let sender_id = message.sender_id.clone();
+        let mut stream = handler
+            .handle_stream(message)
+            .await
+            .map_err(|error| error.to_string())?;
+        let message = timeout(TEST_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| format!("group stream timed out for {sender_id}"))?
+            .ok_or_else(|| format!("group stream closed without output for {sender_id}"))?
+            .map_err(|error| error.to_string())?;
+        if timeout(TEST_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| format!("group stream did not close for {sender_id}"))?
+            .is_some()
+        {
+            return Err(format!(
+                "group stream returned extra output for {sender_id}"
+            ));
+        }
+        Ok(message.text)
+    }
+
+    async fn generation_for_message(
+        handler: &SessionHandler,
+        message: &InboundMessage,
+    ) -> Result<Arc<SessionGeneration>, String> {
+        let key = SessionKey::from_message(message).map_err(|error| error.to_string())?;
+        let session = handler
+            .sessions
+            .get(&key)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| "scoped test session was not registered".to_string())?;
+        let guard = session.lock().await;
+        Ok(Arc::clone(&guard.generation))
+    }
+
+    fn sender_scoped_handler() -> (
+        Arc<SessionHandler>,
+        Arc<AtomicUsize>,
+        Arc<Notify>,
+        Arc<Notify>,
+    ) {
+        let created = Arc::new(AtomicUsize::new(0));
+        let parked_started = Arc::new(Notify::new());
+        let release_parked = Arc::new(Notify::new());
+        let handler = Arc::new(SessionHandler::new(
+            SessionConfig::default(),
+            SenderScopedFactory {
+                created: created.clone(),
+                parked_started: parked_started.clone(),
+                release_parked: release_parked.clone(),
+            },
+        ));
+        (handler, created, parked_started, release_parked)
+    }
+
     fn test_message(text: &str, message_id: &str) -> InboundMessage {
         InboundMessage::new("qq", "u1", "c1", ChatType::Direct, text, message_id)
     }
@@ -829,7 +1029,11 @@ mod tests {
     async fn current_test_generation(
         handler: &SessionHandler,
     ) -> Result<Arc<SessionGeneration>, String> {
-        let key = ("qq".to_string(), "c1".to_string());
+        let key = SessionKey {
+            channel_id: "qq".to_string(),
+            conversation_id: "c1".to_string(),
+            sender_id: "u1".to_string(),
+        };
         let session = handler
             .sessions
             .get(&key)
@@ -927,6 +1131,242 @@ mod tests {
         }
         if counter.load(Ordering::SeqCst) != 0 {
             return Err("reset command reached the inner handler".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_group_conversation_uses_one_session_per_sender() -> Result<(), String> {
+        let (handler, created, _, _) = sender_scoped_handler();
+
+        let alice = group_stream_text(&handler, "alice", "task-hitl", "m1").await?;
+        let bob = group_stream_text(&handler, "bob", "state", "m2").await?;
+        if alice != "handler=1;mode=task;hitl=true" {
+            return Err(format!(
+                "alice state was not retained by her handler: {alice}"
+            ));
+        }
+        if bob != "handler=2;mode=chat;hitl=false" {
+            return Err(format!("bob inherited alice mode or HITL state: {bob}"));
+        }
+        if handler.active_sessions() != 2 || created.load(Ordering::Acquire) != 2 {
+            return Err("same group conversation did not create two sender sessions".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn different_group_senders_do_not_share_the_session_mutex() -> Result<(), String> {
+        let (handler, _, parked_started, release_parked) = sender_scoped_handler();
+        let alice_handler = handler.clone();
+        let alice = tokio::spawn(async move {
+            alice_handler
+                .handle(group_message("alice", "park-handle", "m1"))
+                .await
+                .map_err(|error| error.to_string())
+        });
+        timeout(TEST_TIMEOUT, parked_started.notified())
+            .await
+            .map_err(|_| "alice did not acquire and park her session mutex".to_string())?;
+
+        let bob = timeout(
+            TEST_TIMEOUT,
+            group_handle_text(&handler, "bob", "state", "m2"),
+        )
+        .await
+        .map_err(|_| "bob was blocked by alice's session mutex".to_string())??;
+        if bob != "handler=2;mode=chat;hitl=false" {
+            return Err(format!("bob ran against the wrong handler: {bob}"));
+        }
+
+        release_parked.notify_one();
+        let alice = timeout(TEST_TIMEOUT, alice)
+            .await
+            .map_err(|_| "alice did not finish after release".to_string())?
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        if alice.text != "handler=1;mode=chat;hitl=false" {
+            return Err(format!(
+                "alice resumed with the wrong handler: {}",
+                alice.text
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sender_reset_does_not_replace_another_group_member_session() -> Result<(), String> {
+        let (handler, created, _, _) = sender_scoped_handler();
+        let alice_before = group_stream_text(&handler, "alice", "task-hitl", "m1").await?;
+        let bob_before = group_stream_text(&handler, "bob", "review", "m2").await?;
+        if alice_before != "handler=1;mode=task;hitl=true"
+            || bob_before != "handler=2;mode=review;hitl=false"
+        {
+            return Err("test sessions were not initialized independently".to_string());
+        }
+
+        let reset = group_stream_text(&handler, "alice", "reset chat", "m3").await?;
+        if reset != handler.config.reset_reply {
+            return Err("alice reset did not return the configured reply".to_string());
+        }
+        let alice_after = group_stream_text(&handler, "alice", "state", "m4").await?;
+        let bob_after = group_stream_text(&handler, "bob", "state", "m5").await?;
+        if alice_after != "handler=3;mode=chat;hitl=false" {
+            return Err(format!(
+                "alice reset did not create a clean handler: {alice_after}"
+            ));
+        }
+        if bob_after != "handler=2;mode=review;hitl=false" {
+            return Err(format!("alice reset replaced bob's handler: {bob_after}"));
+        }
+        if handler.active_sessions() != 2 || created.load(Ordering::Acquire) != 3 {
+            return Err("sender reset changed the group session cardinality".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_sender_reuses_mode_and_hitl_session_state() -> Result<(), String> {
+        let (handler, created, _, _) = sender_scoped_handler();
+        let initial = group_stream_text(&handler, "alice", "task-hitl", "m1").await?;
+        let reused = group_stream_text(&handler, "alice", "state", "m2").await?;
+        if initial != "handler=1;mode=task;hitl=true" || reused != initial {
+            return Err(format!(
+                "same sender did not reuse state: {initial} -> {reused}"
+            ));
+        }
+        if handler.active_sessions() != 1 || created.load(Ordering::Acquire) != 1 {
+            return Err("same sender created more than one session".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_or_unknown_sender_identity_fails_closed() -> Result<(), String> {
+        let (handler, created, _, _) = sender_scoped_handler();
+        for sender_id in ["", "   ", "unknown", "UNKNOWN", " alice "] {
+            let result = handler
+                .handle_stream(group_message(sender_id, "state", "m1"))
+                .await;
+            if !matches!(result, Err(ReactError::Channel(ref error)) if matches!(error.as_ref(), echo_core::error::ChannelError::Other(message) if message.contains("sender_id")))
+            {
+                return Err(format!("invalid sender was not rejected: {sender_id:?}"));
+            }
+        }
+        if handler.active_sessions() != 0 || created.load(Ordering::Acquire) != 0 {
+            return Err("invalid sender created a session".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_channel_or_conversation_identity_fails_closed() -> Result<(), String> {
+        let (handler, created, _, _) = sender_scoped_handler();
+        let messages = [
+            scoped_group_message("", "alice", "shared-group", "state", "m1"),
+            scoped_group_message("qq", "alice", "", "state", "m2"),
+            scoped_group_message(" qq ", "alice", "shared-group", "state", "m3"),
+            scoped_group_message("qq", "alice", " shared-group ", "state", "m4"),
+        ];
+        for message in messages {
+            let result = handler.handle_stream(message).await;
+            if !matches!(result, Err(ReactError::Channel(ref error)) if matches!(error.as_ref(), echo_core::error::ChannelError::Other(message) if message.contains("channel_id") || message.contains("conversation_id")))
+            {
+                return Err("empty channel coordinate did not fail closed".to_string());
+            }
+        }
+        if handler.active_sessions() != 0 || created.load(Ordering::Acquire) != 0 {
+            return Err("invalid channel coordinate created a session".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_sender_is_isolated_across_conversations_and_channels() -> Result<(), String> {
+        let (handler, created, _, _) = sender_scoped_handler();
+        let first = stream_message_text(
+            &handler,
+            scoped_group_message("qq", "alice", "group-1", "state", "m1"),
+        )
+        .await?;
+        let conversation = stream_message_text(
+            &handler,
+            scoped_group_message("qq", "alice", "group-2", "state", "m2"),
+        )
+        .await?;
+        let channel = stream_message_text(
+            &handler,
+            scoped_group_message("feishu", "alice", "group-1", "state", "m3"),
+        )
+        .await?;
+        if first != "handler=1;mode=chat;hitl=false"
+            || conversation != "handler=2;mode=chat;hitl=false"
+            || channel != "handler=3;mode=chat;hitl=false"
+        {
+            return Err("channel or conversation was omitted from the session scope".to_string());
+        }
+        if handler.active_sessions() != 3 || created.load(Ordering::Acquire) != 3 {
+            return Err("distinct channel conversations reused one sender session".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timeout_prune_reports_each_scoped_session_original_sender() -> Result<(), String> {
+        type EndRecord = (String, String, String, SessionEndReason);
+
+        let records = Arc::new(StdMutex::new(Vec::<EndRecord>::new()));
+        let callback_records = records.clone();
+        let created = Arc::new(AtomicUsize::new(0));
+        let handler = SessionHandler::new(
+            SessionConfig::default().with_timeout(Duration::from_secs(60)),
+            SenderScopedFactory {
+                created: created.clone(),
+                parked_started: Arc::new(Notify::new()),
+                release_parked: Arc::new(Notify::new()),
+            },
+        )
+        .with_on_session_end(move |info| {
+            let mut records = match callback_records.lock() {
+                Ok(records) => records,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            records.push((info.channel_id, info.chat_id, info.sender_id, info.reason));
+        });
+
+        let alice_message = group_message("alice", "state", "m1");
+        let bob_message = group_message("bob", "state", "m2");
+        stream_message_text(&handler, alice_message.clone()).await?;
+        stream_message_text(&handler, bob_message.clone()).await?;
+        for message in [&alice_message, &bob_message] {
+            let generation = generation_for_message(&handler, message).await?;
+            mark_generation_expired(&generation, handler.config.timeout)?;
+        }
+
+        group_stream_text(&handler, "carol", "state", "m4").await?;
+        let records = match records.lock() {
+            Ok(records) => records,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for sender_id in ["alice", "bob"] {
+            if !records.iter().any(|record| {
+                record.0 == "qq"
+                    && record.1 == "shared-group"
+                    && record.2 == sender_id
+                    && record.3 == SessionEndReason::TimeoutReplaced
+            }) {
+                return Err(format!(
+                    "timeout callback lost sender identity: {sender_id}"
+                ));
+            }
+        }
+        if records.len() != 2 {
+            return Err(format!("timeout prune emitted {} callbacks", records.len()));
+        }
+        if handler.active_sessions() != 1 || created.load(Ordering::Acquire) != 3 {
+            return Err(
+                "timeout prune did not remove only the expired sender sessions".to_string(),
+            );
         }
         Ok(())
     }

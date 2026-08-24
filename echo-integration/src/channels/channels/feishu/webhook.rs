@@ -174,7 +174,14 @@ async fn handle_event(
     }
 
     let message_type = message["message_type"].as_str().unwrap_or("").to_string();
-    let chat_id = message["chat_id"].as_str().unwrap_or("").to_string();
+    let chat_id = match require_conversation_id(message["chat_id"].as_str()) {
+        Ok(chat_id) => chat_id,
+        Err(error) => {
+            state.event_locks.remove(&message_id);
+            warn!(%error, "Feishu webhook: invalid conversation identity");
+            return empty_response(axum::http::StatusCode::BAD_REQUEST);
+        }
+    };
     let chat_type_str = message["chat_type"].as_str().unwrap_or("p2p").to_string();
 
     // Only handle text messages
@@ -195,10 +202,21 @@ async fn handle_event(
         return axum::Json(json!({})).into_response();
     }
 
-    let sender_id = event["sender"]["sender_id"]["open_id"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
+    let sender_id = match super::sender_scope(
+        event["sender"]["sender_id"]["open_id"]
+            .as_str()
+            .filter(|value| !value.is_empty()),
+        event["sender"]["sender_id"]["user_id"]
+            .as_str()
+            .filter(|value| !value.is_empty()),
+    ) {
+        Ok(sender_id) => sender_id,
+        Err(error) => {
+            state.event_locks.remove(&message_id);
+            warn!(%error, "Feishu webhook: invalid sender identity");
+            return empty_response(axum::http::StatusCode::BAD_REQUEST);
+        }
+    };
 
     // A successful HTTP acknowledgement means handler and delivery completed.
     let handler = state.handler.clone();
@@ -272,4 +290,125 @@ pub(super) async fn run_webhook_server(
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for CountingHandler {
+        async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                msg.reply_target(),
+                msg.chat_type,
+                "ok",
+            ))
+        }
+
+        async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_sender_never_reaches_feishu_webhook_handler() -> Result<(), String> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(WebhookState {
+            handler: Arc::new(CountingHandler {
+                calls: calls.clone(),
+            }),
+            verification_token: None,
+            signing_key: None,
+            processed_events: DashMap::new(),
+            event_locks: DashMap::new(),
+        });
+        let body = serde_json::to_vec(&json!({
+            "header": {"event_type": FEISHU_IM_MESSAGE_RECEIVE},
+            "event": {
+                "sender": {"sender_id": {}},
+                "message": {
+                    "message_id": "m1",
+                    "message_type": "text",
+                    "chat_id": "group-1",
+                    "chat_type": "group",
+                    "content": "{\"text\":\"hello\"}"
+                }
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+
+        let response = handle_event(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Bytes::from(body),
+        )
+        .await;
+        if response.status() != axum::http::StatusCode::BAD_REQUEST {
+            return Err(format!(
+                "Feishu webhook returned {} for missing sender",
+                response.status()
+            ));
+        }
+        if calls.load(Ordering::Acquire) != 0 || !state.event_locks.is_empty() {
+            return Err("Feishu webhook retained or forwarded an invalid event".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_id_fallback_reaches_feishu_webhook_handler() -> Result<(), String> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(WebhookState {
+            handler: Arc::new(CountingHandler {
+                calls: calls.clone(),
+            }),
+            verification_token: None,
+            signing_key: None,
+            processed_events: DashMap::new(),
+            event_locks: DashMap::new(),
+        });
+        let body = serde_json::to_vec(&json!({
+            "header": {"event_type": FEISHU_IM_MESSAGE_RECEIVE},
+            "event": {
+                "sender": {"sender_id": {"user_id": "user-1"}},
+                "message": {
+                    "message_id": "m1",
+                    "message_type": "text",
+                    "chat_id": "group-1",
+                    "chat_type": "group",
+                    "content": "{\"text\":\"hello\"}"
+                }
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+
+        let response = handle_event(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Bytes::from(body),
+        )
+        .await;
+        if response.status() != axum::http::StatusCode::OK {
+            return Err(format!(
+                "Feishu webhook rejected user_id fallback with {}",
+                response.status()
+            ));
+        }
+        if calls.load(Ordering::Acquire) != 1
+            || !state.event_locks.is_empty()
+            || !state.processed_events.contains_key("m1")
+        {
+            return Err("Feishu webhook did not complete the user_id event".to_string());
+        }
+        Ok(())
+    }
 }

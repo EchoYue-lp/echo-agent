@@ -86,8 +86,8 @@ use std::sync::Arc;
 /// Forwards IM channel messages to the agent, automatically inheriting all
 /// framework capabilities (tools, memory, MCP, Skills, compression, guards, etc.).
 ///
-/// Each user session (managed by `SessionHandler`) owns an independent
-/// `AgentChannelHandler` to ensure conversation isolation.
+/// Each sender in each channel conversation (managed by `SessionHandler`) owns
+/// an independent `AgentChannelHandler` to ensure conversation isolation.
 pub struct AgentChannelHandler {
     agent: Arc<ReactAgent>,
 }
@@ -117,8 +117,9 @@ impl AgentChannelHandler {
 
     /// Create from an `AgentConfig` and an already constructed shared client.
     ///
-    /// Session factories use this form so each conversation owns independent
-    /// agent state while all sessions reuse the same provider transport.
+    /// Session factories use this form so each sender in each conversation owns
+    /// independent agent state while all sessions reuse the same provider
+    /// transport.
     pub fn from_config_with_client(config: AgentConfig, client: Arc<dyn LlmClient>) -> Self {
         Self::new(ReactAgent::new(config).with_llm_client(client))
     }

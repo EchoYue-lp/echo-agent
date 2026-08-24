@@ -257,10 +257,7 @@ async fn handle_c2c_message(
 ) -> std::result::Result<(), ChannelError> {
     let data = &payload["d"];
 
-    let sender_id = data["author"]["id"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
+    let sender_id = require_sender_id(data["author"]["id"].as_str())?;
     let text = data["content"].as_str().unwrap_or("").to_string();
     let message_id = data["id"].as_str().unwrap_or("").to_string();
 
@@ -270,8 +267,8 @@ async fn handle_c2c_message(
 
     let inbound = InboundMessage::new(
         "qqbot",
-        &sender_id,
-        &sender_id,
+        sender_id,
+        sender_id,
         ChatType::Direct,
         &text,
         &message_id,
@@ -287,16 +284,13 @@ async fn handle_group_at_message(
 ) -> std::result::Result<(), ChannelError> {
     let data = &payload["d"];
 
-    let sender_id = data["author"]["id"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
+    let sender_id = require_sender_id(data["author"]["id"].as_str())?;
     // In QQ Bot v2 API the group chat ID field is group_openid; also compatible with legacy format group.id
-    let group_id = data["group_openid"]
-        .as_str()
-        .or_else(|| data["group"]["id"].as_str())
-        .unwrap_or("")
-        .to_string();
+    let group_id = require_conversation_id(
+        data["group_openid"]
+            .as_str()
+            .or_else(|| data["group"]["id"].as_str()),
+    )?;
     let text = data["content"].as_str().unwrap_or("").to_string();
     let message_id = data["id"].as_str().unwrap_or("").to_string();
 
@@ -306,8 +300,8 @@ async fn handle_group_at_message(
 
     let inbound = InboundMessage::new(
         "qqbot",
-        &sender_id,
-        &group_id,
+        sender_id,
+        group_id,
         ChatType::Group,
         &text,
         &message_id,
@@ -346,5 +340,63 @@ async fn dispatch_to_handler(
             warn!("Handler error: {:?}", e);
             Err(ChannelError::Other(format!("Handler error: {:?}", e)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for CountingHandler {
+        async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                msg.reply_target(),
+                msg.chat_type,
+                "ok",
+            ))
+        }
+
+        async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_or_unknown_sender_never_reaches_qq_handler() -> Result<(), String> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: Arc<dyn MessageHandler> = Arc::new(CountingHandler {
+            calls: calls.clone(),
+        });
+        let missing = json!({"d": {"content": "hello", "id": "m1"}});
+        let unknown = json!({
+            "d": {
+                "author": {"id": "unknown"},
+                "group_openid": "group-1",
+                "content": "hello",
+                "id": "m2"
+            }
+        });
+
+        let direct = handle_c2c_message(handler.clone(), &missing).await;
+        let group = handle_group_at_message(handler, &unknown).await;
+        if !matches!(direct, Err(ChannelError::Other(ref message)) if message.contains("sender_id"))
+            || !matches!(group, Err(ChannelError::Other(ref message)) if message.contains("sender_id"))
+        {
+            return Err("QQ did not return typed sender identity errors".to_string());
+        }
+        if calls.load(Ordering::Acquire) != 0 {
+            return Err("QQ forwarded a message without a stable sender".to_string());
+        }
+        Ok(())
     }
 }

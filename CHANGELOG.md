@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Channel `SessionHandler` now isolates Agent state, locks, mode, HITL,
+  timeout, and reset by `(channel_id, conversation_id, sender_id)`. Malformed
+  identities are rejected before an Agent is created, and built-in QQ/Feishu
+  adapters no longer emit a shared `unknown` sender sentinel. Feishu scopes
+  `open_id` and `user_id` in distinct identity namespaces.
+
 - Procedural macros now resolve their owning split crate directly:
   core-owned macros accept `echo_core`, while `#[handler]` accepts
   `echo_orchestration` plus `echo_core`; neither requires the facade package.

@@ -89,7 +89,8 @@ async fn main() -> echo_agent::error::Result<()> {
         llm_config.clone(),
     )?;
 
-    // Session factory 共享 provider transport，但每个会话保留独立 Agent 状态。
+    // Session factory 共享 provider transport，但每个会话中的每位发送者都保留
+    // 独立 Agent 状态，群聊成员之间也不会共享上下文。
     let llm_client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
 
     let mut manager = ChannelManager::new();
@@ -160,7 +161,7 @@ pub trait ChannelPlugin: Send + Sync {
 ```rust
 pub struct InboundMessage {
     pub channel_id: String,   // "qqbot" | "feishu"
-    pub sender_id: String,    // 发送者标识
+    pub sender_id: String,    // 传输层命名空间化后的发送者规范标识
     pub chat_id: String,      // 会话标识
     pub chat_type: ChatType,  // Direct | Group
     pub text: String,
@@ -168,6 +169,13 @@ pub struct InboundMessage {
     pub timestamp: u64,
 }
 ```
+
+`SessionHandler` 使用 `channel_id + chat_id + sender_id` 作为 Agent 会话键。同一会话中，
+同一发送者持续复用一个 handler；不同群聊成员则分别拥有独立的对话状态、执行锁、交互状态、
+超时替换和 reset 生命周期。空的 channel、conversation、sender 标识和 `unknown` sender
+哨兵都无法形成稳定的用户会话键，因此会被直接拒绝；带首尾空白的标识同样会被拒绝，而不是
+被静默改写。内置传输不会把这类错误消息交给 Agent。飞书的两个身份命名空间会在查找会话前
+规范为 `open_id:{value}` 或 `user_id:{value}`。
 
 ### OutboundMessage —— 发送的消息
 

@@ -74,6 +74,12 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | ------------------------------- | -------- | ----------------------------------------------------------------------- |
 | [Security Guide](./security.md) | Security | Security model, sandbox config, secret management, MCP trust boundaries |
 
+### Architecture Decisions
+
+| ADR                                                                                  | Decision                                                    |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| [0001 - Sender-Scoped Channel Sessions](../adr/0001-channel-session-sender-scope.md) | Channel sessions are isolated by channel, conversation, and sender |
+
 ---
 
 ## Quick Start

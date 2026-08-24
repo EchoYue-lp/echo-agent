@@ -89,8 +89,8 @@ async fn main() -> echo_agent::error::Result<()> {
         llm_config.clone(),
     )?;
 
-    // Session factories share one provider transport while each session keeps
-    // independent Agent conversation state.
+    // Session factories share one provider transport while each sender in each
+    // conversation keeps independent Agent state, including in group chats.
     let llm_client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
 
     let mut manager = ChannelManager::new();
@@ -161,7 +161,7 @@ pub trait ChannelPlugin: Send + Sync {
 ```rust
 pub struct InboundMessage {
     pub channel_id: String,   // "qqbot" | "feishu"
-    pub sender_id: String,    // Sender identifier
+    pub sender_id: String,    // Canonical transport-scoped sender identity
     pub chat_id: String,      // Session identifier
     pub chat_type: ChatType,  // Direct | Group
     pub text: String,
@@ -169,6 +169,17 @@ pub struct InboundMessage {
     pub timestamp: u64,
 }
 ```
+
+`SessionHandler` keys an Agent session by `channel_id + chat_id + sender_id`.
+Messages from the same sender in the same conversation reuse one handler, while
+different group members have independent conversation state, execution locks,
+interaction state, timeout replacement, and reset lifecycle. Empty channel,
+conversation, or sender identifiers and the `unknown` sender sentinel are
+rejected because they cannot form a stable per-user session key. Identifiers
+with surrounding whitespace are also rejected instead of being silently
+rewritten. Built-in transports never forward these malformed messages to an
+Agent. Feishu normalizes its two identity namespaces to `open_id:{value}` or
+`user_id:{value}` before session lookup.
 
 ### OutboundMessage —— Sent Messages
 
