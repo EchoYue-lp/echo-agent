@@ -28,14 +28,18 @@ LLM 的上下文窗口在每次请求结束后就消失了，进程也可能在�
 conversation_id: "user-123-chat-5"
                 │
                 ▼
-FileRuntimeStateStore (./agent-data/runtime_state/):
+FileRuntimeStateStore (./agent-data/runtime_state/_runtime_owners/):
+<编码后的-runtime-id>.json
 {
-  "user-123-chat-5": {
+  "runtime_state_id": "user-123-chat-5",
+  "scope_id": "user-123-chat-5",
+  "phase": "active",
+  "checkpoint": {
     "messages_json":  "...完整消息历史...",
     "current_plan":   "Step 3: draft the haiku",
     "active_skills":  ["doc-writing"],
     "blocked_reason": null,
-    "timestamp":      "2026-06-14T...",
+    "timestamp":      "2026-06-14T..."
   }
 }
 ```

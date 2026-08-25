@@ -187,10 +187,20 @@ handler 持续复用 incarnation；framework timeout/reset 替换会创建新 in
 clone 与 `SessionEndInfo` 都能看到该变化，因此应用可以精确回收旧模型/runtime context，同时
 继续用稳定产品会话 ID 保存 journal 与 Task 历史。
 
+reset 回复和 replacement session 会立即可用。如果旧 stream 仍在运行（包括已准入但尚未 poll 的
+stream），旧 `SessionEndInfo` 清理回调只会在该 stream 完成结算后触发。这样消费者总是在旧
+stream 最后一次写入之后精确回收 checkpoint，不会发生“先清理、后被旧 stream 重新写回”。
+如果消费者回调自身 panic，`SessionHandler` 会在 lifecycle 边界内隔离该 panic，不会让它从
+stream 析构继续传播，也不会污染 replacement session。
+
 自定义 Agent driver 应把稳定产品 ID 放在
 `AgentInvocationContext.runtime.conversation_id`，并把 instance 派生的 runtime key 同时传给
 `runtime_state_id` 与 `transcript_generation_id`。这样同一 incarnation 的 checkpoint load/save
 保持对称，稳定 transcript 也能幂等追加，同时不会把旧产品历史重新注入模型。
+即使消费者有意共享同一个 `ReactAgent`，context 仍按 value-scoped identity 隔离：
+`runtime_state_id` 变化时，下一次模型请求前必须精确 reset/restore；只有相同 identity 才能复用
+warm messages。运行时会在任何可取消的 restore 之前先发布 `Hydrating` 标记，并在该边界清空
+rollback snapshots，因此被取消的切换不会让 partial context 或旧 snapshot 冒充另一 identity。
 
 ### OutboundMessage —— 发送的消息
 

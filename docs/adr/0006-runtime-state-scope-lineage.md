@@ -60,10 +60,23 @@ Callers must close admission and settle foreground/resource owners before reset
 or product deletion; that product admission barrier prevents a new incarnation
 from being created between cross-store cleanup steps.
 
-File storage writes the scope index before the checkpoint. Exact/scope deletion
-removes checkpoint data before removing index entries. A crash can therefore
-leave a harmless tombstone that a retry can reclaim, but not an unindexed new
-checkpoint. SQLite performs index/checkpoint mutations in one transaction.
+File storage has one authoritative record per runtime ID. `Active` records own
+the scope binding and checkpoint in the same atomic JSON replacement;
+`Deleting` records retain the exact cleanup obligation without checkpoint
+payload. A retry can therefore finish every crash cut without choosing between
+separate owner/index/checkpoint files. Scope-index files are rebuildable
+projections and never decide ownership or whether an operation succeeded;
+projection write/delete/fsync failure cannot block authoritative enumeration or
+deletion.
+Writes use temp-file fsync + rename + parent-directory fsync, deletions fsync the
+parent even on an idempotent retry, and first directory creation publishes every
+ancestor durably. One store-root lease plus a fixed set of in-process shards
+replaces per-incarnation lock files, so lock metadata cannot grow with runtime
+IDs. SQLite performs binding/checkpoint mutations in one transaction; all async
+trait methods submit their complete connection/transaction closure to the
+bounded keyed blocking owner. A foreign scope owning a runtime ID that equals
+another scope's name disables only the legacy same-ID fallback; it cannot block
+cleanup of rows genuinely owned by that other scope.
 
 ## Consequences
 
@@ -83,5 +96,8 @@ and stable-hash invocation IDs and avoids ambiguous cross-scope ownership.
 
 Coverage includes multiple senders and incarnations, restart persistence,
 sender-local exact reset, reset transcript retention, full product deletion,
-File crash-tombstone recovery, SQLite transactional lineage, and snapshot
-checkpoint registration under distinct product/runtime identities.
+every File `Active`/`Deleting`/unlink crash cut, competing scope claims, corrupt
+projection repair, durable unlink retry, SQLite transactional lineage and Tokio
+heartbeat, cross-backend same-name scope parity, invocation-aware checkpoint
+restore/save symmetry, and snapshot checkpoint registration under distinct
+product/runtime identities.

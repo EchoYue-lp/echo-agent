@@ -220,11 +220,27 @@ impl ReactAgent {
             .as_ref()
             .and_then(|value| value.history.as_deref())
             .unwrap_or_default();
+        let runtime_state_id = invocation
+            .as_ref()
+            .and_then(|context| context.runtime_state_id.as_deref())
+            .or_else(|| {
+                invocation
+                    .as_ref()
+                    .and_then(|context| context.runtime.as_ref())
+                    .and_then(|runtime| runtime.conversation_id.as_deref())
+            })
+            .or_else(|| {
+                legacy_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.conversation_id.as_deref())
+            })
+            .or(self.config.conversation_id.as_deref());
         let recalled = if let Some(ref msg) = message {
-            self.prepare_stream_context_with_message(mode, msg, history)
+            self.prepare_stream_context_with_message(mode, msg, history, runtime_state_id)
                 .await
         } else {
-            self.prepare_stream_context(mode, &text, history).await
+            self.prepare_stream_context(mode, &text, history, runtime_state_id)
+                .await
         }?;
 
         // ── G2: IntentRouter classification (converged with run_react_loop) ──
@@ -2336,6 +2352,509 @@ mod tests {
             "resume trace missing from events: {:?}",
             run.events
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invocation_runtime_state_identity_controls_restore_and_save() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+
+        let mut configured = crate::state::AgentCheckpoint::new("configured-state");
+        configured.messages_json = serde_json::to_string(&vec![
+            Message::system("system".to_string()),
+            Message::user("configured checkpoint marker".to_string()),
+        ])
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        store.save_checkpoint(&configured).await?;
+
+        let mut invocation_checkpoint = crate::state::AgentCheckpoint::new("runtime-incarnation");
+        invocation_checkpoint.messages_json = serde_json::to_string(&vec![
+            Message::system("system".to_string()),
+            Message::user("invocation checkpoint marker".to_string()),
+        ])
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        store
+            .save_checkpoint_for_scope("product-conversation", &invocation_checkpoint)
+            .await?;
+
+        let llm = Arc::new(MockLlmClient::new().with_response("new incarnation answer"));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("system")
+            .conversation_id("configured-state")
+            .state_store(store.clone())
+            .build()?;
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("product-conversation".to_string()),
+                run_id: Some("run-new".to_string()),
+                turn_id: Some("turn-new".to_string()),
+                execution_id: None,
+                isolation_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+                resource_guards: Vec::new(),
+            }),
+            runtime_state_id: Some("runtime-incarnation".to_string()),
+            transcript_generation_id: Some("runtime-incarnation".to_string()),
+            ..echo_core::agent::AgentInvocationContext::default()
+        };
+
+        let events = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "continue in the new incarnation".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: Some(invocation),
+                },
+                StreamMode::Chat,
+            )
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::FinalAnswer(answer) if answer == "new incarnation answer")
+        ));
+
+        let request = llm
+            .last_messages()
+            .ok_or_else(|| ReactError::Other("mock LLM request was not recorded".to_string()))?;
+        assert!(request.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == "invocation checkpoint marker")
+        }));
+        assert!(!request.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == "configured checkpoint marker")
+        }));
+
+        let configured_after = store
+            .get_checkpoint("configured-state")
+            .await?
+            .ok_or_else(|| ReactError::Other("configured checkpoint disappeared".to_string()))?;
+        assert_eq!(configured_after.messages_json, configured.messages_json);
+        let invocation_after = store
+            .get_checkpoint("runtime-incarnation")
+            .await?
+            .ok_or_else(|| ReactError::Other("invocation checkpoint was not saved".to_string()))?;
+        let restored = invocation_after.restore_messages()?;
+        assert!(restored.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == "new incarnation answer")
+        }));
+        assert!(!restored.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == "configured checkpoint marker")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn warm_agent_switches_runtime_state_identity_without_context_leakage() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+        let mut configured = crate::state::AgentCheckpoint::new("configured-state");
+        configured.messages_json = serde_json::to_string(&vec![
+            Message::system("system".to_string()),
+            Message::user("configured-only-marker".to_string()),
+        ])
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        store.save_checkpoint(&configured).await?;
+        let llm = Arc::new(MockLlmClient::new().with_responses([
+            "assistant-a-one",
+            "assistant-b-one",
+            "assistant-a-two",
+            "assistant-configured",
+        ]));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("system")
+            .conversation_id("configured-state")
+            .state_store(store.clone())
+            .build()?;
+        agent.set_snapshot_manager(crate::memory::SnapshotManager::new(
+            crate::memory::SnapshotPolicy::Manual,
+            4,
+        ));
+        let invocation =
+            |runtime_state_id: &str, turn_id: &str| echo_core::agent::AgentInvocationContext {
+                runtime: Some(echo_core::tools::ExternalRunContext {
+                    conversation_id: Some("product-conversation".to_string()),
+                    run_id: Some(turn_id.to_string()),
+                    turn_id: Some(turn_id.to_string()),
+                    execution_id: None,
+                    isolation_id: None,
+                    message_id: None,
+                    cancel: None,
+                    trace_sink: None,
+                    delegation_policy: None,
+                    resource_guards: Vec::new(),
+                }),
+                runtime_state_id: Some(runtime_state_id.to_string()),
+                transcript_generation_id: Some(runtime_state_id.to_string()),
+                ..echo_core::agent::AgentInvocationContext::default()
+            };
+
+        for (index, (runtime_state_id, turn_id, input)) in [
+            ("runtime-a", "turn-a-one", "user-a-one"),
+            ("runtime-b", "turn-b-one", "user-b-one"),
+            ("runtime-a", "turn-a-two", "user-a-two"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            agent
+                .run_stream_channel(
+                    StreamInit {
+                        text: input.to_string(),
+                        message: None,
+                        label: String::new(),
+                        invocation: Some(invocation(runtime_state_id, turn_id)),
+                    },
+                    StreamMode::Chat,
+                )
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            if index == 0 {
+                let snapshot_id = agent.snapshot().await.ok_or_else(|| {
+                    ReactError::Other("runtime A snapshot was not captured".to_string())
+                })?;
+                assert!(!snapshot_id.is_empty());
+                *agent.plan_state.write().await = Some("runtime-a-only-plan".to_string());
+                agent
+                    .tools
+                    .skill_registry
+                    .mark_activated("runtime-a-only-skill");
+                agent.set_working_dir(Some(std::path::PathBuf::from(
+                    "/tmp/runtime-a-only-working-dir",
+                )));
+            } else if index == 1 {
+                assert!(
+                    agent.rollback(1).await.is_none(),
+                    "runtime B retained runtime A rollback snapshots"
+                );
+            }
+        }
+
+        agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "user-configured".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        let calls = llm.all_calls();
+        let call = |index: usize| {
+            calls
+                .get(index)
+                .ok_or_else(|| ReactError::Other(format!("mock LLM call {index} was not recorded")))
+        };
+        let contains = |messages: &[Message], expected: &str| {
+            messages.iter().any(|message| {
+                message
+                    .text_content()
+                    .is_some_and(|content| content == expected)
+            })
+        };
+        let first = call(0)?;
+        assert!(contains(first, "user-a-one"));
+        assert!(!contains(first, "user-b-one"));
+        let second = call(1)?;
+        assert!(contains(second, "user-b-one"));
+        assert!(!contains(second, "user-a-one"));
+        assert!(!contains(second, "assistant-a-one"));
+        let third = call(2)?;
+        assert!(contains(third, "user-a-one"));
+        assert!(contains(third, "assistant-a-one"));
+        assert!(contains(third, "user-a-two"));
+        assert!(!contains(third, "user-b-one"));
+        assert!(!contains(third, "assistant-b-one"));
+        let configured_call = call(3)?;
+        assert!(contains(configured_call, "configured-only-marker"));
+        assert!(contains(configured_call, "user-configured"));
+        assert!(!contains(configured_call, "user-a-one"));
+        assert!(!contains(configured_call, "user-b-one"));
+
+        let runtime_a = store
+            .get_checkpoint("runtime-a")
+            .await?
+            .ok_or_else(|| ReactError::Other("runtime A checkpoint missing".to_string()))?
+            .restore_messages()?;
+        let runtime_b_checkpoint = store
+            .get_checkpoint("runtime-b")
+            .await?
+            .ok_or_else(|| ReactError::Other("runtime B checkpoint missing".to_string()))?;
+        assert!(runtime_b_checkpoint.current_plan.is_none());
+        assert!(runtime_b_checkpoint.active_skills.is_empty());
+        assert!(runtime_b_checkpoint.working_dir.is_none());
+        let runtime_b = runtime_b_checkpoint.restore_messages()?;
+        assert!(contains(&runtime_a, "user-a-one"));
+        assert!(contains(&runtime_a, "user-a-two"));
+        assert!(!contains(&runtime_a, "user-b-one"));
+        assert!(contains(&runtime_b, "user-b-one"));
+        assert!(!contains(&runtime_b, "user-a-one"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_runtime_switch_cannot_publish_partial_hydration() -> Result<()> {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+        let mut runtime_b = crate::state::AgentCheckpoint::new("runtime-b");
+        runtime_b.messages_json = serde_json::to_string(&vec![
+            Message::system("system".to_string()),
+            Message::user("runtime-b-checkpoint-marker".to_string()),
+        ])
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        store
+            .save_checkpoint_for_scope("product-conversation", &runtime_b)
+            .await?;
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .with_responses(["runtime-a-first-answer", "runtime-a-recovered-answer"]),
+        );
+        let agent = Arc::new(
+            ReactAgentBuilder::new()
+                .llm_client(llm.clone())
+                .system_prompt("system")
+                .conversation_id("configured-state")
+                .state_store(store)
+                .build()?,
+        );
+        let invocation =
+            |runtime_state_id: &str, turn_id: &str| echo_core::agent::AgentInvocationContext {
+                runtime: Some(echo_core::tools::ExternalRunContext {
+                    conversation_id: Some("product-conversation".to_string()),
+                    run_id: Some(turn_id.to_string()),
+                    turn_id: Some(turn_id.to_string()),
+                    execution_id: None,
+                    isolation_id: None,
+                    message_id: None,
+                    cancel: None,
+                    trace_sink: None,
+                    delegation_policy: None,
+                    resource_guards: Vec::new(),
+                }),
+                runtime_state_id: Some(runtime_state_id.to_string()),
+                transcript_generation_id: Some(runtime_state_id.to_string()),
+                ..echo_core::agent::AgentInvocationContext::default()
+            };
+
+        agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "runtime-a-first-user".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: Some(invocation("runtime-a", "turn-a-first")),
+                },
+                StreamMode::Chat,
+            )
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        let hook_entered = Arc::new(tokio::sync::Notify::new());
+        let executor_entered = Arc::clone(&hook_entered);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let executor_attempts = Arc::clone(&attempts);
+        {
+            let mut hooks = agent.tools.hook_registry.write().await;
+            hooks.set_subagent_executor(Arc::new(move |_name, _task| {
+                let entered = Arc::clone(&executor_entered);
+                let attempts = Arc::clone(&executor_attempts);
+                Box::pin(async move {
+                    if attempts.fetch_add(1, Ordering::AcqRel) == 0 {
+                        entered.notify_one();
+                        std::future::pending::<()>().await;
+                    }
+                    Ok("session hook settled".to_string())
+                })
+            }));
+            let mut definition = HooksDefinition::default();
+            definition.add_rules(
+                HookEvent::SessionStart,
+                vec![HookRule {
+                    matcher: "resume".to_string(),
+                    hooks: vec![HookAction::Subagent {
+                        name: "hydration-barrier".to_string(),
+                        task: None,
+                        timeout: 0,
+                    }],
+                }],
+            );
+            hooks.register_user_hooks(definition);
+        }
+
+        let switching_agent = Arc::clone(&agent);
+        let switching_invocation = invocation("runtime-b", "turn-b-cancelled");
+        let switching = tokio::spawn(async move {
+            switching_agent
+                .run_stream_channel(
+                    StreamInit {
+                        text: "runtime-b-cancelled-user".to_string(),
+                        message: None,
+                        label: String::new(),
+                        invocation: Some(switching_invocation),
+                    },
+                    StreamMode::Chat,
+                )
+                .await
+                .map(|_stream| ())
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), hook_entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("runtime B hydration did not reach hook".to_string()))?;
+        switching.abort();
+        let cancelled = switching
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("runtime B switch was not cancelled".to_string()))?;
+        assert!(cancelled.is_cancelled());
+
+        agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "runtime-a-after-cancel".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: Some(invocation("runtime-a", "turn-a-recovered")),
+                },
+                StreamMode::Chat,
+            )
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        let calls = llm.all_calls();
+        assert_eq!(calls.len(), 2);
+        let recovered = calls.get(1).ok_or_else(|| {
+            ReactError::Other("recovered runtime A call was not recorded".to_string())
+        })?;
+        assert!(recovered.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == "runtime-a-first-user")
+        }));
+        assert!(!recovered.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == "runtime-b-checkpoint-marker")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_runtime_conversation_controls_restore_and_save() -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+        let mut configured = crate::state::AgentCheckpoint::new("configured-a");
+        configured.messages_json = serde_json::to_string(&vec![
+            Message::system("system".to_string()),
+            Message::user("configured-a-marker".to_string()),
+        ])
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        store.save_checkpoint(&configured).await?;
+        let mut legacy = crate::state::AgentCheckpoint::new("legacy-b");
+        legacy.messages_json = serde_json::to_string(&vec![
+            Message::system("system".to_string()),
+            Message::user("legacy-b-marker".to_string()),
+        ])
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        store.save_checkpoint(&legacy).await?;
+
+        let llm = Arc::new(MockLlmClient::new().with_response("legacy-b-answer"));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("system")
+            .conversation_id("configured-a")
+            .state_store(store.clone())
+            .build()?;
+        agent.set_external_context(&echo_core::tools::ExternalRunContext {
+            conversation_id: Some("legacy-b".to_string()),
+            run_id: Some("legacy-run".to_string()),
+            turn_id: Some("legacy-turn".to_string()),
+            execution_id: None,
+            isolation_id: None,
+            message_id: None,
+            cancel: None,
+            trace_sink: None,
+            delegation_policy: None,
+            resource_guards: Vec::new(),
+        });
+        agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "legacy-b-user".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        let request = llm
+            .last_messages()
+            .ok_or_else(|| ReactError::Other("legacy LLM request missing".to_string()))?;
+        assert!(request.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == "legacy-b-marker")
+        }));
+        assert!(!request.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == "configured-a-marker")
+        }));
+        let configured_after = store
+            .get_checkpoint("configured-a")
+            .await?
+            .ok_or_else(|| ReactError::Other("configured checkpoint missing".to_string()))?;
+        assert_eq!(configured_after.messages_json, configured.messages_json);
+        let legacy_after = store
+            .get_checkpoint("legacy-b")
+            .await?
+            .ok_or_else(|| ReactError::Other("legacy checkpoint missing".to_string()))?
+            .restore_messages()?;
+        assert!(legacy_after.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == "legacy-b-answer")
+        }));
         Ok(())
     }
 

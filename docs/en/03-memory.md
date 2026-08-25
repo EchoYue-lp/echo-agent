@@ -28,14 +28,18 @@ An LLM's context window vanishes after each request ends, and a process can cras
 conversation_id: "user-123-chat-5"
                 │
                 ▼
-FileRuntimeStateStore (./agent-data/runtime_state/):
+FileRuntimeStateStore (./agent-data/runtime_state/_runtime_owners/):
+<encoded-runtime-id>.json
 {
-  "user-123-chat-5": {
+  "runtime_state_id": "user-123-chat-5",
+  "scope_id": "user-123-chat-5",
+  "phase": "active",
+  "checkpoint": {
     "messages_json":  "...full message history...",
     "current_plan":   "Step 3: draft the haiku",
     "active_skills":  ["doc-writing"],
     "blocked_reason": null,
-    "timestamp":      "2026-06-14T...",
+    "timestamp":      "2026-06-14T..."
   }
 }
 ```

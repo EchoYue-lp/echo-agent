@@ -66,10 +66,25 @@ after adding a sender coordinate.
 - `SessionEndInfo.incarnation_id` always reports the incarnation that actually
   ended, including an application rotation, so exact runtime cleanup does not
   depend on reconstructing identities from strings.
+- Reset publishes its reply and installs the replacement immediately, but the
+  old generation retains its end callback until every admitted stream settles.
+  This prevents cleanup from racing a final checkpoint written by an older
+  stream. Timeout replacement remains restricted to idle generations. External
+  callback panics are contained so stream teardown cannot double-panic during
+  another unwind or poison the replacement session.
 - `AgentInvocationContext.runtime_state_id` separates ReAct checkpoint identity
   from the stable product conversation carried by `ExternalRunContext`.
   `transcript_generation_id` enables typed append projection for that runtime
-  incarnation.
+  incarnation. A shared `ReactAgent` records the identity currently represented
+  by its warm context; a value-scoped identity change forces exact reset/restore
+  before preparing model input, while only the same identity may reuse warmth.
+  Hydration is a three-state protocol: `Hydrating(target)` is published before
+  cancellable mutations and changes to `Hydrated(target)` only after hooks and
+  restore complete. A cancelled switch therefore forces the next turn to
+  rebuild rather than treating partial context as the predecessor. Runtime
+  switches also clear rollback snapshots, and restore-key precedence matches
+  save-key precedence: explicit invocation ID, invocation product conversation,
+  legacy external conversation, then configured conversation.
 - Canonical transcript records carry an internal `(generation, ordinal)` in
   their existing projection metadata. `AgentCheckpoint` persists the committed
   ordinal/digest cursor in its existing payload, so duplicate content, pool
@@ -118,8 +133,14 @@ mutexes, mode and HITL isolation, sender-local reset, same-sender reuse,
 channel/conversation separation, timeout callback identity, invalid identity
 fail-closed behavior, and QQ/Feishu ingress rejection.
 Incarnation coverage additionally exercises same-handler reuse, application
-rotation, timeout callback accuracy after rotation, and fresh replacement IDs.
+rotation, timeout callback accuracy after rotation, fresh replacement IDs,
+deferred cleanup for both parked and admitted-but-unpolled streams, and callback
+panic containment during another unwind.
 Persistence coverage exercises same-incarnation checkpoint recovery, rotated
 checkpoint isolation, identical-tail transcript append, repeated safe-point
 idempotency, crash-cut catch-up, corrupt cursor rejection, and post-compaction
-ordinal continuation.
+ordinal continuation. It also drives one warm Agent through A -> B -> A and
+checks both model requests and saved checkpoints for cross-identity leakage;
+parks B at a post-restore hook, cancels it, and verifies the next A rebuild;
+checks legacy read/save key symmetry; and proves A snapshots cannot roll back
+into B.

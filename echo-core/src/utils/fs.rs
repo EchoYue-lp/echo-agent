@@ -101,7 +101,8 @@ fn create_dir_all_durable_with(
 ///
 /// One process owns the lease for the authority lifetime. Additional handles
 /// in that process must share the same authority rather than acquiring another
-/// lease; a competing process fails open instead of silently racing writes.
+/// lease; a competing process fails closed with an error instead of silently
+/// racing writes.
 pub fn try_exclusive_file_lease(authority_path: &Path) -> std::io::Result<ExclusiveFileLease> {
     use fs2::FileExt;
 
@@ -225,6 +226,30 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         return Err(error);
     }
     sync_parent_directory(parent)
+}
+
+/// Remove one file and durably publish the directory-entry deletion.
+///
+/// `NotFound` is an idempotent success, but the parent is still synced so a
+/// retry reconciles a prior crash after unlink and before the directory barrier.
+pub fn remove_file_durable(path: &Path) -> std::io::Result<bool> {
+    remove_file_durable_with(path, sync_parent_directory)
+}
+
+fn remove_file_durable_with(
+    path: &Path,
+    sync_parent: impl Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other(format!("path has no parent: {}", path.display())))?;
+    let removed = match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    sync_parent(parent)?;
+    Ok(removed)
 }
 
 #[cfg(not(windows))]
@@ -989,6 +1014,46 @@ mod tests {
         atomic_write(&path, b"one")?;
         atomic_write(&path, b"two")?;
         assert_eq!(std::fs::read(&path)?, b"two");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn durable_remove_is_idempotent() -> std::io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("echo-core-durable-remove-{}", uuid::Uuid::new_v4()));
+        create_dir_all_durable(&root)?;
+        let path = root.join("record.json");
+        atomic_write(&path, b"record")?;
+        assert!(remove_file_durable(&path)?);
+        assert!(!path.exists());
+        assert!(!remove_file_durable(&path)?);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn durable_remove_retry_reconciles_unlink_before_parent_barrier() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "echo-core-durable-remove-retry-{}",
+            uuid::Uuid::new_v4()
+        ));
+        create_dir_all_durable(&root)?;
+        let path = root.join("record.json");
+        atomic_write(&path, b"record")?;
+        let sync_attempts = std::cell::Cell::new(0_u8);
+        let first = remove_file_durable_with(&path, |_parent| {
+            let next = sync_attempts.get().saturating_add(1);
+            sync_attempts.set(next);
+            if next == 1 {
+                Err(std::io::Error::other("injected parent barrier failure"))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(first.is_err());
+        assert!(!path.exists());
+        assert!(!remove_file_durable_with(&path, |_parent| Ok(()))?);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -586,6 +586,11 @@ impl ReactAgent {
         }
 
         let model_name = config.model_name.clone();
+        let configured_working_dir = config
+            .working_dir
+            .lock()
+            .ok()
+            .and_then(|working_dir| working_dir.clone());
 
         Self {
             config,
@@ -615,6 +620,10 @@ impl ReactAgent {
                 snapshot_manager: Arc::new(std::sync::RwLock::new(None)),
                 conversation_store: None,
                 state_store: None,
+                runtime_state_hydration: Arc::new(tokio::sync::Mutex::new(
+                    subsystems::memory::RuntimeStateHydration::default(),
+                )),
+                configured_working_dir,
                 transcript_projection_cursor: Arc::new(tokio::sync::Mutex::new(
                     crate::agent::snapshot::TranscriptProjectionCursor::default(),
                 )),
@@ -1777,7 +1786,15 @@ impl ReactAgent {
     /// can continue a previous dialogue. Messages should include the system
     /// prompt as the first entry if needed.
     pub async fn load_messages(&self, messages: Vec<crate::llm::types::Message>) {
+        let _execution_guard = self.execution_mutex.lock().await;
+        let runtime_state_id = self.config.conversation_id.clone();
+        let _previous_hydration = self
+            .begin_runtime_state_hydration(runtime_state_id.as_deref())
+            .await;
+        self.clear_runtime_snapshots();
         self.memory.context.lock().await.set_messages(messages);
+        self.commit_runtime_state_hydration(runtime_state_id.as_deref())
+            .await;
     }
 
     /// Resume agent state from a [`RuntimeStateStore`](crate::state::RuntimeStateStore) checkpoint.
@@ -1790,35 +1807,61 @@ impl ReactAgent {
     /// checkpoint was found and restored, or `None` if no state store is
     /// configured or no checkpoint exists.
     pub async fn resume_from_state_store(&self) -> Result<Option<crate::state::AgentCheckpoint>> {
-        let Some(ref store) = self.memory.state_store else {
-            return Ok(None);
-        };
-        let Some(ref conv_id) = self.config.conversation_id else {
+        let _execution_guard = self.execution_mutex.lock().await;
+        let Some(runtime_state_id) = self.config.conversation_id.clone() else {
             tracing::debug!("resume_from_state_store: no conversation_id configured");
             return Ok(None);
         };
+        let previous_hydration = self
+            .begin_runtime_state_hydration(Some(&runtime_state_id))
+            .await;
+        self.clear_runtime_snapshots();
+        let checkpoint = self.resume_from_state_store_id(&runtime_state_id).await?;
+        if checkpoint.is_some() {
+            self.commit_runtime_state_hydration(Some(&runtime_state_id))
+                .await;
+        } else {
+            *self.memory.runtime_state_hydration.lock().await = previous_hydration;
+        }
+        Ok(checkpoint)
+    }
 
-        let checkpoint = store.get_checkpoint(conv_id).await?;
+    pub(crate) async fn resume_from_state_store_id(
+        &self,
+        runtime_state_id: &str,
+    ) -> Result<Option<crate::state::AgentCheckpoint>> {
+        let Some(ref store) = self.memory.state_store else {
+            return Ok(None);
+        };
+
+        let checkpoint = store.get_checkpoint(runtime_state_id).await?;
         if let Some(ref cp) = checkpoint {
             let restored = cp.restore_runtime_payload()?;
             let messages = restored.messages;
+            let completed_tool_call_ids = cp.completed_tool_call_ids()?;
             let mut projection_cursor = self.memory.transcript_projection_cursor.lock().await;
             match restored.transcript_projection {
                 Some(transcript_projection) => projection_cursor.restore(transcript_projection),
-                None => projection_cursor.align_restored(conv_id, &messages)?,
+                None => projection_cursor.align_restored(runtime_state_id, &messages)?,
             }
             drop(projection_cursor);
 
             let msg_count = messages.len();
             self.memory.context.lock().await.set_messages(messages);
 
-            // Restore plan state
+            // Restore identity-local plan state exactly; `None` must not retain
+            // the previous runtime identity's plan.
+            *self.plan_state.write().await = cp.current_plan.clone();
             if let Some(ref plan) = cp.current_plan {
-                *self.plan_state.write().await = Some(plan.clone());
                 tracing::debug!(plan_len = plan.len(), "Restored plan state from checkpoint");
             }
 
-            // Re-activate skills
+            // Re-activate only skills from this checkpoint. The catalog is
+            // shared, but activation and sandbox policy are runtime-local.
+            self.tools.skill_registry.reset_activation_state();
+            if let Some(registry) = &self.tools.progressive_skill_registry {
+                registry.write().await.reset_activation_state();
+            }
             for skill_name in &cp.active_skills {
                 self.tools.skill_registry.mark_activated(skill_name);
             }
@@ -1829,9 +1872,14 @@ impl ReactAgent {
                 );
             }
 
-            // Restore working directory for worktree-isolated sessions (N-P1-7, BUG-3)
-            if let Some(ref wd) = cp.working_dir {
-                self.set_working_dir(Some(wd.clone()));
+            // Restore the checkpoint directory or the construction-time default;
+            // never retain another runtime identity's directory.
+            let working_dir = cp
+                .working_dir
+                .clone()
+                .or_else(|| self.memory.configured_working_dir.clone());
+            self.set_working_dir(working_dir.clone());
+            if let Some(ref wd) = working_dir {
                 tracing::debug!(?wd, "Restored working_dir from checkpoint");
             }
 
@@ -1843,15 +1891,14 @@ impl ReactAgent {
                 );
             }
 
-            let completed_tool_call_ids = cp.completed_tool_call_ids()?;
             self.record_trace_event(crate::trace::RunEvent::CheckpointResumed {
-                conversation_id: conv_id.clone(),
+                conversation_id: runtime_state_id.to_string(),
                 completed_tool_call_ids: completed_tool_call_ids.clone(),
                 checkpoint_timestamp: cp.timestamp,
             })
             .await;
             tracing::info!(
-                conversation_id = conv_id.as_str(),
+                conversation_id = runtime_state_id,
                 message_count = msg_count,
                 completed_tool_calls = completed_tool_call_ids.len(),
                 blocked_reason = ?cp.blocked_reason,
@@ -1859,7 +1906,7 @@ impl ReactAgent {
             );
         } else {
             tracing::debug!(
-                conversation_id = conv_id.as_str(),
+                conversation_id = runtime_state_id,
                 "No checkpoint found in RuntimeStateStore"
             );
         }

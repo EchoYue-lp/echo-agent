@@ -194,11 +194,26 @@ clones and `SessionEndInfo` observe that rotation, so consumers can retire the
 exact old model/runtime context while keeping journals and task history under a
 stable product conversation ID.
 
+A reset reply and its replacement session are available immediately. If an old
+stream is still active (including an admitted stream that has not been polled),
+the old `SessionEndInfo` cleanup callback runs only after that stream settles.
+This ordering lets a consumer retire the exact old checkpoint after its final
+write instead of allowing the old stream to recreate state after cleanup.
+If consumer callback code panics, `SessionHandler` contains that panic at the
+lifecycle boundary; it does not propagate from stream teardown or poison the
+replacement session.
+
 For custom Agent drivers, carry the stable product ID in
 `AgentInvocationContext.runtime.conversation_id`, and use the instance-derived runtime key for
 both `runtime_state_id` and `transcript_generation_id`. This keeps checkpoint load/save symmetric
 within one incarnation and makes stable transcript appends idempotent without injecting older
 product history back into the model.
+The context is value-scoped even when a consumer intentionally shares one
+`ReactAgent`: changing `runtime_state_id` forces exact reset/restore before the
+next model request, and only repeated calls for the same identity reuse warm
+messages. The runtime publishes a `Hydrating` marker before cancellable restore
+work and clears rollback snapshots at that boundary, so an aborted switch cannot
+make partial context or an older snapshot look valid for another identity.
 
 ### OutboundMessage —— Sent Messages
 

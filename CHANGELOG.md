@@ -99,6 +99,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RuntimeStateStore` now durably indexes runtime incarnations under a stable
   scope, supports exact reset and whole-scope cleanup, and provides a combined
   conversation deletion helper that clears runtime lineage before transcript.
+  File-backed lineage now uses one recoverable `Active`/`Deleting` owner record
+  per runtime ID with rebuildable scope projections and fixed lock shards;
+  SQLite async operations run complete transactions on the bounded blocking
+  owner. Session-end cleanup is deferred until every old-generation stream has
+  settled, while reset replies and replacement admission remain immediate;
+  callback panics are contained during teardown. Warm Agents track their
+  hydrated runtime-state identity and force exact reset/restore on identity
+  changes through a cancellation-safe `Hydrating`/`Hydrated` protocol, clear
+  rollback snapshots, and use one restore/save key precedence including legacy
+  external context. File projection failures no longer block owner-derived operations,
+  and SQLite whole-scope cleanup ignores unrelated same-name runtime owners.
 
 - Procedural macros now resolve their owning split crate directly:
   core-owned macros accept `echo_core`, while `#[handler]` accepts

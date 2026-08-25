@@ -297,6 +297,23 @@ impl SkillRegistry {
         guard.insert(name.to_string())
     }
 
+    /// Clear session-local activation and sandbox policy state without
+    /// unregistering descriptors.
+    ///
+    /// Runtime checkpoint identities may share one registry catalog while
+    /// retaining independent model contexts. Switching identities must not
+    /// carry activated skills or their sandbox policy into the next context.
+    pub fn reset_activation_state(&self) {
+        self.activated
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.active_sandbox_policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
     /// Check whether a skill has been activated in this session.
     pub fn is_activated(&self, name: &str) -> bool {
         let guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
@@ -867,6 +884,16 @@ mod tests {
         let reg = SkillRegistry::new();
         assert_eq!(reg.count(), 0);
         assert!(reg.catalog_prompt().is_none());
+    }
+
+    #[test]
+    fn reset_activation_state_preserves_catalog() {
+        let mut registry = SkillRegistry::new();
+        registry.register_descriptor(make_descriptor("code-review", "Review code quality"));
+        assert!(registry.mark_activated("code-review"));
+        registry.reset_activation_state();
+        assert!(registry.activated_names().is_empty());
+        assert_eq!(registry.available_names(), vec!["code-review".to_string()]);
     }
 
     #[test]

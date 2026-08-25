@@ -80,6 +80,13 @@ generation + ordinal to canonical transcript records and persists only ordinal/d
 state in `AgentCheckpoint`. Repeated safe points and checkpoint/product-store crash cuts are
 idempotent even when two turns have identical content; compaction realigns the cursor only after
 the complete pre-compaction transcript is durable.
+One shared Agent may process multiple value-scoped invocations: a change in effective
+`runtime_state_id` forces exact reset/restore before model preparation, while same-ID warm context
+is reused. The runtime records `Hydrating(target)` before cancellable mutation and commits
+`Hydrated(target)` only after restore hooks settle; non-exact states are rebuilt. Runtime switches
+also clear rollback snapshots. Restore and save use the same precedence: explicit invocation
+runtime ID, invocation product conversation, legacy external conversation, then configured
+conversation. Together these rules prevent A -> B -> A from writing A messages into B.
 
 Rotating `runtime_state_id` starts a clean model context without deleting the stable product
 conversation. `save_checkpoint_for_scope` durably indexes each runtime ID under that product

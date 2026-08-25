@@ -151,20 +151,80 @@ impl ReactAgent {
         }
     }
 
+    async fn reset_runtime_context(&self) {
+        self.reset_messages().await;
+        *self.plan_state.write().await = None;
+        self.tools.skill_registry.reset_activation_state();
+        if let Some(registry) = &self.tools.progressive_skill_registry {
+            registry.write().await.reset_activation_state();
+        }
+        *self.memory.transcript_projection_cursor.lock().await =
+            crate::agent::snapshot::TranscriptProjectionCursor::default();
+        self.set_working_dir(self.memory.configured_working_dir.clone());
+    }
+
+    pub(crate) async fn begin_runtime_state_hydration(
+        &self,
+        runtime_state_id: Option<&str>,
+    ) -> super::super::subsystems::memory::RuntimeStateHydration {
+        let mut hydration = self.memory.runtime_state_hydration.lock().await;
+        std::mem::replace(
+            &mut *hydration,
+            super::super::subsystems::memory::RuntimeStateHydration::Hydrating(
+                runtime_state_id.map(str::to_string),
+            ),
+        )
+    }
+
+    pub(crate) async fn commit_runtime_state_hydration(&self, runtime_state_id: Option<&str>) {
+        let mut hydration = self.memory.runtime_state_hydration.lock().await;
+        *hydration = super::super::subsystems::memory::RuntimeStateHydration::Hydrated(
+            runtime_state_id.map(str::to_string),
+        );
+    }
+
+    pub(crate) fn clear_runtime_snapshots(&self) {
+        let mut snapshots = match self.memory.snapshot_manager.write() {
+            Ok(snapshots) => snapshots,
+            Err(poisoned) => {
+                tracing::error!("runtime snapshot manager lock was poisoned");
+                poisoned.into_inner()
+            }
+        };
+        if let Some(manager) = snapshots.as_mut() {
+            manager.clear();
+        }
+    }
+
     pub(crate) async fn restore_thread_context(&self) -> crate::error::Result<()> {
+        let runtime_state_id = self.config.conversation_id.clone();
+        self.restore_thread_context_for(runtime_state_id.as_deref())
+            .await
+    }
+
+    async fn restore_thread_context_for(
+        &self,
+        runtime_state_id: Option<&str>,
+    ) -> crate::error::Result<()> {
+        let _previous_hydration = self.begin_runtime_state_hydration(runtime_state_id).await;
+        self.clear_runtime_snapshots();
         let agent = self.config.agent_name.clone();
         let mut session_matcher = "startup";
 
         // Try RuntimeStateStore checkpoint (messages + plan + skills)
         if self.memory.state_store.is_some() {
-            match self.resume_from_state_store().await {
+            let restored = match runtime_state_id {
+                Some(runtime_state_id) => self.resume_from_state_store_id(runtime_state_id).await,
+                None => Ok(None),
+            };
+            match restored {
                 Ok(Some(_cp)) => {
                     info!(agent = %agent, "🔄 Restored from RuntimeStateStore checkpoint");
                     session_matcher = "resume";
                 }
                 Ok(None) => {
                     debug!(agent = %agent, "New session, starting from empty context");
-                    self.reset_messages().await;
+                    self.reset_runtime_context().await;
                 }
                 Err(e) => {
                     return Err(crate::error::ReactError::Other(format!(
@@ -173,7 +233,7 @@ impl ReactAgent {
                 }
             }
         } else {
-            self.reset_messages().await;
+            self.reset_runtime_context().await;
         }
 
         // Fire SessionStart hook with appropriate matcher
@@ -183,6 +243,7 @@ impl ReactAgent {
         if start_result.block {
             warn!(agent = %self.config.agent_name, reason = ?start_result.block_reason, "SessionStart hook blocked session restore");
         }
+        self.commit_runtime_state_hydration(runtime_state_id).await;
         Ok(())
     }
 
@@ -190,9 +251,15 @@ impl ReactAgent {
     /// Existing in-process history is authoritative and must never be replaced
     /// between turns.
     pub(crate) async fn restore_chat_context_if_cold(&self) -> crate::error::Result<()> {
-        if self.memory.state_store.is_none() {
-            return Ok(());
-        }
+        let runtime_state_id = self.config.conversation_id.clone();
+        self.restore_chat_context_if_cold_for(runtime_state_id.as_deref())
+            .await
+    }
+
+    async fn restore_chat_context_if_cold_for(
+        &self,
+        runtime_state_id: Option<&str>,
+    ) -> crate::error::Result<()> {
         let is_cold = {
             let context = self.memory.context.lock().await;
             context
@@ -200,8 +267,28 @@ impl ReactAgent {
                 .iter()
                 .all(|message| matches!(message.role, Role::System))
         };
-        if is_cold {
-            self.restore_thread_context().await?;
+        let effective_runtime_state_id = runtime_state_id.map(str::to_string);
+        let should_restore = {
+            let mut hydration = self.memory.runtime_state_hydration.lock().await;
+            match &*hydration {
+                super::super::subsystems::memory::RuntimeStateHydration::Hydrated(current)
+                    if current == &effective_runtime_state_id =>
+                {
+                    is_cold
+                }
+                super::super::subsystems::memory::RuntimeStateHydration::Uninitialized
+                    if !is_cold && effective_runtime_state_id == self.config.conversation_id =>
+                {
+                    *hydration = super::super::subsystems::memory::RuntimeStateHydration::Hydrated(
+                        effective_runtime_state_id.clone(),
+                    );
+                    false
+                }
+                _ => true,
+            }
+        };
+        if should_restore {
+            self.restore_thread_context_for(runtime_state_id).await?;
         }
         Ok(())
     }
@@ -411,6 +498,7 @@ impl ReactAgent {
         mode: StreamMode,
         input: &str,
         history: &[Message],
+        runtime_state_id: Option<&str>,
     ) -> crate::error::Result<usize> {
         // Clear read-before-edit tracking for the new conversation turn
         // (converged with prepare_react_context; the entry layer no longer
@@ -418,10 +506,11 @@ impl ReactAgent {
         self.clear_read_files();
         match mode {
             StreamMode::Execute => {
-                self.restore_thread_context().await?;
+                self.restore_thread_context_for(runtime_state_id).await?;
             }
             StreamMode::Chat => {
-                self.restore_chat_context_if_cold().await?;
+                self.restore_chat_context_if_cold_for(runtime_state_id)
+                    .await?;
             }
         }
 
@@ -482,14 +571,18 @@ impl ReactAgent {
         mode: StreamMode,
         message: &Message,
         history: &[Message],
+        runtime_state_id: Option<&str>,
     ) -> crate::error::Result<usize> {
         // Clear read-before-edit tracking (see prepare_stream_context).
         self.clear_read_files();
         match mode {
             StreamMode::Execute => {
-                self.restore_thread_context().await?;
+                self.restore_thread_context_for(runtime_state_id).await?;
             }
-            StreamMode::Chat => self.restore_chat_context_if_cold().await?,
+            StreamMode::Chat => {
+                self.restore_chat_context_if_cold_for(runtime_state_id)
+                    .await?
+            }
         }
 
         // Extract text from message for long-term memory retrieval

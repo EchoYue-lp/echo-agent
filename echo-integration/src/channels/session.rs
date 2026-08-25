@@ -37,9 +37,11 @@
 //!     .with_reset_keywords(vec!["reset chat".into(), "new chat".into()])
 //!     .with_reset_reply("Conversation has been reset.");
 //!
-//! let handler = SessionHandler::new(config, |_instance| -> Box<dyn MessageHandler> {
+//! fn make_handler(_instance: &ChannelSessionInstance) -> Box<dyn MessageHandler> {
 //!     Box::new(DummyHandler)
-//! });
+//! }
+//!
+//! let handler = SessionHandler::new(config, make_handler);
 //! ```
 
 use super::types::*;
@@ -300,6 +302,23 @@ struct SessionGeneration {
 struct SessionGenerationState {
     active_streams: usize,
     last_active: Instant,
+    deferred_end: Option<DeferredSessionEnd>,
+}
+
+struct DeferredSessionEnd {
+    callback: Arc<dyn Fn(SessionEndInfo) + Send + Sync>,
+    info: SessionEndInfo,
+}
+
+impl DeferredSessionEnd {
+    fn settle(self) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.callback)(self.info);
+        }));
+        if outcome.is_err() {
+            tracing::error!("session end callback panicked; lifecycle settlement was contained");
+        }
+    }
 }
 
 impl SessionGeneration {
@@ -308,6 +327,7 @@ impl SessionGeneration {
             state: StdMutex::new(SessionGenerationState {
                 active_streams: 0,
                 last_active: Instant::now(),
+                deferred_end: None,
             }),
         }
     }
@@ -340,6 +360,24 @@ impl SessionGeneration {
     fn touch(&self) {
         self.lock_state().last_active = Instant::now();
     }
+
+    fn defer_end(&self, callback: Arc<dyn Fn(SessionEndInfo) + Send + Sync>, info: SessionEndInfo) {
+        let deferred = {
+            let mut state = self.lock_state();
+            if state.active_streams == 0 {
+                Some(DeferredSessionEnd { callback, info })
+            } else if state.deferred_end.is_none() {
+                state.deferred_end = Some(DeferredSessionEnd { callback, info });
+                None
+            } else {
+                tracing::error!("session generation already has a deferred end settlement");
+                None
+            }
+        };
+        if let Some(deferred) = deferred {
+            deferred.settle();
+        }
+    }
 }
 
 /// Exact ownership for one inner stream setup/consumption lifetime.
@@ -352,11 +390,24 @@ struct SessionStreamReceipt {
 
 impl Drop for SessionStreamReceipt {
     fn drop(&mut self) {
-        let mut state = self.generation.lock_state();
-        state.last_active = Instant::now();
-        match state.active_streams.checked_sub(1) {
-            Some(active_streams) => state.active_streams = active_streams,
-            None => tracing::error!("session stream activity receipt underflow"),
+        let deferred = {
+            let mut state = self.generation.lock_state();
+            state.last_active = Instant::now();
+            match state.active_streams.checked_sub(1) {
+                Some(active_streams) => {
+                    state.active_streams = active_streams;
+                    (active_streams == 0)
+                        .then(|| state.deferred_end.take())
+                        .flatten()
+                }
+                None => {
+                    tracing::error!("session stream activity receipt underflow");
+                    None
+                }
+            }
+        };
+        if let Some(deferred) = deferred {
+            deferred.settle();
         }
     }
 }
@@ -433,7 +484,13 @@ impl SessionHandler {
         Self::new(SessionConfig::default(), factory)
     }
 
-    /// Set session end callback (for resource cleanup, etc.)
+    /// Set the session-end callback used for exact resource cleanup.
+    ///
+    /// Reset can publish its reply and replacement session immediately, but the
+    /// callback for the retired generation is deferred until every admitted
+    /// stream from that generation has settled. Timeout replacement is already
+    /// restricted to idle generations. Callback panics are contained at the
+    /// framework boundary and never propagate through stream teardown.
     pub fn with_on_session_end<F>(mut self, callback: F) -> Self
     where
         F: Fn(SessionEndInfo) + Send + Sync + 'static,
@@ -486,16 +543,24 @@ impl SessionHandler {
         }
     }
 
-    fn notify_session_end(&self, instance: ChannelSessionInstance, reason: SessionEndReason) {
+    fn settle_session_end(
+        &self,
+        generation: &SessionGeneration,
+        instance: ChannelSessionInstance,
+        reason: SessionEndReason,
+    ) {
         if let Some(ref callback) = self.on_session_end {
             let incarnation_id = instance.incarnation_id();
-            callback(SessionEndInfo {
-                channel_id: instance.channel_id,
-                chat_id: instance.conversation_id,
-                sender_id: instance.sender_id,
-                incarnation_id,
-                reason,
-            });
+            generation.defer_end(
+                Arc::clone(callback),
+                SessionEndInfo {
+                    channel_id: instance.channel_id,
+                    chat_id: instance.conversation_id,
+                    sender_id: instance.sender_id,
+                    incarnation_id,
+                    reason,
+                },
+            );
         }
     }
 
@@ -518,13 +583,18 @@ impl SessionHandler {
                 continue;
             }
             let ended_instance = guard.instance.clone();
+            let ended_generation = Arc::clone(&guard.generation);
             let removed = self
                 .sessions
                 .remove_if(&key, |_, current| Arc::ptr_eq(current, &session))
                 .is_some();
             drop(guard);
             if removed {
-                self.notify_session_end(ended_instance, SessionEndReason::TimeoutReplaced);
+                self.settle_session_end(
+                    &ended_generation,
+                    ended_instance,
+                    SessionEndReason::TimeoutReplaced,
+                );
             }
         }
     }
@@ -538,9 +608,14 @@ impl MessageHandler for SessionHandler {
         let mut guard = self.lock_current_session(&key).await;
         if self.config.is_reset(&msg.text) {
             let ended_instance = guard.instance.clone();
+            let ended_generation = Arc::clone(&guard.generation);
             *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
             drop(guard);
-            self.notify_session_end(ended_instance, SessionEndReason::CommandReset);
+            self.settle_session_end(
+                &ended_generation,
+                ended_instance,
+                SessionEndReason::CommandReset,
+            );
             return Ok(OutboundMessage::new(
                 &msg.channel_id,
                 msg.reply_target(),
@@ -550,8 +625,13 @@ impl MessageHandler for SessionHandler {
         }
         if guard.generation.is_idle_and_expired(self.config.timeout) {
             let ended_instance = guard.instance.clone();
+            let ended_generation = Arc::clone(&guard.generation);
             *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
-            self.notify_session_end(ended_instance, SessionEndReason::TimeoutReplaced);
+            self.settle_session_end(
+                &ended_generation,
+                ended_instance,
+                SessionEndReason::TimeoutReplaced,
+            );
         }
         guard.generation.touch();
         let result = guard.handler.handle(msg).await;
@@ -571,9 +651,14 @@ impl MessageHandler for SessionHandler {
         let mut guard = self.lock_current_session(&key).await;
         if self.config.is_reset(&msg.text) {
             let ended_instance = guard.instance.clone();
+            let ended_generation = Arc::clone(&guard.generation);
             *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
             drop(guard);
-            self.notify_session_end(ended_instance, SessionEndReason::CommandReset);
+            self.settle_session_end(
+                &ended_generation,
+                ended_instance,
+                SessionEndReason::CommandReset,
+            );
             let reply = OutboundMessage::new(
                 &msg.channel_id,
                 msg.reply_target(),
@@ -585,6 +670,7 @@ impl MessageHandler for SessionHandler {
 
         let timeout_replaced = guard.generation.is_idle_and_expired(self.config.timeout);
         let ended_instance = timeout_replaced.then(|| guard.instance.clone());
+        let ended_generation = timeout_replaced.then(|| Arc::clone(&guard.generation));
         if timeout_replaced {
             *guard = self.create_session(
                 &key,
@@ -600,8 +686,12 @@ impl MessageHandler for SessionHandler {
             ));
         };
         drop(guard);
-        if let Some(ended_instance) = ended_instance {
-            self.notify_session_end(ended_instance, SessionEndReason::TimeoutReplaced);
+        if let (Some(ended_instance), Some(ended_generation)) = (ended_instance, ended_generation) {
+            self.settle_session_end(
+                &ended_generation,
+                ended_instance,
+                SessionEndReason::TimeoutReplaced,
+            );
         }
 
         let stream = async_stream::stream! {
@@ -1690,19 +1780,30 @@ mod tests {
         let created = Arc::new(AtomicUsize::new(0));
         let parked_started = Arc::new(Notify::new());
         let release_parked = Arc::new(Notify::new());
+        let ended = Arc::new(StdMutex::new(Vec::<SessionEndReason>::new()));
+        let callback_ended = Arc::clone(&ended);
         let config = SessionConfig::default()
             .with_reset_keywords(vec!["framework-reset".to_string()])
             .with_command_prefix(None)
             .with_reset_reply("configured reset reply");
         let reset_reply = config.reset_reply.clone();
-        let handler = Arc::new(SessionHandler::new(
-            config,
-            GenerationalStreamFactory {
-                created: created.clone(),
-                parked_started: parked_started.clone(),
-                release_parked: release_parked.clone(),
-            },
-        ));
+        let handler = Arc::new(
+            SessionHandler::new(
+                config,
+                GenerationalStreamFactory {
+                    created: created.clone(),
+                    parked_started: parked_started.clone(),
+                    release_parked: release_parked.clone(),
+                },
+            )
+            .with_on_session_end(move |info| {
+                let mut ended = match callback_ended.lock() {
+                    Ok(ended) => ended,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                ended.push(info.reason);
+            }),
+        );
 
         let first = tokio::spawn(parked_stream_text(handler.clone()));
         timeout(TEST_TIMEOUT, parked_started.notified())
@@ -1712,6 +1813,17 @@ mod tests {
         let reset = single_stream_text(&handler, "framework-reset", "m2").await?;
         if reset != reset_reply {
             return Err("explicit reset did not return its configured reply".to_string());
+        }
+        if match ended.lock() {
+            Ok(ended) => ended
+                .iter()
+                .any(|reason| reason == &SessionEndReason::CommandReset),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .iter()
+                .any(|reason| reason == &SessionEndReason::CommandReset),
+        } {
+            return Err("reset cleanup ran while the old stream was active".to_string());
         }
 
         let reset_generation = current_test_generation(&handler).await?;
@@ -1734,10 +1846,107 @@ mod tests {
         if parked != "generation-1:parked-complete" {
             return Err("explicit reset interrupted the already-active stream".to_string());
         }
+        let reset_callbacks = match ended.lock() {
+            Ok(ended) => ended
+                .iter()
+                .filter(|reason| reason == &&SessionEndReason::CommandReset)
+                .count(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .iter()
+                .filter(|reason| reason == &&SessionEndReason::CommandReset)
+                .count(),
+        };
+        if reset_callbacks != 1 {
+            return Err(format!(
+                "old generation settled with {reset_callbacks} reset callbacks"
+            ));
+        }
         let (_, current_last_active_after_old_settlement) =
             generation_snapshot(&current_generation);
         if current_last_active_after_old_settlement != current_last_active {
             return Err("old stream settlement touched the current generation".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unpolled_stream_defers_reset_cleanup_until_drop() -> Result<(), String> {
+        let ended = Arc::new(AtomicUsize::new(0));
+        let callback_ended = Arc::clone(&ended);
+        let handler = SessionHandler::new(
+            SessionConfig::default()
+                .with_reset_keywords(vec!["framework-reset".to_string()])
+                .with_command_prefix(None),
+            GenerationalStreamFactory {
+                created: Arc::new(AtomicUsize::new(0)),
+                parked_started: Arc::new(Notify::new()),
+                release_parked: Arc::new(Notify::new()),
+            },
+        )
+        .with_on_session_end(move |info| {
+            if info.reason == SessionEndReason::CommandReset {
+                callback_ended.fetch_add(1, Ordering::AcqRel);
+            }
+        });
+
+        let unpolled = handler
+            .handle_stream(test_message("park", "m1"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let reply = single_stream_text(&handler, "framework-reset", "m2").await?;
+        if reply != handler.config.reset_reply {
+            return Err("reset did not return before the unpolled stream settled".to_string());
+        }
+        if ended.load(Ordering::Acquire) != 0 {
+            return Err("unpolled stream cleanup was not deferred".to_string());
+        }
+        drop(unpolled);
+        if ended.load(Ordering::Acquire) != 1 {
+            return Err("unpolled stream drop did not settle reset cleanup once".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn callback_panic_is_contained_during_stream_unwind() -> Result<(), String> {
+        let ended = Arc::new(AtomicUsize::new(0));
+        let callback_ended = Arc::clone(&ended);
+        let handler = SessionHandler::new(
+            SessionConfig::default()
+                .with_reset_keywords(vec!["framework-reset".to_string()])
+                .with_command_prefix(None),
+            GenerationalStreamFactory {
+                created: Arc::new(AtomicUsize::new(0)),
+                parked_started: Arc::new(Notify::new()),
+                release_parked: Arc::new(Notify::new()),
+            },
+        )
+        .with_on_session_end(move |info| {
+            if info.reason == SessionEndReason::CommandReset {
+                callback_ended.fetch_add(1, Ordering::AcqRel);
+                std::panic::resume_unwind(Box::new("injected callback panic".to_string()));
+            }
+        });
+
+        let unpolled = handler
+            .handle_stream(test_message("park", "m1"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let _reply = single_stream_text(&handler, "framework-reset", "m2").await?;
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _unpolled = unpolled;
+            std::panic::resume_unwind(Box::new("outer stream unwind".to_string()));
+        }));
+        if unwind.is_ok() {
+            return Err("outer test unwind was unexpectedly swallowed".to_string());
+        }
+        if ended.load(Ordering::Acquire) != 1 {
+            return Err("panicking callback did not settle exactly once".to_string());
+        }
+        let after = single_stream_text(&handler, "after-callback-panic", "m3").await?;
+        if after != "generation-2:after-callback-panic" {
+            return Err("callback panic poisoned the replacement session".to_string());
         }
         Ok(())
     }

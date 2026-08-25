@@ -4,11 +4,15 @@ use super::{
     AgentCheckpoint, RuntimeStateClearReceipt, RuntimeStateScopeClearReceipt, RuntimeStateStore,
 };
 use crate::error::{Result, RuntimeStateError};
+use echo_core::utils::blocking::{
+    BlockingFileOperationKey, BlockingFileOperationScope, run_keyed_file_operation,
+};
 use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
 use std::path::Path;
 
 /// SQLite-backed runtime checkpoint store.
+#[derive(Clone)]
 pub struct SqliteRuntimeStateStore {
     path: std::path::PathBuf,
 }
@@ -22,8 +26,11 @@ impl SqliteRuntimeStateStore {
                 RuntimeStateError::Io(format!("failed to create directory: {error}"))
             })?;
         }
-        let store = Self { path };
+        let mut store = Self { path };
         store.init_tables()?;
+        store.path = std::fs::canonicalize(&store.path).map_err(|error| {
+            RuntimeStateError::Io(format!("failed to canonicalize SQLite store: {error}"))
+        })?;
         Ok(store)
     }
 
@@ -80,18 +87,50 @@ impl SqliteRuntimeStateStore {
 
     /// Delete a conversation checkpoint synchronously.
     pub fn clear_conversation_sync(&self, conversation_id: &str) -> Result<()> {
-        let conn = self.open_conn()?;
-        conn.execute(
-            "DELETE FROM agent_checkpoints WHERE conversation_id = ?1",
-            params![conversation_id],
-        )
-        .map_err(|error| RuntimeStateError::Io(format!("failed to clear checkpoint: {error}")))?;
-        conn.execute(
-            "DELETE FROM runtime_state_scopes WHERE runtime_state_id = ?1",
-            params![conversation_id],
-        )
-        .map_err(|error| {
-            RuntimeStateError::Io(format!("failed to clear checkpoint scope binding: {error}"))
+        let mut conn = self.open_conn()?;
+        let transaction = conn.transaction().map_err(|error| {
+            RuntimeStateError::Io(format!("failed to begin checkpoint clear: {error}"))
+        })?;
+        let owner = transaction
+            .query_row(
+                "SELECT scope_id FROM runtime_state_scopes WHERE runtime_state_id = ?1",
+                params![conversation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                error => Err(error),
+            })
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to inspect checkpoint owner: {error}"))
+            })?;
+        if let Some(owner) = owner.as_deref()
+            && owner != conversation_id
+        {
+            return Err(RuntimeStateError::Io(format!(
+                "runtime state {conversation_id} belongs to scope {owner}, not {conversation_id}"
+            ))
+            .into());
+        }
+        transaction
+            .execute(
+                "DELETE FROM agent_checkpoints WHERE conversation_id = ?1",
+                params![conversation_id],
+            )
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to clear checkpoint: {error}"))
+            })?;
+        transaction
+            .execute(
+                "DELETE FROM runtime_state_scopes WHERE runtime_state_id = ?1",
+                params![conversation_id],
+            )
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to clear checkpoint scope binding: {error}"))
+            })?;
+        transaction.commit().map_err(|error| {
+            RuntimeStateError::Io(format!("failed to commit checkpoint clear: {error}"))
         })?;
         Ok(())
     }
@@ -132,6 +171,35 @@ impl SqliteRuntimeStateStore {
         })?;
         Ok(())
     }
+
+    fn run_blocking<'a, T, F>(
+        &'a self,
+        scope: BlockingFileOperationScope,
+        operation: F,
+    ) -> BoxFuture<'a, Result<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Self) -> Result<T> + Send + 'static,
+    {
+        let store = self.clone();
+        Box::pin(async move {
+            let key =
+                BlockingFileOperationKey::new("runtime-state-sqlite", store.path.clone(), scope);
+            run_keyed_file_operation(key, move || operation(store))
+                .await
+                .map_err(|error| RuntimeStateError::Io(error.to_string()))?
+        })
+    }
+
+    fn entity_scope(value: &str) -> BlockingFileOperationScope {
+        BlockingFileOperationScope::Entity(echo_core::utils::fs::encode_utf8_path_identity(value))
+    }
+
+    fn collection_scope(value: &str) -> BlockingFileOperationScope {
+        BlockingFileOperationScope::Collection(echo_core::utils::fs::encode_utf8_path_identity(
+            value,
+        ))
+    }
 }
 
 impl RuntimeStateStore for SqliteRuntimeStateStore {
@@ -139,8 +207,9 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         &'a self,
         conversation_id: &'a str,
     ) -> BoxFuture<'a, Result<Option<AgentCheckpoint>>> {
-        Box::pin(async move {
-            let conn = self.open_conn()?;
+        let conversation_id = conversation_id.to_string();
+        self.run_blocking(Self::entity_scope(&conversation_id), move |store| {
+            let conn = store.open_conn()?;
             let mut statement = conn
                 .prepare(
                     "SELECT messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp
@@ -150,7 +219,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                     RuntimeStateError::Io(format!("failed to prepare query: {error}"))
                 })?;
 
-            let row = statement.query_row(params![conversation_id], |row| {
+            let row = statement.query_row(params![&conversation_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
@@ -191,7 +260,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                 .with_timezone(&chrono::Utc);
 
             Ok(Some(AgentCheckpoint {
-                conversation_id: conversation_id.to_string(),
+                conversation_id,
                 messages_json,
                 current_plan,
                 active_skills,
@@ -211,31 +280,41 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         scope_id: &'a str,
         checkpoint: &'a AgentCheckpoint,
     ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let mut conn = self.open_conn()?;
-            let transaction = conn.transaction().map_err(|error| {
-                RuntimeStateError::Io(format!("failed to begin checkpoint transaction: {error}"))
-            })?;
-            transaction
+        let scope_id = scope_id.to_string();
+        let checkpoint = checkpoint.clone();
+        self.run_blocking(
+            Self::entity_scope(&checkpoint.conversation_id),
+            move |store| {
+                let mut conn = store.open_conn()?;
+                let transaction = conn.transaction().map_err(|error| {
+                    RuntimeStateError::Io(format!(
+                        "failed to begin checkpoint transaction: {error}"
+                    ))
+                })?;
+                transaction
                 .execute(
                     "INSERT INTO runtime_state_scopes (scope_id, runtime_state_id) VALUES (?1, ?2)
                      ON CONFLICT(scope_id, runtime_state_id) DO NOTHING",
-                    params![scope_id, &checkpoint.conversation_id],
+                    params![&scope_id, &checkpoint.conversation_id],
                 )
                 .map_err(|error| {
                     RuntimeStateError::Io(format!("failed to bind checkpoint scope: {error}"))
                 })?;
-            Self::save_checkpoint_on_connection(&transaction, checkpoint)?;
-            transaction.commit().map_err(|error| {
-                RuntimeStateError::Io(format!("failed to commit checkpoint transaction: {error}"))
-            })?;
-            Ok(())
-        })
+                Self::save_checkpoint_on_connection(&transaction, &checkpoint)?;
+                transaction.commit().map_err(|error| {
+                    RuntimeStateError::Io(format!(
+                        "failed to commit checkpoint transaction: {error}"
+                    ))
+                })?;
+                Ok(())
+            },
+        )
     }
 
     fn runtime_state_ids<'a>(&'a self, scope_id: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
-        Box::pin(async move {
-            let conn = self.open_conn()?;
+        let scope_id = scope_id.to_string();
+        self.run_blocking(Self::collection_scope(&scope_id), move |store| {
+            let conn = store.open_conn()?;
             let mut statement = conn
                 .prepare(
                     "SELECT runtime_state_id FROM runtime_state_scopes WHERE scope_id = ?1 ORDER BY runtime_state_id",
@@ -244,7 +323,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                     RuntimeStateError::Io(format!("failed to prepare scope query: {error}"))
                 })?;
             let rows = statement
-                .query_map(params![scope_id], |row| row.get::<_, String>(0))
+                .query_map(params![&scope_id], |row| row.get::<_, String>(0))
                 .map_err(|error| {
                     RuntimeStateError::Io(format!("failed to query checkpoint scope: {error}"))
                 })?;
@@ -263,30 +342,42 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         scope_id: &'a str,
         runtime_state_id: &'a str,
     ) -> BoxFuture<'a, Result<RuntimeStateClearReceipt>> {
-        Box::pin(async move {
-            let mut conn = self.open_conn()?;
+        let scope_id = scope_id.to_string();
+        let runtime_state_id = runtime_state_id.to_string();
+        self.run_blocking(Self::entity_scope(&runtime_state_id), move |store| {
+            let mut conn = store.open_conn()?;
             let transaction = conn.transaction().map_err(|error| {
                 RuntimeStateError::Io(format!("failed to begin runtime clear: {error}"))
             })?;
-            let indexed = transaction
+            let owner = transaction
                 .query_row(
-                    "SELECT 1 FROM runtime_state_scopes WHERE scope_id = ?1 AND runtime_state_id = ?2",
-                    params![scope_id, runtime_state_id],
-                    |_row| Ok(()),
+                    "SELECT scope_id FROM runtime_state_scopes WHERE runtime_state_id = ?1",
+                    params![&runtime_state_id],
+                    |row| row.get::<_, String>(0),
                 )
-                .map(|()| true)
+                .map(Some)
                 .or_else(|error| match error {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
                     error => Err(error),
                 })
                 .map_err(|error| {
                     RuntimeStateError::Io(format!("failed to inspect runtime scope: {error}"))
                 })?;
-            let checkpoint_removed = if indexed || scope_id == runtime_state_id {
+            if let Some(owner) = owner.as_deref()
+                && owner != scope_id
+            {
+                return Err(RuntimeStateError::Io(format!(
+                    "runtime state {runtime_state_id} belongs to scope {owner}, not {scope_id}"
+                ))
+                .into());
+            }
+            let indexed = owner.as_deref() == Some(scope_id.as_str());
+            let legacy = owner.is_none() && scope_id == runtime_state_id;
+            let checkpoint_removed = if indexed || legacy {
                 transaction
                     .execute(
                         "DELETE FROM agent_checkpoints WHERE conversation_id = ?1",
-                        params![runtime_state_id],
+                        params![&runtime_state_id],
                     )
                     .map_err(|error| {
                         RuntimeStateError::Io(format!("failed to delete checkpoint: {error}"))
@@ -299,7 +390,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                 transaction
                     .execute(
                         "DELETE FROM runtime_state_scopes WHERE scope_id = ?1 AND runtime_state_id = ?2",
-                        params![scope_id, runtime_state_id],
+                        params![&scope_id, &runtime_state_id],
                     )
                     .map_err(|error| {
                         RuntimeStateError::Io(format!("failed to delete scope binding: {error}"))
@@ -309,8 +400,8 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                 RuntimeStateError::Io(format!("failed to commit runtime clear: {error}"))
             })?;
             Ok(RuntimeStateClearReceipt {
-                scope_id: scope_id.to_string(),
-                runtime_state_id: runtime_state_id.to_string(),
+                scope_id,
+                runtime_state_id,
                 checkpoint_removed,
             })
         })
@@ -320,8 +411,9 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         &'a self,
         scope_id: &'a str,
     ) -> BoxFuture<'a, Result<RuntimeStateScopeClearReceipt>> {
-        Box::pin(async move {
-            let mut conn = self.open_conn()?;
+        let scope_id = scope_id.to_string();
+        self.run_blocking(Self::collection_scope(&scope_id), move |store| {
+            let mut conn = store.open_conn()?;
             let transaction = conn.transaction().map_err(|error| {
                 RuntimeStateError::Io(format!("failed to begin scope clear: {error}"))
             })?;
@@ -334,7 +426,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                         RuntimeStateError::Io(format!("failed to prepare scope clear: {error}"))
                     })?;
                 let rows = statement
-                    .query_map(params![scope_id], |row| row.get::<_, String>(0))
+                    .query_map(params![&scope_id], |row| row.get::<_, String>(0))
                     .map_err(|error| {
                         RuntimeStateError::Io(format!("failed to query scope clear: {error}"))
                     })?;
@@ -346,10 +438,28 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                 }
                 ids
             };
-            let legacy_exists = transaction
+            let legacy_owner = transaction
+                .query_row(
+                    "SELECT scope_id FROM runtime_state_scopes WHERE runtime_state_id = ?1",
+                    params![&scope_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map(Some)
+                .or_else(|error| match error {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    error => Err(error),
+                })
+                .map_err(|error| {
+                    RuntimeStateError::Io(format!("failed to inspect legacy owner: {error}"))
+                })?;
+            // A foreign scope may legitimately own a runtime ID equal to this
+            // scope's name. That only disables the legacy same-ID fallback; it
+            // must not block deletion of rows actually owned by `scope_id`.
+            let legacy_exists = legacy_owner.is_none()
+                && transaction
                 .query_row(
                     "SELECT 1 FROM agent_checkpoints WHERE conversation_id = ?1",
-                    params![scope_id],
+                    params![&scope_id],
                     |_row| Ok(()),
                 )
                 .map(|()| true)
@@ -363,7 +473,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
             if legacy_exists
                 && !runtime_state_ids
                     .iter()
-                    .any(|runtime_id| runtime_id == scope_id)
+                    .any(|runtime_id| runtime_id == &scope_id)
             {
                 runtime_state_ids.push(scope_id.to_string());
                 runtime_state_ids.sort();
@@ -381,7 +491,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
             transaction
                 .execute(
                     "DELETE FROM runtime_state_scopes WHERE scope_id = ?1",
-                    params![scope_id],
+                    params![&scope_id],
                 )
                 .map_err(|error| {
                     RuntimeStateError::Io(format!("failed to delete runtime scope: {error}"))
@@ -390,7 +500,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                 RuntimeStateError::Io(format!("failed to commit scope clear: {error}"))
             })?;
             Ok(RuntimeStateScopeClearReceipt {
-                scope_id: scope_id.to_string(),
+                scope_id,
                 runtime_state_ids,
             })
         })
@@ -409,6 +519,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn sqlite_runtime_checkpoint_lifecycle() -> Result<()> {
@@ -483,6 +594,22 @@ mod tests {
         );
         assert!(
             restarted
+                .clear_runtime_state("alice-2", "alice-2")
+                .await
+                .is_err()
+        );
+        assert!(
+            restarted
+                .clear_runtime_state_scope("alice-2")
+                .await?
+                .runtime_state_ids
+                .is_empty()
+        );
+        assert!(restarted.clear_conversation("alice-2").await.is_err());
+        assert!(restarted.clear_conversation_sync("alice-2").is_err());
+        assert!(restarted.get_checkpoint("alice-2").await?.is_some());
+        assert!(
+            restarted
                 .clear_runtime_state("alice", "alice-1")
                 .await?
                 .checkpoint_removed
@@ -490,6 +617,21 @@ mod tests {
         assert!(restarted.get_checkpoint("alice-1").await?.is_none());
         assert!(restarted.get_checkpoint("alice-2").await?.is_some());
         assert!(restarted.get_checkpoint("bob-1").await?.is_some());
+
+        restarted
+            .save_checkpoint_for_scope("scope-a", &checkpoint("scope-a-1"))
+            .await?;
+        restarted
+            .save_checkpoint_for_scope("scope-b", &checkpoint("scope-a"))
+            .await?;
+        let same_name = restarted.clear_runtime_state_scope("scope-a").await?;
+        assert_eq!(same_name.runtime_state_ids, vec!["scope-a-1".to_string()]);
+        assert!(restarted.get_checkpoint("scope-a-1").await?.is_none());
+        assert!(restarted.get_checkpoint("scope-a").await?.is_some());
+        assert_eq!(
+            restarted.runtime_state_ids("scope-b").await?,
+            vec!["scope-a".to_string()]
+        );
         let cleared = restarted.clear_runtime_state_scope("alice").await?;
         assert_eq!(cleared.runtime_state_ids, vec!["alice-2".to_string()]);
         assert!(restarted.get_checkpoint("alice-2").await?.is_none());
@@ -522,6 +664,55 @@ mod tests {
                 RuntimeStateError::Io("corrupt checkpoint was accepted".to_string())
             })?;
         assert!(error.to_string().contains("active_skills"));
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sqlite_blocking_owner_preserves_runtime_heartbeat() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-blocking-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let operation_store = store.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let operation = tokio::spawn(async move {
+            operation_store
+                .run_blocking(
+                    SqliteRuntimeStateStore::entity_scope("heartbeat"),
+                    move |_store| {
+                        let _ignored = entered_tx.send(());
+                        release_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .map_err(|error| {
+                                RuntimeStateError::Io(format!(
+                                    "blocking test release failed: {error}"
+                                ))
+                                .into()
+                            })
+                    },
+                )
+                .await
+        });
+        entered_rx.await.map_err(|error| {
+            RuntimeStateError::Io(format!("blocking test did not start: {error}"))
+        })?;
+        tokio::time::timeout(Duration::from_millis(250), async {
+            for _ in 0..64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| RuntimeStateError::Io("SQLite stalled the Tokio runtime".to_string()))?;
+        release_tx.send(()).map_err(|error| {
+            RuntimeStateError::Io(format!("blocking test release failed: {error}"))
+        })?;
+        operation.await.map_err(|error| {
+            RuntimeStateError::Io(format!("blocking test join failed: {error}"))
+        })??;
         let _ = std::fs::remove_file(path);
         Ok(())
     }

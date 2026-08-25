@@ -2265,7 +2265,7 @@ async fn invocation_history_is_inserted_before_current_input() -> Result<(), Str
     ];
 
     agent
-        .prepare_stream_context(StreamMode::Chat, "current input", &history)
+        .prepare_stream_context(StreamMode::Chat, "current input", &history, None)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -2293,14 +2293,12 @@ async fn invocation_history_is_inserted_before_current_input() -> Result<(), Str
 #[tokio::test]
 async fn q_flt_v07_corrupt_checkpoint_fails_closed_without_overwrite() -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let checkpoint_dir =
-        temp.path()
-            .join("runtime_state")
-            .join(echo_core::utils::fs::encode_utf8_path_identity(
-                "corrupt-conversation",
-            ));
+    let checkpoint_dir = temp.path().join("runtime_state").join("_runtime_owners");
     std::fs::create_dir_all(&checkpoint_dir).map_err(|error| error.to_string())?;
-    let checkpoint_path = checkpoint_dir.join("checkpoint.json");
+    let checkpoint_path = checkpoint_dir.join(format!(
+        "{}.json",
+        echo_core::utils::fs::encode_utf8_path_identity("corrupt-conversation")
+    ));
     let corrupt = b"{ truncated checkpoint";
     std::fs::write(&checkpoint_path, corrupt).map_err(|error| error.to_string())?;
 
@@ -2455,7 +2453,7 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
     // Drive prepare_stream_context with a query that should hit the seeded fact.
     let recalled = agent
-        .prepare_stream_context(StreamMode::Chat, "Rust", &[])
+        .prepare_stream_context(StreamMode::Chat, "Rust", &[], None)
         .await
         .map_err(|error| error.to_string())?;
     assert!(
@@ -2531,7 +2529,7 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
     drop(ctx);
     agent
-        .prepare_stream_context(StreamMode::Chat, "unrelated-query", &[])
+        .prepare_stream_context(StreamMode::Chat, "unrelated-query", &[], None)
         .await
         .map_err(|error| error.to_string())?;
     let ctx = agent.memory.context.lock().await;

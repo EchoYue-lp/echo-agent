@@ -348,7 +348,10 @@ pub struct AgentInvocationContext {
     /// `None` preserves the existing behavior: a runtime conversation override
     /// is also used for checkpoints. Persistent runtimes may set this to an
     /// ephemeral incarnation while keeping product events and transcripts on a
-    /// stable conversation ID.
+    /// stable conversation ID. When one Agent instance receives a different
+    /// runtime-state identity, the framework resets or restores that identity
+    /// before model input is prepared; warm context is reused only for the same
+    /// identity.
     pub runtime_state_id: Option<String>,
     /// Optional model-context generation for append-only transcript projection.
     ///

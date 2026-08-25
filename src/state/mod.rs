@@ -361,9 +361,9 @@ pub trait RuntimeStateStore: Send + Sync {
     /// Save a checkpoint and durably bind its globally unique runtime identity
     /// to one stable product/session scope.
     ///
-    /// Implementations write the index before the checkpoint. A crash may leave
-    /// an index tombstone, but cannot leave an unindexed checkpoint that a later
-    /// scope deletion cannot discover.
+    /// Implementations must commit the checkpoint and globally unique scope
+    /// ownership as one recoverable authority. A secondary index may lag after
+    /// a crash only when it can be rebuilt from that authority without guessing.
     fn save_checkpoint_for_scope<'a>(
         &'a self,
         scope_id: &'a str,
