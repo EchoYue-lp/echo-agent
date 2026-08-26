@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TurnRequest::with_input_receipt` exposes a generic initial-input lifecycle:
+  the driver publishes admission, `ReactAgent` publishes the real
+  `ContextManager` drain boundary, and the same driver publishes a typed
+  terminal. `SubagentExecutor::send_message_tracked` now returns an exact
+  `SubagentMessageReceipt` backed by the existing `AgentSteerReceipt`; the
+  legacy turn-ID-only message route is removed from framework production paths.
+  See [ADR 0009](docs/adr/0009-tracked-input-receipts.md).
+
 - `EventJournal::append_batch` now commits a preflighted, digest-protected
   `PreparedJournalBatch` as one contiguous visibility unit across memory, file,
   and segmented journals. Typed receipts distinguish committed-but-degraded,

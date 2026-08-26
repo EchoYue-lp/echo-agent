@@ -101,6 +101,16 @@ pub enum AgentSteerTurnOutcome {
     Dropped,
 }
 
+/// Producer hook for a generic initial-input lifecycle.
+///
+/// The turn driver owns acceptance and terminal settlement. An Agent
+/// implementation that knows the exact point at which its input entered model
+/// context may publish the drain boundary through this hook. Implementations
+/// without that knowledge leave the receipt at `drained = false`.
+pub trait AgentInputLifecycle: Send + Sync {
+    fn mark_drained(&self);
+}
+
 /// Current durable-consumption boundary observed for one steering input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -381,6 +391,11 @@ pub struct AgentInvocationContext {
     /// Opaque resources retained through the invocation's spawned Agent,
     /// subagent, and tool work.
     pub resource_guards: Vec<crate::tools::InvocationResourceGuard>,
+    /// Optional generic producer for the initial input's drain boundary.
+    ///
+    /// This is framework-only lifecycle plumbing. Product policy and durable
+    /// receipt ownership remain with the caller of the turn driver.
+    pub input_lifecycle: Option<std::sync::Arc<dyn AgentInputLifecycle>>,
 }
 
 impl std::fmt::Debug for AgentInvocationContext {
@@ -432,6 +447,7 @@ impl std::fmt::Debug for AgentInvocationContext {
             .field("history_messages", &self.history.as_ref().map(Vec::len))
             .field("resource_guard_count", &self.resource_guards.len())
             .field("resource_guards", &self.resource_guards)
+            .field("has_input_lifecycle", &self.input_lifecycle.is_some())
             .finish()
     }
 }

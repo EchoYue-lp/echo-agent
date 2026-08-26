@@ -242,6 +242,17 @@ impl ReactAgent {
             self.prepare_stream_context(mode, &text, history, runtime_state_id)
                 .await
         }?;
+        // A tracked cold-input receipt may be published only after the initial
+        // message has been inserted into ContextManager and before intent
+        // routing or provider execution begins. Generic Agent implementations
+        // that do not provide this publisher intentionally leave the receipt
+        // at `drained = false`.
+        if let Some(lifecycle) = invocation
+            .as_ref()
+            .and_then(|context| context.input_lifecycle.as_ref())
+        {
+            lifecycle.mark_drained();
+        }
 
         // ── G2: IntentRouter classification (converged with run_react_loop) ──
         // Routing may activate a skill. DirectAnswer uses the canonical loop
@@ -796,7 +807,7 @@ mod tests {
     use crate::agent::config::AgentConfig;
     use crate::compression::{ContextProjection, PreModelContextProjector, ProjectionContext};
     use crate::intent::{Intent, IntentClassifier, IntentRouter, IntentRouterConfig};
-    use echo_core::agent::Agent;
+    use echo_core::agent::{Agent, AgentInputLifecycle};
     use echo_core::guard::{Guard, GuardDirection, GuardResult};
     use futures::StreamExt;
     use futures::future::BoxFuture;
@@ -823,6 +834,51 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[derive(Default)]
+    struct InputLifecycleProbe {
+        drained: std::sync::atomic::AtomicUsize,
+    }
+
+    impl AgentInputLifecycle for InputLifecycleProbe {
+        fn mark_drained(&self) {
+            self.drained
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_context_publishes_initial_input_drain_before_provider() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response("done"));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm)
+            .system_prompt("system")
+            .build()?;
+        let probe = Arc::new(InputLifecycleProbe::default());
+        let invocation = echo_core::agent::AgentInvocationContext {
+            input_lifecycle: Some(probe.clone()),
+            ..echo_core::agent::AgentInvocationContext::default()
+        };
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "initial input".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: Some(invocation),
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        let events = stream.collect::<Vec<_>>().await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(_))))
+        );
+        assert_eq!(probe.drained.load(std::sync::atomic::Ordering::SeqCst), 1);
+        Ok(())
     }
 
     struct AlwaysDirectClassifier;
@@ -1372,6 +1428,7 @@ mod tests {
             run_budget: None,
             history: None,
             resource_guards: Vec::new(),
+            input_lifecycle: None,
         };
         let first_stream = agent
             .execute_stream_with_invocation_context(
@@ -1415,6 +1472,7 @@ mod tests {
             run_budget: None,
             history: None,
             resource_guards: Vec::new(),
+            input_lifecycle: None,
         };
         let mut queued = Box::pin(agent.execute_stream_with_invocation_context(
             "second",
@@ -1473,6 +1531,7 @@ mod tests {
             run_budget: None,
             history: None,
             resource_guards: Vec::new(),
+            input_lifecycle: None,
         };
 
         let stream = agent
@@ -1536,6 +1595,7 @@ mod tests {
             run_budget: None,
             history: None,
             resource_guards: Vec::new(),
+            input_lifecycle: None,
         };
 
         let stream = agent
@@ -3311,6 +3371,7 @@ mod tests {
             run_budget: None,
             history: None,
             resource_guards: Vec::new(),
+            input_lifecycle: None,
         };
         let stream = agent
             .run_stream_channel(
@@ -3397,6 +3458,7 @@ mod tests {
             run_budget: None,
             history: None,
             resource_guards: Vec::new(),
+            input_lifecycle: None,
         };
         let stream = agent
             .run_stream_channel(
@@ -3474,6 +3536,7 @@ mod tests {
             run_budget: None,
             history: None,
             resource_guards: Vec::new(),
+            input_lifecycle: None,
         };
         let stream = agent
             .run_stream_channel(

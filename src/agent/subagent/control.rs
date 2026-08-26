@@ -4,7 +4,9 @@
 //! registry only binds an exact execution attempt to its cancellation token and
 //! the agent's existing live-steering safe point.
 
-use echo_core::agent::{Agent, AgentSteerError, CancellationToken};
+use echo_core::agent::{
+    Agent, AgentSteerError, AgentSteerReceipt, AgentSteerState, CancellationToken,
+};
 use echo_core::llm::types::Message;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -67,12 +69,35 @@ pub enum SubagentControlPhase {
     Settled,
 }
 
-/// Receipt for one live message delivered through the active agent mailbox.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubagentMessageDelivery {
+/// Exact-attempt envelope for one live message accepted by the active Agent
+/// mailbox. The nested framework receipt is the sole lifecycle authority.
+#[derive(Debug, Clone)]
+pub struct SubagentMessageReceipt {
     pub execution_id: String,
     pub attempt: u32,
-    pub turn_id: String,
+    receipt: AgentSteerReceipt,
+}
+
+impl SubagentMessageReceipt {
+    /// The framework-owned tracked receipt for this exact message.
+    pub fn receipt(&self) -> &AgentSteerReceipt {
+        &self.receipt
+    }
+
+    /// Consume this delivery and return its framework-owned tracked receipt.
+    pub fn into_receipt(self) -> AgentSteerReceipt {
+        self.receipt
+    }
+
+    /// Wait until the message reaches model context or the owning turn settles.
+    pub async fn wait_for_drained(&mut self) -> AgentSteerState {
+        self.receipt.wait_for_drained().await
+    }
+
+    /// Wait until the owning turn reaches its typed terminal outcome.
+    pub async fn wait_for_turn_settled(&mut self) -> AgentSteerState {
+        self.receipt.wait_for_turn_settled().await
+    }
 }
 
 /// Receipt for guidance queued for one exact future attempt.
@@ -377,12 +402,12 @@ impl SubagentControlRegistry {
         })
     }
 
-    pub(crate) async fn send_message(
+    pub(crate) async fn send_message_tracked(
         &self,
         execution_id: &str,
         expected_attempt: u32,
         instruction: impl Into<String>,
-    ) -> Result<SubagentMessageDelivery, SubagentControlError> {
+    ) -> Result<SubagentMessageReceipt, SubagentControlError> {
         let instruction = instruction.into();
         if instruction.trim().is_empty() {
             return Err(SubagentControlError::EmptyInstruction);
@@ -408,13 +433,13 @@ impl SubagentControlRegistry {
                     });
                 }
                 if let (Some(agent), Some(turn_id)) = (&active.agent, active.turn_id.as_deref()) {
-                    let delivered_turn = agent
-                        .steer_input(Some(turn_id), Message::user(instruction.clone()))
+                    let tracked = agent
+                        .steer_input_tracked(Some(turn_id), Message::user(instruction.clone()))
                         .map_err(SubagentControlError::Steer)?;
-                    return Ok(SubagentMessageDelivery {
+                    return Ok(SubagentMessageReceipt {
                         execution_id: execution_id.to_string(),
                         attempt: expected_attempt,
-                        turn_id: delivered_turn,
+                        receipt: tracked,
                     });
                 }
                 active.ready_tx.subscribe()
@@ -610,6 +635,7 @@ impl SubagentControlRegistry {
 mod tests {
     use super::*;
     use echo_core::agent::AgentEvent;
+    use echo_core::agent::AgentSteerTurnOutcome;
     use echo_core::error::Result as AgentResult;
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
@@ -617,6 +643,7 @@ mod tests {
     struct SteerTestAgent {
         active_turn: Mutex<Option<String>>,
         messages: Mutex<Vec<String>>,
+        lifecycle: Mutex<Option<watch::Sender<AgentSteerState>>>,
     }
 
     impl SteerTestAgent {
@@ -624,6 +651,32 @@ mod tests {
             Self {
                 active_turn: Mutex::new(Some(turn_id.to_string())),
                 messages: Mutex::new(Vec::new()),
+                lifecycle: Mutex::new(None),
+            }
+        }
+
+        fn mark_drained(&self) {
+            if let Some(sender) = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+            {
+                let _ = sender.send(AgentSteerState::Drained);
+            }
+        }
+
+        fn settle(&self, outcome: AgentSteerTurnOutcome) {
+            if let Some(sender) = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+            {
+                let _ = sender.send(AgentSteerState::TurnSettled {
+                    outcome,
+                    drained: matches!(outcome, AgentSteerTurnOutcome::Completed),
+                });
             }
         }
     }
@@ -686,6 +739,24 @@ mod tests {
                 .push(text);
             Ok(actual.to_string())
         }
+
+        fn steer_input_tracked(
+            &self,
+            expected_turn_id: Option<&str>,
+            message: Message,
+        ) -> Result<AgentSteerReceipt, AgentSteerError> {
+            let turn_id = self.steer_input(expected_turn_id, message)?;
+            let (sender, receiver) = watch::channel(AgentSteerState::Accepted);
+            *self
+                .lifecycle
+                .lock()
+                .map_err(|_| AgentSteerError::StateUnavailable)? = Some(sender);
+            Ok(AgentSteerReceipt::new(
+                uuid::Uuid::new_v4().to_string(),
+                turn_id,
+                receiver,
+            ))
+        }
     }
 
     #[test]
@@ -741,13 +812,18 @@ mod tests {
             .attach(agent, "turn-1".to_string())
             .map_err(|error| error.to_string())?;
 
-        let delivered = registry
-            .send_message("execution-1", 1, "first")
+        let mut delivered = registry
+            .send_message_tracked("execution-1", 1, "first")
             .await
             .map_err(|error| error.to_string())?;
-        assert_eq!(delivered.turn_id, "turn-1");
+        assert_eq!(delivered.receipt().turn_id(), "turn-1");
+        assert_eq!(delivered.receipt().state(), AgentSteerState::Accepted);
+        concrete.mark_drained();
+        assert_eq!(delivered.wait_for_drained().await, AgentSteerState::Drained);
         assert!(matches!(
-            registry.send_message("execution-1", 2, "stale").await,
+            registry
+                .send_message_tracked("execution-1", 2, "stale")
+                .await,
             Err(SubagentControlError::AttemptMismatch { .. })
         ));
         let messages = concrete
@@ -757,10 +833,20 @@ mod tests {
             .clone();
         assert_eq!(messages, vec!["first".to_string()]);
 
+        concrete.settle(AgentSteerTurnOutcome::Completed);
+        assert_eq!(
+            delivered.wait_for_turn_settled().await,
+            AgentSteerState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Completed,
+                drained: true,
+            }
+        );
         drop(steering);
         admission.settle(SubagentStatus::Completed);
         assert!(matches!(
-            registry.send_message("execution-1", 1, "late").await,
+            registry
+                .send_message_tracked("execution-1", 1, "late")
+                .await,
             Err(SubagentControlError::AttemptSettled { .. })
         ));
         assert_eq!(
@@ -783,7 +869,7 @@ mod tests {
             .admit(identity, CancellationToken::new())
             .map_err(|error| error.to_string())?;
 
-        let delivery = registry.send_message("execution-starting", 1, "wait for ready");
+        let delivery = registry.send_message_tracked("execution-starting", 1, "wait for ready");
         futures::pin_mut!(delivery);
         assert!(matches!(
             futures::poll!(delivery.as_mut()),
@@ -796,8 +882,10 @@ mod tests {
             .binding
             .attach(agent, "turn-starting".to_string())
             .map_err(|error| error.to_string())?;
-        let delivered = delivery.await.map_err(|error| error.to_string())?;
-        assert_eq!(delivered.turn_id, "turn-starting");
+        let mut delivered = delivery.await.map_err(|error| error.to_string())?;
+        assert_eq!(delivered.receipt().turn_id(), "turn-starting");
+        concrete.mark_drained();
+        assert_eq!(delivered.wait_for_drained().await, AgentSteerState::Drained);
         assert_eq!(
             concrete
                 .messages
@@ -806,6 +894,7 @@ mod tests {
                 .as_slice(),
             ["wait for ready".to_string()]
         );
+        concrete.settle(AgentSteerTurnOutcome::Completed);
         drop(steering);
         admission.settle(SubagentStatus::Completed);
         Ok(())

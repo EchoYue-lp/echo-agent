@@ -187,6 +187,16 @@ tokens or transcript timing. Hook blocks settle as `Failed`. If the lifecycle
 signal closes abnormally, all receipt clones converge on `Dropped` while
 preserving the last known drain fact.
 
+### Tracked initial input
+
+For a cold turn, call `TurnRequest::with_input_receipt()` before passing the
+request to `AgentTurnDriver`. The driver publishes `Accepted` after validating
+the request and immediately before invoking the Agent. `ReactAgent` publishes
+`Drained` only after the initial message has entered `ContextManager`, before
+the provider call. The same driver publishes the typed terminal outcome. Agents
+that do not expose an input lifecycle publisher leave the terminal receipt at
+`drained = false`; output events and EOF are never used as a substitute.
+
 ---
 
 ## Stream Timeout Mechanism (Planned)

@@ -15,6 +15,11 @@ Subagent 使用 `Sync`、`Fork` 或 `Teammate`；需要声明式协作时使用
 所有模式都通过 `SubagentRegistry` 解析目标并由 `SubagentExecutor` 执行。
 因此工具调用与程序化调度共享 hook、取消、prompt 编译、隔离和 typed event。
 
+Active Subagent 消息使用 `SubagentExecutor::send_message_tracked`。返回的
+`SubagentMessageReceipt` 只携带 exact attempt identity 与嵌套的
+`AgentSteerReceipt`；mailbox 接收、上下文 drain 和所属 turn 结算只由嵌套
+receipt 负责。单独的 turn ID 不代表投递完成。
+
 ## Team 意图
 
 `TeamSpec` 只保存已注册 Subagent 的名称，不持有 Agent 实例、关系 store 或

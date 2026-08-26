@@ -23,7 +23,7 @@ pub use builder::SubagentBuilder;
 pub use context::{ContextInheritance, SubagentContext};
 pub use control::{
     SubagentAttemptIdentity, SubagentControlError, SubagentControlPhase,
-    SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageDelivery,
+    SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageReceipt,
 };
 pub use events::{SubagentEvent, SubagentEventBus};
 pub use executor::{

@@ -2222,6 +2222,7 @@ mod transcript_filter_tests {
             resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
                 "invocation-guard".to_string(),
             )],
+            input_lifecycle: None,
         };
 
         let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);

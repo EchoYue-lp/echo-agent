@@ -188,6 +188,15 @@ let _terminal = receipt.wait_for_turn_settled().await;
 信号异常关闭时，所有 receipt clone 会收敛为 `Dropped`，同时保留最后确认的 drain
 事实。
 
+### 可跟踪的初始输入
+
+冷启动 turn 应在把请求交给 `AgentTurnDriver` 前调用
+`TurnRequest::with_input_receipt()`。driver 在 request/identity 校验完成、调用
+Agent stream API 之前发布 `Accepted`；`ReactAgent` 只在初始消息成功写入
+`ContextManager`、且 provider 调用之前发布 `Drained`；同一个 driver 负责发布
+typed terminal。没有 input lifecycle publisher 的 Agent 即使产生输出，也保持
+`drained = false`；不能用输出事件或 EOF 替代真实 drain。
+
 ---
 
 ## 流式超时机制（规划中）

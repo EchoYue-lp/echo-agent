@@ -82,8 +82,8 @@
 
 use async_trait::async_trait;
 use echo_core::agent::{
-    Agent, AgentEvent, AgentInvocationContext, CancellationToken, EventEnvelope, EventIdentity,
-    TurnId, envelope_event_stream_after,
+    Agent, AgentEvent, AgentInvocationContext, AgentSteerTurnOutcome, CancellationToken,
+    EventEnvelope, EventIdentity, TurnId, envelope_event_stream_after,
 };
 use echo_core::error::{AgentFailure, ReactError};
 use echo_core::llm::Message;
@@ -118,6 +118,195 @@ pub struct TurnRequest {
     /// Value-scoped run, tool visibility, working-directory, and history
     /// metadata. Structured message callers use the invocation-aware Agent API.
     pub invocation: Option<AgentInvocationContext>,
+    input_publisher: Option<TurnInputLifecycle>,
+}
+
+/// Lifecycle state for one initial input accepted by [`AgentTurnDriver`].
+///
+/// `Accepted` is published by the driver after request/identity validation and
+/// immediately before it calls the Agent stream API. A concrete Agent publishes
+/// `Drained` after its input has entered model context. It is never inferred
+/// from an output envelope, EOF, or a terminal event. The terminal state
+/// records the owning turn outcome and whether the input reached the drain
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnInputState {
+    Pending,
+    Accepted,
+    Drained,
+    TurnSettled {
+        outcome: AgentSteerTurnOutcome,
+        drained: bool,
+    },
+}
+
+struct TurnInputLifecycleInner {
+    state: tokio::sync::watch::Sender<TurnInputState>,
+    settled: std::sync::atomic::AtomicBool,
+}
+
+impl std::fmt::Debug for TurnInputLifecycleInner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnInputLifecycleInner")
+            .field(
+                "settled",
+                &self.settled.load(std::sync::atomic::Ordering::Acquire),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+struct TurnInputLifecycle {
+    inner: std::sync::Arc<TurnInputLifecycleInner>,
+}
+
+impl std::fmt::Debug for TurnInputLifecycle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnInputLifecycle")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+/// Lossless receipt for one initial turn input.
+#[derive(Debug, Clone)]
+pub struct TurnInputReceipt {
+    turn_id: String,
+    state: tokio::sync::watch::Receiver<TurnInputState>,
+}
+
+impl TurnInputReceipt {
+    fn new(turn_id: String) -> (Self, TurnInputLifecycle) {
+        let (state, receiver) = tokio::sync::watch::channel(TurnInputState::Pending);
+        let inner = std::sync::Arc::new(TurnInputLifecycleInner {
+            state,
+            settled: std::sync::atomic::AtomicBool::new(false),
+        });
+        (
+            Self {
+                turn_id,
+                state: receiver,
+            },
+            TurnInputLifecycle { inner },
+        )
+    }
+
+    /// Stable identity of the turn that owns this input.
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+
+    /// Snapshot the latest lifecycle state without waiting.
+    pub fn state(&self) -> TurnInputState {
+        if self.state.has_changed().is_err() {
+            return self.synthesize_closed_terminal();
+        }
+        self.state.borrow().clone()
+    }
+
+    fn synthesize_closed_terminal(&self) -> TurnInputState {
+        let current = self.state.borrow().clone();
+        match current {
+            state @ TurnInputState::TurnSettled { .. } => state,
+            state => TurnInputState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Dropped,
+                drained: matches!(state, TurnInputState::Drained),
+            },
+        }
+    }
+
+    /// Wait until the Agent accepts the input or settles the turn first.
+    pub async fn wait_for_accepted(&mut self) -> TurnInputState {
+        loop {
+            let state = self.state();
+            if !matches!(state, TurnInputState::Pending) {
+                return state;
+            }
+            if self.state.changed().await.is_err() {
+                return self.synthesize_closed_terminal();
+            }
+        }
+    }
+
+    /// Wait until the input reaches the driver's real drain boundary.
+    pub async fn wait_for_drained(&mut self) -> TurnInputState {
+        loop {
+            let state = self.state();
+            if !matches!(state, TurnInputState::Pending | TurnInputState::Accepted) {
+                return state;
+            }
+            if self.state.changed().await.is_err() {
+                return self.synthesize_closed_terminal();
+            }
+        }
+    }
+
+    /// Wait for the owning turn's typed terminal outcome.
+    pub async fn wait_for_turn_settled(&mut self) -> TurnInputState {
+        loop {
+            let state = self.state();
+            if matches!(state, TurnInputState::TurnSettled { .. }) {
+                return state;
+            }
+            if self.state.changed().await.is_err() {
+                return self.synthesize_closed_terminal();
+            }
+        }
+    }
+}
+
+impl TurnInputLifecycle {
+    fn mark_accepted(&self) {
+        self.inner.state.send_if_modified(|state| {
+            if matches!(state, TurnInputState::Pending) {
+                *state = TurnInputState::Accepted;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    fn mark_drained(&self) {
+        self.inner.state.send_if_modified(|state| {
+            if matches!(state, TurnInputState::Pending | TurnInputState::Accepted) {
+                *state = TurnInputState::Drained;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    fn settle(&self, outcome: AgentSteerTurnOutcome) {
+        if self
+            .inner
+            .settled
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let drained = matches!(*self.inner.state.borrow(), TurnInputState::Drained);
+        let terminal = TurnInputState::TurnSettled { outcome, drained };
+        self.inner.state.send_replace(terminal);
+    }
+}
+
+impl Drop for TurnInputLifecycle {
+    fn drop(&mut self) {
+        if std::sync::Arc::strong_count(&self.inner) == 1 {
+            self.settle(AgentSteerTurnOutcome::Dropped);
+        }
+    }
+}
+
+impl echo_core::agent::AgentInputLifecycle for TurnInputLifecycle {
+    fn mark_drained(&self) {
+        TurnInputLifecycle::mark_drained(self);
+    }
 }
 
 /// Input accepted by one driven turn.
@@ -136,6 +325,7 @@ impl TurnRequest {
             cancel: None,
             last_persisted_sequence: 0,
             invocation: None,
+            input_publisher: None,
         }
     }
 
@@ -147,6 +337,7 @@ impl TurnRequest {
             cancel: None,
             last_persisted_sequence: 0,
             invocation: None,
+            input_publisher: None,
         }
     }
 
@@ -168,6 +359,16 @@ impl TurnRequest {
     pub fn invocation(mut self, invocation: AgentInvocationContext) -> Self {
         self.invocation = Some(invocation);
         self
+    }
+
+    /// Attach a lossless lifecycle receipt to this initial input.
+    ///
+    /// The returned receipt starts in `Pending`; the same driver publishes
+    /// `Accepted`, `Drained`, and `TurnSettled` from the real execution path.
+    pub fn with_input_receipt(mut self) -> (Self, TurnInputReceipt) {
+        let (receipt, lifecycle) = TurnInputReceipt::new(self.identity.turn_id.to_string());
+        self.input_publisher = Some(lifecycle);
+        (self, receipt)
     }
 }
 
@@ -299,11 +500,26 @@ impl AgentTurnDriver {
     pub async fn drive(
         &self,
         agent: &dyn Agent,
-        request: TurnRequest,
+        mut request: TurnRequest,
         sink: &dyn EventSink,
     ) -> TurnReceipt {
         let started = Instant::now();
         let turn_id = request.identity.turn_id.clone();
+        let input_lifecycle = request.input_publisher.take();
+        if let Err(error) = request.identity.validate() {
+            if let Some(lifecycle) = input_lifecycle.as_ref() {
+                lifecycle.settle(AgentSteerTurnOutcome::Failed);
+            }
+            return TurnReceipt::failed(
+                turn_id,
+                AgentFailure::from_react_error(&error),
+                request.last_persisted_sequence,
+                started,
+            );
+        }
+        if let Some(lifecycle) = input_lifecycle.as_ref() {
+            lifecycle.mark_accepted();
+        }
         let token = request
             .cancel
             .clone()
@@ -314,10 +530,26 @@ impl AgentTurnDriver {
                     .and_then(|invocation| invocation.cancel.clone())
             })
             .unwrap_or_default();
-        let invocation = request.invocation.map(|mut invocation| {
-            invocation.cancel = Some(token.clone());
-            invocation
+        let input_lifecycle_for_agent = input_lifecycle.as_ref().map(|lifecycle| {
+            std::sync::Arc::new(lifecycle.clone())
+                as std::sync::Arc<dyn echo_core::agent::AgentInputLifecycle>
         });
+        let invocation = request
+            .invocation
+            .map(|mut invocation| {
+                invocation.cancel = Some(token.clone());
+                invocation.input_lifecycle = input_lifecycle_for_agent.clone();
+                invocation
+            })
+            .or_else(|| {
+                input_lifecycle_for_agent.map(|input_lifecycle| {
+                    echo_core::agent::AgentInvocationContext {
+                        cancel: Some(token.clone()),
+                        input_lifecycle: Some(input_lifecycle),
+                        ..echo_core::agent::AgentInvocationContext::default()
+                    }
+                })
+            });
 
         let input = request.input;
         let raw = match (&input, request.mode, invocation) {
@@ -365,6 +597,9 @@ impl AgentTurnDriver {
         let raw = match raw {
             Ok(stream) => stream,
             Err(error) => {
+                if let Some(lifecycle) = input_lifecycle.as_ref() {
+                    lifecycle.settle(AgentSteerTurnOutcome::Failed);
+                }
                 let failure = AgentFailure::from_react_error(&error);
                 let next_sequence = request.last_persisted_sequence.checked_add(1);
                 let mut last_event_sequence = request.last_persisted_sequence;
@@ -389,7 +624,6 @@ impl AgentTurnDriver {
                 return TurnReceipt::failed(turn_id, failure, last_event_sequence, started);
             }
         };
-
         let mut outcome: Option<TurnOutcome> = None;
         let mut final_answer: Option<String> = None;
         let mut prompt_tokens: u64 = 0;
@@ -465,6 +699,13 @@ impl AgentTurnDriver {
                 "turn stream ended without a terminal event".to_string(),
             )))
         });
+        if let Some(lifecycle) = input_lifecycle.as_ref() {
+            lifecycle.settle(match &outcome {
+                TurnOutcome::Completed => AgentSteerTurnOutcome::Completed,
+                TurnOutcome::Cancelled => AgentSteerTurnOutcome::Cancelled,
+                TurnOutcome::Failed(_) => AgentSteerTurnOutcome::Failed,
+            });
+        }
         TurnReceipt {
             turn_id,
             outcome,
@@ -557,6 +798,109 @@ mod tests {
         }
     }
 
+    struct ImmediateDrainAgent;
+
+    impl Agent for ImmediateDrainAgent {
+        fn name(&self) -> &str {
+            "immediate-drain"
+        }
+
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
+            Box::pin(async { Ok(String::new()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async {
+                Ok(
+                    futures::stream::iter([Ok(AgentEvent::FinalAnswer("done".to_string()))])
+                        .boxed(),
+                )
+            })
+        }
+
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            if let Some(lifecycle) = invocation.input_lifecycle {
+                lifecycle.mark_drained();
+            }
+            Box::pin(async {
+                Ok(
+                    futures::stream::iter([Ok(AgentEvent::FinalAnswer("done".to_string()))])
+                        .boxed(),
+                )
+            })
+        }
+    }
+
+    struct PendingAgent;
+
+    impl Agent for PendingAgent {
+        fn name(&self) -> &str {
+            "pending"
+        }
+
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(std::future::pending())
+        }
+
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         events: Mutex<Vec<u64>>,
@@ -593,6 +937,129 @@ mod tests {
             cache_creation_prompt_tokens: 0,
             usage_reported: true,
         }
+    }
+
+    #[tokio::test]
+    async fn tracked_initial_input_uses_immediate_agent_context_drain() {
+        let (request, mut input) =
+            TurnRequest::new(identity("initial-immediate"), "hello").with_input_receipt();
+        assert_eq!(input.state(), TurnInputState::Pending);
+        let receipt = AgentTurnDriver
+            .drive(&ImmediateDrainAgent, request, &RecordingSink::default())
+            .await;
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(
+            input.wait_for_turn_settled().await,
+            TurnInputState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Completed,
+                drained: true,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_initial_input_without_agent_publisher_keeps_no_drain() {
+        let (request, mut input) = TurnRequest::new(identity("initial-generic"), "hello")
+            .mode(TurnMode::Execute)
+            .with_input_receipt();
+        let receipt = AgentTurnDriver
+            .drive(
+                &ScriptedAgent::new(|| vec![AgentEvent::FinalAnswer("done".to_string())]),
+                request,
+                &RecordingSink::default(),
+            )
+            .await;
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(
+            input.wait_for_turn_settled().await,
+            TurnInputState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Completed,
+                drained: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_initial_input_publishes_accepted_before_stream_call() {
+        let (request, mut input) =
+            TurnRequest::new(identity("initial-accepted"), "hello").with_input_receipt();
+        let sink = RecordingSink::default();
+        let mut drive = Box::pin(AgentTurnDriver.drive(&PendingAgent, request, &sink));
+        assert!(matches!(
+            futures::poll!(drive.as_mut()),
+            std::task::Poll::Pending
+        ));
+        assert_eq!(input.state(), TurnInputState::Accepted);
+        drop(drive);
+        assert_eq!(
+            input.wait_for_turn_settled().await,
+            TurnInputState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Dropped,
+                drained: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_initial_input_cancelled_terminal_is_typed_without_drain() {
+        let (request, mut input) = TurnRequest::new(identity("initial-cancelled"), "hello")
+            .mode(TurnMode::Execute)
+            .with_input_receipt();
+        let receipt = AgentTurnDriver
+            .drive(
+                &ScriptedAgent::new(|| vec![AgentEvent::Cancelled]),
+                request,
+                &RecordingSink::default(),
+            )
+            .await;
+        assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
+        assert_eq!(
+            input.wait_for_turn_settled().await,
+            TurnInputState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Cancelled,
+                drained: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_initial_input_start_failure_is_typed_without_drain() {
+        let (request, mut input) = TurnRequest::new(identity("initial-failed"), "hello")
+            .mode(TurnMode::Execute)
+            .with_input_receipt();
+        let receipt = AgentTurnDriver
+            .drive(&FailingAgent, request, &RecordingSink::default())
+            .await;
+        assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+        assert_eq!(
+            input.wait_for_turn_settled().await,
+            TurnInputState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Failed,
+                drained: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_initial_input_sink_failure_is_typed_without_drain() {
+        let (request, mut input) = TurnRequest::new(identity("initial-sink-failed"), "hello")
+            .mode(TurnMode::Execute)
+            .with_input_receipt();
+        let receipt = AgentTurnDriver
+            .drive(
+                &ScriptedAgent::new(|| vec![AgentEvent::FinalAnswer("done".to_string())]),
+                request,
+                &FailingSink,
+            )
+            .await;
+        assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+        assert_eq!(
+            input.wait_for_turn_settled().await,
+            TurnInputState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Failed,
+                drained: false,
+            }
+        );
     }
 
     #[tokio::test]

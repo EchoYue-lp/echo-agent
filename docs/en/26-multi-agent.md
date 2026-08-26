@@ -16,6 +16,12 @@ Every mode resolves the target through `SubagentRegistry` and executes through
 `SubagentExecutor`. Direct tool dispatch and programmatic dispatch therefore
 share hooks, cancellation, prompt compilation, isolation, and typed events.
 
+Active Subagent messages use `SubagentExecutor::send_message_tracked`. Its
+`SubagentMessageReceipt` contains the exact attempt identity and the nested
+`AgentSteerReceipt`; the nested receipt is the only authority for mailbox
+acceptance, context drain, and owning-turn settlement. A turn ID alone is not a
+delivery-complete result.
+
 ## Team Intent
 
 `TeamSpec` contains registered Subagent names only. It does not hold Agent

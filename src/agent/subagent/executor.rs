@@ -18,7 +18,7 @@ use tracing::{info, warn};
 use super::context::SubagentContext;
 use super::control::{
     SubagentAttemptBinding, SubagentAttemptIdentity, SubagentControlError, SubagentControlRegistry,
-    SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageDelivery,
+    SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageReceipt,
 };
 use super::events::SubagentEvent;
 use super::hooks::{SubagentHookContext, SubagentHookRegistry};
@@ -424,14 +424,14 @@ impl SubagentExecutor {
     }
 
     /// Deliver a live instruction to one exact active attempt.
-    pub async fn send_message(
+    pub async fn send_message_tracked(
         &self,
         execution_id: &str,
         expected_attempt: u32,
         instruction: impl Into<String>,
-    ) -> std::result::Result<SubagentMessageDelivery, SubagentControlError> {
+    ) -> std::result::Result<SubagentMessageReceipt, SubagentControlError> {
         self.control_registry
-            .send_message(execution_id, expected_attempt, instruction)
+            .send_message_tracked(execution_id, expected_attempt, instruction)
             .await
     }
 
@@ -1852,6 +1852,7 @@ impl SubagentExecutor {
                 run_budget: None,
                 history: (!invocation_history.is_empty()).then_some(invocation_history.clone()),
                 resource_guards: Vec::new(),
+                input_lifecycle: None,
             };
             registry
                 .event_bus()
@@ -2766,7 +2767,7 @@ mod tests {
         assert_eq!(result.outcome.status, SubagentStatus::Cancelled);
         assert!(matches!(
             executor
-                .send_message("execution-controlled", 1, "late")
+                .send_message_tracked("execution-controlled", 1, "late")
                 .await,
             Err(SubagentControlError::AttemptSettled { .. })
         ));
