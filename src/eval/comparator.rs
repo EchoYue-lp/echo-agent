@@ -98,7 +98,7 @@ impl AbComparator {
             "unchanged"
         };
         let mut lines = vec![
-            format!("A/B Comparison Results:"),
+            "A/B Comparison Results:".to_string(),
             format!(
                 "  Baseline:  {:.4} avg (n={})",
                 comparison.baseline.avg_score, comparison.baseline.total

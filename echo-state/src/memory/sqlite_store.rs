@@ -306,14 +306,10 @@ impl SqliteStore {
             )
             .into());
         }
-        let mut values = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            let array: [u8; 4] = chunk.try_into().map_err(|_| {
-                MemoryError::SerializationError(
-                    "stored embedding contains a partial float".to_string(),
-                )
-            })?;
-            let value = f32::from_le_bytes(array);
+        let (chunks, _) = bytes.as_chunks::<4>();
+        let mut values = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            let value = f32::from_le_bytes(*chunk);
             if !value.is_finite() {
                 return Err(MemoryError::SerializationError(
                     "stored embedding contains a non-finite value".to_string(),
