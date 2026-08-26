@@ -124,6 +124,42 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
+#[cfg(test)]
+pub(crate) type TestError = Box<dyn std::error::Error + Send + Sync>;
+
+#[cfg(test)]
+pub(crate) type TestResult<T = ()> = std::result::Result<T, TestError>;
+
+#[cfg(test)]
+pub(crate) fn test_failure(message: impl Into<String>) -> TestError {
+    Box::new(std::io::Error::other(message.into()))
+}
+
+#[cfg(test)]
+pub(crate) trait TestContext<T> {
+    fn test_context(self, context: &str) -> TestResult<T>;
+}
+
+#[cfg(test)]
+impl<T, E: fmt::Debug> TestContext<T> for std::result::Result<T, E> {
+    fn test_context(self, context: &str) -> TestResult<T> {
+        match self {
+            Ok(value) => Ok(value),
+            Err(error) => Err(test_failure(format!("{context}: {error:?}"))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<T> TestContext<T> for Option<T> {
+    fn test_context(self, context: &str) -> TestResult<T> {
+        match self {
+            Some(value) => Ok(value),
+            None => Err(test_failure(format!("{context}: value was absent"))),
+        }
+    }
+}
+
 const JOURNAL_BATCH_SCHEMA_VERSION: u16 = 1;
 
 // File-backed runtime caches normally keep far fewer authorities live. The
@@ -1914,8 +1950,8 @@ mod tests {
         }
     }
 
-    fn batch<E: JournalEvent>(events: Vec<E>) -> PreparedJournalBatch<E> {
-        PreparedJournalBatch::new(events).expect("prepare test batch")
+    fn batch<E: JournalEvent>(events: Vec<E>) -> TestResult<PreparedJournalBatch<E>> {
+        PreparedJournalBatch::new(events).test_context("prepare test batch")
     }
 
     #[test]
@@ -1934,16 +1970,17 @@ mod tests {
     }
 
     #[test]
-    fn memory_batch_is_one_ordered_commit_and_empty_is_zero_write() {
+    fn memory_batch_is_one_ordered_commit_and_empty_is_zero_write() -> TestResult {
         let journal = MemoryEventJournal::new();
-        let empty = PreparedJournalBatch::new(Vec::<i32>::new())
-            .expect_err("empty batch must fail during preflight");
+        let Err(empty) = PreparedJournalBatch::new(Vec::<i32>::new()) else {
+            return Err(test_failure("empty batch unexpectedly passed preflight"));
+        };
         assert!(empty.error.contains("at least one"));
         assert_eq!(journal.next_sequence(), 1);
 
         let receipt = journal
-            .append_batch(batch(vec![10, 20, 30]))
-            .expect("append memory batch");
+            .append_batch(batch(vec![10, 20, 30])?)
+            .test_context("append memory batch")?;
         assert!(uuid::Uuid::parse_str(&receipt.batch_id).is_ok());
         assert_eq!(receipt.records.len(), 3);
         assert_eq!(
@@ -1954,12 +1991,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
-        let replay = journal.replay_after(0, usize::MAX).expect("replay batch");
+        let replay = journal
+            .replay_after(0, usize::MAX)
+            .test_context("replay batch")?;
         assert_eq!(replay.len(), 3);
         assert_eq!(
             journal
                 .replay_after(1, 1)
-                .expect("replay within batch")
+                .test_context("replay within batch")?
                 .first()
                 .map(|record| *record.event),
             Some(20)
@@ -1971,22 +2010,27 @@ mod tests {
                 .zip(replay.iter())
                 .all(|(committed, replayed)| Arc::ptr_eq(&committed.event, &replayed.event))
         );
+        Ok(())
     }
 
     #[test]
-    fn memory_batch_identity_is_idempotent_and_conflicts_poison() {
+    fn memory_batch_identity_is_idempotent_and_conflicts_poison() -> TestResult {
         let journal = MemoryEventJournal::new();
-        let original = batch(vec![10, 20]);
+        let original = batch(vec![10, 20])?;
         let batch_id = original.batch_id().to_string();
-        let committed = journal.append_batch(original).expect("initial commit");
+        let committed = journal
+            .append_batch(original)
+            .test_context("initial commit")?;
         assert_eq!(
             committed.commit_status(),
             JournalBatchCommitStatus::Committed
         );
 
         let duplicate = PreparedJournalBatch::with_test_identity(batch_id.clone(), vec![10, 20])
-            .expect("same identity payload");
-        let idempotent = journal.append_batch(duplicate).expect("idempotent append");
+            .test_context("same identity payload")?;
+        let idempotent = journal
+            .append_batch(duplicate)
+            .test_context("idempotent append")?;
         assert_eq!(
             idempotent.commit_status(),
             JournalBatchCommitStatus::AlreadyCommitted
@@ -2002,30 +2046,33 @@ mod tests {
         assert_eq!(journal.last_sequence(), 2);
 
         let conflict = PreparedJournalBatch::with_test_identity(batch_id, vec![10, 99])
-            .expect("conflicting identity payload");
-        let error = journal
-            .append_batch(conflict)
-            .expect_err("identity conflict must fail closed");
+            .test_context("conflicting identity payload")?;
+        let Err(error) = journal.append_batch(conflict) else {
+            return Err(test_failure("identity conflict unexpectedly committed"));
+        };
         assert!(error.to_string().contains("conflicts"));
         assert!(!error.is_retry_safe());
-        let refused = journal
-            .append_batch(batch(vec![30]))
-            .expect_err("identity conflict poisons memory authority");
+        let Err(refused) = journal.append_batch(batch(vec![30])?) else {
+            return Err(test_failure(
+                "poisoned memory authority unexpectedly accepted a retry",
+            ));
+        };
         assert!(refused.to_string().contains("poisoned"));
         assert!(!refused.is_retry_safe());
         assert!(refused.requires_reopen());
+        Ok(())
     }
 
     #[test]
-    fn memory_rejects_interior_mutation_before_idempotent_lookup() {
+    fn memory_rejects_interior_mutation_before_idempotent_lookup() -> TestResult {
         let journal = MemoryEventJournal::new();
         let original = batch(vec![MutableEvent {
             value: AtomicUsize::new(1),
-        }]);
+        }])?;
         let batch_id = original.batch_id().to_string();
         journal
             .append_batch(original)
-            .expect("commit original payload");
+            .test_context("commit original payload")?;
 
         let mutated = PreparedJournalBatch::with_test_identity(
             batch_id.clone(),
@@ -2033,19 +2080,21 @@ mod tests {
                 value: AtomicUsize::new(1),
             }],
         )
-        .expect("prepare mutable duplicate");
+        .test_context("prepare mutable duplicate")?;
         if let Some(event) = mutated.events().first() {
             event.value.store(2, Ordering::SeqCst);
         }
         assert!(matches!(
             journal
                 .lookup_batch(&mutated)
-                .expect("lookup mutated payload"),
+                .test_context("lookup mutated payload")?,
             JournalBatchLookup::Conflict { .. }
         ));
-        let mutation = journal
-            .append_batch(mutated)
-            .expect_err("mutated prepared payload must not be idempotent");
+        let Err(mutation) = journal.append_batch(mutated) else {
+            return Err(test_failure(
+                "mutated prepared payload unexpectedly matched the committed batch",
+            ));
+        };
         assert!(matches!(
             mutation,
             JournalBatchAppendError::PreparedMutation { .. }
@@ -2059,26 +2108,27 @@ mod tests {
                 value: AtomicUsize::new(1),
             }],
         )
-        .expect("prepare original digest lookup");
+        .test_context("prepare original digest lookup")?;
         assert!(matches!(
             journal
                 .lookup_batch(&original_lookup)
-                .expect("lookup original payload"),
+                .test_context("lookup original payload")?,
             JournalBatchLookup::AlreadyCommitted(_)
         ));
+        Ok(())
     }
 
     #[test]
-    fn memory_batch_preflight_rejects_sequence_overflow_without_mutation() {
+    fn memory_batch_preflight_rejects_sequence_overflow_without_mutation() -> TestResult {
         let journal = MemoryEventJournal::new();
         journal
             .inner
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .next_sequence = u64::MAX;
-        let error = journal
-            .append_batch(batch(vec![1]))
-            .expect_err("overflow must fail before mutation");
+        let Err(error) = journal.append_batch(batch(vec![1])?) else {
+            return Err(test_failure("sequence overflow unexpectedly committed"));
+        };
         assert!(matches!(
             error,
             JournalBatchAppendError::NotCommitted { .. }
@@ -2087,24 +2137,29 @@ mod tests {
         assert!(
             journal
                 .replay_after(0, usize::MAX)
-                .expect("replay")
+                .test_context("replay")?
                 .is_empty()
         );
+        Ok(())
     }
 
     #[test]
-    fn memory_batch_serialization_failure_is_not_committed() {
+    fn memory_batch_serialization_failure_is_not_committed() -> TestResult {
         let journal = MemoryEventJournal::<FailingEvent>::new();
-        let error = PreparedJournalBatch::new(vec![FailingEvent])
-            .expect_err("serialization must fail before mutation");
+        let Err(error) = PreparedJournalBatch::new(vec![FailingEvent]) else {
+            return Err(test_failure(
+                "serialization failure unexpectedly produced a prepared batch",
+            ));
+        };
         assert!(error.error.contains("serialization failure"));
         assert_eq!(journal.next_sequence(), 1);
         assert!(
             journal
                 .replay_after(0, usize::MAX)
-                .expect("replay")
+                .test_context("replay")?
                 .is_empty()
         );
+        Ok(())
     }
 
     #[test]
@@ -2152,13 +2207,13 @@ mod tests {
     }
 
     #[test]
-    fn batch_crossing_checkpoint_cadence_folds_then_saves_at_batch_end() {
+    fn batch_crossing_checkpoint_cadence_folds_then_saves_at_batch_end() -> TestResult {
         let fixture = reducer_with(3);
-        fixture.reducer.apply(1).expect("seed event");
+        fixture.reducer.apply(1).test_context("seed event")?;
         let receipt = fixture
             .reducer
-            .apply_batch(batch(vec![2, 3, 4]))
-            .expect("apply batch");
+            .apply_batch(batch(vec![2, 3, 4])?)
+            .test_context("apply batch")?;
         assert_eq!(receipt.first_sequence, 2);
         assert_eq!(receipt.last_sequence, 4);
         assert_eq!(receipt.record_count, 3);
@@ -2166,18 +2221,21 @@ mod tests {
         let frame = fixture
             .checkpoints
             .load()
-            .expect("load checkpoint")
-            .expect("batch checkpoint");
+            .test_context("load checkpoint")?
+            .test_context("batch checkpoint")?;
         assert_eq!(frame.sequence, 4);
         assert_eq!(frame.state.events, vec![1, 2, 3, 4]);
+        Ok(())
     }
 
     #[test]
-    fn already_committed_partial_overlap_folds_only_contiguous_suffix() {
+    fn already_committed_partial_overlap_folds_only_contiguous_suffix() -> TestResult {
         let journal = Arc::new(MemoryEventJournal::new());
-        let original = batch(vec![1, 2, 3]);
+        let original = batch(vec![1, 2, 3])?;
         let batch_id = original.batch_id().to_string();
-        let committed = journal.append_batch(original).expect("commit source batch");
+        let committed = journal
+            .append_batch(original)
+            .test_context("commit source batch")?;
         let reducer = CheckpointedReducer::<_, SumReducer>::new(
             Arc::clone(&journal),
             Arc::new(MemoryCheckpointStore::new()),
@@ -2195,13 +2253,14 @@ mod tests {
             }
         }
         let duplicate = PreparedJournalBatch::with_test_identity(batch_id, vec![1, 2, 3])
-            .expect("prepare idempotent overlap");
+            .test_context("prepare idempotent overlap")?;
         let receipt = reducer
             .apply_batch(duplicate)
-            .expect("fold idempotent suffix");
+            .test_context("fold idempotent suffix")?;
         assert_eq!(receipt.commit, JournalBatchCommitStatus::AlreadyCommitted);
         assert_eq!(reducer.last_applied_sequence(), 3);
         reducer.with_state(|state| assert_eq!(state.events, vec![1, 2, 3]));
+        Ok(())
     }
 
     #[test]
@@ -2317,7 +2376,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_failure_returns_committed_batch_with_degraded_checkpoint() {
+    fn checkpoint_failure_returns_committed_batch_with_degraded_checkpoint() -> TestResult {
         let journal = Arc::new(MemoryEventJournal::new());
         let checkpoints = Arc::new(FailOnceCheckpointStore::new());
         let reducer = CheckpointedReducer::new(
@@ -2327,8 +2386,8 @@ mod tests {
         );
 
         let first = reducer
-            .apply_batch(batch(vec![7, 8, 9]))
-            .expect("event batch must commit");
+            .apply_batch(batch(vec![7, 8, 9])?)
+            .test_context("event batch must commit")?;
         assert_eq!(first.first_sequence, 1);
         assert_eq!(first.last_sequence, 3);
         assert!(matches!(
@@ -2338,15 +2397,18 @@ mod tests {
         assert_eq!(journal.last_sequence(), 3);
         reducer.with_state(|state| assert_eq!(state.events, vec![7, 8, 9]));
 
-        let second = reducer.apply(10).expect("later append retries checkpoint");
+        let second = reducer
+            .apply(10)
+            .test_context("later append retries checkpoint")?;
         assert_eq!(second.sequence, 4);
         assert_eq!(second.checkpoint, CheckpointApplyStatus::Saved);
         let frame = checkpoints
             .load()
-            .expect("checkpoint load")
-            .expect("checkpoint repaired");
+            .test_context("checkpoint load")?
+            .test_context("checkpoint repaired")?;
         assert_eq!(frame.sequence, 4);
         assert_eq!(frame.state.events, vec![7, 8, 9, 10]);
+        Ok(())
     }
 
     #[test]
@@ -2387,7 +2449,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_memory_batches_never_interleave_records() {
+    fn concurrent_memory_batches_never_interleave_records() -> TestResult {
         const THREADS: usize = 16;
         let journal = Arc::new(MemoryEventJournal::new());
         let barrier = Arc::new(Barrier::new(THREADS));
@@ -2395,32 +2457,30 @@ mod tests {
         for index in 0..THREADS {
             let journal = Arc::clone(&journal);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(std::thread::spawn(move || -> TestResult<_> {
                 barrier.wait();
                 let base = i32::try_from(index).unwrap_or(i32::MAX).saturating_mul(10);
-                journal.append_batch(batch(vec![
-                    base,
-                    base.saturating_add(1),
-                    base.saturating_add(2),
-                ]))
+                journal
+                    .append_batch(batch(vec![
+                        base,
+                        base.saturating_add(1),
+                        base.saturating_add(2),
+                    ])?)
+                    .test_context("append concurrent memory batch")
             }));
         }
         let mut receipts = Vec::new();
         for handle in handles {
-            let receipt = handle
-                .join()
-                .ok()
-                .and_then(std::result::Result::ok)
-                .expect("concurrent batch");
+            let receipt = handle.join().test_context("join concurrent batch")??;
             receipts.push(receipt);
         }
-        let replay = journal.replay_after(0, usize::MAX).expect("replay");
+        let replay = journal.replay_after(0, usize::MAX).test_context("replay")?;
         for receipt in receipts {
             let first = receipt
                 .records
                 .first()
                 .map(|record| record.sequence)
-                .expect("batch first sequence");
+                .test_context("batch first sequence")?;
             let record_count = u64::try_from(receipt.records.len()).unwrap_or(u64::MAX);
             let values = replay
                 .iter()
@@ -2436,6 +2496,7 @@ mod tests {
                     .is_some_and(|(left, right)| left.saturating_add(1) == *right)
             }));
         }
+        Ok(())
     }
 
     #[test]

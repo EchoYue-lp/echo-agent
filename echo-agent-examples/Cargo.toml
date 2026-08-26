@@ -2,7 +2,8 @@
 name = "echo-agent-examples"
 version = "0.0.0"
 edition = "2024"
+license = "MIT"
 publish = false
 
 [dependencies]
-echo_agent = { path = "..", default-features = false }
+echo_agent = { version = "0.2.0", path = "..", default-features = false }

@@ -1999,7 +1999,10 @@ impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CheckpointStore, CheckpointedReducer, EventReducer, FileCheckpointStore};
+    use super::super::{
+        CheckpointStore, CheckpointedReducer, EventReducer, FileCheckpointStore, TestContext,
+        TestResult, test_failure,
+    };
     use super::*;
     use std::sync::Barrier;
 
@@ -2010,8 +2013,8 @@ mod tests {
             .expect("live segmented journal handle")
     }
 
-    fn batch<E: JournalEvent>(events: Vec<E>) -> PreparedJournalBatch<E> {
-        PreparedJournalBatch::new(events).expect("prepare test batch")
+    fn batch<E: JournalEvent>(events: Vec<E>) -> TestResult<PreparedJournalBatch<E>> {
+        PreparedJournalBatch::new(events).test_context("prepare test batch")
     }
 
     #[derive(Clone, Copy)]
@@ -2025,11 +2028,11 @@ mod tests {
         Digest,
     }
 
-    fn tampered_frame(tamper: FrameTamper) -> Vec<u8> {
-        let prepared = prepare_journal_frame(&batch(vec!["original".to_string()]), 1)
-            .expect("prepare tamper frame");
+    fn tampered_frame(tamper: FrameTamper) -> TestResult<Vec<u8>> {
+        let prepared = prepare_journal_frame(&batch(vec!["original".to_string()])?, 1)
+            .test_context("prepare tamper frame")?;
         let mut frame: serde_json::Value =
-            serde_json::from_slice(&prepared.line).expect("decode tamper frame");
+            serde_json::from_slice(&prepared.line).test_context("decode tamper frame")?;
         match tamper {
             FrameTamper::Schema => {
                 if let Some(value) = frame.get_mut("schema_version") {
@@ -2082,9 +2085,9 @@ mod tests {
                 }
             }
         }
-        let mut bytes = serde_json::to_vec(&frame).expect("encode tamper frame");
+        let mut bytes = serde_json::to_vec(&frame).test_context("encode tamper frame")?;
         bytes.push(b'\n');
-        bytes
+        Ok(bytes)
     }
 
     fn temp_root(label: &str) -> PathBuf {
@@ -2174,18 +2177,22 @@ mod tests {
     }
 
     #[test]
-    fn batch_never_crosses_segments_and_oversized_batch_is_isolated() {
+    fn batch_never_crosses_segments_and_oversized_batch_is_isolated() -> TestResult {
         let root = temp_root("batch-rollover");
         let journal = open_strings(&root, 512, FileDurability::Flush);
-        journal.append("seed".to_string()).expect("seed append");
+        journal
+            .append("seed".to_string())
+            .test_context("seed append")?;
         let oversized = (0..8)
             .map(|index| format!("batch-{index}-{}", "x".repeat(128)))
             .collect::<Vec<_>>();
         let receipt = journal
-            .append_batch(batch(oversized))
-            .expect("append oversized batch");
+            .append_batch(batch(oversized)?)
+            .test_context("append oversized batch")?;
         assert_eq!(receipt.records.len(), 8);
-        journal.append("tail".to_string()).expect("tail append");
+        journal
+            .append("tail".to_string())
+            .test_context("tail append")?;
 
         let segments = journal.segments();
         assert_eq!(segments.len(), 3);
@@ -2197,7 +2204,9 @@ mod tests {
             vec![(1, 1), (2, 9), (10, 10)]
         );
         assert!(segments.get(1).is_some_and(|segment| segment.bytes > 512));
-        let replay = journal.replay_after(1, 8).expect("replay batch segment");
+        let replay = journal
+            .replay_after(1, 8)
+            .test_context("replay batch segment")?;
         assert_eq!(
             replay
                 .iter()
@@ -2208,7 +2217,7 @@ mod tests {
         assert_eq!(
             journal
                 .replay_after(5, 3)
-                .expect("replay inside segmented batch")
+                .test_context("replay inside segmented batch")?
                 .iter()
                 .map(|record| record.sequence)
                 .collect::<Vec<_>>(),
@@ -2216,24 +2225,26 @@ mod tests {
         );
         drop(journal);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
-    fn batch_integrity_digest_is_fixed_width_lowercase_hex() {
-        let prepared = prepare_journal_frame(&batch(vec!["digest-event".to_string()]), 42)
-            .expect("prepare batch frame");
+    fn batch_integrity_digest_is_fixed_width_lowercase_hex() -> TestResult {
+        let prepared = prepare_journal_frame(&batch(vec!["digest-event".to_string()])?, 42)
+            .test_context("prepare batch frame")?;
         let frame: serde_json::Value =
-            serde_json::from_slice(&prepared.line).expect("decode batch frame");
+            serde_json::from_slice(&prepared.line).test_context("decode batch frame")?;
         let digest = frame
             .get("digest")
             .and_then(serde_json::Value::as_str)
-            .expect("batch digest");
+            .test_context("batch digest")?;
         assert_eq!(digest.len(), 64);
         assert!(
             digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+        Ok(())
     }
 
     #[test]
@@ -2250,7 +2261,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_segmented_batches_are_contiguous_and_never_interleave() {
+    fn concurrent_segmented_batches_are_contiguous_and_never_interleave() -> TestResult {
         const APPENDS: usize = 16;
         let root = temp_root("concurrent");
         let journal = Arc::new(open_strings(&root, 4096, FileDurability::Flush));
@@ -2259,27 +2270,31 @@ mod tests {
         for index in 0..APPENDS {
             let journal = Arc::clone(&journal);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(std::thread::spawn(move || -> TestResult<_> {
                 barrier.wait();
                 let base = i32::try_from(index).unwrap_or(i32::MAX).saturating_mul(10);
-                journal.append_batch(batch(vec![
-                    base.to_string(),
-                    base.saturating_add(1).to_string(),
-                    base.saturating_add(2).to_string(),
-                ]))
+                journal
+                    .append_batch(batch(vec![
+                        base.to_string(),
+                        base.saturating_add(1).to_string(),
+                        base.saturating_add(2).to_string(),
+                    ])?)
+                    .test_context("append concurrent segmented batch")
             }));
         }
-        let receipts = handles
-            .into_iter()
-            .map(|handle| handle.join().expect("append thread").expect("append"))
-            .collect::<Vec<_>>();
-        let replay = journal.replay_after(0, usize::MAX).expect("replay batches");
+        let mut receipts = Vec::new();
+        for handle in handles {
+            receipts.push(handle.join().test_context("join segmented append")??);
+        }
+        let replay = journal
+            .replay_after(0, usize::MAX)
+            .test_context("replay batches")?;
         for receipt in receipts {
             let first = receipt
                 .records
                 .first()
                 .map(|record| record.sequence)
-                .expect("first batch record");
+                .test_context("first batch record")?;
             let count = u64::try_from(receipt.records.len()).unwrap_or(u64::MAX);
             let values = replay
                 .iter()
@@ -2298,19 +2313,24 @@ mod tests {
         assert_eq!(journal.last_sequence(), 48);
         drop(journal);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
-    fn active_torn_batch_tail_is_repaired_without_partial_visibility() {
+    fn active_torn_batch_tail_is_repaired_without_partial_visibility() -> TestResult {
         let root = temp_root("active-torn");
         let journal = open_strings(&root, 1, FileDurability::Flush);
-        journal.append("one".to_string()).expect("append one");
-        journal.append("two".to_string()).expect("append two");
+        journal
+            .append("one".to_string())
+            .test_context("append one")?;
+        journal
+            .append("two".to_string())
+            .test_context("append two")?;
         let active = journal
             .segments()
             .into_iter()
             .find(|segment| segment.active)
-            .expect("active segment");
+            .test_context("active segment")?;
         let good_len = active.bytes;
         drop(journal);
         let prepared = prepare_journal_frame(
@@ -2318,35 +2338,36 @@ mod tests {
                 "three".to_string(),
                 "four".to_string(),
                 "five".to_string(),
-            ]),
+            ])?,
             3,
         )
-        .expect("prepare torn batch frame");
+        .test_context("prepare torn batch frame")?;
         let partial_len = prepared.line.len().saturating_sub(1).max(1) / 2;
         let partial = prepared
             .line
             .get(..partial_len)
-            .expect("partial batch range");
+            .test_context("partial batch range")?;
         echo_core::utils::fs::append_existing(&active.path, partial, FileDurability::Flush)
-            .expect("write torn active batch tail");
+            .test_context("write torn active batch tail")?;
 
         let reopened = open_strings(&root, 1, FileDurability::Flush);
         assert_eq!(
             std::fs::metadata(&active.path)
-                .expect("active metadata")
+                .test_context("active metadata")?
                 .len(),
             good_len
         );
         assert_eq!(
             reopened
                 .append("three".to_string())
-                .expect("append after repair")
+                .test_context("append after repair")?
                 .record
                 .sequence,
             3
         );
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
@@ -2396,7 +2417,7 @@ mod tests {
     }
 
     #[test]
-    fn segmented_batch_frame_rejects_every_integrity_field_tamper() {
+    fn segmented_batch_frame_rejects_every_integrity_field_tamper() -> TestResult {
         for tamper in [
             FrameTamper::Schema,
             FrameTamper::BatchId,
@@ -2412,41 +2433,47 @@ mod tests {
                 .segments()
                 .into_iter()
                 .find(|segment| segment.active)
-                .expect("active segment");
+                .test_context("active segment")?;
             drop(journal);
-            std::fs::write(&active.path, tampered_frame(tamper))
-                .expect("write tampered segment frame");
+            std::fs::write(&active.path, tampered_frame(tamper)?)
+                .test_context("write tampered segment frame")?;
             let result =
                 SegmentedFileEventJournal::<String>::open(&root, 4096, FileDurability::SyncData);
             assert!(result.is_err());
             std::fs::remove_dir_all(root).ok();
         }
+        Ok(())
     }
 
     #[test]
-    fn segmented_cold_scan_rejects_a_duplicated_complete_batch_frame() {
+    fn segmented_cold_scan_rejects_a_duplicated_complete_batch_frame() -> TestResult {
         let root = temp_root("duplicate-frame");
         let journal = open_strings(&root, 4096, FileDurability::SyncData);
         let active = journal
             .segments()
             .into_iter()
             .find(|segment| segment.active)
-            .expect("active segment");
+            .test_context("active segment")?;
         drop(journal);
-        let frame = prepare_journal_frame(&batch(vec!["one".to_string()]), 1)
-            .expect("prepare duplicate frame");
+        let frame = prepare_journal_frame(&batch(vec!["one".to_string()])?, 1)
+            .test_context("prepare duplicate frame")?;
         let mut duplicated = frame.line.clone();
         duplicated.extend_from_slice(&frame.line);
-        std::fs::write(&active.path, duplicated).expect("write duplicated frame");
-        let error =
+        std::fs::write(&active.path, duplicated).test_context("write duplicated frame")?;
+        let Err(error) =
             SegmentedFileEventJournal::<String>::open(&root, 4096, FileDurability::SyncData)
-                .expect_err("duplicate physical identity must fail closed");
+        else {
+            return Err(test_failure(
+                "duplicate segmented batch identity unexpectedly opened",
+            ));
+        };
         assert!(
             error
                 .to_string()
                 .contains("duplicate physical batch identity")
         );
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
@@ -2760,11 +2787,14 @@ mod tests {
     }
 
     #[test]
-    fn segmented_batch_fault_matrix_has_explicit_retry_contract() {
+    fn segmented_batch_fault_matrix_has_explicit_retry_contract() -> TestResult {
         let full_root = temp_root("batch-full");
         let full = open_strings(&full_root, 4096, FileDurability::SyncData);
-        let empty = PreparedJournalBatch::new(Vec::<String>::new())
-            .expect_err("empty segmented batch must fail preflight");
+        let Err(empty) = PreparedJournalBatch::new(Vec::<String>::new()) else {
+            return Err(test_failure(
+                "empty segmented batch unexpectedly passed preflight",
+            ));
+        };
         assert!(empty.error.contains("at least one"));
         assert_eq!(full.next_sequence(), 1);
         assert!(
@@ -2781,8 +2811,8 @@ mod tests {
                 "a".to_string(),
                 "b".to_string(),
                 "c".to_string(),
-            ]))
-            .expect("complete batch is committed degraded");
+            ])?)
+            .test_context("complete batch is committed degraded")?;
         assert_eq!(committed.records.len(), 3);
         assert!(matches!(
             committed.durability,
@@ -2793,14 +2823,14 @@ mod tests {
         assert_eq!(
             full_reopened
                 .replay_after(0, usize::MAX)
-                .expect("cold replay committed batch")
+                .test_context("cold replay committed batch")?
                 .len(),
             3
         );
         assert_eq!(
             full_reopened
                 .replay_after(0, usize::MAX)
-                .expect("lookup committed batch")
+                .test_context("lookup committed batch")?
                 .iter()
                 .filter(|record| record.batch_id == committed.batch_id)
                 .count(),
@@ -2818,18 +2848,20 @@ mod tests {
             .reconcile_read_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = true;
-        let full_unknown_prepared = batch(vec!["a".to_string(), "b".to_string()]);
+        let full_unknown_prepared = batch(vec!["a".to_string(), "b".to_string()])?;
         let full_unknown_id = full_unknown_prepared.batch_id().to_string();
-        let full_unknown_error = full_unknown
-            .append_batch(full_unknown_prepared)
-            .expect_err("full write without reconciliation proof is unknown");
+        let Err(full_unknown_error) = full_unknown.append_batch(full_unknown_prepared) else {
+            return Err(test_failure(
+                "ambiguous segmented full write unexpectedly committed",
+            ));
+        };
         assert!(matches!(
             full_unknown_error,
             JournalBatchAppendError::OutcomeUnknown { .. }
         ));
         let full_unknown_returned = full_unknown_error
             .into_prepared()
-            .expect("unknown outcome retains prepared batch");
+            .test_context("unknown outcome retains prepared batch")?;
         drop(full_unknown);
         let full_unknown_reopened =
             open_strings(&full_unknown_root, 4096, FileDurability::SyncData);
@@ -2839,7 +2871,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner()) = true;
         let lookup = full_unknown_reopened
             .lookup_batch(&full_unknown_returned)
-            .expect("lookup full unknown batch");
+            .test_context("lookup full unknown batch")?;
         let (reconciled_id, reconciled_len, lookup_durability) = match lookup {
             JournalBatchLookup::AlreadyCommitted(receipt) => (
                 receipt.batch_id().to_string(),
@@ -2862,13 +2894,15 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) =
             Some(AppendFault::PartialWriteInvalidData { bytes: 19 });
-        let not_committed = partial
-            .append_batch(batch(vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-            ]))
-            .expect_err("partial batch frame is removed");
+        let Err(not_committed) = partial.append_batch(batch(vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+        ])?) else {
+            return Err(test_failure(
+                "partial segmented batch unexpectedly committed",
+            ));
+        };
         assert!(matches!(
             not_committed,
             JournalBatchAppendError::NotCommitted { .. }
@@ -2877,7 +2911,7 @@ mod tests {
         assert!(
             partial
                 .replay_after(0, usize::MAX)
-                .expect("replay")
+                .test_context("replay")?
                 .is_empty()
         );
         drop(partial);
@@ -2889,21 +2923,27 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) =
             Some(AppendFault::MissingLastByteInvalidData);
-        let short_prepared = batch(vec!["one".to_string(), "two".to_string()]);
+        let short_prepared = batch(vec!["one".to_string(), "two".to_string()])?;
         let short_id = short_prepared.batch_id().to_string();
-        let short_error = short
-            .append_batch(short_prepared)
-            .expect_err("line len minus one must repair the full batch");
+        let Err(short_error) = short.append_batch(short_prepared) else {
+            return Err(test_failure(
+                "missing-last-byte segmented batch unexpectedly committed",
+            ));
+        };
         assert!(short_error.is_retry_safe());
         assert!(
             short
                 .replay_after(0, usize::MAX)
-                .expect("replay")
+                .test_context("replay")?
                 .is_empty()
         );
         let short_retry = short
-            .append_batch(short_error.into_prepared().expect("retryable short batch"))
-            .expect("retry short batch");
+            .append_batch(
+                short_error
+                    .into_prepared()
+                    .test_context("retryable short batch")?,
+            )
+            .test_context("retry short batch")?;
         assert_eq!(short_retry.batch_id, short_id);
         drop(short);
 
@@ -2918,11 +2958,13 @@ mod tests {
             .truncate_barrier_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = true;
-        let barrier_prepared = batch(vec!["one".to_string(), "two".to_string()]);
+        let barrier_prepared = batch(vec!["one".to_string(), "two".to_string()])?;
         let barrier_id = barrier_prepared.batch_id().to_string();
-        let barrier_error = barrier
-            .append_batch(barrier_prepared)
-            .expect_err("truncate barrier ambiguity must poison");
+        let Err(barrier_error) = barrier.append_batch(barrier_prepared) else {
+            return Err(test_failure(
+                "segmented truncate-barrier ambiguity unexpectedly committed",
+            ));
+        };
         assert!(matches!(
             barrier_error,
             JournalBatchAppendError::OutcomeUnknown { .. }
@@ -2930,18 +2972,18 @@ mod tests {
         assert_eq!(barrier_error.batch_id(), barrier_id);
         let barrier_returned = barrier_error
             .into_prepared()
-            .expect("truncate ambiguity retains prepared batch");
+            .test_context("truncate ambiguity retains prepared batch")?;
         drop(barrier);
         let barrier_reopened = open_strings(&barrier_root, 4096, FileDurability::SyncData);
         assert!(matches!(
             barrier_reopened
                 .lookup_batch(&barrier_returned)
-                .expect("lookup absent ambiguous batch"),
+                .test_context("lookup absent ambiguous batch")?,
             JournalBatchLookup::Absent
         ));
         let barrier_retry = barrier_reopened
             .append_batch(barrier_returned)
-            .expect("retry proven absent batch");
+            .test_context("retry proven absent batch")?;
         assert_eq!(barrier_retry.batch_id(), barrier_id);
         drop(barrier_reopened);
 
@@ -2952,18 +2994,23 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) =
             Some(AppendFault::UnrecognizedSuffixInvalidData);
-        let outcome = unknown
-            .append_batch(batch(vec!["a".to_string(), "b".to_string()]))
-            .expect_err("unrecognized suffix has unknown outcome");
+        let Err(outcome) = unknown.append_batch(batch(vec!["a".to_string(), "b".to_string()])?)
+        else {
+            return Err(test_failure(
+                "unrecognized segmented suffix unexpectedly committed",
+            ));
+        };
         assert!(matches!(
             outcome,
             JournalBatchAppendError::OutcomeUnknown { .. }
         ));
         assert!(!outcome.is_retry_safe());
         assert!(outcome.requires_reopen());
-        let refused = unknown
-            .append_batch(batch(vec!["retry".to_string()]))
-            .expect_err("poison forbids blind retry");
+        let Err(refused) = unknown.append_batch(batch(vec!["retry".to_string()])?) else {
+            return Err(test_failure(
+                "poisoned segmented authority unexpectedly accepted a retry",
+            ));
+        };
         assert!(matches!(
             &refused,
             JournalBatchAppendError::AuthorityPoisoned { .. }
@@ -2978,6 +3025,7 @@ mod tests {
         std::fs::remove_dir_all(short_root).ok();
         std::fs::remove_dir_all(barrier_root).ok();
         std::fs::remove_dir_all(unknown_root).ok();
+        Ok(())
     }
 
     #[test]
@@ -3862,14 +3910,14 @@ mod tests {
     }
 
     #[test]
-    fn segmented_rejects_mutated_unknown_payload_before_cold_idempotent_match() {
+    fn segmented_rejects_mutated_unknown_payload_before_cold_idempotent_match() -> TestResult {
         let root = temp_root("mutable-unknown");
         let journal = SegmentedFileEventJournal::<MutableSegmentEvent>::open(
             &root,
             4096,
             FileDurability::SyncData,
         )
-        .expect("open mutable segmented journal");
+        .test_context("open mutable segmented journal")?;
         *journal
             .append_fault
             .lock()
@@ -3880,12 +3928,16 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner()) = true;
         let prepared = batch(vec![MutableSegmentEvent {
             value: std::sync::atomic::AtomicUsize::new(1),
-        }]);
+        }])?;
         let batch_id = prepared.batch_id().to_string();
-        let unknown = journal
-            .append_batch(prepared)
-            .expect_err("full write ambiguity retains mutable payload");
-        let mutated = unknown.into_prepared().expect("returned mutable payload");
+        let Err(unknown) = journal.append_batch(prepared) else {
+            return Err(test_failure(
+                "mutable segmented full-write ambiguity unexpectedly committed",
+            ));
+        };
+        let mutated = unknown
+            .into_prepared()
+            .test_context("returned mutable payload")?;
         if let Some(event) = mutated.events().first() {
             event.value.store(2, std::sync::atomic::Ordering::SeqCst);
         }
@@ -3896,16 +3948,18 @@ mod tests {
             4096,
             FileDurability::SyncData,
         )
-        .expect("reopen mutable segmented journal");
+        .test_context("reopen mutable segmented journal")?;
         assert!(matches!(
             reopened
                 .lookup_batch(&mutated)
-                .expect("lookup mutated payload"),
+                .test_context("lookup mutated payload")?,
             JournalBatchLookup::Conflict { .. }
         ));
-        let mutation = reopened
-            .append_batch(mutated)
-            .expect_err("mutated payload must not match old commit");
+        let Err(mutation) = reopened.append_batch(mutated) else {
+            return Err(test_failure(
+                "mutated segmented payload unexpectedly matched the old commit",
+            ));
+        };
         assert!(matches!(
             mutation,
             JournalBatchAppendError::PreparedMutation { .. }
@@ -3919,28 +3973,31 @@ mod tests {
                 value: std::sync::atomic::AtomicUsize::new(1),
             }],
         )
-        .expect("prepare original payload lookup");
+        .test_context("prepare original payload lookup")?;
         assert!(matches!(
-            reopened.lookup_batch(&original).expect("lookup old digest"),
+            reopened
+                .lookup_batch(&original)
+                .test_context("lookup old digest")?,
             JournalBatchLookup::AlreadyCommitted(_)
         ));
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
-    fn non_clone_events_append_and_replay_without_serde_copy() {
+    fn non_clone_events_append_and_replay_without_serde_copy() -> TestResult {
         let memory = super::super::MemoryEventJournal::new();
         let receipt = memory
             .append(NonCloneEvent {
                 value: "memory".to_string(),
             })
-            .expect("memory append");
+            .test_context("memory append")?;
         assert_eq!(receipt.record.event.value, "memory");
         assert_eq!(
             memory
                 .replay_after(0, 1)
-                .expect("memory replay")
+                .test_context("memory replay")?
                 .first()
                 .map(|record| record.event.value.as_str()),
             Some("memory")
@@ -3948,26 +4005,28 @@ mod tests {
 
         let root = temp_root("non-clone");
         let journal = SegmentedFileEventJournal::open(&root, 4096, FileDurability::Flush)
-            .expect("open non-clone journal");
+            .test_context("open non-clone journal")?;
         *journal
             .append_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::ZeroWriteInvalidData);
-        let not_committed = journal
-            .append(NonCloneEvent {
-                value: "file".to_string(),
-            })
-            .expect_err("zero-byte write returns prepared batch");
+        let Err(not_committed) = journal.append(NonCloneEvent {
+            value: "file".to_string(),
+        }) else {
+            return Err(test_failure(
+                "zero-byte segmented write unexpectedly committed",
+            ));
+        };
         assert!(not_committed.is_retry_safe());
         let returned = not_committed
             .into_prepared()
-            .expect("returned prepared batch");
+            .test_context("returned prepared batch")?;
         let batch_id = returned.batch_id().to_string();
         let payload = returned
             .events()
             .first()
             .cloned()
-            .expect("returned payload");
+            .test_context("returned payload")?;
         assert_eq!(returned.batch_id(), batch_id);
         assert!(
             returned
@@ -3975,7 +4034,9 @@ mod tests {
                 .first()
                 .is_some_and(|event| Arc::ptr_eq(event, &payload))
         );
-        let receipt = journal.append_batch(returned).expect("retry same batch");
+        let receipt = journal
+            .append_batch(returned)
+            .test_context("retry same batch")?;
         assert_eq!(receipt.batch_id(), batch_id);
         assert!(
             receipt
@@ -3989,10 +4050,10 @@ mod tests {
                 value: "file".to_string(),
             }],
         )
-        .expect("same identity duplicate");
+        .test_context("same identity duplicate")?;
         let idempotent = journal
             .append_batch(duplicate)
-            .expect("idempotent duplicate");
+            .test_context("idempotent duplicate")?;
         assert_eq!(
             idempotent.commit_status(),
             JournalBatchCommitStatus::AlreadyCommitted
@@ -4001,7 +4062,7 @@ mod tests {
         assert_eq!(
             journal
                 .replay_after(0, 1)
-                .expect("file replay")
+                .test_context("file replay")?
                 .first()
                 .map(|record| record.event.value.as_str()),
             Some("file")
@@ -4012,13 +4073,16 @@ mod tests {
                 value: "different".to_string(),
             }],
         )
-        .expect("conflicting identity");
-        let conflict_error = journal
-            .append_batch(conflict)
-            .expect_err("same id different payload must poison");
+        .test_context("conflicting identity")?;
+        let Err(conflict_error) = journal.append_batch(conflict) else {
+            return Err(test_failure(
+                "conflicting segmented batch identity unexpectedly committed",
+            ));
+        };
         assert!(conflict_error.to_string().contains("conflicts"));
         assert!(!conflict_error.is_retry_safe());
         drop(journal);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 }

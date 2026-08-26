@@ -1086,7 +1086,10 @@ impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CheckpointApplyStatus, CheckpointedReducer, MemoryEventJournal};
+    use super::super::{
+        CheckpointApplyStatus, CheckpointedReducer, MemoryEventJournal, TestContext, TestResult,
+        test_failure,
+    };
     use super::*;
     use serde::{Deserialize, Serialize};
 
@@ -1094,8 +1097,8 @@ mod tests {
         journal.shared.as_ref().expect("live file journal handle")
     }
 
-    fn batch<E: JournalEvent>(events: Vec<E>) -> PreparedJournalBatch<E> {
-        PreparedJournalBatch::new(events).expect("prepare test batch")
+    fn batch<E: JournalEvent>(events: Vec<E>) -> TestResult<PreparedJournalBatch<E>> {
+        PreparedJournalBatch::new(events).test_context("prepare test batch")
     }
 
     #[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -1154,11 +1157,11 @@ mod tests {
         Digest,
     }
 
-    fn tampered_frame(tamper: FrameTamper) -> Vec<u8> {
-        let prepared = prepare_journal_frame(&batch(vec!["original".to_string()]), 1)
-            .expect("prepare tamper frame");
+    fn tampered_frame(tamper: FrameTamper) -> TestResult<Vec<u8>> {
+        let prepared = prepare_journal_frame(&batch(vec!["original".to_string()])?, 1)
+            .test_context("prepare tamper frame")?;
         let mut frame: serde_json::Value =
-            serde_json::from_slice(&prepared.line).expect("decode tamper frame");
+            serde_json::from_slice(&prepared.line).test_context("decode tamper frame")?;
         match tamper {
             FrameTamper::Schema => {
                 if let Some(value) = frame.get_mut("schema_version") {
@@ -1211,9 +1214,9 @@ mod tests {
                 }
             }
         }
-        let mut bytes = serde_json::to_vec(&frame).expect("encode tamper frame");
+        let mut bytes = serde_json::to_vec(&frame).test_context("encode tamper frame")?;
         bytes.push(b'\n');
-        bytes
+        Ok(bytes)
     }
 
     struct VisibleFailureCheckpointStore {
@@ -1395,45 +1398,44 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_file_batches_commit_as_contiguous_non_interleaved_ranges() {
+    fn concurrent_file_batches_commit_as_contiguous_non_interleaved_ranges() -> TestResult {
         const BATCHES: usize = 12;
         let root = temp_root();
         let path = root.join("events.jsonl");
         let journal = Arc::new(
-            FileEventJournal::<i32>::open(&path, FileDurability::Flush).expect("open journal"),
+            FileEventJournal::<i32>::open(&path, FileDurability::Flush)
+                .test_context("open journal")?,
         );
         let barrier = Arc::new(std::sync::Barrier::new(BATCHES));
         let mut handles = Vec::new();
         for index in 0..BATCHES {
             let journal = Arc::clone(&journal);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(std::thread::spawn(move || -> TestResult<_> {
                 barrier.wait();
                 let base = i32::try_from(index).unwrap_or(i32::MAX).saturating_mul(10);
-                journal.append_batch(batch(vec![
-                    base,
-                    base.saturating_add(1),
-                    base.saturating_add(2),
-                ]))
+                journal
+                    .append_batch(batch(vec![
+                        base,
+                        base.saturating_add(1),
+                        base.saturating_add(2),
+                    ])?)
+                    .test_context("append concurrent file batch")
             }));
         }
         let mut receipts = Vec::new();
         for handle in handles {
-            receipts.push(
-                handle
-                    .join()
-                    .ok()
-                    .and_then(std::result::Result::ok)
-                    .expect("concurrent file batch"),
-            );
+            receipts.push(handle.join().test_context("join concurrent file batch")??);
         }
-        let replay = journal.replay_after(0, usize::MAX).expect("replay batches");
+        let replay = journal
+            .replay_after(0, usize::MAX)
+            .test_context("replay batches")?;
         for receipt in receipts {
             let first = receipt
                 .records
                 .first()
                 .map(|record| record.sequence)
-                .expect("first batch record");
+                .test_context("first batch record")?;
             let record_count = u64::try_from(receipt.records.len()).unwrap_or(u64::MAX);
             let values = replay
                 .iter()
@@ -1450,6 +1452,7 @@ mod tests {
         }
         drop(journal);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
@@ -1570,15 +1573,22 @@ mod tests {
     }
 
     #[test]
-    fn file_batch_fault_matrix_is_typed_and_never_partially_visible() {
+    fn file_batch_fault_matrix_is_typed_and_never_partially_visible() -> TestResult {
         let full_root = temp_root();
         let full_path = full_root.join("events.jsonl");
         let full = FileEventJournal::<String>::open(&full_path, FileDurability::SyncData)
-            .expect("open full fault journal");
-        let empty = PreparedJournalBatch::new(Vec::<String>::new())
-            .expect_err("empty file batch must fail preflight");
+            .test_context("open full fault journal")?;
+        let Err(empty) = PreparedJournalBatch::new(Vec::<String>::new()) else {
+            return Err(test_failure(
+                "empty file batch unexpectedly passed preflight",
+            ));
+        };
         assert!(empty.error.contains("at least one"));
-        assert!(read_existing(&full_path).expect("empty journal").is_empty());
+        assert!(
+            read_existing(&full_path)
+                .test_context("empty journal")?
+                .is_empty()
+        );
         *full
             .append_fault
             .lock()
@@ -1588,8 +1598,8 @@ mod tests {
                 "a".to_string(),
                 "b".to_string(),
                 "c".to_string(),
-            ]))
-            .expect("full frame owns the whole batch");
+            ])?)
+            .test_context("full frame owns the whole batch")?;
         assert_eq!(committed.records.len(), 3);
         assert!(matches!(
             committed.durability,
@@ -1598,18 +1608,18 @@ mod tests {
         assert_eq!(full.next_sequence(), 4);
         drop(full);
         let full_reopened = FileEventJournal::<String>::open(&full_path, FileDurability::SyncData)
-            .expect("reopen committed batch");
+            .test_context("reopen committed batch")?;
         assert_eq!(
             full_reopened
                 .replay_after(0, usize::MAX)
-                .expect("cold replay committed batch")
+                .test_context("cold replay committed batch")?
                 .len(),
             3
         );
         assert_eq!(
             full_reopened
                 .replay_after(1, 1)
-                .expect("replay inside committed batch")
+                .test_context("replay inside committed batch")?
                 .first()
                 .map(|record| record.event.as_str()),
             Some("b")
@@ -1617,7 +1627,7 @@ mod tests {
         assert_eq!(
             full_reopened
                 .replay_after(0, usize::MAX)
-                .expect("lookup committed batch")
+                .test_context("lookup committed batch")?
                 .iter()
                 .filter(|record| record.batch_id == committed.batch_id)
                 .count(),
@@ -1629,7 +1639,7 @@ mod tests {
         let full_unknown_path = full_unknown_root.join("events.jsonl");
         let full_unknown =
             FileEventJournal::<String>::open(&full_unknown_path, FileDurability::SyncData)
-                .expect("open full unknown journal");
+                .test_context("open full unknown journal")?;
         *full_unknown
             .append_fault
             .lock()
@@ -1638,29 +1648,31 @@ mod tests {
             .reconcile_read_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = true;
-        let full_unknown_prepared = batch(vec!["a".to_string(), "b".to_string()]);
+        let full_unknown_prepared = batch(vec!["a".to_string(), "b".to_string()])?;
         let full_unknown_id = full_unknown_prepared.batch_id().to_string();
-        let full_unknown_error = full_unknown
-            .append_batch(full_unknown_prepared)
-            .expect_err("full write without reconciliation proof is unknown");
+        let Err(full_unknown_error) = full_unknown.append_batch(full_unknown_prepared) else {
+            return Err(test_failure(
+                "ambiguous full write unexpectedly returned a committed receipt",
+            ));
+        };
         assert!(matches!(
             full_unknown_error,
             JournalBatchAppendError::OutcomeUnknown { .. }
         ));
         let full_unknown_returned = full_unknown_error
             .into_prepared()
-            .expect("unknown outcome retains prepared batch");
+            .test_context("unknown outcome retains prepared batch")?;
         drop(full_unknown);
         let full_unknown_reopened =
             FileEventJournal::<String>::open(&full_unknown_path, FileDurability::SyncData)
-                .expect("reopen full unknown journal");
+                .test_context("reopen full unknown journal")?;
         *full_unknown_reopened
             .sync_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = true;
         let lookup = full_unknown_reopened
             .lookup_batch(&full_unknown_returned)
-            .expect("lookup full unknown batch");
+            .test_context("lookup full unknown batch")?;
         let (reconciled_id, reconciled_len, lookup_durability) = match lookup {
             JournalBatchLookup::AlreadyCommitted(receipt) => (
                 receipt.batch_id().to_string(),
@@ -1679,19 +1691,19 @@ mod tests {
         let partial_root = temp_root();
         let partial_path = partial_root.join("events.jsonl");
         let partial = FileEventJournal::<String>::open(&partial_path, FileDurability::SyncData)
-            .expect("open partial fault journal");
+            .test_context("open partial fault journal")?;
         *partial
             .append_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) =
             Some(AppendFault::PartialWriteInvalidData { bytes: 17 });
-        let not_committed = partial
-            .append_batch(batch(vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-            ]))
-            .expect_err("partial frame must be removed as one batch");
+        let Err(not_committed) = partial.append_batch(batch(vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+        ])?) else {
+            return Err(test_failure("partial batch frame unexpectedly committed"));
+        };
         assert!(matches!(
             not_committed,
             JournalBatchAppendError::NotCommitted { .. }
@@ -1700,7 +1712,7 @@ mod tests {
         assert_eq!(partial.next_sequence(), 1);
         assert!(
             read_existing(&partial_path)
-                .expect("repaired file")
+                .test_context("repaired file")?
                 .is_empty()
         );
         drop(partial);
@@ -1708,33 +1720,39 @@ mod tests {
         let short_root = temp_root();
         let short_path = short_root.join("events.jsonl");
         let short = FileEventJournal::<String>::open(&short_path, FileDurability::SyncData)
-            .expect("open missing-last-byte journal");
+            .test_context("open missing-last-byte journal")?;
         *short
             .append_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) =
             Some(AppendFault::MissingLastByteInvalidData);
-        let short_prepared = batch(vec!["one".to_string(), "two".to_string()]);
+        let short_prepared = batch(vec!["one".to_string(), "two".to_string()])?;
         let short_id = short_prepared.batch_id().to_string();
-        let short_error = short
-            .append_batch(short_prepared)
-            .expect_err("line len minus one must repair the full batch");
+        let Err(short_error) = short.append_batch(short_prepared) else {
+            return Err(test_failure(
+                "missing-last-byte batch unexpectedly committed",
+            ));
+        };
         assert!(short_error.is_retry_safe());
         assert!(
             read_existing(&short_path)
-                .expect("short repaired")
+                .test_context("short repaired")?
                 .is_empty()
         );
         let short_retry = short
-            .append_batch(short_error.into_prepared().expect("retryable short batch"))
-            .expect("retry short batch");
+            .append_batch(
+                short_error
+                    .into_prepared()
+                    .test_context("retryable short batch")?,
+            )
+            .test_context("retry short batch")?;
         assert_eq!(short_retry.batch_id, short_id);
         drop(short);
 
         let barrier_root = temp_root();
         let barrier_path = barrier_root.join("events.jsonl");
         let barrier = FileEventJournal::<String>::open(&barrier_path, FileDurability::SyncData)
-            .expect("open truncate barrier journal");
+            .test_context("open truncate barrier journal")?;
         *barrier
             .append_fault
             .lock()
@@ -1744,11 +1762,13 @@ mod tests {
             .truncate_barrier_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = true;
-        let barrier_prepared = batch(vec!["one".to_string(), "two".to_string()]);
+        let barrier_prepared = batch(vec!["one".to_string(), "two".to_string()])?;
         let barrier_id = barrier_prepared.batch_id().to_string();
-        let barrier_error = barrier
-            .append_batch(barrier_prepared)
-            .expect_err("truncate barrier ambiguity must poison");
+        let Err(barrier_error) = barrier.append_batch(barrier_prepared) else {
+            return Err(test_failure(
+                "truncate-barrier ambiguity unexpectedly committed",
+            ));
+        };
         assert!(matches!(
             barrier_error,
             JournalBatchAppendError::OutcomeUnknown { .. }
@@ -1756,44 +1776,49 @@ mod tests {
         assert_eq!(barrier_error.batch_id(), barrier_id);
         let barrier_returned = barrier_error
             .into_prepared()
-            .expect("truncate ambiguity retains prepared batch");
+            .test_context("truncate ambiguity retains prepared batch")?;
         drop(barrier);
         let barrier_reopened =
             FileEventJournal::<String>::open(&barrier_path, FileDurability::SyncData)
-                .expect("reopen truncate ambiguity");
+                .test_context("reopen truncate ambiguity")?;
         assert!(matches!(
             barrier_reopened
                 .lookup_batch(&barrier_returned)
-                .expect("lookup absent ambiguous batch"),
+                .test_context("lookup absent ambiguous batch")?,
             JournalBatchLookup::Absent
         ));
         let barrier_retry = barrier_reopened
             .append_batch(barrier_returned)
-            .expect("retry proven absent batch");
+            .test_context("retry proven absent batch")?;
         assert_eq!(barrier_retry.batch_id(), barrier_id);
         drop(barrier_reopened);
 
         let unknown_root = temp_root();
         let unknown_path = unknown_root.join("events.jsonl");
         let unknown = FileEventJournal::<String>::open(&unknown_path, FileDurability::Flush)
-            .expect("open unknown fault journal");
+            .test_context("open unknown fault journal")?;
         *unknown
             .append_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) =
             Some(AppendFault::UnrecognizedSuffixInvalidData);
-        let outcome = unknown
-            .append_batch(batch(vec!["a".to_string(), "b".to_string()]))
-            .expect_err("unrecognized suffix has unknown outcome");
+        let Err(outcome) = unknown.append_batch(batch(vec!["a".to_string(), "b".to_string()])?)
+        else {
+            return Err(test_failure(
+                "unrecognized append suffix unexpectedly committed",
+            ));
+        };
         assert!(matches!(
             outcome,
             JournalBatchAppendError::OutcomeUnknown { .. }
         ));
         assert!(!outcome.is_retry_safe());
         assert!(outcome.requires_reopen());
-        let refused = unknown
-            .append_batch(batch(vec!["retry".to_string()]))
-            .expect_err("poisoned authority forbids blind retry");
+        let Err(refused) = unknown.append_batch(batch(vec!["retry".to_string()])?) else {
+            return Err(test_failure(
+                "poisoned file authority unexpectedly accepted a retry",
+            ));
+        };
         assert!(matches!(
             &refused,
             JournalBatchAppendError::AuthorityPoisoned { .. }
@@ -1808,34 +1833,39 @@ mod tests {
         std::fs::remove_dir_all(short_root).ok();
         std::fs::remove_dir_all(barrier_root).ok();
         std::fs::remove_dir_all(unknown_root).ok();
+        Ok(())
     }
 
     #[test]
-    fn zero_write_not_committed_returns_same_non_clone_prepared_batch() {
+    fn zero_write_not_committed_returns_same_non_clone_prepared_batch() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
         let journal = FileEventJournal::<NonCloneBatchEvent>::open(&path, FileDurability::SyncData)
-            .expect("open non-clone batch journal");
+            .test_context("open non-clone batch journal")?;
         *journal
             .append_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::ZeroWriteInvalidData);
-        let not_committed = journal
-            .append(NonCloneBatchEvent {
-                value: "owned-once".to_string(),
-            })
-            .expect_err("zero-byte write error must be retryable");
+        let Err(not_committed) = journal.append(NonCloneBatchEvent {
+            value: "owned-once".to_string(),
+        }) else {
+            return Err(test_failure("zero-byte write unexpectedly committed"));
+        };
         assert!(not_committed.is_retry_safe());
-        assert!(read_existing(&path).expect("zero-write file").is_empty());
+        assert!(
+            read_existing(&path)
+                .test_context("zero-write file")?
+                .is_empty()
+        );
         let returned = not_committed
             .into_prepared()
-            .expect("returned prepared batch");
+            .test_context("returned prepared batch")?;
         let batch_id = returned.batch_id().to_string();
         let payload = returned
             .events()
             .first()
             .cloned()
-            .expect("returned payload");
+            .test_context("returned payload")?;
         assert_eq!(returned.batch_id(), batch_id);
         assert!(
             returned
@@ -1843,7 +1873,9 @@ mod tests {
                 .first()
                 .is_some_and(|event| Arc::ptr_eq(event, &payload))
         );
-        let committed = journal.append_batch(returned).expect("retry same batch");
+        let committed = journal
+            .append_batch(returned)
+            .test_context("retry same batch")?;
         assert_eq!(committed.batch_id(), batch_id);
         assert_eq!(
             committed.records().first().map(JournalRecord::batch_id),
@@ -1862,10 +1894,10 @@ mod tests {
                 value: "owned-once".to_string(),
             }],
         )
-        .expect("same identity duplicate");
+        .test_context("same identity duplicate")?;
         let idempotent = journal
             .append_batch(duplicate)
-            .expect("idempotent duplicate");
+            .test_context("idempotent duplicate")?;
         assert_eq!(
             idempotent.commit_status(),
             JournalBatchCommitStatus::AlreadyCommitted
@@ -1878,22 +1910,25 @@ mod tests {
                 value: "different".to_string(),
             }],
         )
-        .expect("conflicting identity");
-        let conflict_error = journal
-            .append_batch(conflict)
-            .expect_err("same id different payload must poison");
+        .test_context("conflicting identity")?;
+        let Err(conflict_error) = journal.append_batch(conflict) else {
+            return Err(test_failure(
+                "conflicting batch identity unexpectedly committed",
+            ));
+        };
         assert!(conflict_error.to_string().contains("conflicts"));
         assert!(!conflict_error.is_retry_safe());
         drop(journal);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
-    fn single_non_clone_unknown_outcome_retains_identity_for_cold_lookup() {
+    fn single_non_clone_unknown_outcome_retains_identity_for_cold_lookup() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
         let journal = FileEventJournal::<NonCloneBatchEvent>::open(&path, FileDurability::SyncData)
-            .expect("open single unknown journal");
+            .test_context("open single unknown journal")?;
         *journal
             .append_fault
             .lock()
@@ -1902,24 +1937,26 @@ mod tests {
             .reconcile_read_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = true;
-        let error = journal
-            .append(NonCloneBatchEvent {
-                value: "unknown-once".to_string(),
-            })
-            .expect_err("single full-write ambiguity must remain typed");
+        let Err(error) = journal.append(NonCloneBatchEvent {
+            value: "unknown-once".to_string(),
+        }) else {
+            return Err(test_failure(
+                "single full-write ambiguity unexpectedly committed",
+            ));
+        };
         assert!(!error.is_retry_safe());
         let batch_id = error.batch_id().to_string();
         let returned = error
             .into_prepared()
-            .expect("unknown single retains prepared payload");
+            .test_context("unknown single retains prepared payload")?;
         drop(journal);
 
         let reopened =
             FileEventJournal::<NonCloneBatchEvent>::open(&path, FileDurability::SyncData)
-                .expect("reopen single unknown journal");
+                .test_context("reopen single unknown journal")?;
         let lookup = reopened
             .lookup_batch(&returned)
-            .expect("lookup unknown single");
+            .test_context("lookup unknown single")?;
         let (resolved_id, resolved_sequence) = match lookup {
             JournalBatchLookup::AlreadyCommitted(receipt) => (
                 receipt.batch_id().to_string(),
@@ -1933,14 +1970,15 @@ mod tests {
         assert_eq!(resolved_sequence, Some(1));
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
-    fn file_rejects_mutated_unknown_payload_before_cold_idempotent_match() {
+    fn file_rejects_mutated_unknown_payload_before_cold_idempotent_match() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
         let journal = FileEventJournal::<MutableBatchEvent>::open(&path, FileDurability::SyncData)
-            .expect("open mutable unknown journal");
+            .test_context("open mutable unknown journal")?;
         *journal
             .append_fault
             .lock()
@@ -1951,28 +1989,34 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner()) = true;
         let prepared = batch(vec![MutableBatchEvent {
             value: std::sync::atomic::AtomicUsize::new(1),
-        }]);
+        }])?;
         let batch_id = prepared.batch_id().to_string();
-        let unknown = journal
-            .append_batch(prepared)
-            .expect_err("full write ambiguity retains mutable payload");
-        let mutated = unknown.into_prepared().expect("returned mutable payload");
+        let Err(unknown) = journal.append_batch(prepared) else {
+            return Err(test_failure(
+                "mutable full-write ambiguity unexpectedly committed",
+            ));
+        };
+        let mutated = unknown
+            .into_prepared()
+            .test_context("returned mutable payload")?;
         if let Some(event) = mutated.events().first() {
             event.value.store(2, std::sync::atomic::Ordering::SeqCst);
         }
         drop(journal);
 
         let reopened = FileEventJournal::<MutableBatchEvent>::open(&path, FileDurability::SyncData)
-            .expect("reopen mutable unknown journal");
+            .test_context("reopen mutable unknown journal")?;
         assert!(matches!(
             reopened
                 .lookup_batch(&mutated)
-                .expect("lookup mutated payload"),
+                .test_context("lookup mutated payload")?,
             JournalBatchLookup::Conflict { .. }
         ));
-        let mutation = reopened
-            .append_batch(mutated)
-            .expect_err("mutated payload must not match old commit");
+        let Err(mutation) = reopened.append_batch(mutated) else {
+            return Err(test_failure(
+                "mutated payload unexpectedly matched the old commit",
+            ));
+        };
         assert!(matches!(
             mutation,
             JournalBatchAppendError::PreparedMutation { .. }
@@ -1986,22 +2030,25 @@ mod tests {
                 value: std::sync::atomic::AtomicUsize::new(1),
             }],
         )
-        .expect("prepare original payload lookup");
+        .test_context("prepare original payload lookup")?;
         assert!(matches!(
-            reopened.lookup_batch(&original).expect("lookup old digest"),
+            reopened
+                .lookup_batch(&original)
+                .test_context("lookup old digest")?,
             JournalBatchLookup::AlreadyCommitted(_)
         ));
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
-    fn reducer_does_not_refold_already_committed_batch_after_cold_recovery() {
+    fn reducer_does_not_refold_already_committed_batch_after_cold_recovery() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
         let journal = Arc::new(
             FileEventJournal::<String>::open(&path, FileDurability::SyncData)
-                .expect("open reducer unknown journal"),
+                .test_context("open reducer unknown journal")?,
         );
         let checkpoints = Arc::new(CountingCheckpointStore::new());
         let writer = CheckpointedReducer::<_, LensReducer>::new(
@@ -2017,19 +2064,22 @@ mod tests {
             .reconcile_read_fault
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = true;
-        let error = writer
-            .apply_batch(batch(vec!["one".to_string(), "two".to_string()]))
-            .expect_err("full write ambiguity must stay typed through reducer");
+        let Err(error) = writer.apply_batch(batch(vec!["one".to_string(), "two".to_string()])?)
+        else {
+            return Err(test_failure(
+                "reducer full-write ambiguity unexpectedly committed",
+            ));
+        };
         assert_eq!(writer.last_applied_sequence(), 0);
         let returned = error
             .into_prepared()
-            .expect("reducer error retains prepared batch");
+            .test_context("reducer error retains prepared batch")?;
         drop(writer);
         drop(journal);
 
         let reopened = Arc::new(
             FileEventJournal::<String>::open(&path, FileDurability::SyncData)
-                .expect("reopen reducer journal"),
+                .test_context("reopen reducer journal")?,
         );
         let recovered = CheckpointedReducer::<_, LensReducer>::new(
             reopened,
@@ -2039,7 +2089,7 @@ mod tests {
         assert_eq!(
             recovered
                 .recover()
-                .expect("recover committed batch")
+                .test_context("recover committed batch")?
                 .last_applied_sequence,
             2
         );
@@ -2047,7 +2097,7 @@ mod tests {
         let applied_before = recovered.with_state(|state| state.applied);
         let receipt = recovered
             .apply_batch(returned)
-            .expect("idempotent reducer apply");
+            .test_context("idempotent reducer apply")?;
         assert_eq!(receipt.commit, JournalBatchCommitStatus::AlreadyCommitted);
         assert_eq!(receipt.checkpoint, CheckpointApplyStatus::NotDue);
         assert_eq!(recovered.last_applied_sequence(), 2);
@@ -2057,6 +2107,7 @@ mod tests {
             saves_before
         );
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
@@ -2092,39 +2143,49 @@ mod tests {
     }
 
     #[test]
-    fn replacement_requires_last_handle_close_and_verified_reopen() {
+    fn replacement_requires_last_handle_close_and_verified_reopen() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
-        let journal =
-            FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("open journal");
-        journal.append("one".to_string()).expect("append original");
-        let original = read_existing(&path).expect("read original record");
-        let replacement = prepare_journal_frame(&batch(vec!["two".to_string()]), 1)
-            .expect("encode replacement batch frame")
+        let journal = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+            .test_context("open journal")?;
+        journal
+            .append("one".to_string())
+            .test_context("append original")?;
+        let original = read_existing(&path).test_context("read original record")?;
+        let replacement = prepare_journal_frame(&batch(vec!["two".to_string()])?, 1)
+            .test_context("encode replacement batch frame")?
             .line;
         assert_eq!(replacement.len(), original.len());
-        std::fs::remove_file(&path).expect("remove journal fixture");
-        let missing_open = FileEventJournal::<String>::open(&path, FileDurability::Flush)
-            .expect_err("live missing file must not be recreated");
+        std::fs::remove_file(&path).test_context("remove journal fixture")?;
+        let Err(missing_open) = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+        else {
+            return Err(test_failure("live missing file unexpectedly reopened"));
+        };
         assert!(missing_open.to_string().contains("journal open"));
         assert!(!path.exists());
         assert_eq!(journal.next_sequence(), 2);
-        std::fs::write(&path, &replacement).expect("write same-length replacement");
+        std::fs::write(&path, &replacement).test_context("write same-length replacement")?;
 
-        let replay_error = journal
-            .replay_after(0, usize::MAX)
-            .expect_err("replacement must reject replay");
+        let Err(replay_error) = journal.replay_after(0, usize::MAX) else {
+            return Err(test_failure("replacement unexpectedly allowed replay"));
+        };
         assert!(replay_error.to_string().contains("identity changed"));
-        let append_error = journal
-            .append("must-not-commit".to_string())
-            .expect_err("replacement must reject append");
+        let Err(append_error) = journal.append("must-not-commit".to_string()) else {
+            return Err(test_failure("replacement unexpectedly allowed append"));
+        };
         assert!(append_error.to_string().contains("identity changed"));
-        let sync_error = journal
-            .sync_data()
-            .expect_err("replacement must reject barrier");
+        let Err(sync_error) = journal.sync_data() else {
+            return Err(test_failure(
+                "replacement unexpectedly allowed sync barrier",
+            ));
+        };
         assert!(sync_error.to_string().contains("identity changed"));
-        let second_open = FileEventJournal::<String>::open(&path, FileDurability::Flush)
-            .expect_err("live replacement must not reset shared state");
+        let Err(second_open) = FileEventJournal::<String>::open(&path, FileDurability::Flush)
+        else {
+            return Err(test_failure(
+                "live replacement unexpectedly reset shared state",
+            ));
+        };
         assert!(second_open.to_string().contains("identity changed"));
         assert_eq!(journal.next_sequence(), 2);
         assert!(
@@ -2138,10 +2199,10 @@ mod tests {
 
         drop(journal);
         let reopened = FileEventJournal::<String>::open(&path, FileDurability::Flush)
-            .expect("verified new authority opens replacement");
+            .test_context("verified new authority opens replacement")?;
         let records = reopened
             .replay_after(0, usize::MAX)
-            .expect("replay replacement");
+            .test_context("replay replacement")?;
         assert_eq!(
             records.first().map(|record| record.event.as_str()),
             Some("two")
@@ -2149,13 +2210,14 @@ mod tests {
         assert_eq!(
             reopened
                 .append("after-reopen".to_string())
-                .expect("append after verified reopen")
+                .test_context("append after verified reopen")?
                 .record
                 .sequence,
             2
         );
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
@@ -2252,40 +2314,46 @@ mod tests {
     }
 
     #[test]
-    fn cold_recovery_discards_every_record_in_a_partial_batch_frame() {
+    fn cold_recovery_discards_every_record_in_a_partial_batch_frame() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
         let journal = FileEventJournal::<String>::open(&path, FileDurability::SyncData)
-            .expect("open journal");
+            .test_context("open journal")?;
         drop(journal);
         let prepared = prepare_journal_frame(
             &batch(vec![
                 "one".to_string(),
                 "two".to_string(),
                 "three".to_string(),
-            ]),
+            ])?,
             1,
         )
-        .expect("prepare batch frame");
+        .test_context("prepare batch frame")?;
         let partial_len = prepared.line.len().saturating_sub(1).max(1) / 2;
         let partial = prepared
             .line
             .get(..partial_len)
-            .expect("partial frame range");
-        append_existing(&path, partial, FileDurability::Flush).expect("write partial frame");
+            .test_context("partial frame range")?;
+        append_existing(&path, partial, FileDurability::Flush)
+            .test_context("write partial frame")?;
 
-        let reopened =
-            FileEventJournal::<String>::open(&path, FileDurability::SyncData).expect("repair open");
+        let reopened = FileEventJournal::<String>::open(&path, FileDurability::SyncData)
+            .test_context("repair open")?;
         assert_eq!(reopened.next_sequence(), 1);
         assert!(
             reopened
                 .replay_after(0, usize::MAX)
-                .expect("replay")
+                .test_context("replay")?
                 .is_empty()
         );
-        assert!(read_existing(&path).expect("read repaired").is_empty());
+        assert!(
+            read_existing(&path)
+                .test_context("read repaired")?
+                .is_empty()
+        );
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
@@ -2321,7 +2389,7 @@ mod tests {
     }
 
     #[test]
-    fn file_batch_frame_rejects_every_integrity_field_tamper() {
+    fn file_batch_frame_rejects_every_integrity_field_tamper() -> TestResult {
         for tamper in [
             FrameTamper::Schema,
             FrameTamper::BatchId,
@@ -2333,47 +2401,54 @@ mod tests {
         ] {
             let root = temp_root();
             let path = root.join("events.jsonl");
-            std::fs::write(&path, tampered_frame(tamper)).expect("write tampered frame");
+            std::fs::write(&path, tampered_frame(tamper)?).test_context("write tampered frame")?;
             let result = FileEventJournal::<String>::open(&path, FileDurability::SyncData);
             assert!(result.is_err());
             std::fs::remove_dir_all(root).ok();
         }
+        Ok(())
     }
 
     #[test]
-    fn file_cold_scan_rejects_a_duplicated_complete_batch_frame() {
+    fn file_cold_scan_rejects_a_duplicated_complete_batch_frame() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
-        let frame = prepare_journal_frame(&batch(vec!["one".to_string()]), 1)
-            .expect("prepare duplicate frame");
+        let frame = prepare_journal_frame(&batch(vec!["one".to_string()])?, 1)
+            .test_context("prepare duplicate frame")?;
         let mut duplicated = frame.line.clone();
         duplicated.extend_from_slice(&frame.line);
-        std::fs::write(&path, duplicated).expect("write duplicated frame");
-        let error = FileEventJournal::<String>::open(&path, FileDurability::SyncData)
-            .expect_err("duplicate physical identity must fail closed");
+        std::fs::write(&path, duplicated).test_context("write duplicated frame")?;
+        let Err(error) = FileEventJournal::<String>::open(&path, FileDurability::SyncData) else {
+            return Err(test_failure(
+                "duplicate physical identity unexpectedly opened",
+            ));
+        };
         assert!(
             error
                 .to_string()
                 .contains("duplicate physical batch identity")
         );
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
-    fn sequence_gap_is_an_error() {
+    fn sequence_gap_is_an_error() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
-        let first =
-            prepare_journal_frame(&batch(vec!["a".to_string()]), 1).expect("first batch frame");
-        let third =
-            prepare_journal_frame(&batch(vec!["c".to_string()]), 3).expect("third batch frame");
+        let first = prepare_journal_frame(&batch(vec!["a".to_string()])?, 1)
+            .test_context("first batch frame")?;
+        let third = prepare_journal_frame(&batch(vec!["c".to_string()])?, 3)
+            .test_context("third batch frame")?;
         let mut gap = first.line;
         gap.extend_from_slice(&third.line);
-        std::fs::write(&path, gap).expect("write gap");
-        let error = FileEventJournal::<String>::open(&path, FileDurability::Flush)
-            .expect_err("gap must fail");
+        std::fs::write(&path, gap).test_context("write gap")?;
+        let Err(error) = FileEventJournal::<String>::open(&path, FileDurability::Flush) else {
+            return Err(test_failure("sequence gap unexpectedly opened"));
+        };
         assert!(error.to_string().contains("sequence gap"));
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `EventJournal::append_batch` now commits a preflighted, digest-protected
+  `PreparedJournalBatch` as one contiguous visibility unit across memory, file,
+  and segmented journals. Typed receipts distinguish committed-but-degraded,
+  proven retry-safe, conflicting, and unknown outcomes; reopen plus
+  `lookup_batch` reconciles ambiguous writes without duplicating effects. See
+  [ADR 0007](docs/adr/0007-atomic-journal-batch-commits.md).
+
 - `Agent::steer_input_tracked` and `AgentSteerReceipt` expose authoritative
   `Accepted`, model-context `Drained`, and root `TurnSettled` boundaries. The
   terminal records completed, cancelled, failed, or dropped ownership and
@@ -126,6 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RuntimeTaskService` owns ready-frontier, retry, cancellation, and terminal
   settlement. The legacy `ManagedTask`/`PlanSpec`/`Verifier` parallel model was
   removed; product fields round-trip through `TaskSpec::extension`.
+  See [ADR 0008](docs/adr/0008-canonical-runtime-task-authority.md).
 - `TaskToolPolicy` implementations must now provide the idempotent
   `abort_scope_preparation` hook. `TaskRevisionService::create_from_tool`
   invokes it after any post-`ensure_scope` preparation, validation, load, or

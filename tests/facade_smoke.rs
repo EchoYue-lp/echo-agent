@@ -80,18 +80,17 @@ fn invocation_resource_guards_are_available_from_the_facade() {
 }
 
 #[test]
-fn runtime_state_and_task_primitives_are_available_from_the_facade() {
+fn runtime_state_and_task_primitives_are_available_from_the_facade()
+-> Result<(), Box<dyn std::error::Error>> {
     let journal = MemoryEventJournal::new();
-    let receipt = journal.append("facade-event".to_string()).expect("append");
+    let receipt = journal.append("facade-event".to_string())?;
     assert_eq!(receipt.record.sequence, 1);
     assert_eq!(receipt.durability, JournalDurabilityStatus::Confirmed);
 
-    let batch = journal
-        .append_batch(
-            PreparedJournalBatch::new(vec!["second".to_string(), "third".to_string()])
-                .expect("prepare facade batch"),
-        )
-        .expect("append facade batch");
+    let batch = journal.append_batch(PreparedJournalBatch::new(vec![
+        "second".to_string(),
+        "third".to_string(),
+    ])?)?;
     assert_eq!(batch.records().len(), 2);
     assert_eq!(batch.commit_status(), JournalBatchCommitStatus::Committed);
     assert_eq!(
@@ -100,10 +99,9 @@ fn runtime_state_and_task_primitives_are_available_from_the_facade() {
     );
     let _typed_batch_error: Option<JournalBatchAppendError<String>> = None;
     let _typed_single_error: Option<JournalAppendError<String>> = None;
-    let prepared =
-        PreparedJournalBatch::new(vec!["absent".to_string()]).expect("prepare facade lookup");
+    let prepared = PreparedJournalBatch::new(vec!["absent".to_string()])?;
     assert!(matches!(
-        journal.lookup_batch(&prepared).expect("facade lookup"),
+        journal.lookup_batch(&prepared)?,
         JournalBatchLookup::Absent
     ));
 
@@ -143,6 +141,7 @@ fn runtime_state_and_task_primitives_are_available_from_the_facade() {
         RuntimeInterruptionDisposition::default(),
         RuntimeInterruptionDisposition::Cancelled
     );
+    Ok(())
 }
 
 struct FacadeController;

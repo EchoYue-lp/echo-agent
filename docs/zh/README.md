@@ -80,6 +80,8 @@
 | [0001 - Channel 用户会话隔离](../adr/0001-channel-session-sender-scope.md)       | Channel 会话按通道、会话与发送者三元身份隔离               |
 | [0006 - Runtime-State Scope Lineage](../adr/0006-runtime-state-scope-lineage.md) | 稳定 scope 持久拥有并可回收 runtime checkpoint incarnation |
 | [0002 - 沙箱取消清理](../adr/0002-sandbox-cancellation-cleanup.md)               | 持有资源的沙箱后端完成清理后才返回 terminal                |
+| [0007 - Journal 原子批次提交](../adr/0007-atomic-journal-batch-commits.md)       | 相关 journal 事件作为一个持久提交单元整体可见              |
+| [0008 - Runtime Task 单一权威](../adr/0008-canonical-runtime-task-authority.md) | 一个 revisioned graph 统一 Task CRUD、执行与结算           |
 
 ---
 

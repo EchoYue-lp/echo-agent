@@ -1750,23 +1750,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_record_surfaces_as_error_not_empty() {
+    async fn corrupt_record_surfaces_as_error_not_empty()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let base = tmp_base();
-        let store = FileConversationStore::new(&base).unwrap();
+        let store = FileConversationStore::new(&base)?;
         store
             .create_conversation(new_conv("c1", Some("title")))
-            .await
-            .unwrap();
+            .await?;
         // Corrupt the record file on disk.
-        let path = store.conv_path("c1").unwrap();
-        std::fs::write(&path, b"{ not valid json").unwrap();
+        let path = store.conv_path("c1")?;
+        std::fs::write(&path, b"{ not valid json")?;
 
-        let err = store.get_conversation("c1").await.unwrap_err();
+        let Err(err) = store.get_conversation("c1").await else {
+            let failure: Box<dyn std::error::Error> = Box::new(std::io::Error::other(
+                "corrupt conversation record unexpectedly loaded",
+            ));
+            return Err(failure);
+        };
         assert!(
             matches!(err, echo_core::error::ReactError::Memory(_)),
             "expected a Memory error, got {err:?}"
         );
-        let _ = std::fs::remove_dir_all(&base);
+        std::fs::remove_dir_all(&base)?;
+        Ok(())
     }
 
     #[tokio::test]
