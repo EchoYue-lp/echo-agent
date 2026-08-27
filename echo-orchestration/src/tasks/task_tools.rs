@@ -3,12 +3,13 @@
 use std::sync::Arc;
 
 use echo_core::error::Result;
+use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 
 use super::{
-    TaskCreateInput, TaskDraft, TaskGraphExecutionMode, TaskPlanPatchInputOp, TaskRevisionError,
-    TaskRevisionService, TaskSpecPatch, TaskStatus, TaskUpdateInput,
+    Task, TaskCreateInput, TaskDraft, TaskGraphExecutionMode, TaskPlanPatchInputOp,
+    TaskRevisionError, TaskRevisionService, TaskSpecPatch, TaskStatus, TaskUpdateInput,
 };
 
 pub struct TaskCreateTool {
@@ -143,6 +144,9 @@ pub struct TaskListTool {
     service: Arc<TaskRevisionService>,
 }
 
+const TASK_LIST_DEFAULT_LIMIT: usize = 20;
+const TASK_LIST_MAX_LIMIT: usize = 100;
+
 impl TaskListTool {
     pub fn new(service: Arc<TaskRevisionService>) -> Self {
         Self { service }
@@ -155,44 +159,93 @@ impl Tool for TaskListTool {
     }
 
     fn description(&self) -> &str {
-        "List the current TaskRun's tasks, dependency-aware graph revision, and runtime status."
+        "List the current TaskRun's tasks, dependency-aware graph revision, and runtime status. Results are bounded; use limit, cursor, and detail_level=full to page through the same committed graph without creating another task store."
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({ "type": "object", "properties": {} })
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": TASK_LIST_MAX_LIMIT,
+                    "default": TASK_LIST_DEFAULT_LIMIT,
+                    "description": "Maximum tasks returned in one page."
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor returned in the previous page metadata."
+                },
+                "detail_level": {
+                    "type": "string",
+                    "enum": ["summary", "full"],
+                    "default": "summary",
+                    "description": "Summary returns id/title/status; full also includes dependencies, retry count, and status detail."
+                }
+            }
+        })
     }
 
     fn execute_with_context<'a>(
         &'a self,
-        _params: ToolParameters,
+        params: ToolParameters,
         context: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
+            let page_request = match PageRequest::from_parameters(
+                &params,
+                TASK_LIST_DEFAULT_LIMIT,
+                TASK_LIST_MAX_LIMIT,
+            ) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::error(error.to_string())),
+            };
+            let detail_level = match params.get("detail_level") {
+                None => "summary",
+                Some(value) => match value.as_str() {
+                    Some("summary") => "summary",
+                    Some("full") => "full",
+                    Some(other) => {
+                        return Ok(ToolResult::error(format!(
+                            "detail_level must be 'summary' or 'full', received '{other}'"
+                        )));
+                    }
+                    None => {
+                        return Ok(ToolResult::error(
+                            "detail_level must be a string ('summary' or 'full')",
+                        ));
+                    }
+                },
+            };
             let scope_id = match self.service.resolve_scope(context).await {
                 Ok(scope_id) => scope_id,
                 Err(error) => return Ok(ToolResult::error(error.to_string())),
             };
             match self.service.load(&scope_id).await {
                 Ok(Some(graph)) => {
-                    let lines = graph
-                        .snapshot
-                        .tasks
+                    let query = serde_json::json!({
+                        "scope_id": scope_id,
+                        "detail_level": detail_level,
+                    });
+                    let (tasks, page_info) =
+                        match page_request.paginate(graph.snapshot.tasks.clone(), &query) {
+                            Ok(page) => page,
+                            Err(error) => return Ok(ToolResult::error(error.to_string())),
+                        };
+                    let lines = tasks
                         .iter()
-                        .map(|task| {
-                            format!(
-                                "[{}] {} — {}",
-                                status_name(&task.execution.status),
-                                task.spec.id,
-                                task.spec.title
-                            )
-                        })
+                        .map(|task| render_task_list_row(task, detail_level))
                         .collect::<Vec<_>>();
-                    Ok(ToolResult::success(format!(
+                    let mut result = ToolResult::success(format!(
                         "Task graph revision {} — Tasks ({}):\n{}",
                         graph.snapshot.revision,
-                        graph.snapshot.tasks.len(),
+                        page_info.total.unwrap_or(graph.snapshot.tasks.len()),
                         lines.join("\n")
-                    )))
+                    ));
+                    page_info.apply_to(&mut result);
+                    Ok(result)
                 }
                 Ok(None) => Ok(ToolResult::error("No tasks; call task_create first")),
                 Err(error) => Ok(ToolResult::error(format!("Failed: {error}"))),
@@ -654,6 +707,40 @@ fn status_name(status: &TaskStatus) -> &'static str {
     }
 }
 
+fn render_task_list_row(task: &Task, detail_level: &str) -> String {
+    let mut row = format!(
+        "[{}] {} — {}",
+        status_name(&task.execution.status),
+        task.spec.id,
+        task.spec.title
+    );
+    if detail_level == "full" {
+        if !task.spec.depends_on.is_empty() {
+            row.push_str(&format!("; depends_on={}", task.spec.depends_on.join(",")));
+        }
+        row.push_str(&format!(
+            "; retry={}/{}",
+            task.execution.retry_count, task.spec.max_retries
+        ));
+        let detail = match &task.execution.status {
+            TaskStatus::Blocked(detail)
+            | TaskStatus::Failed(detail)
+            | TaskStatus::Paused(detail) => Some(detail.as_str()),
+            TaskStatus::TimedOut { error } => Some(error.as_str()),
+            TaskStatus::Retrying { last_error, .. } => Some(last_error.as_str()),
+            TaskStatus::Pending
+            | TaskStatus::Running
+            | TaskStatus::Completed
+            | TaskStatus::Skipped
+            | TaskStatus::Cancelled => None,
+        };
+        if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
+            row.push_str(&format!("; detail={detail}"));
+        }
+    }
+    row
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,13 +786,30 @@ mod tests {
 
         let list = TaskListTool::new(service);
         let listed = list
-            .execute(parameters(serde_json::json!({}))?)
+            .execute(parameters(
+                serde_json::json!({"detail_level": "full", "limit": 5}),
+            )?)
             .await
             .map_err(|error| error.to_string())?;
         assert!(listed.success);
         assert!(listed.output.contains("revision 2"));
         assert!(listed.output.contains("分析问题"));
+        assert!(listed.output.contains("retry=0/3"));
+        assert_eq!(listed.metadata.get("page.returned"), Some(&"1".to_string()));
         Ok(())
+    }
+
+    #[test]
+    fn task_list_schema_exposes_bounded_paging_and_detail() {
+        let schema = TaskListTool::new(service()).parameters();
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object);
+        assert!(properties.is_some_and(|properties| {
+            properties.contains_key("limit")
+                && properties.contains_key("cursor")
+                && properties.contains_key("detail_level")
+        }));
     }
 
     #[test]

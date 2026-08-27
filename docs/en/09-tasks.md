@@ -43,11 +43,18 @@ The default framework Agent registers three task tools:
 |------|----------|
 | `task_create` | Atomically creates one complete graph, or appends with `base_revision` |
 | `task_update` | Applies one optimistic patch to specs, relations, order, skip, or status |
-| `task_list` | Reads the current committed graph revision |
+| `task_list` | Reads a bounded page of the current committed graph revision; accepts `limit` (1–100), an opaque `cursor`, and `detail_level` (`summary` or `full`) |
 
 The first `task_create` call must carry every related task in one `tasks`
 array. Later mutations include the current `base_revision`; stale writers fail
 with a revision conflict instead of overwriting newer state.
+
+`task_list` defaults to a 20-task summary page. The result metadata includes
+`page.next_cursor`, `page.returned`, `page.total`, and `page.truncated` when more
+tasks remain. Reuse the cursor with the same committed graph and limit; a query
+or snapshot change invalidates it. `detail_level=full` adds dependencies, retry
+counts, and non-empty lifecycle detail without creating a second store or
+reducer.
 
 Applications that need durable storage or product policy inject their own
 `RevisionedTaskStore` and `TaskToolPolicy`:

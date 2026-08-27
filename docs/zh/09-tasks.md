@@ -38,10 +38,16 @@ typed extension 持有。
 |------|------|
 | `task_create` | 原子创建完整任务图，或携带 `base_revision` 追加任务 |
 | `task_update` | 对规格、关系、顺序、跳过或状态应用一次乐观并发 patch |
-| `task_list` | 读取当前已提交任务图版本 |
+| `task_list` | 读取当前已提交任务图的有界分页；支持 `limit`（1–100）、opaque `cursor` 和 `detail_level`（`summary`/`full`） |
 
 首次 `task_create` 必须在一个 `tasks` 数组中携带所有相关任务。后续修改携带
 当前 `base_revision`；过时写入返回版本冲突，不会覆盖更新的状态。
+
+`task_list` 默认返回 20 个任务的 summary 页。结果 metadata 会在仍有后续任务时
+提供 `page.next_cursor`、`page.returned`、`page.total` 和 `page.truncated`。后续请求
+必须使用相同的已提交任务图和 limit 携带 opaque cursor；查询或快照变化会使 cursor
+失效。`detail_level=full` 只额外返回依赖、重试计数和非空生命周期 detail，不建立
+第二个 store 或 reducer。
 
 需要持久化或产品策略的应用注入自己的 `RevisionedTaskStore` 和
 `TaskToolPolicy`：
