@@ -812,6 +812,79 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn task_list_cursor_continuation_is_bounded_and_exact() -> std::result::Result<(), String>
+    {
+        let service = service();
+        let create = TaskCreateTool::new(service.clone());
+        let created = create
+            .execute(parameters(serde_json::json!({
+                "tasks": [
+                    {"id": "first", "title": "First", "description": "one"},
+                    {"id": "second", "title": "Second", "description": "two"},
+                    {"id": "third", "title": "Third", "description": "three"}
+                ]
+            }))?)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(created.success);
+
+        let list = TaskListTool::new(service);
+        let first_page = list
+            .execute(parameters(serde_json::json!({"limit": 2}))?)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(first_page.success);
+        assert!(first_page.truncated);
+        assert!(first_page.output.contains("first"));
+        assert!(first_page.output.contains("second"));
+        assert!(!first_page.output.contains("third"));
+        let cursor = first_page
+            .metadata
+            .get("page.next_cursor")
+            .cloned()
+            .ok_or_else(|| "first page omitted next cursor".to_string())?;
+
+        let second_page = list
+            .execute(parameters(serde_json::json!({
+                "limit": 2,
+                "cursor": cursor,
+            }))?)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(second_page.success);
+        assert!(!second_page.truncated);
+        assert!(!second_page.output.contains("first"));
+        assert!(!second_page.output.contains("second"));
+        assert!(second_page.output.contains("third"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_list_rejects_invalid_cursor() -> std::result::Result<(), String> {
+        let service = service();
+        let create = TaskCreateTool::new(service.clone());
+        let created = create
+            .execute(parameters(serde_json::json!({
+                "tasks": [{"id": "task-1", "title": "Task", "description": "one"}]
+            }))?)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(created.success);
+
+        let list = TaskListTool::new(service);
+        let result = list
+            .execute(parameters(serde_json::json!({
+                "limit": 2,
+                "cursor": "not-hex",
+            }))?)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(!result.success);
+        assert!(result.error.is_some());
+        Ok(())
+    }
+
     #[test]
     fn default_schema_exposes_manual_status_updates() {
         let schema = task_update_schema(&service());
