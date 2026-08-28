@@ -523,25 +523,24 @@ impl PluginIntegrator {
                 None => None,
             };
             #[cfg(not(feature = "mcp"))]
-            if let Some(path) = resolved.mcp_config_file {
-                if let Some(contents) =
+            if let Some(path) = resolved.mcp_config_file
+                && let Some(contents) =
                     read_text(&path, &variables, &plugin_id, "mcp", &mut diagnostics).await
-                {
-                    hash_document(
-                        &mut identity,
-                        "mcp",
-                        &variables.plugin_root,
-                        &path,
-                        contents.as_bytes(),
-                    );
-                    diagnostics.push(warning_diagnostic(
-                        Some(&plugin_id),
-                        "mcp",
-                        Some(path),
-                        "MCP component is frozen but cannot be applied without the 'mcp' feature"
-                            .to_string(),
-                    ));
-                }
+            {
+                hash_document(
+                    &mut identity,
+                    "mcp",
+                    &variables.plugin_root,
+                    &path,
+                    contents.as_bytes(),
+                );
+                diagnostics.push(warning_diagnostic(
+                    Some(&plugin_id),
+                    "mcp",
+                    Some(path),
+                    "MCP component is frozen but cannot be applied without the 'mcp' feature"
+                        .to_string(),
+                ));
             }
 
             let mut subagent_documents = Vec::new();
