@@ -234,12 +234,16 @@ pub fn register_all_tools_with_cells(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "database", feature = "files", feature = "shell"))]
     use super::*;
+    #[cfg(any(feature = "database", feature = "files", feature = "shell"))]
     use echo_core::tools::Tool;
 
+    #[cfg(any(feature = "database", feature = "files", feature = "shell"))]
     #[derive(Default)]
     struct Collector(Vec<String>);
 
+    #[cfg(any(feature = "database", feature = "files", feature = "shell"))]
     impl ToolRegistrar for Collector {
         fn register(&mut self, tool: Box<dyn Tool>) {
             self.0.push(tool.name().to_string());
