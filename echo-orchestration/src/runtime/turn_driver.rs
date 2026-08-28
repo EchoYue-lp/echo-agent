@@ -83,7 +83,7 @@
 use async_trait::async_trait;
 use echo_core::agent::{
     Agent, AgentEvent, AgentInvocationContext, AgentSteerTurnOutcome, CancellationToken,
-    EventEnvelope, EventIdentity, TurnId, envelope_event_stream_after,
+    EventEnvelope, EventIdentity, MessageId, TurnId, envelope_event_stream_after,
 };
 use echo_core::error::{AgentFailure, ReactError};
 use echo_core::llm::Message;
@@ -424,12 +424,16 @@ pub struct TurnReceipt {
     pub outcome: TurnOutcome,
     /// Final answer text when the turn completed with one.
     pub final_answer: Option<String>,
+    /// Message identity carried by the accepted final-answer envelope.
+    pub final_message_id: Option<MessageId>,
     /// Provider-reported prompt tokens accumulated over the turn.
     pub prompt_tokens: u64,
     /// Provider-reported completion tokens accumulated over the turn.
     pub completion_tokens: u64,
     /// Number of provider calls that reported usage.
     pub llm_calls: u64,
+    /// Number of explicit context-compaction boundaries emitted by the Agent.
+    pub compaction_count: u64,
     /// Last envelope sequence emitted for the turn.
     pub last_event_sequence: u64,
     /// Wall-clock turn duration.
@@ -452,9 +456,11 @@ impl TurnReceipt {
             turn_id,
             outcome: TurnOutcome::Failed(failure),
             final_answer: None,
+            final_message_id: None,
             prompt_tokens: 0,
             completion_tokens: 0,
             llm_calls: 0,
+            compaction_count: 0,
             last_event_sequence,
             elapsed: started.elapsed(),
         }
@@ -626,9 +632,11 @@ impl AgentTurnDriver {
         };
         let mut outcome: Option<TurnOutcome> = None;
         let mut final_answer: Option<String> = None;
+        let mut final_message_id: Option<MessageId> = None;
         let mut prompt_tokens: u64 = 0;
         let mut completion_tokens: u64 = 0;
         let mut llm_calls: u64 = 0;
+        let mut compaction_count: u64 = 0;
         let mut last_event_sequence = request.last_persisted_sequence;
         let mut stream =
             envelope_event_stream_after(raw, request.identity, request.last_persisted_sequence);
@@ -660,7 +668,11 @@ impl AgentTurnDriver {
                     if outcome.is_none() {
                         outcome = Some(TurnOutcome::Completed);
                         final_answer = Some(answer.clone());
+                        final_message_id = envelope.message_id.clone();
                     }
+                }
+                AgentEvent::ContextCompressed { .. } => {
+                    compaction_count = compaction_count.saturating_add(1);
                 }
                 AgentEvent::Cancelled => {
                     outcome.get_or_insert(TurnOutcome::Cancelled);
@@ -689,6 +701,7 @@ impl AgentTurnDriver {
                     token.cancel();
                     outcome = Some(TurnOutcome::Failed(AgentFailure::from_react_error(&error)));
                     final_answer = None;
+                    final_message_id = None;
                     break;
                 }
             }
@@ -710,9 +723,11 @@ impl AgentTurnDriver {
             turn_id,
             outcome,
             final_answer,
+            final_message_id,
             prompt_tokens,
             completion_tokens,
             llm_calls,
+            compaction_count,
             last_event_sequence,
             elapsed: started.elapsed(),
         }
@@ -1131,6 +1146,78 @@ mod tests {
         assert_eq!(receipt.prompt_tokens, 107);
         assert_eq!(receipt.completion_tokens, 43);
         assert_eq!(receipt.llm_calls, 2);
+    }
+
+    #[tokio::test]
+    async fn receipt_owns_final_message_and_compaction_facts() -> Result<(), String> {
+        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
+            vec![
+                AgentEvent::ContextCompressed {
+                    before_count: 12,
+                    after_count: 5,
+                    before_tokens: 1_200,
+                    after_tokens: 500,
+                },
+                AgentEvent::ContextCompressed {
+                    before_count: 8,
+                    after_count: 4,
+                    before_tokens: 800,
+                    after_tokens: 400,
+                },
+                AgentEvent::FinalAnswer("finished".to_string()),
+            ]
+        }));
+        let identity = EventIdentity::for_chat(
+            Some("conversation-receipt".to_string()),
+            "turn-receipt",
+            "message-receipt",
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let receipt = AgentTurnDriver
+            .drive(
+                agent.as_ref(),
+                TurnRequest::new(identity, "hello"),
+                &RecordingSink::default(),
+            )
+            .await;
+
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(receipt.compaction_count, 2);
+        assert_eq!(
+            receipt
+                .final_message_id
+                .as_ref()
+                .map(echo_core::agent::MessageId::as_str),
+            Some("message-receipt")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_delivery_clears_final_completion_facts() -> Result<(), String> {
+        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
+            vec![AgentEvent::FinalAnswer("undelivered".to_string())]
+        }));
+        let identity = EventIdentity::for_chat(
+            Some("conversation-delivery-failure".to_string()),
+            "turn-delivery-failure",
+            "message-delivery-failure",
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let receipt = AgentTurnDriver
+            .drive(
+                agent.as_ref(),
+                TurnRequest::new(identity, "hello"),
+                &FailingSink,
+            )
+            .await;
+
+        assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+        assert!(receipt.final_answer.is_none());
+        assert!(receipt.final_message_id.is_none());
+        Ok(())
     }
 
     #[tokio::test]

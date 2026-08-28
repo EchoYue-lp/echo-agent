@@ -197,6 +197,17 @@ the provider call. The same driver publishes the typed terminal outcome. Agents
 that do not expose an input lifecycle publisher leave the terminal receipt at
 `drained = false`; output events and EOF are never used as a substitute.
 
+### Canonical turn receipt
+
+`AgentTurnDriver` returns the sole framework-owned `TurnReceipt` for generic
+turn facts. In addition to the typed terminal, it carries the final answer and
+message identity, provider-reported input/output totals, reported-call count,
+explicit context-compaction count, final envelope sequence, and elapsed time.
+Product sinks may persist or render the same envelopes, but must project these
+fields from the receipt instead of folding a second turn summary from events.
+Product-only facts such as workspace routing, UI retention pins, and webhook
+delivery remain in the application adapter.
+
 ---
 
 ## Stream Timeout Mechanism (Planned)

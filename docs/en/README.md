@@ -84,6 +84,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [0007 - Atomic Journal Batch Commits](../adr/0007-atomic-journal-batch-commits.md)   | Related journal events become visible as one durable commit unit      |
 | [0008 - Canonical Runtime Task Authority](../adr/0008-canonical-runtime-task-authority.md) | One revisioned graph owns task CRUD, execution, and settlement    |
 | [0009 - Tracked Input Receipts](../adr/0009-tracked-input-receipts.md) | Active and initial inputs expose accepted, drained, and terminal boundaries |
+| [0010 - Canonical Turn Receipt Accounting](../adr/0010-canonical-turn-receipt-accounting.md) | One framework receipt owns generic terminal, usage, compaction, and final-message facts |
 
 ---
 

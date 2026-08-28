@@ -197,6 +197,16 @@ Agent stream API 之前发布 `Accepted`；`ReactAgent` 只在初始消息成功
 typed terminal。没有 input lifecycle publisher 的 Agent 即使产生输出，也保持
 `drained = false`；不能用输出事件或 EOF 替代真实 drain。
 
+### 规范化 turn receipt
+
+`AgentTurnDriver` 返回 framework 对通用 turn 事实的唯一权威
+`TurnReceipt`。除 typed terminal 外，它还携带 final answer 及其 message
+identity、provider 报告的输入/输出 token 合计、报告 usage 的调用次数、显式
+context compaction 次数、最后一个 envelope sequence 和耗时。产品 sink 可以持久化
+或渲染同一批 envelope，但必须从 receipt 投影这些字段，不能再从事件折叠第二份
+turn summary。workspace routing、UI retention pin、webhook delivery 等产品事实仍留在
+应用 adapter。
+
 ---
 
 ## 流式超时机制（规划中）

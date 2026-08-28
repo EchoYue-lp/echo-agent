@@ -83,6 +83,7 @@
 | [0007 - Journal 原子批次提交](../adr/0007-atomic-journal-batch-commits.md)       | 相关 journal 事件作为一个持久提交单元整体可见              |
 | [0008 - Runtime Task 单一权威](../adr/0008-canonical-runtime-task-authority.md) | 一个 revisioned graph 统一 Task CRUD、执行与结算           |
 | [0009 - Tracked Input Receipt](../adr/0009-tracked-input-receipts.md) | Active 与初始输入统一暴露 accepted、drained、terminal 边界 |
+| [0010 - 规范化 Turn Receipt 计量](../adr/0010-canonical-turn-receipt-accounting.md) | 通用 terminal、usage、compaction 与 final-message 事实只有一个 framework receipt 权威 |
 
 ---
 

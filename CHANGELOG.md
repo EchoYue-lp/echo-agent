@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TurnReceipt` now carries the final message identity and explicit context
+  compaction count alongside its existing typed terminal, final answer, usage,
+  sequence, and elapsed-time facts. Downstream products can project one
+  canonical bounded turn summary instead of re-folding the event stream. See
+  [ADR 0010](docs/adr/0010-canonical-turn-receipt-accounting.md).
+
 - `TurnRequest::with_input_receipt` exposes a generic initial-input lifecycle:
   the driver publishes admission, `ReactAgent` publishes the real
   `ContextManager` drain boundary, and the same driver publishes a typed
