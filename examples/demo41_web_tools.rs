@@ -208,10 +208,11 @@ async fn demo_web_fetch() -> echo_agent::error::Result<()> {
             result.error
         )));
     }
+    let output_char_count = result.output.chars().count();
     let preview: String = result.output.chars().take(500).collect();
     println!("  {preview}");
-    if result.output.len() > 500 {
-        println!("  ... (共 {} 字符)", result.output.len());
+    if output_char_count > 500 {
+        println!("  ... (共 {output_char_count} 字符)");
     }
     println!();
     Ok(())

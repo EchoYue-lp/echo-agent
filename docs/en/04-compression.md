@@ -255,7 +255,7 @@ let result = compressor.compress_in_place(&mut messages, current_tokens, target_
 println!("Levels applied: {:?}", result.levels_applied);
 ```
 
-See [demo53_adaptive_compression.rs](../../examples/demo53_adaptive_compression.rs).
+See [demo53_adaptive_compression.rs](../../tests/example_contracts/demo53_adaptive_compression.rs).
 
 ---
 
@@ -439,7 +439,7 @@ ctx.prepare() is called:
 | Tool-heavy workflows | `AdaptiveCompressor` (auto-escalation with L1 tool folding) |
 | Test environment | `SlidingWindowCompressor(5)` + `token_limit: 100` |
 
-See: `examples/demo05_compressor.rs`, `examples/demo53_adaptive_compression.rs`
+See: `examples/demo05_compressor.rs`, `tests/example_contracts/demo53_adaptive_compression.rs`
 
 ---
 

@@ -93,7 +93,8 @@ impl Tool for CodeQualityTool {
                 .unwrap_or("unknown");
 
             // 简单模拟代码分析
-            let score: i32 = if code.len() > 50 { 85 } else { 70 };
+            let code_length = code.chars().count();
+            let score: i32 = if code_length > 50 { 85 } else { 70 };
             let issues = if code.contains("TODO") || code.contains("FIXME") {
                 vec!["存在未完成的 TODO 项".to_string()]
             } else {
@@ -103,7 +104,7 @@ impl Tool for CodeQualityTool {
             let result = json!({
                 "analysis_id": format!("QA-{:03}", count),
                 "language": lang,
-                "code_length": code.len(),
+                "code_length": code_length,
                 "quality_score": score,
                 "issues": issues,
                 "suggestions": if score > 80 {
@@ -540,6 +541,6 @@ fn print_banner() {
     println!("║                                                                ║");
     println!("║  展示核心能力：                                                 ║");
     println!("║  • 外部技能 • Plan-Execute • 动态工具 • Workflow 流式           ║");
-    println!("║  • 拓扑追踪 • Subagent 团队 • SQLite 记忆 • 语义检索          ║");
+    println!("║  • 拓扑追踪 • Subagent 团队 • 内存状态 • 结构化结果          ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 }

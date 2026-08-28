@@ -164,7 +164,7 @@ async fn demo_2_catalog() -> echo_agent::error::Result<()> {
     println!(
         "  Catalog ({} skills, {} chars):\n",
         registry.descriptor_count(),
-        catalog.len()
+        catalog.chars().count()
     );
     for line in catalog.lines() {
         println!("  │ {}", line);
@@ -219,7 +219,10 @@ async fn demo_3_activation() -> echo_agent::error::Result<()> {
         )));
     }
 
-    println!("  Instructions ({} chars):", content.instructions.len());
+    println!(
+        "  Instructions ({} chars):",
+        content.instructions.chars().count()
+    );
     for line in content.instructions.lines().take(12) {
         println!("  │ {}", line);
     }
@@ -298,28 +301,32 @@ async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
             &project_dir,
         )
         .await?;
-        let summary = &json["summary"];
-        if summary["total_files"].as_u64().unwrap_or(0) == 0 {
+        let summary = required_json_field(&json, "summary", "count_lines.py")?;
+        let total_files = required_json_u64(summary, "total_files", "count_lines.py summary")?;
+        if total_files == 0 {
             return Err(echo_agent::error::ReactError::Other(
                 "demo08 验收失败：count_lines.py 未返回有效文件统计".to_string(),
             ));
         }
+        let total_lines = required_json_field(summary, "total_lines", "count_lines.py summary")?;
+        let code_lines = required_json_field(summary, "code_lines", "count_lines.py summary")?;
+        let languages_detected =
+            required_json_field(summary, "languages_detected", "count_lines.py summary")?;
         println!(
             "    Files: {}, Lines: {}, Code: {}, Languages: {}",
-            summary["total_files"],
-            summary["total_lines"],
-            summary["code_lines"],
-            summary["languages_detected"]
+            total_files, total_lines, code_lines, languages_detected
         );
-        if let Some(langs) = json["languages"].as_array() {
+        if let Some(langs) = json.get("languages").and_then(serde_json::Value::as_array) {
             println!("    Top languages:");
             for lang in langs.iter().take(5) {
+                let percentage = required_json_f64(lang, "percentage", "count_lines.py language")?;
+                let language = required_json_str(lang, "language", "count_lines.py language")?;
+                let files = required_json_field(lang, "files", "count_lines.py language")?;
+                let code_lines =
+                    required_json_field(lang, "code_lines", "count_lines.py language")?;
                 println!(
                     "      {:>5.1}%  {} ({} files, {} lines)",
-                    lang["percentage"].as_f64().unwrap_or(0.0),
-                    lang["language"].as_str().unwrap_or("?"),
-                    lang["files"],
-                    lang["code_lines"]
+                    percentage, language, files, code_lines
                 );
             }
         }
@@ -338,15 +345,15 @@ async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
             &project_dir,
         )
         .await?;
-        let summary = &json["summary"];
-        if summary["total"].as_u64().is_none() {
-            return Err(echo_agent::error::ReactError::Other(
-                "demo08 验收失败：find_todos.sh 未返回 summary.total".to_string(),
-            ));
-        }
+        let summary = required_json_field(&json, "summary", "find_todos.sh")?;
+        let total = required_json_u64(summary, "total", "find_todos.sh summary")?;
+        let todo = required_json_field(summary, "TODO", "find_todos.sh summary")?;
+        let fixme = required_json_field(summary, "FIXME", "find_todos.sh summary")?;
+        let hack = required_json_field(summary, "HACK", "find_todos.sh summary")?;
+        let xxx = required_json_field(summary, "XXX", "find_todos.sh summary")?;
         println!(
             "    Total markers: {} (TODO={}, FIXME={}, HACK={}, XXX={})",
-            summary["total"], summary["TODO"], summary["FIXME"], summary["HACK"], summary["XXX"]
+            total, todo, fixme, hack, xxx
         );
     }
 
@@ -363,21 +370,23 @@ async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
             &project_dir,
         )
         .await?;
-        let total = json["total_dependencies"].as_u64().unwrap_or(0);
+        let total = required_json_u64(&json, "total_dependencies", "dep_summary.ts")?;
         if total == 0 {
             return Err(echo_agent::error::ReactError::Other(
                 "demo08 验收失败：dep_summary.ts 未返回依赖统计".to_string(),
             ));
         }
         println!("    Total dependencies: {}", total);
-        if let Some(managers) = json["managers"].as_array() {
+        if let Some(managers) = json.get("managers").and_then(serde_json::Value::as_array) {
             for mgr in managers {
+                let manager = required_json_str(mgr, "manager", "dep_summary.ts manager")?;
+                let file = required_json_str(mgr, "file", "dep_summary.ts manager")?;
+                let direct_count =
+                    required_json_field(mgr, "direct_count", "dep_summary.ts manager")?;
+                let dev_count = required_json_field(mgr, "dev_count", "dep_summary.ts manager")?;
                 println!(
                     "    {} ({}): {} direct, {} dev",
-                    mgr["manager"].as_str().unwrap_or("?"),
-                    mgr["file"].as_str().unwrap_or("?"),
-                    mgr["direct_count"],
-                    mgr["dev_count"]
+                    manager, file, direct_count, dev_count
                 );
             }
         }
@@ -461,14 +470,66 @@ async fn run_skill_script_stdout(
 }
 
 fn extract_script_stdout(output: &str) -> Option<&str> {
-    let start = output.find(">\n")?;
-    let end = output.rfind("</script_output>")?;
-    let body = output[start + 2..end].trim();
+    let (_, body) = output.split_once(">\n")?;
+    let (body, _) = body.rsplit_once("</script_output>")?;
+    let body = body.trim();
     let body = body
         .split_once("\n<stderr>")
         .map(|(stdout, _)| stdout)
         .unwrap_or(body);
     Some(body.trim())
+}
+
+fn required_json_field<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+    context: &str,
+) -> echo_agent::error::Result<&'a serde_json::Value> {
+    value.get(field).ok_or_else(|| {
+        echo_agent::error::ReactError::Other(format!("demo08 验收失败：{context} 缺少字段 {field}"))
+    })
+}
+
+fn required_json_u64(
+    value: &serde_json::Value,
+    field: &str,
+    context: &str,
+) -> echo_agent::error::Result<u64> {
+    required_json_field(value, field, context)?
+        .as_u64()
+        .ok_or_else(|| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo08 验收失败：{context}.{field} 不是无符号整数"
+            ))
+        })
+}
+
+fn required_json_f64(
+    value: &serde_json::Value,
+    field: &str,
+    context: &str,
+) -> echo_agent::error::Result<f64> {
+    required_json_field(value, field, context)?
+        .as_f64()
+        .ok_or_else(|| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo08 验收失败：{context}.{field} 不是数值"
+            ))
+        })
+}
+
+fn required_json_str<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+    context: &str,
+) -> echo_agent::error::Result<&'a str> {
+    required_json_field(value, field, context)?
+        .as_str()
+        .ok_or_else(|| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo08 验收失败：{context}.{field} 不是字符串"
+            ))
+        })
 }
 
 // ── Part 5: Full Agent Integration ───────────────────────────────────────────
@@ -921,7 +982,10 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
                 "demo08 验收失败：小红书封面技能激活结果不完整".to_string(),
             ));
         }
-        println!("\n    Instructions ({} chars):", content.instructions.len());
+        println!(
+            "\n    Instructions ({} chars):",
+            content.instructions.chars().count()
+        );
         for line in content.instructions.lines() {
             println!("    │ {}", line);
         }

@@ -141,7 +141,7 @@ agent.add_tool(Box::new(
 - 筛选满足业务条件的记录
 - 按分类聚合收入或数量
 
-参考示例：`examples/demo43_data_tools.rs`
+参考示例：`tests/example_contracts/demo43_data_tools.rs`
 
 ---
 

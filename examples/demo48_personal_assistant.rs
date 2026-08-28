@@ -148,8 +148,16 @@ async fn demo_long_term_memory(db_path: &Path) -> Result<()> {
         ));
     };
     println!("    用户资料:");
-    println!("      兴趣: {:?}", item.value["interests"]);
-    println!("      目标: {:?}", item.value["goals"]);
+    let interests = item.value.get("interests").ok_or_else(|| {
+        echo_agent::error::ReactError::Other(
+            "综合验收失败：user_profile 缺少 interests".to_string(),
+        )
+    })?;
+    let goals = item.value.get("goals").ok_or_else(|| {
+        echo_agent::error::ReactError::Other("综合验收失败：user_profile 缺少 goals".to_string())
+    })?;
+    println!("      兴趣: {:?}", interests);
+    println!("      目标: {:?}", goals);
     println!();
 
     // 搜索相关对话
@@ -161,7 +169,11 @@ async fn demo_long_term_memory(db_path: &Path) -> Result<()> {
     }
     println!("    关于「Rust」的对话:");
     for item in &search_results {
-        let summary = item.value["summary"].as_str().unwrap_or("");
+        let summary = item
+            .value
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         println!("      • {}", summary);
     }
     println!();

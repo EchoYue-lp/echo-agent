@@ -14,11 +14,7 @@
 //! without making real LLM calls.
 //!
 //! ```sh
-//! # Dry-run demo (no API key needed):
-//! cargo run --example demo54_headless
-//!
-//! # With an LLM API key (full end-to-end):
-//! DEEPSEEK_API_KEY=sk-xxx cargo run --example demo54_headless
+//! cargo test --test example_contracts contract_demo54_headless
 //! ```
 
 use echo_agent::headless::{HeadlessConfig, HeadlessResult};
@@ -31,8 +27,8 @@ macro_rules! section {
     };
 }
 
-#[tokio::main]
-async fn main() {
+#[tokio::test]
+async fn contract_demo54_headless() -> Result<(), serde_json::Error> {
     println!("╔══════════════════════════════════════════════════╗");
     println!("║       echo-agent  Headless Mode Demo             ║");
     println!("║  (config + result handling — no LLM required)    ║");
@@ -41,7 +37,7 @@ async fn main() {
     demo_config_defaults();
     demo_config_custom();
     demo_text_output();
-    demo_json_output();
+    demo_json_output()?;
     demo_exit_codes();
     demo_empty_prompt();
     demo_cicd_pattern();
@@ -49,6 +45,7 @@ async fn main() {
     println!("\n╔══════════════════════════════════════════════════╗");
     println!("║  All 7 scenarios passed ✅                       ║");
     println!("╚══════════════════════════════════════════════════╝");
+    Ok(())
 }
 
 /// Scenario 1: Default configuration
@@ -112,7 +109,7 @@ fn demo_text_output() {
 }
 
 /// Scenario 4: JSON output formatting
-fn demo_json_output() {
+fn demo_json_output() -> Result<(), serde_json::Error> {
     section!(4, "JSON Output Mode");
 
     let result = HeadlessResult {
@@ -130,11 +127,21 @@ fn demo_json_output() {
     }
 
     // Verify JSON structure
-    let parsed: serde_json::Value = serde_json::from_str(&formatted).unwrap();
-    assert_eq!(parsed["success"], true);
-    assert_eq!(parsed["model"], "qwen3-max");
-    assert_eq!(parsed["output"], "Task completed successfully");
+    let parsed: serde_json::Value = serde_json::from_str(&formatted)?;
+    assert_eq!(
+        parsed.get("success").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        parsed.get("model").and_then(serde_json::Value::as_str),
+        Some("qwen3-max")
+    );
+    assert_eq!(
+        parsed.get("output").and_then(serde_json::Value::as_str),
+        Some("Task completed successfully")
+    );
     println!("  ✅ JSON mode returns structured {{success, model, output}}");
+    Ok(())
 }
 
 /// Scenario 5: Exit code computation

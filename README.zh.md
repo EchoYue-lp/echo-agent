@@ -706,7 +706,7 @@ agent.set_circuit_breaker(cb_config);
 | 01 | [`demo01_tools`](examples/demo01_tools.rs) | `#[tool]` 宏自定义工具 |
 | 02 | [`demo02_tasks`](examples/demo02_tasks.rs) | DAG 任务规划 |
 | 03 | [`demo03_approval`](examples/demo03_approval.rs) | 人工审批 |
-| 04 | [`demo04_subagent`](examples/demo04_subagent.rs) | 多 Agent 编排 |
+| 04 | [`demo04_subagent`](tests/example_contracts/demo04_subagent.rs) | 多 Agent 编排 |
 | 05 | [`demo05_compressor`](examples/demo05_compressor.rs) | 上下文压缩 |
 | 06 | [`demo06_mcp`](examples/demo06_mcp.rs) | MCP 工具服务器 |
 | 07 | [`demo07_skills`](examples/demo07_skills.rs) | 内置技能 |
@@ -714,7 +714,7 @@ agent.set_circuit_breaker(cb_config);
 | 09 | [`demo09_file_shell`](examples/demo09_file_shell.rs) | 文件 & Shell 工具 |
 | 10 | [`demo10_streaming`](examples/demo10_streaming.rs) | 流式输出 |
 | 11 | [`demo11_callbacks`](examples/demo11_callbacks.rs) | 生命周期回调 |
-| 12 | [`demo12_resilience`](examples/demo12_resilience.rs) | 重试与容错 |
+| 12 | [`demo12_resilience`](tests/example_contracts/demo12_resilience.rs) | 重试与容错 |
 | 13 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | 工具执行配置 |
 | 15 | [`demo15_structured_output`](examples/demo15_structured_output.rs) | JSON Schema 输出 |
 | 17 | [`demo17_chat`](examples/demo17_chat.rs) | 交互式对话 |
@@ -722,27 +722,27 @@ agent.set_circuit_breaker(cb_config);
 | 19 | [`demo19_guard`](examples/demo19_guard.rs) | 护栏系统 |
 | 20 | [`demo20_audit`](examples/demo20_audit.rs) | 审计日志 |
 | 23 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A 协议 |
-| 24 | [`demo24_topology`](examples/demo24_topology.rs) | 拓扑可视化 |
+| 24 | [`demo24_topology`](tests/example_contracts/demo24_topology.rs) | 拓扑可视化 |
 | 25 | [`demo25_macros`](examples/demo25_macros.rs) | 宏系统展示 |
 | 26 | [`demo26_provider_factory`](examples/demo26_provider_factory.rs) | 动态 LLM 工厂 |
 | 27 | [`demo27_sqlite_memory`](examples/demo27_sqlite_memory.rs) | SQLite 持久化 |
 | 28 | [`demo28_workflow`](examples/demo28_workflow.rs) | 工作流管道 |
 | 29 | [`demo29_sandbox`](examples/demo29_sandbox.rs) | 沙箱执行 |
-| 30 | [`demo30_mcp_server`](examples/demo30_mcp_server.rs) | MCP 服务端 |
-| 31 | [`demo31_memory_tools`](examples/demo31_memory_tools.rs) | 记忆工具注入 |
+| 30 | [`demo30_mcp_server`](tests/example_contracts/demo30_mcp_server.rs) | MCP 服务端 |
+| 31 | [`demo31_memory_tools`](tests/example_contracts/demo31_memory_tools.rs) | 记忆工具注入 |
 | 32 | [`demo32_token_budget`](examples/demo32_token_budget.rs) | Token 预算管控 |
 | 33 | [`demo33_retry_policy`](examples/demo33_retry_policy.rs) | 统一重试 |
-| 34 | [`demo34_workflow_stream`](examples/demo34_workflow_stream.rs) | 工作流流式 |
+| 34 | [`demo34_workflow_stream`](tests/example_contracts/demo34_workflow_stream.rs) | 工作流流式 |
 | 35 | [`demo35_dynamic_tools`](examples/demo35_dynamic_tools.rs) | 动态工具管理 |
 | 36 | [`demo36_multimodal`](examples/demo36_multimodal.rs) | 多模态消息 |
-| 37 | [`demo37_declarative_workflow`](examples/demo37_declarative_workflow.rs) | YAML/JSON 工作流 |
+| 37 | [`demo37_declarative_workflow`](tests/example_contracts/demo37_declarative_workflow.rs) | YAML/JSON 工作流 |
 | 38 | [`demo38_im_channels`](examples/demo38_im_channels.rs) | IM 通道集成 |
-| 39 | [`demo39_workflow`](examples/demo39_workflow.rs) | 图工作流引擎 |
+| 39 | [`demo39_workflow`](tests/example_contracts/demo39_workflow.rs) | 图工作流引擎 |
 | 40 | [`demo40_snapshot`](examples/demo40_snapshot.rs) | 快照与回滚 |
 | 41 | [`demo41_web_tools`](examples/demo41_web_tools.rs) | Web 搜索 + 获取 |
 | 42 | [`demo42_playwright_mcp`](examples/demo42_playwright_mcp.rs) | Playwright MCP 浏览器自动化 |
-| 43 | [`demo43_data_tools`](examples/demo43_data_tools.rs) | Excel / CSV / Word / Text 数据处理 |
-| 67 | [`demo67_progress`](examples/demo67_progress.rs) | 进度事件 |
+| 43 | [`demo43_data_tools`](tests/example_contracts/demo43_data_tools.rs) | Excel / CSV / Word / Text 数据处理 |
+| 67 | [`demo67_progress`](tests/example_contracts/demo67_progress.rs) | 进度事件 |
 | 68 | [`demo68_human_gate`](examples/demo68_human_gate.rs) | 人工审批门禁 |
 | 70 | [`demo70_scheduler`](examples/demo70_scheduler.rs) | 任务调度 |
 

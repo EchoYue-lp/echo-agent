@@ -26,7 +26,7 @@ use echo_agent::prelude::*;
 use echo_agent::workflow::{GraphBuilder, SharedState};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -194,8 +194,10 @@ async fn demo_semantic_storage(db_path: &Path) -> Result<()> {
         }
 
         for (i, item) in results.iter().take(2).enumerate() {
-            let content = item.value["content"]
-                .as_str()
+            let content = item
+                .value
+                .get("content")
+                .and_then(Value::as_str)
                 .unwrap_or("")
                 .chars()
                 .take(50)
@@ -232,7 +234,7 @@ async fn demo_structured_analysis() -> Result<()> {
 
     println!("  📋 分析任务: Q1 销售数据分析\n");
 
-    let schema = typed_response_format::<SalesAnalysis>("sales_analysis");
+    let schema = typed_response_format::<SalesAnalysis>("sales_analysis")?;
 
     let prompt = r#"请分析以下 Q1 销售数据，并返回一个严格匹配 schema 的 JSON 对象。
 不要输出 Markdown，不要省略任何字段。
@@ -310,7 +312,7 @@ async fn demo_data_quality_check() -> Result<()> {
     println!("    - 重复: 检测到25个重复用户");
     println!("    - 格式: phone字段有80个不符合格式\n");
 
-    let schema = typed_response_format::<DataQualityReport>("data_quality");
+    let schema = typed_response_format::<DataQualityReport>("data_quality")?;
 
     let prompt = "请评估以下用户数据集的质量，并返回一个严格匹配 schema 的 JSON 对象。
 不要输出 Markdown，不要省略任何字段。
@@ -480,13 +482,20 @@ async fn demo_history_retrieval(db_path: &Path) -> Result<()> {
             )));
         }
         for (i, item) in results.iter().enumerate() {
-            let content = item.value["content"]
-                .as_str()
+            let content = item
+                .value
+                .get("content")
+                .and_then(Value::as_str)
                 .unwrap_or("")
                 .chars()
                 .take(60)
                 .collect::<String>();
-            println!("      [{}] {}: {}...", i + 1, item.value["month"], content);
+            let month = item
+                .value
+                .get("month")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown month");
+            println!("      [{}] {}: {}...", i + 1, month, content);
         }
         println!();
     }
@@ -508,10 +517,10 @@ fn print_banner() {
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 }
 
-fn typed_response_format<T: JsonSchema>(name: &str) -> ResponseFormat {
+fn typed_response_format<T: JsonSchema>(name: &str) -> Result<ResponseFormat> {
     let schema = schema_for!(T);
-    let schema_value = serde_json::to_value(schema).expect("schema should serialize");
-    ResponseFormat::json_schema(name, schema_value)
+    let schema_value = serde_json::to_value(schema)?;
+    Ok(ResponseFormat::json_schema(name, schema_value))
 }
 
 fn data_analyst_db_path() -> PathBuf {

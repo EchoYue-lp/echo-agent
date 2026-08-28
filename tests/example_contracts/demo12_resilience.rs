@@ -15,15 +15,15 @@ async fn add(a: f64, b: f64) -> Result<ToolResult> {
     Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[tokio::test]
+async fn contract_demo12_resilience() -> Result<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "echo_agent=warn,demo12_resilience=info".into()),
         )
-        .init();
+        .try_init();
 
     print_banner();
 

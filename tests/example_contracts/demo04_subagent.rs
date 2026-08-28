@@ -67,11 +67,11 @@ fn spawn_human_loop_subagent(
     })
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
+#[tokio::test]
+async fn contract_demo04_subagent() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
-        .init();
+        .try_init();
 
     println!("🧪 demo04 - Subagent 编排 + Human-in-the-Loop 演示\n");
 
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
         .enable_tools()
         .enable_human_in_loop()
         .approval_provider(human_loop.clone() as Arc<dyn echo_agent::human_loop::HumanLoopProvider>)
-        .llm_client(weather_llm)
+        .llm_client(weather_llm.clone())
         .max_iterations(6)
         .build()?;
 
@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
         .model("math-agent-mock")
         .system_prompt("你是折扣计算专家，只使用数学工具逐步计算，再给出最终金额。")
         .enable_tools()
-        .llm_client(math_llm)
+        .llm_client(math_llm.clone())
         .max_iterations(16)
         .build()?;
     math_agent.add_tools(math_tools());
@@ -174,6 +174,7 @@ async fn main() -> Result<()> {
             "你是主编排 Agent。遇到缺失上下文的专业问题先分派给对应 subagent，再汇总结果，不要自己直接计算。",
         )
         .enable_subagent()
+        .register_agent_dispatch_tool()
         .llm_client(orchestrator_llm)
         .max_iterations(8)
         .enable_tools()
@@ -192,6 +193,13 @@ async fn main() -> Result<()> {
         return Err(echo_agent::error::ReactError::Other(
             "demo04 验收失败：Subagent 编排示例返回空结果".to_string(),
         ));
+    }
+    if weather_llm.call_count() == 0 || math_llm.call_count() == 0 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo04 验收失败：Subagent 未全部执行，weather_calls={}, math_calls={}",
+            weather_llm.call_count(),
+            math_llm.call_count()
+        )));
     }
     if input_count.load(Ordering::Relaxed) == 0 {
         return Err(echo_agent::error::ReactError::Other(

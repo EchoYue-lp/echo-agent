@@ -36,7 +36,7 @@ async fn main() -> echo_agent::error::Result<()> {
         .build();
 
     println!("Agent Card JSON:");
-    println!("{}\n", serde_json::to_string_pretty(&card).unwrap());
+    println!("{}\n", serde_json::to_string_pretty(&card)?);
 
     // ── 2. 从 Agent 自动生成 Card ────────────────────────────
     println!("--- 2. 从 Agent 自动生成 Card ---\n");
@@ -109,10 +109,7 @@ async fn main() -> echo_agent::error::Result<()> {
         }
     });
 
-    println!(
-        "发送请求: {}",
-        serde_json::to_string_pretty(&request).unwrap()
-    );
+    println!("发送请求: {}", serde_json::to_string_pretty(&request)?);
     let response = server.handle_request(&request.to_string()).await;
     let response_json: serde_json::Value = serde_json::from_str(&response)?;
     if response_json.get("result").is_none() {

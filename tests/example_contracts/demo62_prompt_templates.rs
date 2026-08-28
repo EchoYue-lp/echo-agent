@@ -8,18 +8,16 @@
 //! 4. 模板组合 / 继承（通过 render_template 嵌套渲染）
 //! 5. 线程安全共享
 //!
-//! ```bash
-//! cargo run --example demo62_prompt_templates
-//! ```
+//! Contract test: `contract_demo62_prompt_templates`.
 
 use echo_agent::prelude::*;
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> echo_agent::error::Result<()> {
-    tracing_subscriber::fmt()
+#[tokio::test]
+async fn contract_demo62_prompt_templates() -> echo_agent::error::Result<()> {
+    let _ = tracing_subscriber::fmt()
         .with_env_filter("echo_agent=info")
-        .init();
+        .try_init();
 
     print_banner();
 

@@ -41,10 +41,8 @@ async fn main() -> Result<()> {
     println!("  完整构建示例：");
     println!("    model      : {}", config.model_name());
     println!("    name       : {}", config.agent_name());
-    println!(
-        "    prompt     : {}…",
-        &config.system_prompt()[..60.min(config.system_prompt().len())]
-    );
+    let prompt_preview: String = config.system_prompt().chars().take(60).collect();
+    println!("    prompt     : {}…", prompt_preview);
     println!();
 
     // ── Part 2：DefaultAgentFactory — 工厂创建 Agent ──────────────────────

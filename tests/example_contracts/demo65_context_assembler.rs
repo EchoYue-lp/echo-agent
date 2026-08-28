@@ -3,12 +3,13 @@
 //! 本示例演示如何使用 ContextAssembler 构建上下文消息列表，
 //! 包括优先级排序和预算感知的截断。
 //!
-//! 运行方式: cargo run --example demo65_context_assembler
+//! 契约测试入口: `contract_demo65_context_assembler`
 
 use echo_agent::context::{ContextAssembler, ContextBudget, ContextSources};
 use echo_agent::llm::types::{Message, Role};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[test]
+fn contract_demo65_context_assembler() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== demo65: Context Assembler ===\n");
 
     // 示例 1: 基本用法（无预算限制）
@@ -258,6 +259,6 @@ fn estimate_tokens(messages: &[Message]) -> usize {
     messages
         .iter()
         .filter_map(|m| m.content.as_text_ref())
-        .map(|text| text.len() / 4)
+        .map(|text| text.chars().count() / 4)
         .sum()
 }

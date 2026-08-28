@@ -8,9 +8,7 @@
 //!
 //! 需要 `data` 和 `statistics` features。
 //!
-//! ```bash
-//! cargo run --example demo60_data_quality --features "data,statistics"
-//! ```
+//! Contract test: `contract_demo60_data_quality` (requires `data` and `statistics`).
 
 use echo_agent::error::Result;
 use echo_agent::tools::Tool;
@@ -51,11 +49,11 @@ fn print_json_preview(text: &str, max_lines: usize) {
     println!();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
+#[tokio::test]
+async fn contract_demo60_data_quality() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
-        .init();
+        .try_init();
 
     println!("═══════════════════════════════════════════════════════");
     println!("    demo60: Data Quality & Statistics");

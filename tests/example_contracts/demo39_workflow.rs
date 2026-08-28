@@ -8,21 +8,23 @@
 //! 5. Agent 节点集成
 //! 6. State snapshot / restore
 //!
-//! 运行方式：
+//! Contract test:
 //! ```bash
-//! cargo run --example demo39_workflow
+//! cargo test --test example_contracts contract_demo39_workflow
 //! ```
 
 use echo_agent::workflow::{GraphBuilder, SharedState};
+use serde::Deserialize;
 
-#[tokio::main]
-async fn main() -> echo_agent::error::Result<()> {
+#[tokio::test]
+async fn contract_demo39_workflow() -> echo_agent::error::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "echo_agent=info,demo39_workflow=info".into()),
         )
-        .init();
+        .try_init()
+        .ok();
 
     print_banner();
 
@@ -99,14 +101,17 @@ async fn demo_linear_pipeline() -> echo_agent::error::Result<()> {
 
     println!("  Path: {:?}", result.path);
     println!("  Steps: {}", result.steps);
-    println!("  Stage: {}", result.state.get::<String>("stage").unwrap());
+    println!(
+        "  Stage: {}",
+        required_state::<String>(&result.state, "stage")?
+    );
     println!(
         "  Records: {}",
-        result.state.get::<i64>("record_count").unwrap()
+        required_state::<i64>(&result.state, "record_count")?
     );
     println!(
         "  Result: {}",
-        result.state.get::<String>("result").unwrap()
+        required_state::<String>(&result.state, "result")?
     );
     println!();
     Ok(())
@@ -177,8 +182,8 @@ async fn demo_conditional() -> echo_agent::error::Result<()> {
         println!(
             "  Ticket: {:40} -> priority={:6} action={:?}  path={:?}",
             ticket,
-            result.state.get::<String>("priority").unwrap(),
-            result.state.get::<String>("action").unwrap(),
+            required_state::<String>(&result.state, "priority")?,
+            required_state::<String>(&result.state, "action")?,
             result.path,
         );
     }
@@ -245,15 +250,15 @@ async fn demo_loop() -> echo_agent::error::Result<()> {
     println!("  Steps: {}", result.steps);
     println!(
         "  Iterations: {}",
-        result.state.get::<i64>("iteration").unwrap()
+        required_state::<i64>(&result.state, "iteration")?
     );
     println!(
         "  Final score: {}",
-        result.state.get::<i64>("quality_score").unwrap()
+        required_state::<i64>(&result.state, "quality_score")?
     );
     println!(
         "  Output: {}",
-        result.state.get::<String>("final_output").unwrap()
+        required_state::<String>(&result.state, "final_output")?
     );
     println!();
     Ok(())
@@ -280,7 +285,8 @@ async fn demo_parallel() -> echo_agent::error::Result<()> {
         .add_function_node("char_count", |state: &SharedState| {
             Box::pin(async move {
                 let text: String = state.get("text").unwrap_or_default();
-                let _ = state.set("char_count", text.len() as i64);
+                let char_count = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
+                let _ = state.set("char_count", char_count);
                 Ok(())
             })
         })
@@ -288,7 +294,7 @@ async fn demo_parallel() -> echo_agent::error::Result<()> {
             Box::pin(async move {
                 let text: String = state.get("text").unwrap_or_default();
                 let keywords: Vec<&str> = text.split_whitespace()
-                    .filter(|w| w.len() > 5)
+                    .filter(|w| w.chars().count() > 5)
                     .collect();
                 let _ = state.set("keywords", keywords);
                 Ok(())
@@ -329,19 +335,19 @@ async fn demo_parallel() -> echo_agent::error::Result<()> {
     println!("  Steps: {}", result.steps);
     println!(
         "  Words: {}",
-        result.state.get::<i64>("word_count").unwrap()
+        required_state::<i64>(&result.state, "word_count")?
     );
     println!(
         "  Chars: {}",
-        result.state.get::<i64>("char_count").unwrap()
+        required_state::<i64>(&result.state, "char_count")?
     );
     println!(
         "  Keywords: {:?}",
-        result.state.get::<Vec<String>>("keywords").unwrap()
+        required_state::<Vec<String>>(&result.state, "keywords")?
     );
     println!(
         "  Summary: {}",
-        result.state.get::<String>("summary").unwrap()
+        required_state::<String>(&result.state, "summary")?
     );
     println!();
     Ok(())
@@ -384,15 +390,11 @@ async fn demo_agent_node() -> echo_agent::error::Result<()> {
     println!("  Path: {:?}", result.path);
     println!(
         "  Analysis: {}",
-        result.state.get::<String>("analysis").unwrap()
+        required_state::<String>(&result.state, "analysis")?
     );
     println!(
         "  Report:\n  {}",
-        result
-            .state
-            .get::<String>("report")
-            .unwrap()
-            .replace('\n', "\n  ")
+        required_state::<String>(&result.state, "report")?.replace('\n', "\n  ")
     );
     println!();
     Ok(())
@@ -413,7 +415,7 @@ async fn demo_snapshot() -> echo_agent::error::Result<()> {
     ));
 
     // Take snapshot
-    let snapshot = state.snapshot().expect("snapshot failed");
+    let snapshot = state.snapshot()?;
     println!("  Snapshot taken ({} bytes):", snapshot.len());
     println!(
         "  {}",
@@ -426,10 +428,16 @@ async fn demo_snapshot() -> echo_agent::error::Result<()> {
     );
 
     // Restore from snapshot
-    let restored = SharedState::from_snapshot(&snapshot).unwrap();
+    let restored = SharedState::from_snapshot(&snapshot)?;
     println!("\n  Restored state:");
-    println!("    counter: {}", restored.get::<i64>("counter").unwrap());
-    println!("    label: {}", restored.get::<String>("label").unwrap());
+    println!(
+        "    counter: {}",
+        required_state::<i64>(&restored, "counter")?
+    );
+    println!(
+        "    label: {}",
+        required_state::<String>(&restored, "label")?
+    );
     println!("    messages: {}", restored.message_count());
 
     // Demonstrate merge
@@ -441,11 +449,11 @@ async fn demo_snapshot() -> echo_agent::error::Result<()> {
     println!("\n  After merge (no overwrite):");
     println!(
         "    counter: {} (preserved)",
-        restored.get::<i64>("counter").unwrap()
+        required_state::<i64>(&restored, "counter")?
     );
     println!(
         "    extra: {} (merged)",
-        restored.get::<String>("extra").unwrap()
+        required_state::<String>(&restored, "extra")?
     );
     println!("    keys: {:?}", restored.keys());
     println!();
@@ -465,4 +473,15 @@ fn print_banner() {
 fn separator(title: &str) {
     println!("{}", "-".repeat(64));
     println!("{title}\n");
+}
+
+fn required_state<T>(state: &SharedState, key: &str) -> echo_agent::error::Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    state.get(key).ok_or_else(|| {
+        echo_agent::error::ReactError::Other(format!(
+            "demo39 workflow state is missing required key `{key}`"
+        ))
+    })
 }

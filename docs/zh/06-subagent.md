@@ -160,4 +160,4 @@ let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
 3. **Subagent 不要 `enable_subagent(true)`**（避免递归嵌套导致难以调试）
 4. **复杂任务使用版本化任务图工具**，避免在提示词中维护平行的隐式状态
 
-对应示例：`examples/demo04_subagent.rs`
+对应示例：`tests/example_contracts/demo04_subagent.rs`

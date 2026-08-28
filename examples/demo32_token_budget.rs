@@ -35,7 +35,7 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("═══ Token Budget Control Demo ═══\n");
 
     // ── Part 1: 配置方式演示 ─────────────────────────────────────────────────
-    demo_config();
+    demo_config()?;
 
     // ── Part 2: 实际截断效果演示 ───────────────────────────────────────────────
     demo_actual_truncation().await?;
@@ -46,7 +46,7 @@ async fn main() -> echo_agent::error::Result<()> {
 
 // ── Part 1: 配置方式演示 ─────────────────────────────────────────────────────
 
-fn demo_config() {
+fn demo_config() -> echo_agent::error::Result<()> {
     println!("─────────────────────────────────────────────");
     println!("Part 1: 配置方式");
     println!("─────────────────────────────────────────────\n");
@@ -67,8 +67,7 @@ fn demo_config() {
         .model("qwen3-max")
         .name("budget_agent")
         .max_tool_output_tokens(1500)
-        .build()
-        .unwrap();
+        .build()?;
 
     println!(
         "    max_tool_output_tokens = {:?}",
@@ -83,6 +82,7 @@ fn demo_config() {
         default_config.get_max_tool_output_tokens()
     );
     println!("    (None 表示不限制)\n");
+    Ok(())
 }
 
 // ── Part 2: 实际截断效果演示 ─────────────────────────────────────────────────
@@ -126,16 +126,17 @@ async fn demo_actual_truncation() -> echo_agent::error::Result<()> {
             Box::pin(async move {
                 let mut content = String::from("=== 文件开始 ===\n\n");
 
-                let lines = (length - 100) / 50;
+                let lines = length.saturating_sub(100) / 50;
                 for i in 0..lines {
                     content.push_str(&format!(
                         "Line {:05}: 这是一段测试文本，包含各种数据用于填充内容。数字={}, 字母=ABCDEF\n",
-                        i, i * 123
+                        i,
+                        i.saturating_mul(123)
                     ));
                 }
 
                 content.push_str("\n=== 文件结束 ===\n");
-                content.push_str(&format!("[文件共 {} 字符]\n", content.len()));
+                content.push_str(&format!("[文件共 {} 字符]\n", content.chars().count()));
 
                 if length > 500 {
                     content.push_str(">>> 重要信息在第 100 行 <<<\n");

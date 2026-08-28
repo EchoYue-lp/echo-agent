@@ -15,7 +15,7 @@
 //! Feature flags required: `lsp`
 //!
 //! ```sh
-//! cargo run --features lsp --example demo55_lsp_tools
+//! cargo test --features lsp --test example_contracts contract_demo55_lsp_tools
 //! ```
 
 #[cfg(feature = "lsp")]
@@ -38,26 +38,27 @@ mod demo {
         };
     }
 
-    pub async fn run() {
+    pub async fn run() -> Result<(), String> {
         println!("╔══════════════════════════════════════════════════╗");
         println!("║       echo-agent  LSP Tools Demo                 ║");
         println!("║  (config + tool construction — servers optional)  ║");
         println!("╚══════════════════════════════════════════════════╝");
 
-        demo_config_from_yaml();
-        demo_config_extension_routing();
-        demo_manager_creation();
+        demo_config_from_yaml()?;
+        demo_config_extension_routing()?;
+        demo_manager_creation()?;
         demo_tool_descriptions();
-        demo_tool_parameters();
-        demo_programmatic_config();
+        demo_tool_parameters()?;
+        demo_programmatic_config()?;
 
         println!("\n╔══════════════════════════════════════════════════╗");
         println!("║  All 6 scenarios passed ✅                       ║");
         println!("╚══════════════════════════════════════════════════╝");
+        Ok(())
     }
 
     /// Scenario 1: Parse LspConfig from YAML
-    fn demo_config_from_yaml() {
+    fn demo_config_from_yaml() -> Result<(), String> {
         section!(1, "LspConfig from YAML (.lsp.yaml)");
 
         let yaml = r#"
@@ -78,7 +79,7 @@ languages:
     args: ["--stdio"]
     extensions: [".ts", ".tsx", ".js", ".jsx"]
 "#;
-        let config = LspConfig::from_yaml(yaml).unwrap();
+        let config = LspConfig::from_yaml(yaml)?;
         println!("  Loaded {} language server configs:", config.servers.len());
         for (lang, server) in &config.servers {
             println!(
@@ -88,12 +89,16 @@ languages:
         }
 
         assert_eq!(config.servers.len(), 3);
-        assert_eq!(config.get("rust").unwrap().command, "rust-analyzer");
+        let rust = config
+            .get("rust")
+            .ok_or_else(|| "rust language server config is missing".to_string())?;
+        assert_eq!(rust.command, "rust-analyzer");
         println!("  ✅ YAML config parsed successfully");
+        Ok(())
     }
 
     /// Scenario 2: Extension-based routing
-    fn demo_config_extension_routing() {
+    fn demo_config_extension_routing() -> Result<(), String> {
         section!(2, "File Extension → Language Server Routing");
 
         let yaml = r#"
@@ -109,7 +114,7 @@ languages:
     args: ["--stdio"]
     extensions: [".py", ".pyi"]
 "#;
-        let config = LspConfig::from_yaml(yaml).unwrap();
+        let config = LspConfig::from_yaml(yaml)?;
 
         let test_extensions = [".rs", ".py", ".pyi", ".ts"];
         for ext in &test_extensions {
@@ -127,10 +132,11 @@ languages:
         assert!(config.get_for_extension(".py").is_some());
         assert!(config.get_for_extension(".ts").is_none());
         println!("  ✅ Extension routing works correctly");
+        Ok(())
     }
 
     /// Scenario 3: Create an LspManager
-    fn demo_manager_creation() {
+    fn demo_manager_creation() -> Result<(), String> {
         section!(3, "LspManager Creation");
 
         let mut manager = LspManager::new();
@@ -144,7 +150,7 @@ languages:
     args: []
     extensions: [".rs"]
 "#;
-        let config = LspConfig::from_yaml(yaml).unwrap();
+        let config = LspConfig::from_yaml(yaml)?;
         manager.load_config(&config);
         println!("  Loaded rust-analyzer config");
 
@@ -158,6 +164,7 @@ languages:
 
         let _ = shared_manager;
         println!("  ✅ Manager ready (start_server() requires rust-analyzer binary)");
+        Ok(())
     }
 
     /// Scenario 4: Tool descriptions and names
@@ -202,7 +209,7 @@ languages:
     }
 
     /// Scenario 5: Tool parameter schemas
-    fn demo_tool_parameters() {
+    fn demo_tool_parameters() -> Result<(), String> {
         section!(5, "Tool Parameter Schemas (JSON Schema)");
 
         let manager = Arc::new(RwLock::new(LspManager::new()));
@@ -210,18 +217,23 @@ languages:
         let goto = LspGotoDefinitionTool::new(manager.clone());
         let schema = goto.parameters();
         println!("  lsp_goto_definition parameters:");
-        println!("    {}", serde_json::to_string_pretty(&schema).unwrap());
+        let rendered = serde_json::to_string_pretty(&schema)
+            .map_err(|error| format!("failed to render goto-definition schema: {error}"))?;
+        println!("    {}", rendered);
 
         let diag = LspDiagnosticsTool::new(manager.clone());
         let schema = diag.parameters();
         println!("\n  lsp_diagnostics parameters:");
-        println!("    {}", serde_json::to_string_pretty(&schema).unwrap());
+        let rendered = serde_json::to_string_pretty(&schema)
+            .map_err(|error| format!("failed to render diagnostics schema: {error}"))?;
+        println!("    {}", rendered);
 
         println!("\n  ✅ JSON Schema parameters verified");
+        Ok(())
     }
 
     /// Scenario 6: Programmatic config construction
-    fn demo_programmatic_config() {
+    fn demo_programmatic_config() -> Result<(), String> {
         section!(6, "Programmatic LspServerConfig");
 
         // Build config without YAML
@@ -240,18 +252,21 @@ languages:
         );
 
         let config = LspConfig { servers };
-        assert!(config.get("rust").is_some());
-        assert_eq!(config.get("rust").unwrap().command, "rust-analyzer");
+        let rust = config
+            .get("rust")
+            .ok_or_else(|| "programmatic rust language server config is missing".to_string())?;
+        assert_eq!(rust.command, "rust-analyzer");
 
         println!("  Built config programmatically:");
         println!("    rust → rust-analyzer (max_restarts: 3)");
         println!("  ✅ No YAML needed for simple setups");
+        Ok(())
     }
 }
 
 #[cfg(not(feature = "lsp"))]
 mod demo {
-    pub async fn run() {
+    pub async fn run() -> Result<(), String> {
         println!("╔══════════════════════════════════════════════════╗");
         println!("║       echo-agent  LSP Tools Demo                 ║");
         println!("╚══════════════════════════════════════════════════╝");
@@ -271,10 +286,11 @@ mod demo {
         println!("    - LspStatusTool: check language server health");
         println!();
         println!("  Supported languages: Rust, Python, TypeScript, and more.");
+        Ok(())
     }
 }
 
-#[tokio::main]
-async fn main() {
-    demo::run().await;
+#[tokio::test]
+async fn contract_demo55_lsp_tools() -> Result<(), String> {
+    demo::run().await
 }

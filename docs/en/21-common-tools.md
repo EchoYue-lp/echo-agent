@@ -141,7 +141,7 @@ Typical use cases:
 - filter rows matching a business rule
 - group data by category and aggregate revenue
 
-See: `examples/demo43_data_tools.rs`
+See: `tests/example_contracts/demo43_data_tools.rs`
 
 ---
 

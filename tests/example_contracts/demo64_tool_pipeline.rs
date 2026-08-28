@@ -18,11 +18,10 @@
 //! 12. `TruncationStage`     — 输出截断（token 预算）
 //! 13. `CallbackStage(End)`   — on_tool_end 回调
 //!
-//! ```bash
-//! cargo run --example demo64_tool_pipeline
-//! ```
+//! Contract test: `contract_demo64_tool_pipeline`.
 
 use echo_agent::prelude::*;
+use echo_agent::testing::MockLlmClient;
 use echo_agent::tool;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -43,15 +42,15 @@ async fn add(
 
 // ── 入口 ──────────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> echo_agent::error::Result<()> {
+#[tokio::test]
+async fn contract_demo64_tool_pipeline() -> echo_agent::error::Result<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "echo_agent=warn,demo64_tool_pipeline=info".into()),
         )
-        .init();
+        .try_init();
 
     print_banner();
 
@@ -266,6 +265,8 @@ async fn demo_intervention_callback() -> echo_agent::error::Result<()> {
 struct PipelineTracker {
     tool_starts: AtomicUsize,
     tool_ends: AtomicUsize,
+    add_starts: AtomicUsize,
+    add_ends: AtomicUsize,
     iterations: AtomicUsize,
 }
 
@@ -274,6 +275,8 @@ impl PipelineTracker {
         Self {
             tool_starts: AtomicUsize::new(0),
             tool_ends: AtomicUsize::new(0),
+            add_starts: AtomicUsize::new(0),
+            add_ends: AtomicUsize::new(0),
             iterations: AtomicUsize::new(0),
         }
     }
@@ -287,6 +290,9 @@ impl AgentCallback for PipelineTracker {
         _args: &'a Value,
     ) -> BoxFuture<'a, ()> {
         self.tool_starts.fetch_add(1, Ordering::SeqCst);
+        if tool == "add" {
+            self.add_starts.fetch_add(1, Ordering::SeqCst);
+        }
         println!("    📍 CallbackStage(Start) [{agent}] → {tool}");
         Box::pin(async {})
     }
@@ -298,6 +304,9 @@ impl AgentCallback for PipelineTracker {
         output: &'a str,
     ) -> BoxFuture<'a, ()> {
         self.tool_ends.fetch_add(1, Ordering::SeqCst);
+        if tool == "add" {
+            self.add_ends.fetch_add(1, Ordering::SeqCst);
+        }
         let preview: String = output.chars().take(40).collect();
         println!("    📍 CallbackStage(End)   [{agent}] → {tool}: \"{preview}\"");
         Box::pin(async {})
@@ -330,6 +339,16 @@ async fn demo_agent_callback() -> echo_agent::error::Result<()> {
     println!("  创建带 AgentCallback 的 Agent，观察管线回调事件\n");
 
     let tracker = Arc::new(PipelineTracker::new());
+    let mock_client = Arc::new(
+        MockLlmClient::new()
+            .with_model_name("pipeline-mock")
+            .then_tool_call("call_add", "add", r#"{"a":15.0,"b":27.0}"#)
+            .then_tool_call(
+                "call_final_answer",
+                "final_answer",
+                r#"{"answer":"15 + 27 = 42"}"#,
+            ),
+    );
 
     let config = AgentConfig::new(
         "qwen3-max",
@@ -342,7 +361,7 @@ async fn demo_agent_callback() -> echo_agent::error::Result<()> {
     })
     .with_callback(tracker.clone());
 
-    let mut agent = ReactAgent::new(config);
+    let mut agent = ReactAgent::new(config).with_llm_client(mock_client);
     agent.add_tool(Box::new(AddTool));
 
     println!("  执行: \"计算 15 + 27\"");
@@ -351,11 +370,17 @@ async fn demo_agent_callback() -> echo_agent::error::Result<()> {
 
     let starts = tracker.tool_starts.load(Ordering::SeqCst);
     let ends = tracker.tool_ends.load(Ordering::SeqCst);
+    let add_starts = tracker.add_starts.load(Ordering::SeqCst);
+    let add_ends = tracker.add_ends.load(Ordering::SeqCst);
     let iters = tracker.iterations.load(Ordering::SeqCst);
     println!("\n  管线回调统计:");
     println!("    on_tool_start: {starts} 次 (对应 CallbackStage(Start))");
     println!("    on_tool_end:   {ends} 次 (对应 CallbackStage(End))");
     println!("    on_iteration:  {iters} 次");
+
+    assert_eq!(answer.trim(), "15 + 27 = 42");
+    assert_eq!(add_starts, 1, "add should trigger one start callback");
+    assert_eq!(add_ends, 1, "add should trigger one end callback");
 
     println!("\n  回调触发的管线阶段:");
     println!("    on_tool_start → 阶段 7: CallbackStage(Start)");

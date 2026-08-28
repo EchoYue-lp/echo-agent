@@ -7,7 +7,7 @@
 //! - CSV/JSON/Parquet 数据处理
 //!
 //! ```bash
-//! cargo run --example demo43_data_tools --features full
+//! cargo test --all-features --test example_contracts contract_demo43_data_tools
 //! ```
 
 use echo_agent::error::Result;
@@ -16,6 +16,7 @@ use echo_agent::testing::MockLlmClient;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default, Clone)]
@@ -45,25 +46,26 @@ impl AgentCallback for ToolRecorder {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[tokio::test]
+async fn contract_demo43_data_tools() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
-        .init();
+        .try_init()
+        .ok();
 
     println!("═══════════════════════════════════════════════════════");
     println!("    Echo Agent 数据处理工具演示");
     println!("═══════════════════════════════════════════════════════\n");
 
     // 创建测试文件
-    create_test_files()?;
+    let test_files = create_test_files()?;
 
     // ── Part 1: Excel 文件处理 ───────────────────────────────────────────
     println!("───────────────────────────────────────────────────────");
     println!("Part 1: Excel 文件处理");
     println!("───────────────────────────────────────────────────────\n");
 
-    let excel_path = "/tmp/echo_test_excel.xlsx";
+    let excel_path = test_files.excel.to_string_lossy().into_owned();
     let task = format!(
         r#"请处理这个 Excel 文件：{}
 
@@ -71,7 +73,7 @@ async fn main() -> Result<()> {
 1. 使用 excel_info 获取工作表信息
 2. 使用 read_excel 读取数据预览
 3. 分析数据内容并总结"#,
-        excel_path
+        test_files.excel.display()
     );
 
     println!("任务: {}\n", task);
@@ -101,7 +103,7 @@ async fn main() -> Result<()> {
     println!("Part 2: 文本文件处理");
     println!("───────────────────────────────────────────────────────\n");
 
-    let text_path = "/tmp/echo_test_text.txt";
+    let text_path = test_files.text.to_string_lossy().into_owned();
     let task = format!(
         r#"请处理这个文本文件：{}
 
@@ -109,7 +111,7 @@ async fn main() -> Result<()> {
 1. 使用 text_stats 获取文本统计
 2. 使用 search_text 搜索关键词 "数据"
 3. 总结文件内容"#,
-        text_path
+        test_files.text.display()
     );
 
     println!("任务: {}\n", task);
@@ -139,7 +141,7 @@ async fn main() -> Result<()> {
     println!("Part 3: CSV 数据处理");
     println!("───────────────────────────────────────────────────────\n");
 
-    let csv_path = "/tmp/echo_test_data.csv";
+    let csv_path = test_files.csv.to_string_lossy().into_owned();
     let task = format!(
         r#"请处理这个 CSV 文件：{}
 
@@ -147,7 +149,7 @@ async fn main() -> Result<()> {
 1. 使用 data_read 读取 CSV 数据
 2. 使用 data_stats 获取数据统计
 3. 分析数据并给出洞察"#,
-        csv_path
+        test_files.csv.display()
     );
 
     println!("任务: {}\n", task);
@@ -186,25 +188,28 @@ async fn main() -> Result<()> {
     println!("Part 5: 综合数据处理任务");
     println!("───────────────────────────────────────────────────────\n");
 
-    let task = r#"我有一个数据处理的综合需求：
+    let task = format!(
+        r#"我有一个数据处理的综合需求：
 
-1. 读取 /tmp/echo_test_data.csv 文件
+1. 读取 {} 文件
 2. 分析其中的数值列统计信息
 3. 给出数据处理建议
 
-请使用 data_read、data_stats 等工具完成。"#;
+请使用 data_read、data_stats 等工具完成。"#,
+        test_files.csv.display()
+    );
 
     println!("任务: {}\n", task);
 
     let result = run_scripted_task(
         "data-summary-agent",
-        task,
+        &task,
         vec![
             (
                 "read_data",
-                json!({ "file_path": "/tmp/echo_test_data.csv", "format": "csv", "preview_rows": 5 }),
+                json!({ "file_path": csv_path, "format": "csv", "preview_rows": 5 }),
             ),
-            ("data_stats", json!({ "file_path": "/tmp/echo_test_data.csv" })),
+            ("data_stats", json!({ "file_path": csv_path })),
         ],
         "数值列已经完成统计分析，建议下一步重点关注 salary 与 department 的分布差异。",
     )
@@ -220,9 +225,6 @@ async fn main() -> Result<()> {
     println!("    Demo 完成");
     println!("═══════════════════════════════════════════════════════");
 
-    // 清理测试文件
-    cleanup_test_files();
-
     Ok(())
 }
 
@@ -237,17 +239,11 @@ async fn run_scripted_task(
 
     let mut mock = MockLlmClient::new().with_model_name(format!("{agent_name}-mock"));
     for (idx, (tool_name, args)) in steps.iter().enumerate() {
-        mock = mock.then_tool_call(
-            format!("call_{idx}_{tool_name}"),
-            *tool_name,
-            serde_json::to_string(args).unwrap(),
-        );
+        let arguments = serde_json::to_string(args)?;
+        mock = mock.then_tool_call(format!("call_{idx}_{tool_name}"), *tool_name, arguments);
     }
-    mock = mock.then_tool_call(
-        "call_final_answer",
-        "final_answer",
-        serde_json::to_string(&json!({ "answer": final_answer })).unwrap(),
-    );
+    let final_arguments = serde_json::to_string(&json!({ "answer": final_answer }))?;
+    mock = mock.then_tool_call("call_final_answer", "final_answer", final_arguments);
 
     let agent = ReactAgentBuilder::new()
         .name(agent_name)
@@ -270,8 +266,20 @@ async fn run_scripted_task(
     Ok(result)
 }
 
+struct TestFiles {
+    _dir: tempfile::TempDir,
+    text: PathBuf,
+    csv: PathBuf,
+    excel: PathBuf,
+}
+
 /// 创建测试文件
-fn create_test_files() -> Result<()> {
+fn create_test_files() -> Result<TestFiles> {
+    let dir = tempfile::tempdir()?;
+    let text_path = dir.path().join("echo_test_text.txt");
+    let csv_path = dir.path().join("echo_test_data.csv");
+    let excel_path = dir.path().join("echo_test_excel.xlsx");
+
     // 创建测试文本文件
     let text_content = r#"Echo Agent 数据处理工具演示文档
 
@@ -296,7 +304,7 @@ fn create_test_files() -> Result<()> {
 Echo Agent 提供了强大的数据处理能力，适合各种数据分析场景。
 "#;
 
-    fs::write("/tmp/echo_test_text.txt", text_content)?;
+    fs::write(&text_path, text_content)?;
 
     // 创建测试 CSV 文件
     let csv_content = "name,age,salary,department
@@ -309,37 +317,37 @@ Echo Agent 提供了强大的数据处理能力，适合各种数据分析场景
 吴九,27,14000,销售部
 郑十,33,20000,管理部";
 
-    fs::write("/tmp/echo_test_data.csv", csv_content)?;
+    fs::write(&csv_path, csv_content)?;
 
     // 创建真正的 Excel 文件（xlsx 格式）
-    create_test_xlsx()?;
+    create_test_xlsx(&excel_path)?;
 
     println!("测试文件已创建:");
-    println!("  - /tmp/echo_test_text.txt");
-    println!("  - /tmp/echo_test_data.csv");
-    println!("  - /tmp/echo_test_excel.xlsx");
+    println!("  - {}", text_path.display());
+    println!("  - {}", csv_path.display());
+    println!("  - {}", excel_path.display());
     println!();
-    Ok(())
-}
-
-/// 清理测试文件
-fn cleanup_test_files() {
-    fs::remove_file("/tmp/echo_test_text.txt").ok();
-    fs::remove_file("/tmp/echo_test_data.csv").ok();
-    fs::remove_file("/tmp/echo_test_excel.xlsx").ok();
-    fs::remove_file("/tmp/echo_test_data.xlsx.csv").ok();
-    fs::remove_file("/tmp/echo_test_doc.pdf").ok();
+    Ok(TestFiles {
+        _dir: dir,
+        text: text_path,
+        csv: csv_path,
+        excel: excel_path,
+    })
 }
 
 /// 创建真正的 xlsx 测试文件（通过 base64 解码嵌入的最小有效 xlsx）
-fn create_test_xlsx() -> Result<()> {
+fn create_test_xlsx(path: &Path) -> Result<()> {
     use base64::Engine;
     let xlsx_base64 = "UEsDBBQAAAAIALFzjFzziwlWFAEAAC8DAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbK1SS08CMRD+K02vhBY8GGNYOPg4qon4A8Z2lm3oK50B4d9bFjTGoFz2NGm/ZyYzW+yCF1ss5FJs5FRNpMBoknVx1ci35eP4RgpiiBZ8itjIPZJczGfLfUYSVRupkR1zvtWaTIcBSKWMsSJtKgG4PstKZzBrWKG+mkyutUmRMfKYDx5yPrvHFjaexcOufh97FPQkxd2ReMhqJOTsnQGuuN5G+ytlfEpQVdlzqHOZRpUg9dmEA/J3wEn3XBdTnEXxAoWfIFSW3nn9kcr6PaW1+t/kTMvUts6gTWYTqkRRLgiWOkQOXvVTBXBxdDm/J5Pux3TgIt/+F3pQBwXtK5d6LDT4Mn54X+rBe4+DF+hNv5J1f/DzT1BLAwQUAAAACACxc4xcmNrri64AAAAnAQAACwAAAF9yZWxzLy5yZWxzjc/BDoIwDAbgV1l6l4EHYwyDizHhavAB5lYGAdZlmwpv745iPHhs+vf707Je5ok90YeBrIAiy4GhVaQHawTc2svuCCxEabWcyKKAFQPUVXnFScZ0EvrBBZYMGwT0MboT50H1OMuQkUObNh35WcY0esOdVKM0yPd5fuD+04CtyRotwDe6ANauDv+xqesGhWdSjxlt/FHxlUiy9AajgGXiL/LjnWjMEgq8KvnmweoNUEsDBBQAAAAIALFzjFydbEO9uQAAABsBAAAPAAAAeGwvd29ya2Jvb2sueG1sjU9LrsIwDLxK5D2kZYGeqrZsEBJr4AChcWlEY1d2+LzbE357VjPWaMYz9eoeR3NF0cDUQDkvwCB17AOdGjjsN7M/MJoceTcyYQP/qLBq6xvL+ch8NtlO2sCQ0lRZq92A0emcJ6Ss9CzRpXzKyeok6LwOiCmOdlEUSxtdIHgnVPJLBvd96HDN3SUipXeI4OhSLq9DmBTa+vVBP2jIxVx69+RlHvLErc87wUgVMpGtL8G2tf3a7HdZ+wBQSwMEFAAAAAgAsXOMXC+NjwLVAAAANAIAABoAAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc62RzWrDMAyAX8XovjjpYIxRt5cx6LU/DyBsJQ5NbGNp7fL2NYVtDZSxQ09CEvr0IS3XX+OgTpS5j8FAU9WgKNjo+tAZOOw/nl5BsWBwOMRABiZiWK+WWxpQygj7PrEqjMAGvEh605qtpxG5iolC6bQxjyglzZ1OaI/YkV7U9YvOtwyYM9XGGcgb14DaT4n+w45t21t6j/ZzpCB3VuhzzEf2RFKgmDsSAz8l1tfQVIUK+r7M4pEy7DGT20kul+ZfoVn5L5nnh8rINNCtxTX/Xq9n315dAFBLAwQUAAAACACxc4xc+NXvZ2wBAAD/BAAAGAAAAHhsL3dvcmtzaGVldHMvc2hlZXQxLnhtbIWUXW6DMBCEr4L83hibP1MBUSHqCdoDWMRNogYTYZS0ty/JRtZmQc0bnlnvt2NbFOuf7hiczeAOvS2ZWIUsMLbttwe7K9nnx/uLYoEbtd3qY29NyX6NY+uquPTDt9sbMwbTfutKth/H0yvnrt2bTrtVfzJ2cr76odPjtBx23J0Go7e3Td2RyzBMeacPllXFTdvoUVfF0F+CYZpjUtvrx5tgwVgyN63PVVjwc1Xw9u7V2BOPXoM9+ehtsBd5j09sP4D0A0hUHJMBJLRXhA2ySMKQTLzBzZJlcuTJESpOCTmC4UmyBmSh5mTcLFsmx54co2ISro4hc0LIIAs5J8fPMyeenKDinJATyEzJIMsFMm4mwmV06tEpribPqU4BQkZqQBbpnP3QTS6zM8/OcHVE2Bnkpi8cZJHN2dnzE1cerTCaPnAFsTOCVvfqOVo9f2a5R+cYTa61ziE1OYwG5OtlU3T+321z9I/h/udV/QFQSwMEFAAAAAgAsXOMXHLtzCIaAQAACwIAABQAAAB4bC9zaGFyZWRTdHJpbmdzLnhtbG3RwUrDMBgH8FcpubtUD0Ok7Q6CT6APENrPttAkNUnF3aZlgopjg15kG+htIJsXB3X4OM3m3sKKoNDs+P3+/+QLxOlc0cS6BCFjzly037KRBcznQcxCF52dnuwdIksqwgKScAYu6oJEHc+RUln1SSZdFCmVHmEs/QgokS2eAquTcy4oUfUoQixTASSQEYCiCT6w7TamJGbI8nnGVL21jayMxRcZHP9BvSL2HOUxQsHBynPwz/xrJDRIkoSIblMDSIlQFJhqJvrzuSrvmrq+760nb9t8ZgTTgR6Pm7oterpY7KhvBg/Vqmjq13Kp+3Oju3jZDG93XKLnT1WZG1re6MlqV3000/1XQ4fv1cfUeHg+0o/X/4rr7/S+AVBLAwQUAAAACACxc4xcutKA9BkBAAAwAgAADQAAAHhsL3N0eWxlcy54bWylkcFuwyAMhl8FcV9Jd5imKUkPlSLt3E7alSZOggQmArdK9vQzIdXa807+/Rt/2FAeZmfFDUI0Hiu53xVSALa+MzhU8uvcvLxLEUljp61HqOQCUR7qMtJi4TQCkGAAxkqORNOHUrEdwem48xMgV3ofnCZOw6DiFEB3MTU5q16L4k05bVDWZe+Romj9FYln2Ay+5EfctGVnL1VdonaQ86O25hJMMlU+uYbIfcbaZxAbdTlpIgjYcCI2fV4m3gZ5p4xZz62BMRcfOn6SR1C26tJCT9wQzDCmSH5SqUjkHYvO6MGjtgl579gEY1uw9pQe7rt/Ys+9wKtrHH12leQPSMvcJQ+0yYzJSeI/0jL731gx98/8Fa3+Prv+BVBLAQIUAxQAAAAIALFzjFzziwlWFAEAAC8DAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgAsXOMXJja64uuAAAAJwEAAAsAAAAAAAAAAAAAAIABRQEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgAsXOMXJ1sQ725AAAAGwEAAA8AAAAAAAAAAAAAAIABHAIAAHhsL3dvcmtib29rLnhtbFBLAQIUAxQAAAAIALFzjFwvjY8C1QAAADQCAAAaAAAAAAAAAAAAAACAAQIDAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc1BLAQIUAxQAAAAIALFzjFz41e9nbAEAAP8EAAAYAAAAAAAAAAAAAACAAQ8EAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWxQSwECFAMUAAAACACxc4xccu3MIhoBAAALAgAAFAAAAAAAAAAAAAAAgAGxBQAAeGwvc2hhcmVkU3RyaW5ncy54bWxQSwECFAMUAAAACACxc4xcutKA9BkBAAAwAgAADQAAAAAAAAAAAAAAgAH9BgAAeGwvc3R5bGVzLnhtbFBLBQYAAAAABwAHAMIBAABBCAAAAAA=";
 
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(xlsx_base64)
-        .expect("Invalid base64 xlsx data");
+        .map_err(|error| {
+            echo_agent::error::ReactError::Other(format!(
+                "failed to decode embedded xlsx fixture: {error}"
+            ))
+        })?;
 
-    fs::write("/tmp/echo_test_excel.xlsx", bytes)?;
+    fs::write(path, bytes)?;
     Ok(())
 }

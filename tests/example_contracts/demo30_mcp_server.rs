@@ -11,7 +11,7 @@
 //! - `tools/list`、`tools/call`、`ping` 完整流程
 //!
 //! ```bash
-//! cargo run --example demo30_mcp_server
+//! cargo test --all-features --locked contract_demo30_mcp_server -- --nocapture
 //! ```
 
 use echo_agent::error::Result;
@@ -92,8 +92,8 @@ impl Tool for CalculatorTool {
 
 // ── Main ────────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[tokio::test]
+async fn contract_demo30_mcp_server() -> Result<()> {
     println!("═══════════════════════════════════════════════════════");
     println!("         Echo Agent × MCP Server 演示 (demo30)");
     println!("═══════════════════════════════════════════════════════\n");
@@ -128,13 +128,37 @@ async fn main() -> Result<()> {
         });
 
         let resp = send(&server, &req).await?;
-        let negotiated = resp["result"]["protocolVersion"].as_str().unwrap_or("?");
-        let tag = if negotiated == *version {
-            "echo"
-        } else {
-            "fallback→latest"
-        };
-        println!("  请求 {version:>12}  →  回复 {negotiated:<12}  ({tag})");
+        if *version == "2099-01-01" {
+            let error_code =
+                required_value(&resp, "/error/code", "未知协议版本未返回 JSON-RPC 错误码")?
+                    .as_i64()
+                    .ok_or_else(|| {
+                        echo_agent::error::ReactError::Other(
+                            "demo30 验收失败：未知协议版本错误码不是整数".to_string(),
+                        )
+                    })?;
+            let error_message =
+                required_str(&resp, "/error/message", "未知协议版本未返回错误消息")?;
+            if error_code != -32600 || !error_message.contains("不支持的协议版本") {
+                return Err(echo_agent::error::ReactError::Other(format!(
+                    "demo30 验收失败：未知协议版本错误契约不正确: code={error_code}, message={error_message}"
+                )));
+            }
+            println!("  请求 {version:>12}  →  error {error_code} ({error_message})");
+            continue;
+        }
+
+        let negotiated = required_str(
+            &resp,
+            "/result/protocolVersion",
+            "initialize 响应缺少 protocolVersion",
+        )?;
+        if negotiated != *version {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo30 验收失败：已支持协议版本未原样协商: requested={version}, negotiated={negotiated}"
+            )));
+        }
+        println!("  请求 {version:>12}  →  回复 {negotiated:<12}  (echo)");
     }
 
     // initialized 通知
@@ -153,18 +177,12 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let tools = resp["result"]["tools"].as_array().ok_or_else(|| {
-        echo_agent::error::ReactError::Other(
-            "demo30 验收失败：tools/list 未返回 tools 数组".to_string(),
-        )
-    })?;
+    let tools = required_array(&resp, "/result/tools", "tools/list 未返回 tools 数组")?;
     println!("  发现 {} 个工具:", tools.len());
     for t in tools {
-        println!(
-            "    - {:15} : {}",
-            t["name"].as_str().unwrap_or("?"),
-            t["description"].as_str().unwrap_or("")
-        );
+        let name = required_str(t, "/name", "tools/list 工具缺少 name")?;
+        let description = required_str(t, "/description", "tools/list 工具缺少 description")?;
+        println!("    - {:15} : {}", name, description);
     }
 
     // ── Part 4: tools/call ───────────────────────────────────────────────────
@@ -178,20 +196,17 @@ async fn main() -> Result<()> {
         }),
     )
     .await?;
-    if resp["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .is_empty()
-    {
+    let weather_text = required_str(
+        &resp,
+        "/result/content/0/text",
+        "get_weather 响应缺少文本内容",
+    )?;
+    if weather_text.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：get_weather 返回空文本".to_string(),
         ));
     }
-    println!(
-        "  get_weather(Beijing) → {}",
-        resp["result"]["content"][0]["text"].as_str().unwrap_or("?")
-    );
+    println!("  get_weather(Beijing) → {weather_text}");
 
     let resp = send(
         &server,
@@ -201,15 +216,17 @@ async fn main() -> Result<()> {
         }),
     )
     .await?;
-    if resp["result"]["content"][0]["text"].as_str().unwrap_or("") != "126" {
+    let calculation_text = required_str(
+        &resp,
+        "/result/content/0/text",
+        "calculate 响应缺少文本内容",
+    )?;
+    if calculation_text != "126" {
         return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：calculate(42 * 3) 返回值不正确".to_string(),
         ));
     }
-    println!(
-        "  calculate(42 * 3)    → {}",
-        resp["result"]["content"][0]["text"].as_str().unwrap_or("?")
-    );
+    println!("  calculate(42 * 3)    → {calculation_text}");
 
     let resp = send(
         &server,
@@ -219,16 +236,14 @@ async fn main() -> Result<()> {
         }),
     )
     .await?;
-    let is_err = resp["result"]["isError"].as_bool().unwrap_or(false);
+    let is_err = required_bool(&resp, "/result/isError", "除零响应缺少布尔字段 isError")?;
     if !is_err {
         return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：calculate(10 / 0) 未标记 isError".to_string(),
         ));
     }
-    println!(
-        "  calculate(10 / 0)    → {} (isError={is_err})",
-        resp["result"]["content"][0]["text"].as_str().unwrap_or("?")
-    );
+    let division_text = required_str(&resp, "/result/content/0/text", "除零响应缺少文本内容")?;
+    println!("  calculate(10 / 0)    → {division_text} (isError={is_err})");
 
     // ── Part 5: ping + 错误处理 ──────────────────────────────────────────────
     println!("\n--- Part 5: ping + 错误处理 ---\n");
@@ -260,20 +275,13 @@ async fn main() -> Result<()> {
         }),
     )
     .await?;
-    if resp["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .is_empty()
-    {
+    let error_message = required_str(&resp, "/error/message", "调用不存在工具时未返回错误消息")?;
+    if error_message.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：调用不存在工具时未返回错误消息".to_string(),
         ));
     }
-    println!(
-        "  tools/call(nonexistent) → error: {}",
-        resp["error"]["message"].as_str().unwrap_or("?")
-    );
+    println!("  tools/call(nonexistent) → error: {error_message}");
 
     let resp = send(
         &server,
@@ -282,26 +290,25 @@ async fn main() -> Result<()> {
         }),
     )
     .await?;
-    if !resp["error"]["code"].is_number() {
+    let error_code = required_value(&resp, "/error/code", "未知方法未返回错误码")?;
+    if !error_code.is_number() {
         return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：未知方法未返回错误码".to_string(),
         ));
     }
-    println!(
-        "  foo/bar → error code: {} (Method not found)",
-        resp["error"]["code"]
-    );
+    println!("  foo/bar → error code: {} (Method not found)", error_code);
 
     let resp_str = server.handle_json_rpc("not valid json").await;
     let resp: Value = serde_json::from_str(&resp_str)?;
-    if !resp["error"]["code"].is_number() {
+    let parse_error_code = required_value(&resp, "/error/code", "非法 JSON 未返回 parse error")?;
+    if !parse_error_code.is_number() {
         return Err(echo_agent::error::ReactError::Other(
             "demo30 验收失败：非法 JSON 未返回 parse error".to_string(),
         ));
     }
     println!(
         "  invalid JSON → error code: {} (Parse error)",
-        resp["error"]["code"]
+        parse_error_code
     );
 
     // ── Part 6: from_tools 便捷构建 ──────────────────────────────────────────
@@ -320,10 +327,7 @@ async fn main() -> Result<()> {
         }),
     )
     .await?;
-    let count = resp["result"]["tools"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
+    let count = required_array(&resp, "/result/tools", "from_tools() 响应缺少 tools 数组")?.len();
     if count != 2 {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo30 验收失败：from_tools() 构建后的工具数错误: {count}"
@@ -345,4 +349,40 @@ async fn send(server: &McpServer, req: &Value) -> Result<Value> {
     let resp_str = server.handle_json_rpc(&req.to_string()).await;
     let resp = serde_json::from_str(&resp_str)?;
     Ok(resp)
+}
+
+fn required_value<'a>(value: &'a Value, pointer: &str, context: &str) -> Result<&'a Value> {
+    value
+        .pointer(pointer)
+        .ok_or_else(|| echo_agent::error::ReactError::Other(format!("demo30 验收失败：{context}")))
+}
+
+fn required_str<'a>(value: &'a Value, pointer: &str, context: &str) -> Result<&'a str> {
+    required_value(value, pointer, context)?
+        .as_str()
+        .ok_or_else(|| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo30 验收失败：{context}，字段不是字符串"
+            ))
+        })
+}
+
+fn required_bool(value: &Value, pointer: &str, context: &str) -> Result<bool> {
+    required_value(value, pointer, context)?
+        .as_bool()
+        .ok_or_else(|| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo30 验收失败：{context}，字段不是布尔值"
+            ))
+        })
+}
+
+fn required_array<'a>(value: &'a Value, pointer: &str, context: &str) -> Result<&'a Vec<Value>> {
+    required_value(value, pointer, context)?
+        .as_array()
+        .ok_or_else(|| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo30 验收失败：{context}，字段不是数组"
+            ))
+        })
 }

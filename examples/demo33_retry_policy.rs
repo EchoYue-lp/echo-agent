@@ -33,6 +33,7 @@
 
 mod support;
 
+use echo_agent::error::ReactError;
 use echo_agent::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -49,10 +50,10 @@ async fn main() -> Result<()> {
     demo_backoff_calculation();
 
     // ── Part 3: with_retry 基础场景 ────────────────────────────────────────────
-    demo_with_retry_basic().await;
+    demo_with_retry_basic().await?;
 
     // ── Part 4: with_retry_if 选择性重试 ───────────────────────────────────────
-    demo_with_retry_if().await;
+    demo_with_retry_if().await?;
 
     // ── Part 5: 实际 LLM 调用重试演示 ──────────────────────────────────────────
     demo_llm_retry().await?;
@@ -137,7 +138,7 @@ fn demo_backoff_calculation() {
 
 // ── Part 3: with_retry 基础场景 ─────────────────────────────────────────────────
 
-async fn demo_with_retry_basic() {
+async fn demo_with_retry_basic() -> Result<()> {
     println!("─────────────────────────────────────────────");
     println!("Part 3: with_retry 基础场景");
     println!("─────────────────────────────────────────────\n");
@@ -148,7 +149,10 @@ async fn demo_with_retry_basic() {
         Ok::<_, String>("成功")
     })
     .await;
-    println!("    结果: {:?}\n", result.unwrap());
+    let first_result = result.map_err(|error| {
+        ReactError::Other(format!("demo33 验收失败：no_retry 场景意外失败: {error}"))
+    })?;
+    println!("    结果: {first_result:?}\n");
 
     // 3.2 前两次失败，第三次成功
     println!("  [3.2] 前两次失败，第三次成功");
@@ -170,7 +174,10 @@ async fn demo_with_retry_basic() {
     })
     .await;
 
-    println!("    {}", result.unwrap());
+    let recovered = result.map_err(|error| {
+        ReactError::Other(format!("demo33 验收失败：可恢复重试场景最终失败: {error}"))
+    })?;
+    println!("    {recovered}");
     println!(
         "    总调用次数: {}, 耗时: {:?}\n",
         counter.load(Ordering::SeqCst),
@@ -192,16 +199,25 @@ async fn demo_with_retry_basic() {
     })
     .await;
 
-    println!("    错误: {}", result.unwrap_err());
+    let exhausted_error = match result {
+        Err(error) => error,
+        Ok(()) => {
+            return Err(ReactError::Other(
+                "demo33 验收失败：重试耗尽场景意外成功".to_string(),
+            ));
+        }
+    };
+    println!("    错误: {exhausted_error}");
     println!(
         "    总调用次数: {} (1 初始 + 2 重试)\n",
         counter.load(Ordering::SeqCst)
     );
+    Ok(())
 }
 
 // ── Part 4: with_retry_if 选择性重试 ───────────────────────────────────────────
 
-async fn demo_with_retry_if() {
+async fn demo_with_retry_if() -> Result<()> {
     println!("─────────────────────────────────────────────");
     println!("Part 4: with_retry_if 选择性重试");
     println!("─────────────────────────────────────────────\n");
@@ -244,7 +260,15 @@ async fn demo_with_retry_if() {
     )
     .await;
 
-    println!("    错误: {:?}", result.unwrap_err());
+    let fatal_error = match result {
+        Err(error) => error,
+        Ok(value) => {
+            return Err(ReactError::Other(format!(
+                "demo33 验收失败：致命错误场景意外成功: {value}"
+            )));
+        }
+    };
+    println!("    错误: {fatal_error:?}");
     println!(
         "    总调用次数: {} (第2次遇到致命错误，立即返回)\n",
         counter.load(Ordering::SeqCst)
@@ -256,6 +280,7 @@ async fn demo_with_retry_if() {
     println!("        matches!(e.status(), Some(408 | 429 | 500..=599))");
     println!("    }}).await?;");
     println!();
+    Ok(())
 }
 
 // ── Part 5: 实际 LLM 调用重试演示 ─────────────────────────────────────────────

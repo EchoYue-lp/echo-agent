@@ -58,5 +58,5 @@ assert_eq!(selected, vec![PathBuf::from("src/auth.rs")]);
 `score_files` 返回评分，`select_relevant` 最多返回 `max_files` 个路径。
 相同分数按路径排序，保证重复运行结果确定。
 
-可运行示例见 `examples/demo65_context_assembler.rs` 和
-`examples/demo66_context_selector.rs`。
+可运行示例见 `tests/example_contracts/demo65_context_assembler.rs` 和
+`tests/example_contracts/demo66_context_selector.rs`。

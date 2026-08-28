@@ -42,7 +42,7 @@ async fn main() -> echo_agent::error::Result<()> {
     for snap in agent.snapshots() {
         println!(
             "  [{}] iteration={}, messages={}, time={}",
-            &snap.id[..8],
+            short_id(&snap.id),
             snap.iteration,
             snap.messages.len(),
             snap.created_at,
@@ -57,7 +57,7 @@ async fn main() -> echo_agent::error::Result<()> {
         if let Some(snapshot) = agent.rollback(steps_back).await {
             println!(
                 "已回滚到快照 {} (iteration={}, messages={})",
-                &snapshot.id[..8],
+                short_id(&snapshot.id),
                 snapshot.iteration,
                 snapshot.messages.len(),
             );
@@ -76,9 +76,13 @@ async fn main() -> echo_agent::error::Result<()> {
     // ── 6. 手动快照 ─────────────────────────────────────────────────────────
     println!("\n--- 手动快照 ---");
     if let Some(id) = agent.snapshot().await {
-        println!("手动快照 ID: {}", &id[..8]);
+        println!("手动快照 ID: {}", short_id(&id));
     }
     println!("最终快照数: {}", agent.snapshots().len());
 
     Ok(())
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
 }

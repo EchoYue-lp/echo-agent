@@ -435,7 +435,11 @@ async fn main() -> Result<()> {
     }
     println!("  相关记忆: {} 条", memories.len());
     for mem in &memories {
-        let content = mem.value["content"].as_str().unwrap_or("");
+        let content = mem
+            .value
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         let preview: String = content.chars().take(80).collect();
         println!("    • {}", preview);
     }

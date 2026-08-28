@@ -78,9 +78,24 @@ async fn demo_extract_json(agent: &ReactAgent) -> echo_agent::error::Result<()> 
     println!("  输入: {text}");
 
     let value = agent.extract_json(text, schema).await?;
+    let name = value.get("name").ok_or_else(|| {
+        echo_agent::error::ReactError::Other(
+            "demo15 验收失败：extract_json 结果缺少 name".to_string(),
+        )
+    })?;
+    let age = value.get("age").ok_or_else(|| {
+        echo_agent::error::ReactError::Other(
+            "demo15 验收失败：extract_json 结果缺少 age".to_string(),
+        )
+    })?;
+    let occupation = value.get("occupation").ok_or_else(|| {
+        echo_agent::error::ReactError::Other(
+            "demo15 验收失败：extract_json 结果缺少 occupation".to_string(),
+        )
+    })?;
     println!(
         "  结果: name={}, age={}, occupation={}",
-        value["name"], value["age"], value["occupation"]
+        name, age, occupation
     );
     Ok(())
 }

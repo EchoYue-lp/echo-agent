@@ -199,7 +199,7 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo01_tools.rs`                | Basic tool registration and invocation                                                                |
 | `examples/demo02_tasks.rs`                | DAG task planning                                                                                     |
 | `examples/demo03_approval.rs`             | Human-in-the-loop approval                                                                            |
-| `examples/demo04_subagent.rs`             | Subagent orchestration                                                                                |
+| `tests/example_contracts/demo04_subagent.rs`             | Subagent orchestration                                                                                |
 | `examples/demo05_compressor.rs`           | Context compression                                                                                   |
 | `examples/demo06_mcp.rs`                  | MCP protocol integration                                                                              |
 | `examples/demo07_skills.rs`               | Skill system                                                                                          |
@@ -207,7 +207,7 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo09_file_shell.rs`           | File and shell tools                                                                                  |
 | `examples/demo10_streaming.rs`            | Streaming output                                                                                      |
 | `examples/demo11_callbacks.rs`            | Lifecycle callbacks                                                                                   |
-| `examples/demo12_resilience.rs`           | Fault tolerance and retries                                                                           |
+| `tests/example_contracts/demo12_resilience.rs`           | Fault tolerance and retries                                                                           |
 | `examples/demo13_tool_execution.rs`       | Tool execution configuration                                                                          |
 | `examples/demo15_structured_output.rs`    | Structured output (extract / JSON Schema)                                                             |
 | `examples/demo17_chat.rs`                 | Multi-turn chat (chat / chat_stream / reset)                                                          |
@@ -215,31 +215,31 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo19_guard.rs`                | Guard system (rule / LLM content filtering)                                                           |
 | `examples/demo20_audit.rs`                | Audit logging                                                                                         |
 | `examples/demo23_a2a.rs`                  | A2A protocol                                                                                          |
-| `examples/demo24_topology.rs`             | Multi-agent topology visualization                                                                    |
+| `tests/example_contracts/demo24_topology.rs`             | Multi-agent topology visualization                                                                    |
 | `examples/demo25_macros.rs`               | Macro system showcase                                                                                 |
 | `examples/demo26_provider_factory.rs`     | Dynamic LLM factory                                                                                   |
 | `examples/demo27_sqlite_memory.rs`        | SQLite persistence                                                                                    |
 | `examples/demo28_workflow.rs`             | Workflow pipeline                                                                                     |
 | `examples/demo29_sandbox.rs`              | Sandbox execution                                                                                     |
-| `examples/demo30_mcp_server.rs`           | MCP server mode                                                                                       |
-| `examples/demo31_memory_tools.rs`         | Memory tool injection                                                                                 |
+| `tests/example_contracts/demo30_mcp_server.rs`           | MCP server mode                                                                                       |
+| `tests/example_contracts/demo31_memory_tools.rs`         | Memory tool injection                                                                                 |
 | `examples/demo32_token_budget.rs`         | Token budget control                                                                                  |
 | `examples/demo33_retry_policy.rs`         | Unified retry                                                                                         |
-| `examples/demo34_workflow_stream.rs`      | Workflow streaming                                                                                    |
+| `tests/example_contracts/demo34_workflow_stream.rs`      | Workflow streaming                                                                                    |
 | `examples/demo35_dynamic_tools.rs`        | Dynamic tool management                                                                               |
 | `examples/demo36_multimodal.rs`           | Multi-modal messages                                                                                  |
-| `examples/demo37_declarative_workflow.rs` | YAML/JSON workflows                                                                                   |
+| `tests/example_contracts/demo37_declarative_workflow.rs` | YAML/JSON workflows                                                                                   |
 | `examples/demo38_im_channels.rs`          | IM channel integration                                                                                |
-| `examples/demo39_workflow.rs`             | Graph workflow engine                                                                                 |
+| `tests/example_contracts/demo39_workflow.rs`             | Graph workflow engine                                                                                 |
 | `examples/demo40_snapshot.rs`             | Snapshot & rollback                                                                                   |
 | `examples/demo41_web_tools.rs`            | Web search + fetch                                                                                    |
 | `examples/demo42_playwright_mcp.rs`       | Playwright MCP browser automation                                                                     |
-| `examples/demo43_data_tools.rs`           | Data tools (Excel / CSV / Word / Text)                                                                |
+| `tests/example_contracts/demo43_data_tools.rs`           | Data tools (Excel / CSV / Word / Text)                                                                |
 | `examples/demo44_code_laboratory.rs`      | Code execution assistant                                                                              |
 | `examples/demo45_customer_service.rs`     | Intelligent customer service                                                                          |
 | `examples/demo46_data_analyst.rs`         | Data analysis assistant                                                                               |
 | `examples/demo47_enterprise.rs`           | Enterprise workflow automation                                                                        |
 | `examples/demo48_personal_assistant.rs`   | Personal smart assistant                                                                              |
 | `examples/demo49_research_agent.rs`       | Research & report assistant                                                                           |
-| `examples/demo50_eval.rs`                 | Eval system: cases, criteria, constraints, trajectory replay, trigger accuracy, HTML reports          |
-| `examples/demo51_self_improvement.rs`     | Self-improvement: Analyzer failure detection, Curator skill lifecycle, TrajectorySaver fine-tune data |
+| `tests/example_contracts/demo50_eval.rs`                 | Eval system: cases, criteria, constraints, trajectory replay, trigger accuracy, HTML reports          |
+| `tests/example_contracts/demo51_self_improvement.rs`     | Self-improvement: Analyzer failure detection, Curator skill lifecycle, TrajectorySaver fine-tune data |

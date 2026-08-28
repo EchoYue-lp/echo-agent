@@ -15,7 +15,7 @@ mod support;
 
 use echo_agent::memory::store::Store;
 use echo_agent::prelude::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -120,7 +120,7 @@ async fn demo_crud(db_path: &Path) -> echo_agent::error::Result<()> {
     println!(
         "  ✅ get: key={}, value={}",
         item.key,
-        serde_json::to_string(&item.value).unwrap_or_default()
+        serde_json::to_string(&item.value)?
     );
 
     // 更新（upsert）
@@ -135,7 +135,12 @@ async fn demo_crud(db_path: &Path) -> echo_agent::error::Result<()> {
             }),
         )
         .await?;
-    let updated = store.get(ns, "user-pref-001").await?.unwrap();
+    let updated = store.get(ns, "user-pref-001").await?;
+    let Some(updated) = updated else {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：upsert 后无法读取 user-pref-001".to_string(),
+        ));
+    };
     println!(
         "  ✅ upsert: updated_at={}, value 已更新",
         updated.updated_at
@@ -221,7 +226,7 @@ async fn demo_fts5_search(db_path: &Path) -> echo_agent::error::Result<()> {
                     "     [{:.3}] {} → {}",
                     item.score.unwrap_or(0.0),
                     item.key,
-                    item.value["content"].as_str().unwrap_or(""),
+                    required_content(&item.value, "FTS5 搜索结果")?,
                 );
             }
         }
@@ -256,15 +261,25 @@ async fn demo_namespace_isolation(db_path: &Path) -> echo_agent::error::Result<(
 
     // Alice 只能看到自己的
     let alice_item = store.get(&["alice", "memories"], "secret").await?;
+    let Some(alice_item) = alice_item else {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：Alice 的 secret 丢失".to_string(),
+        ));
+    };
     let bob_item = store.get(&["bob", "memories"], "secret").await?;
+    let Some(bob_item) = bob_item else {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：Bob 的 secret 丢失".to_string(),
+        ));
+    };
 
     println!(
         "  🔒 Alice 的 secret: {}",
-        alice_item.unwrap().value["content"]
+        required_content(&alice_item.value, "Alice namespace 记录")?
     );
     println!(
         "  🔒 Bob   的 secret: {}",
-        bob_item.unwrap().value["content"]
+        required_content(&bob_item.value, "Bob namespace 记录")?
     );
 
     // Bob 搜索 Alice 的内容
@@ -336,7 +351,7 @@ async fn demo_semantic_search(db_path: &Path) -> echo_agent::error::Result<()> {
                 "     [{:.4}] {} → {}",
                 item.score.unwrap_or(0.0),
                 item.key,
-                item.value["content"].as_str().unwrap_or(""),
+                required_content(&item.value, "语义搜索结果")?,
             );
         }
         println!();
@@ -452,7 +467,7 @@ async fn demo_persistence(db_path: &Path) -> echo_agent::error::Result<()> {
         };
         println!(
             "  ✅ 实例 2: 读取成功 → {}",
-            item.value["content"].as_str().unwrap_or("")
+            required_content(&item.value, "持久化记录")?
         );
 
         // FTS5 索引也能跨实例
@@ -484,6 +499,14 @@ async fn demo_persistence(db_path: &Path) -> echo_agent::error::Result<()> {
 }
 
 // ── 辅助 ────────────────────────────────────────────────────────────────────
+
+fn required_content<'a>(value: &'a Value, context: &str) -> echo_agent::error::Result<&'a str> {
+    value.get("content").and_then(Value::as_str).ok_or_else(|| {
+        echo_agent::error::ReactError::Other(format!(
+            "demo27 验收失败：{context} 缺少字符串字段 content"
+        ))
+    })
+}
 
 fn print_banner() {
     println!("{}", "═".repeat(64));

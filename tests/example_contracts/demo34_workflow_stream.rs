@@ -4,17 +4,17 @@
 //! 支持 NodeStart / NodeEnd / Token / Completed 等实时事件。
 //!
 //! ```bash
-//! cargo run --example demo34_workflow_stream
+//! cargo test --all-features --locked contract_demo34_workflow_stream -- --nocapture
 //! ```
 
 use echo_agent::prelude::*;
 use futures::StreamExt;
 
-#[tokio::main]
-async fn main() -> echo_agent::error::Result<()> {
-    tracing_subscriber::fmt()
+#[tokio::test]
+async fn contract_demo34_workflow_stream() -> echo_agent::error::Result<()> {
+    let _ = tracing_subscriber::fmt()
         .with_env_filter("echo_agent=info")
-        .init();
+        .try_init();
 
     println!("═══ Workflow Streaming Demo ═══\n");
 
@@ -84,7 +84,10 @@ async fn demo_parallel_stream() -> echo_agent::error::Result<()> {
         .add_function_node("analyze", |state: &SharedState| {
             Box::pin(async move {
                 let text: String = state.get("text").unwrap_or_default();
-                let keywords: Vec<&str> = text.split_whitespace().filter(|w| w.len() > 4).collect();
+                let keywords: Vec<&str> = text
+                    .split_whitespace()
+                    .filter(|word| word.chars().count() > 4)
+                    .collect();
                 let _ = state.set("keywords", keywords);
                 Ok(())
             })

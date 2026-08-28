@@ -72,7 +72,7 @@ impl PrintCallback {
 #[guard(name = "length-limit")]
 async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardResult> {
     let _ = direction;
-    if content.len() > 50000 {
+    if content.chars().count() > 50000 {
         Ok(GuardResult::Block {
             reason: "内容过长，超过 50000 字符".into(),
         })
@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
     };
     println!(
         "  生成的 JSON Schema:\n  {}",
-        serde_json::to_string_pretty(&schema).unwrap()
+        serde_json::to_string_pretty(&schema)?
     );
 
     // ── 6. chat_request! 宏 ─────────────────────────────────────────────

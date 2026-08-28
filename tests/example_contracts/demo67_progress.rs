@@ -6,7 +6,7 @@
 //!   3. Product-owned data in `TaskSpec::extension`
 //!   4. `TaskEvent::Progress` flowing through a `TaskEventBus`
 //!
-//! Run: cargo run --example demo67_progress
+//! Contract test: `contract_demo67_progress`.
 
 use echo_agent::tasks::{Phase, PhasePlan, ProgressReporter, TaskEvent, TaskEventBus, TaskSpec};
 use serde::{Deserialize, Serialize};
@@ -21,8 +21,8 @@ struct ResearchParams {
     require_peer_review: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn contract_demo67_progress() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 === demo67: Progress Tracking + Task Extension ===\n");
 
     // ── 1. Build a PhasePlan with 3 weighted phases ────────────────

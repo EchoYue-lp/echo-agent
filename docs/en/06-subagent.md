@@ -161,4 +161,4 @@ let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
 3. **Don't enable `enable_subagent(true)` on Subagents** — avoid recursive nesting that's hard to debug
 4. **Use the revisioned task graph for complex task relationships** instead of prompt-only hidden state
 
-See: `examples/demo04_subagent.rs`
+See: `tests/example_contracts/demo04_subagent.rs`

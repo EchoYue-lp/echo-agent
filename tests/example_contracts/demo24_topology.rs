@@ -3,15 +3,15 @@
 //! 演示如何追踪 Agent 调用关系并导出为 Mermaid / DOT 格式。
 //!
 //! ```bash
-//! cargo run --example demo24_topology
+//! cargo test --all-features --locked contract_demo24_topology -- --nocapture
 //! ```
 
 use echo_agent::advanced::*;
 use echo_agent::prelude::*;
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> echo_agent::error::Result<()> {
+#[tokio::test]
+async fn contract_demo24_topology() -> echo_agent::error::Result<()> {
     dotenvy::dotenv().ok();
 
     println!("=== Agent 拓扑可视化示例 ===\n");
@@ -58,7 +58,7 @@ async fn main() -> echo_agent::error::Result<()> {
 
     // ── 4. 导出 JSON 格式 ───────────────────────────────────
     println!("\n--- 4. JSON 格式 ---\n");
-    println!("{}", tracker.to_json().unwrap());
+    println!("{}", tracker.to_json()?);
 
     // ── 5. 通过 Callback 自动追踪 ────────────────────────────
     println!("\n--- 5. TopologyCallback 自动追踪 ---\n");

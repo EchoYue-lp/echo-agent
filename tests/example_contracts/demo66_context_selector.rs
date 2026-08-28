@@ -3,13 +3,14 @@
 //! 本示例演示如何使用 ContextSelector 基于任务描述评分和选择相关文件，
 //! 包括符号匹配、最近修改和 Git 变更的加权评分。
 //!
-//! 运行方式: cargo run --example demo66_context_selector
+//! 契约测试入口: `contract_demo66_context_selector`
 
 use echo_agent::context::ContextSelector;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[test]
+fn contract_demo66_context_selector() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== demo66: Context Selector ===\n");
 
     // 示例 1: 基本用法
@@ -273,16 +274,7 @@ fn real_world_scenario() -> Result<(), Box<dyn std::error::Error>> {
     println!("任务: {}", task);
     println!("\n评分结果:");
     for (i, (file, score)) in scored.iter().enumerate().take(10) {
-        // 标记文件类型
-        let file_type = if file.to_str().unwrap().contains("test") {
-            "🧪 test"
-        } else if file.to_str().unwrap().contains("config")
-            || file.to_str().unwrap().contains("Cargo")
-        {
-            "⚙️ config"
-        } else {
-            "📄 source"
-        };
+        let file_type = classify_file(file);
 
         println!(
             "  [{}] {} {} (score: {:.2})",
@@ -295,15 +287,7 @@ fn real_world_scenario() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n选择的相关文件:");
     for (i, file) in selected.iter().enumerate() {
-        let file_type = if file.to_str().unwrap().contains("test") {
-            "🧪 test"
-        } else if file.to_str().unwrap().contains("config")
-            || file.to_str().unwrap().contains("Cargo")
-        {
-            "⚙️ config"
-        } else {
-            "📄 source"
-        };
+        let file_type = classify_file(file);
 
         println!("  [{}] {} {}", i + 1, file_type, file.display());
     }
@@ -311,6 +295,17 @@ fn real_world_scenario() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n💡 提示: 可以使用这些文件作为上下文来修复问题");
 
     Ok(())
+}
+
+fn classify_file(file: &Path) -> &'static str {
+    let display = file.to_string_lossy();
+    if display.contains("test") {
+        "🧪 test"
+    } else if display.contains("config") || display.contains("Cargo") {
+        "⚙️ config"
+    } else {
+        "📄 source"
+    }
 }
 
 /// 打印选择结果

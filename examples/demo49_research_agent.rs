@@ -175,8 +175,9 @@ async fn demo_research_memory(db_path: &Path) -> Result<()> {
             "    [{}] {} - {}",
             i + 1,
             item.key,
-            item.value["summary"]
-                .as_str()
+            item.value
+                .get("summary")
+                .and_then(|value| value.as_str())
                 .unwrap_or("")
                 .chars()
                 .take(50)
@@ -193,10 +194,28 @@ async fn demo_research_memory(db_path: &Path) -> Result<()> {
         ));
     };
     println!("  📄 获取单条记录 (rust_2024):");
-    println!("    主题: {}", item.value["topic"]);
-    println!("    研究日期: {}", item.value["researched_at"]);
+    let topic = item
+        .value
+        .get("topic")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            echo_agent::error::ReactError::Other(
+                "综合验收失败：rust_2024 研究记录缺少 topic".to_string(),
+            )
+        })?;
+    let researched_at = item
+        .value
+        .get("researched_at")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            echo_agent::error::ReactError::Other(
+                "综合验收失败：rust_2024 研究记录缺少 researched_at".to_string(),
+            )
+        })?;
+    println!("    主题: {topic}");
+    println!("    研究日期: {researched_at}");
     println!();
-    if item.value["topic"] != "Rust 语言 2024 年发展" {
+    if topic != "Rust 语言 2024 年发展" {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：研究记录内容不符合预期".to_string(),
         ));
@@ -376,7 +395,7 @@ async fn demo_structured_extraction() -> Result<()> {
 
     println!("📝 任务: 技术选型对比分析\n");
 
-    let schema = typed_response_format::<TechComparison>("tech_comparison");
+    let schema = typed_response_format::<TechComparison>("tech_comparison")?;
 
     let prompt = "对比 Go、Rust、Python 三种语言在后端开发中的优劣，并给出推荐。";
 
@@ -492,10 +511,10 @@ fn print_banner() {
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 }
 
-fn typed_response_format<T: JsonSchema>(name: &str) -> ResponseFormat {
+fn typed_response_format<T: JsonSchema>(name: &str) -> Result<ResponseFormat> {
     let schema = schema_for!(T);
-    let schema_value = serde_json::to_value(schema).expect("schema should serialize");
-    ResponseFormat::json_schema(name, schema_value)
+    let schema_value = serde_json::to_value(schema)?;
+    Ok(ResponseFormat::json_schema(name, schema_value))
 }
 
 fn research_db_path() -> PathBuf {

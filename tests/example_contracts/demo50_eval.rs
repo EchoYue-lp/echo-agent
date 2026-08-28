@@ -10,9 +10,9 @@
 //!
 //! 全程无真实 LLM 调用，使用 Mock 数据演示离线分析能力。
 //!
-//! 运行方式：
+//! Contract test:
 //! ```bash
-//! cargo run --example demo50_eval
+//! cargo test --test example_contracts contract_demo50_eval
 //! ```
 
 use chrono::Utc;
@@ -65,8 +65,8 @@ fn make_run(id: &str, input: &str, events: Vec<RunEvent>, status: RunStatus) -> 
     }
 }
 
-#[tokio::main]
-async fn main() {
+#[tokio::test]
+async fn contract_demo50_eval() -> std::io::Result<()> {
     println!("╔══════════════════════════════════════════════════╗");
     println!("║         echo-agent  评估系统 demo                ║");
     println!("║  （全程无真实 LLM 调用 / 离线分析演示）           ║");
@@ -76,11 +76,12 @@ async fn main() {
     demo_trajectory_replay().await;
     demo_regression_suite().await;
     demo_trigger_accuracy().await;
-    demo_html_report().await;
+    demo_html_report().await?;
 
     println!("\n╔══════════════════════════════════════════════════╗");
     println!("║  全部 5 个场景通过 ✅                             ║");
     println!("╚══════════════════════════════════════════════════╝");
+    Ok(())
 }
 
 /// 场景 1：定义评估用例
@@ -408,7 +409,7 @@ async fn demo_trigger_accuracy() {
 }
 
 /// 场景 5：HTML 报告生成
-async fn demo_html_report() {
+async fn demo_html_report() -> std::io::Result<()> {
     section!(5, "HTML 报告生成");
 
     // 构造评估结果
@@ -454,14 +455,14 @@ async fn demo_html_report() {
     assert!(review_html.contains("feedback"));
     pass!("交互式审查 HTML 生成成功");
 
-    // 写入文件（可选）
-    let report_dir = std::env::temp_dir().join("echo_eval_demo");
-    let _ = std::fs::create_dir_all(&report_dir);
-    let html_path = report_dir.join("eval_report.html");
-    let review_path = report_dir.join("review.html");
-    let _ = std::fs::write(&html_path, &html);
-    let _ = std::fs::write(&review_path, &review_html);
+    // Verify report persistence without leaving fixed artifacts behind.
+    let report_dir = tempfile::tempdir()?;
+    let html_path = report_dir.path().join("eval_report.html");
+    let review_path = report_dir.path().join("review.html");
+    std::fs::write(&html_path, &html)?;
+    std::fs::write(&review_path, &review_html)?;
     println!("\n  报告已写入:");
     println!("    {}", html_path.display());
     println!("    {}", review_path.display());
+    Ok(())
 }

@@ -10,7 +10,7 @@
 //!
 //! 运行方式：
 //! ```bash
-//! cargo run --example demo51_self_improvement
+//! cargo test --test example_contracts contract_demo51_self_improvement
 //! ```
 
 use chrono::Utc;
@@ -63,8 +63,8 @@ fn make_run(id: &str, input: &str, events: Vec<RunEvent>, status: RunStatus) -> 
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn contract_demo51_self_improvement() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔══════════════════════════════════════════════════╗");
     println!("║       echo-agent  自进化系统 demo                ║");
     println!("║  （全程无真实 LLM 调用 / 离线分析演示）           ║");
@@ -270,8 +270,11 @@ async fn demo_critique_aggregation() {
 async fn demo_curator() -> Result<(), Box<dyn std::error::Error>> {
     section!(3, "Curator — 技能生命周期管理");
 
-    let dir = std::env::temp_dir().join(format!("echo_curator_demo_{}", uuid::Uuid::new_v4()));
-    let curator = Curator::new(CuratorConfig::default(), dir.join("curator_state.json"));
+    let dir = tempfile::tempdir()?;
+    let curator = Curator::new(
+        CuratorConfig::default(),
+        dir.path().join("curator_state.json"),
+    );
 
     // 注册技能
     curator.touch_skill("code-review", true)?;
@@ -336,8 +339,6 @@ async fn demo_curator() -> Result<(), Box<dyn std::error::Error>> {
     );
     pass!("非 Agent 创建的 bundled-skill 保持 Active");
 
-    // 清理
-    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 
@@ -345,8 +346,8 @@ async fn demo_curator() -> Result<(), Box<dyn std::error::Error>> {
 async fn demo_trajectory_saver() -> Result<(), Box<dyn std::error::Error>> {
     section!(4, "TrajectorySaver — ShareGPT 格式微调数据");
 
-    let dir = std::env::temp_dir().join(format!("echo_traj_demo_{}", uuid::Uuid::new_v4()));
-    let saver = TrajectorySaver::new(&dir)?;
+    let dir = tempfile::tempdir()?;
+    let saver = TrajectorySaver::new(dir.path())?;
 
     // 构造一个完成的运行
     let run = make_run(
@@ -414,7 +415,5 @@ async fn demo_trajectory_saver() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(stats.completed, 1);
     pass!("统计信息正确");
 
-    // 清理
-    let _ = tokio::fs::remove_dir_all(&dir).await;
     Ok(())
 }

@@ -524,7 +524,7 @@ agent.add_tools(vec![
 | `generate_chart` | chart | Chart generation (requires `chart` feature) |
 | `db_query` / `db_schema` | database | SQL database tools (requires `database` feature) |
 
-See: `examples/demo01_tools.rs`, `examples/demo09_file_shell.rs`, `examples/demo13_tool_execution.rs`, `examples/demo64_tool_pipeline.rs`
+See: `examples/demo01_tools.rs`, `examples/demo09_file_shell.rs`, `examples/demo13_tool_execution.rs`, `tests/example_contracts/demo64_tool_pipeline.rs`
 
 ---
 
@@ -598,4 +598,4 @@ let agent = ReactAgentBuilder::new()
     .build(config);
 ```
 
-See [demo64_tool_pipeline.rs](../../examples/demo64_tool_pipeline.rs).
+See [demo64_tool_pipeline.rs](../../tests/example_contracts/demo64_tool_pipeline.rs).

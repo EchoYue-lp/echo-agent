@@ -5,17 +5,17 @@
 //! 将 Store 直接暴露给 LLM，实现 Agent 自主使用记忆。
 //!
 //! ```bash
-//! cargo run --example demo31_memory_tools
+//! cargo test --all-features --locked contract_demo31_memory_tools -- --nocapture
 //! ```
 
 use echo_agent::prelude::*;
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> echo_agent::error::Result<()> {
-    tracing_subscriber::fmt()
+#[tokio::test]
+async fn contract_demo31_memory_tools() -> echo_agent::error::Result<()> {
+    let _ = tracing_subscriber::fmt()
         .with_env_filter("echo_agent=info")
-        .init();
+        .try_init();
 
     println!("═══ Memory Tool Auto-Injection Demo ═══\n");
 

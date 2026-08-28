@@ -5,9 +5,7 @@
 //!
 //! Run: cargo run --example demo70_scheduler
 
-use echo_agent::workspace::orchestration::scheduler::{
-    CronTask, CronTaskStatus, CronTaskStore, FireFn, SchedulerRunner,
-};
+use echo_agent::scheduler::{CronTask, CronTaskStatus, CronTaskStore, FireFn, SchedulerRunner};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 

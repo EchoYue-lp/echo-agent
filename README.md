@@ -973,7 +973,7 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 01 | [`demo01_tools`](examples/demo01_tools.rs) | Custom tools with `#[tool]` |
 | 02 | [`demo02_tasks`](examples/demo02_tasks.rs) | DAG task planning |
 | 03 | [`demo03_approval`](examples/demo03_approval.rs) | Human-in-the-loop |
-| 04 | [`demo04_subagent`](examples/demo04_subagent.rs) | Multi-agent orchestration |
+| 04 | [`demo04_subagent`](tests/example_contracts/demo04_subagent.rs) | Multi-agent orchestration |
 | 05 | [`demo05_compressor`](examples/demo05_compressor.rs) | Context compression |
 | 06 | [`demo06_mcp`](examples/demo06_mcp.rs) | MCP tool server |
 | 07 | [`demo07_skills`](examples/demo07_skills.rs) | Built-in skills |
@@ -981,7 +981,7 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 09 | [`demo09_file_shell`](examples/demo09_file_shell.rs) | File & shell tools |
 | 10 | [`demo10_streaming`](examples/demo10_streaming.rs) | Streaming output |
 | 11 | [`demo11_callbacks`](examples/demo11_callbacks.rs) | Lifecycle callbacks |
-| 12 | [`demo12_resilience`](examples/demo12_resilience.rs) | Retry & fault tolerance |
+| 12 | [`demo12_resilience`](tests/example_contracts/demo12_resilience.rs) | Retry & fault tolerance |
 | 13 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | Tool execution config |
 | 15 | [`demo15_structured_output`](examples/demo15_structured_output.rs) | JSON Schema output |
 | 17 | [`demo17_chat`](examples/demo17_chat.rs) | Interactive chat |
@@ -989,42 +989,42 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 19 | [`demo19_guard`](examples/demo19_guard.rs) | Guard system |
 | 20 | [`demo20_audit`](examples/demo20_audit.rs) | Audit logging |
 | 23 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A protocol |
-| 24 | [`demo24_topology`](examples/demo24_topology.rs) | Topology visualization |
+| 24 | [`demo24_topology`](tests/example_contracts/demo24_topology.rs) | Topology visualization |
 | 25 | [`demo25_macros`](examples/demo25_macros.rs) | Macro system showcase |
 | 26 | [`demo26_provider_factory`](examples/demo26_provider_factory.rs) | Dynamic LLM factory |
 | 27 | [`demo27_sqlite_memory`](examples/demo27_sqlite_memory.rs) | SQLite persistence |
 | 28 | [`demo28_workflow`](examples/demo28_workflow.rs) | Workflow pipeline |
 | 29 | [`demo29_sandbox`](examples/demo29_sandbox.rs) | Sandbox execution |
-| 30 | [`demo30_mcp_server`](examples/demo30_mcp_server.rs) | MCP server mode |
-| 31 | [`demo31_memory_tools`](examples/demo31_memory_tools.rs) | Memory tool injection |
+| 30 | [`demo30_mcp_server`](tests/example_contracts/demo30_mcp_server.rs) | MCP server mode |
+| 31 | [`demo31_memory_tools`](tests/example_contracts/demo31_memory_tools.rs) | Memory tool injection |
 | 32 | [`demo32_token_budget`](examples/demo32_token_budget.rs) | Token budget control |
 | 33 | [`demo33_retry_policy`](examples/demo33_retry_policy.rs) | Unified retry |
-| 34 | [`demo34_workflow_stream`](examples/demo34_workflow_stream.rs) | Workflow streaming |
+| 34 | [`demo34_workflow_stream`](tests/example_contracts/demo34_workflow_stream.rs) | Workflow streaming |
 | 35 | [`demo35_dynamic_tools`](examples/demo35_dynamic_tools.rs) | Dynamic tool management |
 | 36 | [`demo36_multimodal`](examples/demo36_multimodal.rs) | Multi-modal messages |
-| 37 | [`demo37_declarative_workflow`](examples/demo37_declarative_workflow.rs) | YAML/JSON workflows |
+| 37 | [`demo37_declarative_workflow`](tests/example_contracts/demo37_declarative_workflow.rs) | YAML/JSON workflows |
 | 38 | [`demo38_im_channels`](examples/demo38_im_channels.rs) | IM channel integration |
-| 39 | [`demo39_workflow`](examples/demo39_workflow.rs) | Graph workflow engine |
+| 39 | [`demo39_workflow`](tests/example_contracts/demo39_workflow.rs) | Graph workflow engine |
 | 40 | [`demo40_snapshot`](examples/demo40_snapshot.rs) | Snapshot & rollback |
 | 41 | [`demo41_web_tools`](examples/demo41_web_tools.rs) | Web search + fetch |
 | 42 | [`demo42_playwright_mcp`](examples/demo42_playwright_mcp.rs) | Playwright MCP browser automation |
-| 43 | [`demo43_data_tools`](examples/demo43_data_tools.rs) | Excel / CSV / Word / Text processing |
-| 50 | [`demo50_eval`](examples/demo50_eval.rs) | Eval system: cases, criteria, constraints, replay, HTML reports |
-| 51 | [`demo51_self_improvement`](examples/demo51_self_improvement.rs) | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver |
-| 53 | [`demo53_adaptive_compression`](examples/demo53_adaptive_compression.rs) | 5-level adaptive compression (Snip→Micro→Collapse→Compact→Reactive) |
-| 54 | [`demo54_headless`](examples/demo54_headless.rs) | Headless mode: single-prompt CI/CD execution |
-| 55 | [`demo55_lsp_tools`](examples/demo55_lsp_tools.rs) | LSP tools: go-to-definition, find-references, diagnostics |
+| 43 | [`demo43_data_tools`](tests/example_contracts/demo43_data_tools.rs) | Excel / CSV / Word / Text processing |
+| 50 | [`demo50_eval`](tests/example_contracts/demo50_eval.rs) | Eval system: cases, criteria, constraints, replay, HTML reports |
+| 51 | [`demo51_self_improvement`](tests/example_contracts/demo51_self_improvement.rs) | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver |
+| 53 | [`demo53_adaptive_compression`](tests/example_contracts/demo53_adaptive_compression.rs) | 5-level adaptive compression (Snip→Micro→Collapse→Compact→Reactive) |
+| 54 | [`demo54_headless`](tests/example_contracts/demo54_headless.rs) | Headless mode: single-prompt CI/CD execution |
+| 55 | [`demo55_lsp_tools`](tests/example_contracts/demo55_lsp_tools.rs) | LSP tools: go-to-definition, find-references, diagnostics |
 | 56 | [`demo56_plugin_system`](examples/demo56_plugin_system.rs) | Plugin system: manifest, registry, lifecycle, scope |
-| 57 | [`demo57_data_pipeline`](examples/demo57_data_pipeline.rs) | Code-first data pipeline: persist script → execute → verify artifacts |
+| 57 | [`demo57_data_pipeline`](tests/example_contracts/demo57_data_pipeline.rs) | Code-first data pipeline: persist script → execute → verify artifacts |
 | 58 | [`demo58_git_worktree`](examples/demo58_git_worktree.rs) | Git worktree isolation + checkpoint rollback |
 | 59 | [`demo59_code_search`](examples/demo59_code_search.rs) | Ripgrep-powered code search with structured output |
-| 60 | [`demo60_data_quality`](examples/demo60_data_quality.rs) | Data quality profiling + statistical analysis |
+| 60 | [`demo60_data_quality`](tests/example_contracts/demo60_data_quality.rs) | Data quality profiling + statistical analysis |
 | 61 | [`demo61_agent_factory`](examples/demo61_agent_factory.rs) | Agent factory, mode engine, prompt templates |
-| 62 | [`demo62_prompt_templates`](examples/demo62_prompt_templates.rs) | Prompt template manager with variable substitution |
-| 64 | [`demo64_tool_pipeline`](examples/demo64_tool_pipeline.rs) | Tool execution pipeline + approval stack |
-| 65 | [`demo65_context_assembler`](examples/demo65_context_assembler.rs) | ContextAssembler: budget-aware context assembly with priority ordering |
-| 66 | [`demo66_context_selector`](examples/demo66_context_selector.rs) | ContextSelector: score and select files by task relevance |
-| 67 | [`demo67_progress`](examples/demo67_progress.rs) | Progress reporting |
+| 62 | [`demo62_prompt_templates`](tests/example_contracts/demo62_prompt_templates.rs) | Prompt template manager with variable substitution |
+| 64 | [`demo64_tool_pipeline`](tests/example_contracts/demo64_tool_pipeline.rs) | Tool execution pipeline + approval stack |
+| 65 | [`demo65_context_assembler`](tests/example_contracts/demo65_context_assembler.rs) | ContextAssembler: budget-aware context assembly with priority ordering |
+| 66 | [`demo66_context_selector`](tests/example_contracts/demo66_context_selector.rs) | ContextSelector: score and select files by task relevance |
+| 67 | [`demo67_progress`](tests/example_contracts/demo67_progress.rs) | Progress reporting |
 | 68 | [`demo68_human_gate`](examples/demo68_human_gate.rs) | Human approval gate |
 | 70 | [`demo70_scheduler`](examples/demo70_scheduler.rs) | Task scheduling |
 

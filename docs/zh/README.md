@@ -195,7 +195,7 @@ Anthropic Messages 或 Chat Completions，并声明文本、图片、音频、�
 | `examples/demo01_tools.rs`                | 基础工具注册与调用                                                        |
 | `examples/demo02_tasks.rs`                | DAG 任务规划                                                              |
 | `examples/demo03_approval.rs`             | 人工审批                                                                  |
-| `examples/demo04_subagent.rs`             | Subagent 编排                                                             |
+| `tests/example_contracts/demo04_subagent.rs`             | Subagent 编排                                                             |
 | `examples/demo05_compressor.rs`           | 上下文压缩                                                                |
 | `examples/demo06_mcp.rs`                  | MCP 协议集成                                                              |
 | `examples/demo07_skills.rs`               | Skill 系统                                                                |
@@ -203,7 +203,7 @@ Anthropic Messages 或 Chat Completions，并声明文本、图片、音频、�
 | `examples/demo09_file_shell.rs`           | 文件和 Shell 工具                                                         |
 | `examples/demo10_streaming.rs`            | 流式输出                                                                  |
 | `examples/demo11_callbacks.rs`            | 生命周期回调                                                              |
-| `examples/demo12_resilience.rs`           | 容错与重试                                                                |
+| `tests/example_contracts/demo12_resilience.rs`           | 容错与重试                                                                |
 | `examples/demo13_tool_execution.rs`       | 工具执行配置                                                              |
 | `examples/demo15_structured_output.rs`    | 结构化输出（extract / JSON Schema）                                       |
 | `examples/demo17_chat.rs`                 | 多轮对话（chat / chat_stream / reset）                                    |
@@ -211,31 +211,31 @@ Anthropic Messages 或 Chat Completions，并声明文本、图片、音频、�
 | `examples/demo19_guard.rs`                | Guard 系统（规则 / LLM 内容过滤）                                         |
 | `examples/demo20_audit.rs`                | 审计日志                                                                  |
 | `examples/demo23_a2a.rs`                  | A2A 协议                                                                  |
-| `examples/demo24_topology.rs`             | 多 Agent 拓扑可视化                                                       |
+| `tests/example_contracts/demo24_topology.rs`             | 多 Agent 拓扑可视化                                                       |
 | `examples/demo25_macros.rs`               | 宏系统综合展示                                                            |
 | `examples/demo26_provider_factory.rs`     | 动态 LLM 工厂                                                             |
 | `examples/demo27_sqlite_memory.rs`        | SQLite 持久化记忆                                                         |
 | `examples/demo28_workflow.rs`             | 工作流管道                                                                |
 | `examples/demo29_sandbox.rs`              | 沙箱执行                                                                  |
-| `examples/demo30_mcp_server.rs`           | MCP 服务端模式                                                            |
-| `examples/demo31_memory_tools.rs`         | 记忆工具注入                                                              |
+| `tests/example_contracts/demo30_mcp_server.rs`           | MCP 服务端模式                                                            |
+| `tests/example_contracts/demo31_memory_tools.rs`         | 记忆工具注入                                                              |
 | `examples/demo32_token_budget.rs`         | Token 预算控制                                                            |
 | `examples/demo33_retry_policy.rs`         | 统一重试策略                                                              |
-| `examples/demo34_workflow_stream.rs`      | 工作流流式输出                                                            |
+| `tests/example_contracts/demo34_workflow_stream.rs`      | 工作流流式输出                                                            |
 | `examples/demo35_dynamic_tools.rs`        | 动态工具管理                                                              |
 | `examples/demo36_multimodal.rs`           | 多模态消息                                                                |
-| `examples/demo37_declarative_workflow.rs` | YAML/JSON 声明式工作流                                                    |
+| `tests/example_contracts/demo37_declarative_workflow.rs` | YAML/JSON 声明式工作流                                                    |
 | `examples/demo38_im_channels.rs`          | IM 频道集成                                                               |
-| `examples/demo39_workflow.rs`             | 图工作流引擎                                                              |
+| `tests/example_contracts/demo39_workflow.rs`             | 图工作流引擎                                                              |
 | `examples/demo40_snapshot.rs`             | 快照与回滚                                                                |
 | `examples/demo41_web_tools.rs`            | Web 搜索与页面获取                                                        |
 | `examples/demo42_playwright_mcp.rs`       | Playwright MCP 浏览器自动化                                               |
-| `examples/demo43_data_tools.rs`           | 数据工具（Excel / CSV / Word / 文本）                                     |
+| `tests/example_contracts/demo43_data_tools.rs`           | 数据工具（Excel / CSV / Word / 文本）                                     |
 | `examples/demo44_code_laboratory.rs`      | 代码执行助手                                                              |
 | `examples/demo45_customer_service.rs`     | 智能客服                                                                  |
 | `examples/demo46_data_analyst.rs`         | 数据分析助手                                                              |
 | `examples/demo47_enterprise.rs`           | 企业工作流自动化                                                          |
 | `examples/demo48_personal_assistant.rs`   | 个人智能助理                                                              |
 | `examples/demo49_research_agent.rs`       | 研究与报告助手                                                            |
-| `examples/demo50_eval.rs`                 | 评估系统：用例、标准、约束、轨迹回放、触发准确率、HTML 报告               |
-| `examples/demo51_self_improvement.rs`     | 自进化：Analyzer 失败检测、Curator 技能生命周期、TrajectorySaver 微调数据 |
+| `tests/example_contracts/demo50_eval.rs`                 | 评估系统：用例、标准、约束、轨迹回放、触发准确率、HTML 报告               |
+| `tests/example_contracts/demo51_self_improvement.rs`     | 自进化：Analyzer 失败检测、Curator 技能生命周期、TrajectorySaver 微调数据 |

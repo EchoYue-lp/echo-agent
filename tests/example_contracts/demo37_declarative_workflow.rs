@@ -7,7 +7,7 @@
 //! - 支持条件分支、并行 fan-out 等高级拓扑
 //!
 //! ```bash
-//! cargo run --example demo37_declarative_workflow
+//! cargo test --all-features --locked contract_demo37_declarative_workflow -- --nocapture
 //! ```
 
 use echo_agent::prelude::*;
@@ -15,8 +15,8 @@ use echo_agent::workflow::loader::{
     WorkflowDefinition, load_graph_from_json_str, load_graph_from_yaml_str,
 };
 
-#[tokio::main]
-async fn main() -> echo_agent::error::Result<()> {
+#[tokio::test]
+async fn contract_demo37_declarative_workflow() -> echo_agent::error::Result<()> {
     println!("═══ Declarative Workflow Demo ═══\n");
 
     // ── 1. YAML 定义解析 ─────────────────────────────────────────────────

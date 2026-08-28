@@ -4,9 +4,7 @@
 //! example uses `MockAgent` to demonstrate the public configuration and state
 //! contract without writing files.
 //!
-//! ```bash
-//! cargo run --example demo57_data_pipeline --features testing
-//! ```
+//! Contract test: `contract_demo57_data_pipeline` (requires the `testing` feature).
 
 use echo_agent::error::Result;
 use echo_agent::testing::MockAgent;
@@ -15,11 +13,11 @@ use echo_agent::workflow::pipelines::{
 };
 use echo_agent::workflow::shared_agent;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
+#[tokio::test]
+async fn contract_demo57_data_pipeline() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
         .with_env_filter("info,echo_orchestration=debug")
-        .init();
+        .try_init();
 
     println!("demo57: code-first data analysis pipeline\n");
 

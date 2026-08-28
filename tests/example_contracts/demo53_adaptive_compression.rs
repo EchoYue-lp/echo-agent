@@ -16,12 +16,13 @@
 //! `ContextManager` integration via the `ContextCompressor` trait.
 //!
 //! ```sh
-//! cargo run --example demo53_adaptive_compression
+//! cargo test --test example_contracts contract_demo53_adaptive_compression
 //! ```
 
 use echo_agent::compression::ContextManager;
 use echo_agent::compression::levels::{AdaptiveCompressionConfig, AdaptiveCompressor};
 use echo_agent::compression::{CompressionInput, CompressionOutput, ContextCompressor};
+use echo_agent::error::{ReactError, Result};
 use echo_agent::prelude::{Message, MessageContent, Role};
 
 macro_rules! section {
@@ -43,17 +44,17 @@ fn make_msg(role: Role, text: &str) -> Message {
 /// Create a tool output message of approximately `token_count` tokens.
 /// The heuristic tokenizer uses ~4 chars per token.
 fn make_tool_output(id: usize, approx_tokens: usize) -> Message {
-    let char_count = approx_tokens * 4;
+    let char_count = approx_tokens.saturating_mul(4);
     let content = format!(
         "Tool output #{}:\n{}",
         id,
-        "lorem ipsum dolor sit amet. ".repeat(char_count / 28 + 1)
+        "lorem ipsum dolor sit amet. ".repeat((char_count / 28).saturating_add(1))
     );
     make_msg(Role::Tool, &content)
 }
 
-#[tokio::main]
-async fn main() {
+#[tokio::test]
+async fn contract_demo53_adaptive_compression() -> Result<()> {
     println!("╔══════════════════════════════════════════════════╗");
     println!("║    echo-agent  Adaptive Compression Demo         ║");
     println!("║  (no LLM calls — local heuristic compression)    ║");
@@ -66,11 +67,12 @@ async fn main() {
     demo_l5_reactive();
     demo_escalation();
     demo_no_compression_needed();
-    demo_context_manager_integration().await;
+    demo_context_manager_integration().await?;
 
     println!("\n╔══════════════════════════════════════════════════╗");
     println!("║  All 8 scenarios passed ✅                       ║");
     println!("╚══════════════════════════════════════════════════╝");
+    Ok(())
 }
 
 /// L1 Snip: truncate oversized tool outputs
@@ -275,7 +277,7 @@ fn demo_l5_reactive() {
     // Estimate ~1 token per 4 chars
     let current_tokens: usize = messages
         .iter()
-        .map(|m| m.content.as_text_ref().unwrap_or("").len() / 4)
+        .map(|m| m.content.as_text_ref().unwrap_or("").chars().count() / 4)
         .sum();
     // Target much smaller than current
     let target_tokens = current_tokens / 20;
@@ -365,7 +367,7 @@ fn demo_no_compression_needed() {
 }
 
 /// ContextManager integration: AdaptiveCompressor via ContextCompressor trait
-async fn demo_context_manager_integration() {
+async fn demo_context_manager_integration() -> Result<()> {
     section!("8", "ContextManager Integration (ContextCompressor trait)");
 
     let config = AdaptiveCompressionConfig {
@@ -382,23 +384,39 @@ async fn demo_context_manager_integration() {
 
     // AdaptiveCompressor now implements ContextCompressor!
     // It can be used directly with ContextManager::builder().compressor()
-    let mut ctx = ContextManager::builder(10) // very low limit to force compression
+    const CONTEXT_LIMIT: usize = 64;
+    let mut ctx = ContextManager::builder(CONTEXT_LIMIT)
         .compressor(compressor)
         .with_system("You are a helpful assistant.".to_string())
         .build();
 
-    // Add many messages to trigger compression
-    for i in 0..10 {
-        ctx.push(make_msg(Role::User, &format!("Question {}", i)));
-        ctx.push(make_msg(Role::Assistant, &format!("Answer {}", i)));
+    // Long older turns force compression, while the short latest turn and the
+    // generated collapse summary fit inside the post-compression budget.
+    for i in 0..9 {
+        ctx.push(make_msg(
+            Role::User,
+            &format!("Question {i}: {}", "historical context ".repeat(12)),
+        ));
+        ctx.push(make_msg(
+            Role::Assistant,
+            &format!("Answer {i}: {}", "historical response ".repeat(12)),
+        ));
     }
+    ctx.push(make_msg(Role::User, "Latest question"));
+    ctx.push(make_msg(Role::Assistant, "Latest answer"));
 
     let before_count = ctx.messages().len();
     let before_tokens = ctx.token_estimate();
+    assert!(
+        before_tokens > CONTEXT_LIMIT,
+        "scenario 8 must begin above the context limit"
+    );
 
     // prepare() triggers auto-compression via the ContextCompressor trait
-    let result = ctx.prepare(None).await.unwrap();
-    let compressed = result.compressed.expect("compression should have occurred");
+    let result = ctx.prepare(None).await?;
+    let compressed = result.compressed.ok_or_else(|| {
+        ReactError::Other("compression should have occurred in scenario 8".to_string())
+    })?;
 
     println!(
         "  Before: {} messages, {} tokens",
@@ -417,6 +435,10 @@ async fn demo_context_manager_integration() {
     println!("  Report: {}", metrics.report());
 
     assert!(compressed.after_count < before_count);
+    assert!(
+        compressed.after_tokens <= CONTEXT_LIMIT,
+        "compressed context must fit the configured limit"
+    );
     assert!(metrics.total_compressions >= 1);
     println!("  ✅ AdaptiveCompressor works seamlessly via ContextCompressor trait");
     println!("  ✅ CompressionMetrics tracked automatically");
@@ -447,10 +469,11 @@ async fn demo_context_manager_integration() {
         tokenizer: None,
     };
 
-    let output: CompressionOutput = compressor2.compress(input).await.unwrap();
+    let output: CompressionOutput = compressor2.compress(input).await?;
     println!("  Output messages: {}", output.messages.len());
     println!("  Evicted messages: {}", output.evicted.len());
     println!("  Compressor name: {}", compressor2.name());
     assert!(!output.evicted.is_empty(), "should have evicted messages");
     println!("  ✅ ContextCompressor::compress() works directly on AdaptiveCompressor");
+    Ok(())
 }

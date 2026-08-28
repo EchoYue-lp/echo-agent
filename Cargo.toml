@@ -192,21 +192,7 @@ name = "demo28_workflow"
 name = "demo29_sandbox"
 
 [[example]]
-name = "demo30_mcp_server"
-required-features = ["mcp"]
-
-[[example]]
-name = "demo31_memory_tools"
-required-features = ["sqlite"]
-
-[[example]]
-name = "demo34_workflow_stream"
-
-[[example]]
 name = "demo36_multimodal"
-
-[[example]]
-name = "demo37_declarative_workflow"
 
 [[example]]
 name = "demo38_im_channels"
@@ -222,22 +208,6 @@ path = "examples/demo42_playwright_mcp.rs"
 required-features = ["mcp"]
 
 [[example]]
-name = "demo04_subagent"
-required-features = ["testing"]
-
-[[example]]
-name = "demo12_resilience"
-required-features = ["testing"]
-
-[[example]]
-name = "demo39_workflow"
-required-features = ["testing"]
-
-[[example]]
-name = "demo43_data_tools"
-required-features = ["testing"]
-
-[[example]]
 name = "demo47_enterprise"
 required-features = ["testing"]
 
@@ -248,10 +218,6 @@ required-features = ["human-loop"]
 [[example]]
 name = "demo20_audit"
 required-features = ["human-loop"]
-
-[[example]]
-name = "demo24_topology"
-required-features = ["topology"]
 
 [[example]]
 name = "demo03_approval"
@@ -267,35 +233,12 @@ required-features = ["files", "shell"]
 
 [[example]]
 name = "demo08_external_skills"
-required-features = ["sqlite"]
 
 [[example]]
 name = "demo35_dynamic_tools"
 
 [[example]]
-name = "demo50_eval"
-required-features = ["eval"]
-
-[[example]]
-name = "demo51_self_improvement"
-required-features = ["eval", "improve"]
-
-[[example]]
-name = "demo53_adaptive_compression"
-
-[[example]]
-name = "demo54_headless"
-
-[[example]]
-name = "demo55_lsp_tools"
-required-features = ["lsp"]
-
-[[example]]
 name = "demo56_plugin_system"
-
-[[example]]
-name = "demo57_data_pipeline"
-required-features = ["testing"]
 
 [[example]]
 name = "demo58_git_worktree"
@@ -306,28 +249,8 @@ name = "demo59_code_search"
 required-features = ["files"]
 
 [[example]]
-name = "demo60_data_quality"
-required-features = ["data", "statistics"]
-
-[[example]]
 name = "demo61_agent_factory"
 required-features = ["testing"]
-
-[[example]]
-name = "demo62_prompt_templates"
-
-[[example]]
-name = "demo64_tool_pipeline"
-
-[[example]]
-name = "demo65_context_assembler"
-
-[[example]]
-name = "demo66_context_selector"
-
-[[example]]
-name = "demo67_progress"
-required-features = []
 
 [[example]]
 name = "demo68_human_gate"
@@ -335,6 +258,10 @@ required-features = ["subagent", "human-loop"]
 
 [[example]]
 name = "demo70_scheduler"
+
+[[example]]
+name = "demo19_guard"
+required-features = ["content-guard"]
 
 [dev-dependencies]
 proptest = "1"
