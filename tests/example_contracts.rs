@@ -1,6 +1,6 @@
 //! Executable contracts migrated from deterministic framework examples.
 
-#[cfg(feature = "testing")]
+#[cfg(all(feature = "testing", feature = "human-loop"))]
 #[path = "example_contracts/demo04_subagent.rs"]
 mod demo04_subagent;
 #[cfg(feature = "testing")]
@@ -45,6 +45,7 @@ mod demo57_data_pipeline;
 mod demo60_data_quality;
 #[path = "example_contracts/demo62_prompt_templates.rs"]
 mod demo62_prompt_templates;
+#[cfg(feature = "testing")]
 #[path = "example_contracts/demo64_tool_pipeline.rs"]
 mod demo64_tool_pipeline;
 #[path = "example_contracts/demo65_context_assembler.rs"]
