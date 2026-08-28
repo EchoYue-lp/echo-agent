@@ -549,6 +549,9 @@ impl MemoryLayerManager {
             "user forget",
             "delete_memory",
         )?;
+        if layer == MemoryLayer::Hot {
+            self.notify_memory_layer_change(key, "hot", "deleted").await;
+        }
         Ok(true)
     }
 
@@ -1385,6 +1388,7 @@ mod tests {
     use super::*;
     use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
     use echo_state::memory::store::InMemoryStore;
+    use std::sync::Mutex as StdMutex;
 
     /// A no-op ChangeLog for testing.
     struct NullChangeLog;
@@ -1408,6 +1412,70 @@ mod tests {
         ) -> Result<Option<ChangeEntry>> {
             Ok(None)
         }
+        fn len(&self) -> usize {
+            0
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        changes: StdMutex<Vec<(String, String, String)>>,
+    }
+
+    impl RecordingObserver {
+        fn changes(&self) -> Vec<(String, String, String)> {
+            self.changes
+                .lock()
+                .map(|changes| changes.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl EvolutionObserver for RecordingObserver {
+        fn on_memory_layer_change<'a>(
+            &'a self,
+            key: &'a str,
+            from_layer: &'a str,
+            to_layer: &'a str,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                if let Ok(mut changes) = self.changes.lock() {
+                    changes.push((
+                        key.to_string(),
+                        from_layer.to_string(),
+                        to_layer.to_string(),
+                    ));
+                }
+            })
+        }
+    }
+
+    struct FailingChangeLog;
+
+    impl ChangeLog for FailingChangeLog {
+        fn record(&self, _entry: ChangeEntry) -> Result<()> {
+            Err(merge_plan_error("injected change-log failure"))
+        }
+
+        fn record_idempotent(
+            &self,
+            _entry: ChangeEntry,
+        ) -> Result<super::super::audit::ChangeRecordOutcome> {
+            Err(merge_plan_error("injected change-log failure"))
+        }
+
+        fn query(&self, _filter: &super::super::audit::ChangeFilter) -> Result<Vec<ChangeEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn latest_for(
+            &self,
+            _entity_type: EntityType,
+            _entity_key: &str,
+        ) -> Result<Option<ChangeEntry>> {
+            Ok(None)
+        }
+
         fn len(&self) -> usize {
             0
         }
@@ -1522,6 +1590,73 @@ entries:
         let meta = manager.read_hot_meta();
         assert_eq!(meta.len(), 1);
         assert_eq!(meta[0].key, "test_key");
+    }
+
+    #[tokio::test]
+    async fn successful_hot_delete_notifies_once_and_missing_retry_does_not_notify() -> Result<()> {
+        let dir = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?
+            .keep();
+        let observer = Arc::new(RecordingObserver::default());
+        let manager =
+            MemoryLayerManager::new(dir, Arc::new(InMemoryStore::new()), Box::new(NullChangeLog))
+                .with_evolution_observer(observer.clone());
+        let entry = TypedMemoryEntry {
+            key: "delete_hot".to_string(),
+            content: "Delete this hot memory".to_string(),
+            meta: MemoryMeta::new(
+                MemoryType::UserPreference,
+                MemorySource::ExplicitSave,
+                "test",
+            ),
+            raw: echo_core::memory::store::StoreItem::new(
+                vec!["agent".to_string()],
+                "delete_hot".to_string(),
+                serde_json::Value::Null,
+            ),
+        };
+        manager.add_to_hot(&entry).await.map_err(ReactError::from)?;
+
+        assert!(manager.delete_memory("delete_hot").await?);
+        assert!(!manager.delete_memory("delete_hot").await?);
+        assert_eq!(
+            observer.changes(),
+            vec![(
+                "delete_hot".to_string(),
+                "hot".to_string(),
+                "deleted".to_string(),
+            )]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_hot_delete_audit_emits_no_layer_change() -> Result<()> {
+        let dir = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?
+            .keep();
+        let observer = Arc::new(RecordingObserver::default());
+        let manager = MemoryLayerManager::new(
+            dir,
+            Arc::new(InMemoryStore::new()),
+            Box::new(FailingChangeLog),
+        )
+        .with_evolution_observer(observer.clone());
+        let entry = TypedMemoryEntry {
+            key: "failed_delete".to_string(),
+            content: "Audit failure".to_string(),
+            meta: MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "test"),
+            raw: echo_core::memory::store::StoreItem::new(
+                vec!["agent".to_string()],
+                "failed_delete".to_string(),
+                serde_json::Value::Null,
+            ),
+        };
+        manager.add_to_hot(&entry).await.map_err(ReactError::from)?;
+
+        assert!(manager.delete_memory("failed_delete").await.is_err());
+        assert!(observer.changes().is_empty());
+        Ok(())
     }
 
     #[test]

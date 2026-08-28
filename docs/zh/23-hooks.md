@@ -96,6 +96,9 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 健康检查、补丁、合并和规则提升主路径真实发射，不是只保留在枚举中的占位事件。
 Task/Subagent 的取消与超时由对应终态事件的结构化 status 表达，不再使用独立事件。
 
+成功删除 hot memory 时也会发出 `MemoryLayerChange`，其中
+`from_layer = "hot"`、`to_layer = "deleted"`。缺失或失败的删除不会发出该事件。
+
 ### Hook 动作类型
 
 | 类型 | 行为 |

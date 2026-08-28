@@ -929,3 +929,87 @@ fn format_store_item(item: &StoreItem) -> String {
         other => other.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evolution::EvolutionObserver;
+    use echo_state::memory::store::InMemoryStore;
+    use futures::future::BoxFuture;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        changes: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl EvolutionObserver for RecordingObserver {
+        fn on_memory_layer_change<'a>(
+            &'a self,
+            key: &'a str,
+            from_layer: &'a str,
+            to_layer: &'a str,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                if let Ok(mut changes) = self.changes.lock() {
+                    changes.push((
+                        key.to_string(),
+                        from_layer.to_string(),
+                        to_layer.to_string(),
+                    ));
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn layered_forget_tool_emits_hot_delete_notification()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?.keep();
+        let observer = Arc::new(RecordingObserver::default());
+        let manager = Arc::new(
+            MemoryLayerManager::new(
+                dir,
+                Arc::new(InMemoryStore::new()),
+                Box::new(crate::evolution::audit::NullChangeLog),
+            )
+            .with_evolution_observer(observer.clone()),
+        );
+        let meta = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "tool-test",
+        )
+        .with_confidence(0.95)
+        .with_stability(0.90);
+        manager
+            .write_memory("tool_forget", "Forget through the tool", meta)
+            .await?;
+        observer
+            .changes
+            .lock()
+            .map_err(|_| "observer lock is poisoned")?
+            .clear();
+
+        let tool = LayeredForgetTool::new(manager);
+        let parameters = [("id".to_string(), json!("tool_forget"))]
+            .into_iter()
+            .collect();
+        let result = tool.execute(parameters).await?;
+
+        assert!(result.success);
+        assert_eq!(
+            observer
+                .changes
+                .lock()
+                .map_err(|_| "observer lock is poisoned")?
+                .as_slice(),
+            &[(
+                "tool_forget".to_string(),
+                "hot".to_string(),
+                "deleted".to_string(),
+            )]
+        );
+        Ok(())
+    }
+}

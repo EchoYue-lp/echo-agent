@@ -54,6 +54,10 @@ All eight Evolution events above are emitted by their owning write, transition,
 candidate-detection, health-check, patch, merge, and rule-promotion paths. They
 are runtime events rather than reserved enum values.
 
+`MemoryLayerChange` also reports a successful hot-memory deletion as
+`from_layer = "hot"` and `to_layer = "deleted"`. Missing or failed deletes do
+not emit the event.
+
 ### Hook Types
 
 | Type | Behavior |

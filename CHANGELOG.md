@@ -86,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Successful hot-layer memory deletion now emits the existing
+  `MemoryLayerChange` observer event exactly once as `hot -> deleted`; missing
+  or failed deletes remain silent.
+
 - `FileRuntimeStateStore` and `FileConversationStore` now submit async-trait
   filesystem work to one process-wide bounded, keyed blocking owner. Operations
   for a conversation remain ordered, accepted writes survive caller abort, and
