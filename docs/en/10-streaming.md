@@ -258,4 +258,5 @@ After truncate: [────── head (70%) ──────][── tail (
 
 If spill creation fails, echo-agent applies a conservative fallback token budget instead
 of returning the full oversized result to the model. `ToolResult.truncated` and metadata
-record whether the result was spilled, truncated, or truncated after a spill failure.
+record output handling, while a successful spill is carried by the typed
+`ToolResult.artifact` descriptor.

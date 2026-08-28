@@ -13,6 +13,8 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 128;
 
 /// Lifecycle events emitted by the subagent system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Boxing ToolResult would change the public event contract for every consumer.
+#[allow(clippy::large_enum_variant)]
 pub enum SubagentEvent {
     /// A subagent was registered.
     Registered {
@@ -413,7 +415,14 @@ mod tests {
             data: Some(serde_json::json!({"partial": true})),
             truncated: true,
             mime_type: Some("application/json".to_string()),
-            metadata: HashMap::from([("artifact_path".to_string(), "/tmp/tool.log".to_string())]),
+            artifact: Some(echo_core::tools::artifact::ToolOutputArtifactRef {
+                path: std::path::PathBuf::from("/tmp/tool.log"),
+                artifact_bytes: 12,
+                payload_bytes: 12,
+                sha256: "a".repeat(64),
+                retention: "test".to_string(),
+            }),
+            metadata: HashMap::new(),
             model_content: Vec::new(),
         };
         let completed = SubagentEvent::DispatchToolCompleted {
@@ -450,10 +459,10 @@ mod tests {
         assert!(decoded_result.truncated);
         assert_eq!(
             decoded_result
-                .metadata
-                .get("artifact_path")
-                .map(String::as_str),
-            Some("/tmp/tool.log")
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.path.as_path()),
+            Some(std::path::Path::new("/tmp/tool.log"))
         );
         assert_eq!(
             decoded_result.failure.map(|failure| failure.category),

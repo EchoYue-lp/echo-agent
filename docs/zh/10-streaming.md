@@ -254,5 +254,5 @@ src/agent/react/run/stream_loop/
 ```
 
 spill 创建失败时，框架使用保守的 fallback token 预算截断，不会把完整超大结果直接
-塞回模型。`ToolResult.truncated` 和 metadata 会记录 spilled、truncated 或
-spill_failed_truncated。
+塞回模型。`ToolResult.truncated` 和 metadata 记录输出处理方式；spill 成功时，完整引用由
+类型化的 `ToolResult.artifact` descriptor 承载。

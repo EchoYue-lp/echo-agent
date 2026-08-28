@@ -1467,18 +1467,14 @@ impl SubagentExecutor {
                         source: SubagentEvidenceSource::Observed,
                         attributes: serde_json::json!({ "args": args }),
                     });
-                    if let Some(artifact) =
-                        echo_core::tools::artifact::ToolOutputArtifactRef::from_metadata(
-                            &result.metadata,
-                        )
-                    {
+                    if let Some(artifact) = result.artifact.as_ref() {
                         observed_artifacts.push(SubagentArtifact {
                             path: artifact.path.to_string_lossy().to_string(),
                             kind: "tool_log".to_string(),
                             bytes: Some(artifact.artifact_bytes),
-                            sha256: Some(artifact.sha256),
+                            sha256: Some(artifact.sha256.clone()),
                             producer_execution_id: execution_id.clone(),
-                            available: artifact.path.is_file(),
+                            available: true,
                         });
                     }
                     registry
@@ -2089,6 +2085,7 @@ mod tests {
                     truncated: true,
                     mime_type: Some("application/json".to_string()),
                     metadata: HashMap::from([("source".to_string(), "fixture".to_string())]),
+                    artifact: None,
                     model_content: Vec::new(),
                 };
                 let events = vec![

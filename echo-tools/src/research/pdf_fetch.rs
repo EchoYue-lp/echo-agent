@@ -169,12 +169,12 @@ impl Tool for PdfFetchTool {
                 "metadata": metadata,
             });
             let mut result = ToolResult::success_json(preview_result).with_truncated(true);
-            artifact.extend_metadata(&mut result.metadata);
             result.output.push_str(&format!(
                 "\n\n[PDF text preview only. Full result artifact: {}. Use read_artifact with expected_sha256 {}.]",
                 artifact.path.display(),
                 artifact.sha256
             ));
+            result.artifact = Some(artifact);
 
             Ok(result)
         })

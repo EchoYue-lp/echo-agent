@@ -106,7 +106,7 @@ pub struct RunSummary {
 pub enum RunEvent {
     LlmCall { messages, prompt_tokens, completion_tokens, duration_ms },
     ToolCall { call_id, name, args, risk, duration_ms },
-    ToolResult { call_id, name, success, output_preview, output_truncated, duration_ms },
+    ToolResult { call_id, name, success, output_preview, output_truncated, artifact, duration_ms },
     ToolError { call_id, name, message },
     Error { message },
     Checkpoint { id },
@@ -124,7 +124,7 @@ pub enum RunEvent {
 |------|------|------|
 | `LlmCall` | 思考 | 每次 LLM API 调用后——记录 Token 数和延迟 |
 | `ToolCall` | 执行 | 工具执行前——记录名称、参数（已脱敏）、风险等级 |
-| `ToolResult` | 执行 | 工具成功后——记录成功标志、输出预览（前 200 字符） |
+| `ToolResult` | 执行 | 工具结束后——记录成功标志、有界输出预览，以及存在时的类型化完整输出 artifact |
 | `ToolError` | 执行 | 工具失败后——记录错误消息 |
 | `Error` | 任意 | 运行级别错误 |
 | `Checkpoint` | 任意 | 保存检查点时 |

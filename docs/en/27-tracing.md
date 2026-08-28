@@ -106,7 +106,7 @@ pub struct RunSummary {
 pub enum RunEvent {
     LlmCall { messages, prompt_tokens, completion_tokens, duration_ms },
     ToolCall { call_id, name, args, risk, duration_ms },
-    ToolResult { call_id, name, success, output_preview, output_truncated, duration_ms },
+    ToolResult { call_id, name, success, output_preview, output_truncated, artifact, duration_ms },
     ToolError { call_id, name, message },
     Error { message },
     Checkpoint { id },
@@ -124,7 +124,7 @@ pub enum RunEvent {
 |-------|-------|-------------|
 | `LlmCall` | Think | After each LLM API call — records token counts and latency |
 | `ToolCall` | Act | Before tool execution — records name, args (secrets redacted), risk level |
-| `ToolResult` | Act | After tool succeeds — records success flag, output preview (first 200 chars) |
+| `ToolResult` | Act | After tool completion — records success, bounded preview, and the typed complete-output artifact when present |
 | `ToolError` | Act | After tool fails — records error message |
 | `Error` | Any | Run-level errors |
 | `Checkpoint` | Any | When a checkpoint is saved |

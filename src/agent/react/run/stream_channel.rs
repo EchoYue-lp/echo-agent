@@ -1971,11 +1971,9 @@ mod tests {
             result.metadata.get("output_handling").map(String::as_str),
             Some("spilled")
         );
-        let artifact =
-            echo_core::tools::artifact::ToolOutputArtifactRef::from_metadata(&result.metadata)
-                .ok_or_else(|| {
-                    ReactError::Other("ToolResult lost its artifact reference".to_string())
-                })?;
+        let artifact = result.artifact.as_ref().ok_or_else(|| {
+            ReactError::Other("ToolResult lost its artifact reference".to_string())
+        })?;
         let recovered = std::fs::read_to_string(&artifact.path)
             .map_err(|error| ReactError::Other(error.to_string()))?;
         assert_eq!(recovered, original);

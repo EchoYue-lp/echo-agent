@@ -343,6 +343,12 @@ pub struct ToolResult {
     /// MIME type of the output content, when known (e.g. `text/html`, `image/png`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mime_type: Option<String>,
+    /// Complete output artifact when the result was spilled from inline output.
+    ///
+    /// This is a typed terminal fact. Consumers must not reconstruct artifact
+    /// identity or integrity from the open-ended `metadata` map.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub artifact: Option<artifact::ToolOutputArtifactRef>,
     /// Arbitrary key-value metadata (e.g. source URL, file path, duration, token count).
     #[serde(default)]
     pub metadata: HashMap<String, String>,
@@ -363,6 +369,7 @@ impl ToolResult {
             data: None,
             truncated: false,
             mime_type: None,
+            artifact: None,
             metadata: HashMap::new(),
             model_content: Vec::new(),
         }
@@ -383,6 +390,7 @@ impl ToolResult {
             data: Some(data),
             truncated: false,
             mime_type: None,
+            artifact: None,
             metadata: HashMap::new(),
             model_content: Vec::new(),
         }
@@ -399,6 +407,7 @@ impl ToolResult {
             data: None,
             truncated: false,
             mime_type: None,
+            artifact: None,
             metadata: HashMap::new(),
             model_content: Vec::new(),
         }
@@ -417,6 +426,7 @@ impl ToolResult {
             data: None,
             truncated: false,
             mime_type: None,
+            artifact: None,
             metadata: HashMap::new(),
             model_content: Vec::new(),
         }
@@ -472,6 +482,12 @@ impl ToolResult {
     /// Set the MIME type for the output content.
     pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
         self.mime_type = Some(mime_type.into());
+        self
+    }
+
+    /// Attach the complete typed artifact descriptor to this result.
+    pub fn with_artifact(mut self, artifact: artifact::ToolOutputArtifactRef) -> Self {
+        self.artifact = Some(artifact);
         self
     }
 

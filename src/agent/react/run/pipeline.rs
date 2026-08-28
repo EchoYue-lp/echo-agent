@@ -13,6 +13,9 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::debug;
 
+// Complete tool results stay inline so the pipeline preserves the same typed
+// stream event without adding an allocation to every streamed item.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ToolPipelineEvent {
     Invocation {
         call_id: String,
@@ -677,6 +680,7 @@ impl PipelineStage for ExecuteStage {
                     data: None,
                     truncated: false,
                     mime_type: None,
+                    artifact: None,
                     metadata: std::collections::HashMap::new(),
                     model_content: Vec::new(),
                 }
@@ -811,9 +815,10 @@ impl PipelineStage for TruncationStage {
             .as_deref()
             .or_else(|| ctx.result.as_ref().map(|r| r.output.as_str()))
             .unwrap_or("");
-        let existing_artifact = ctx.result.as_ref().and_then(|result| {
-            echo_core::tools::artifact::ToolOutputArtifactRef::from_metadata(&result.metadata)
-        });
+        let existing_artifact = ctx
+            .result
+            .as_ref()
+            .and_then(|result| result.artifact.clone());
         let processed = snapshot.process_tool_output_for_call(
             raw.to_string(),
             &ctx.call_id,
@@ -822,6 +827,7 @@ impl PipelineStage for TruncationStage {
         );
         if let Some(result) = ctx.result.as_mut() {
             result.truncated = result.truncated || processed.truncated;
+            result.artifact = processed.artifact;
             result.metadata.extend(processed.metadata);
             snapshot.tools.tool_manager.record_tool_result(
                 &ctx.tool_name,
@@ -933,7 +939,7 @@ impl PipelineStage for TraceRecordingStage {
                     returned_bytes: metadata_u64(result, "returned_bytes"),
                     estimated_tokens: metadata_usize(result, "estimated_tokens"),
                     output_handling: result.metadata.get("output_handling").cloned(),
-                    artifact: trace_artifact(result),
+                    artifact: result.artifact.clone(),
                 })
                 .await;
             if !result.success {
@@ -965,21 +971,6 @@ fn metadata_usize(result: &crate::tools::ToolResult, key: &str) -> usize {
         .get(key)
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0)
-}
-
-fn trace_artifact(
-    result: &crate::tools::ToolResult,
-) -> Option<crate::trace::ToolOutputArtifactTrace> {
-    Some(crate::trace::ToolOutputArtifactTrace {
-        path: result.metadata.get("artifact_path")?.clone(),
-        bytes: metadata_u64(result, "artifact_bytes"),
-        sha256: result.metadata.get("artifact_sha256")?.clone(),
-        retention: result
-            .metadata
-            .get("artifact_retention")
-            .cloned()
-            .unwrap_or_else(|| "unspecified".to_string()),
-    })
 }
 
 // ── ToolExecutionPipeline ──────────────────────────────────────────
@@ -1536,17 +1527,19 @@ mod tests {
             result.metadata.get("output_handling").map(String::as_str),
             Some("spilled")
         );
-        let artifact_path = result
-            .metadata
-            .get("artifact_path")
-            .ok_or_else(|| ReactError::Other("spill metadata lacks artifact_path".to_string()))?;
-        assert!(std::path::Path::new(artifact_path).starts_with(working_dir.path()));
+        let artifact = result
+            .artifact
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("spill result lacks typed artifact".to_string()))?;
+        let artifact_path = &artifact.path;
+        assert!(artifact_path.starts_with(working_dir.path()));
+        let artifact_path_text = artifact_path.to_string_lossy();
         assert!(ctx.output.as_deref().is_some_and(|output| {
             output.contains("Tool output preview only")
                 && output.contains("not a summary")
                 && output.contains("Full output artifact")
                 && output.contains("Use read_artifact with this exact path")
-                && output.contains(artifact_path)
+                && output.contains(artifact_path_text.as_ref())
         }));
 
         let read_tool = crate::tools::files::artifact::ReadArtifactTool;
@@ -1559,7 +1552,10 @@ mod tests {
         let mut recovered = String::new();
         loop {
             let mut params = ToolParameters::from([
-                ("path".to_string(), Value::String(artifact_path.clone())),
+                (
+                    "path".to_string(),
+                    Value::String(artifact_path_text.to_string()),
+                ),
                 ("max_tokens".to_string(), Value::from(500_u64)),
             ]);
             if let Some(value) = cursor.clone() {
@@ -1583,11 +1579,8 @@ mod tests {
             std::fs::read_to_string(artifact_path).ok().as_deref(),
             Some(original.as_str())
         );
-        let trace_artifact = trace_artifact(result)
-            .ok_or_else(|| ReactError::Other("trace lost artifact descriptor".to_string()))?;
-        assert_eq!(trace_artifact.path.as_str(), artifact_path.as_str());
-        assert_eq!(trace_artifact.sha256.len(), 64);
-        assert_eq!(trace_artifact.retention, "test");
+        assert_eq!(artifact.sha256.len(), 64);
+        assert_eq!(artifact.retention, "test");
         Ok(())
     }
 
@@ -1650,7 +1643,7 @@ mod tests {
             result.metadata.get("output_handling").map(String::as_str),
             Some("spilled")
         );
-        assert!(result.metadata.contains_key("artifact_path"));
+        assert!(result.artifact.is_some());
         Ok(())
     }
 

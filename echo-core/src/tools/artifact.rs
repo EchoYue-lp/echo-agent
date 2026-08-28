@@ -98,51 +98,6 @@ pub struct ToolOutputArtifactRef {
     pub retention: String,
 }
 
-impl ToolOutputArtifactRef {
-    pub fn extend_metadata(&self, metadata: &mut std::collections::HashMap<String, String>) {
-        metadata.insert("artifact_kind".to_string(), "tool_log".to_string());
-        metadata.insert(
-            "artifact_media_type".to_string(),
-            "text/plain; charset=utf-8".to_string(),
-        );
-        metadata.insert("artifact_status".to_string(), "available".to_string());
-        metadata.insert("artifact_path".to_string(), self.path.display().to_string());
-        metadata.insert(
-            "artifact_bytes".to_string(),
-            self.artifact_bytes.to_string(),
-        );
-        metadata.insert(
-            "artifact_payload_bytes".to_string(),
-            self.payload_bytes.to_string(),
-        );
-        metadata.insert("artifact_sha256".to_string(), self.sha256.clone());
-        metadata.insert("artifact_retention".to_string(), self.retention.clone());
-    }
-
-    pub fn from_metadata(metadata: &std::collections::HashMap<String, String>) -> Option<Self> {
-        let path = metadata.get("artifact_path").map(PathBuf::from)?;
-        let artifact_bytes = metadata
-            .get("artifact_bytes")
-            .and_then(|value| value.parse::<u64>().ok())?;
-        let payload_bytes = metadata
-            .get("artifact_payload_bytes")
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(artifact_bytes);
-        let sha256 = metadata.get("artifact_sha256")?.clone();
-        let retention = metadata
-            .get("artifact_retention")
-            .cloned()
-            .unwrap_or_else(|| "unspecified".to_string());
-        Some(Self {
-            path,
-            artifact_bytes,
-            payload_bytes,
-            sha256,
-            retention,
-        })
-    }
-}
-
 pub struct ToolOutputArtifactWriter {
     config: ToolOutputArtifactConfig,
     scope_dir: PathBuf,

@@ -286,7 +286,7 @@ impl Tool for WebFetchTool {
                         "returned_bytes".to_string(),
                         result.output.len().to_string(),
                     );
-                    artifact.extend_metadata(&mut result.metadata);
+                    result.artifact = Some(artifact);
                     return Ok(result);
                 }
             }

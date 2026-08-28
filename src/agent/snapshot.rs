@@ -24,6 +24,7 @@ const TOOL_OUTPUT_SPILL_FAILURE_FALLBACK_TOKENS: usize = 8_000;
 pub(crate) struct ProcessedToolOutput {
     pub output: String,
     pub truncated: bool,
+    pub artifact: Option<echo_core::tools::artifact::ToolOutputArtifactRef>,
     pub metadata: std::collections::HashMap<String, String>,
 }
 
@@ -1439,10 +1440,10 @@ impl AgentRunSnapshot {
             );
             metadata.insert("returned_bytes".to_string(), model_output.len().to_string());
             metadata.insert("estimated_tokens".to_string(), estimated_tokens.to_string());
-            artifact.extend_metadata(&mut metadata);
             return ProcessedToolOutput {
                 output: model_output,
                 truncated: true,
+                artifact: Some(artifact),
                 metadata,
             };
         }
@@ -1462,6 +1463,7 @@ impl AgentRunSnapshot {
             return ProcessedToolOutput {
                 output,
                 truncated: false,
+                artifact: None,
                 metadata,
             };
         };
@@ -1477,6 +1479,7 @@ impl AgentRunSnapshot {
             return ProcessedToolOutput {
                 output,
                 truncated: false,
+                artifact: None,
                 metadata,
             };
         }
@@ -1519,6 +1522,7 @@ impl AgentRunSnapshot {
         ProcessedToolOutput {
             output: truncated_output,
             truncated: true,
+            artifact: None,
             metadata,
         }
     }

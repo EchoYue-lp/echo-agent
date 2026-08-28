@@ -1114,7 +1114,7 @@ impl ArtifactCapture {
             None => None,
         };
         if let Some(artifact) = artifact {
-            apply_artifact(&artifact, &mut result);
+            apply_artifact(artifact, &mut result);
         } else if let Some(error) = self.error.take() {
             result
                 .metadata
@@ -1125,7 +1125,7 @@ impl ArtifactCapture {
     }
 }
 
-fn apply_artifact(artifact: &ToolOutputArtifactRef, result: &mut ToolResult) {
+fn apply_artifact(artifact: ToolOutputArtifactRef, result: &mut ToolResult) {
     let original_bytes = result
         .metadata
         .get("stdout_bytes")
@@ -1138,14 +1138,15 @@ fn apply_artifact(artifact: &ToolOutputArtifactRef, result: &mut ToolResult) {
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(0),
         );
-    artifact.extend_metadata(&mut result.metadata);
+    let payload_bytes = artifact.payload_bytes;
+    result.artifact = Some(artifact);
     result
         .metadata
         .insert("output_handling".to_string(), "spilled".to_string());
     result.metadata.insert(
         "original_bytes".to_string(),
         if original_bytes == 0 {
-            artifact.payload_bytes
+            payload_bytes
         } else {
             original_bytes
         }
@@ -1936,31 +1937,16 @@ mod tests {
                 "missing shell completion",
             )
         })?;
-        let artifact_path = result
-            .metadata
-            .get("artifact_path")
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "missing artifact path")
-            })?;
-        let artifact = std::fs::read(&artifact_path)?;
+        let artifact = result.artifact.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "missing artifact reference")
+        })?;
+        let artifact_contents = std::fs::read(&artifact.path)?;
         assert!(result.success);
         assert!(result.truncated);
         assert_eq!(result.output.len(), MAX_RETAINED_OUTPUT_BYTES);
-        assert!(artifact.len() >= 10_500_000);
-        assert_eq!(
-            result
-                .metadata
-                .get("artifact_retention")
-                .map(String::as_str),
-            Some("test")
-        );
-        assert!(
-            result
-                .metadata
-                .get("artifact_sha256")
-                .is_some_and(|hash| hash.len() == 64)
-        );
+        assert!(artifact_contents.len() >= 10_500_000);
+        assert_eq!(artifact.retention, "test");
+        assert_eq!(artifact.sha256.len(), 64);
 
         let _ = std::fs::remove_file(script);
         let _ = std::fs::remove_dir_all(artifact_root);

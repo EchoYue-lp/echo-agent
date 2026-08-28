@@ -221,14 +221,6 @@ impl LlmContextBreakdown {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolOutputArtifactTrace {
-    pub path: String,
-    pub bytes: u64,
-    pub sha256: String,
-    pub retention: String,
-}
-
 // ── RunEvent ─────────────────────────────────────────────────────────
 
 /// A discrete event within a run's execution timeline.
@@ -343,7 +335,7 @@ pub enum RunEvent {
         output_handling: Option<String>,
         /// Complete tool-output artifact descriptor when handling is `spilled`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        artifact: Option<ToolOutputArtifactTrace>,
+        artifact: Option<echo_core::tools::artifact::ToolOutputArtifactRef>,
     },
     /// A tool returned an error.
     ToolError {

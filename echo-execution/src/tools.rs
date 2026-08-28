@@ -493,9 +493,9 @@ impl ToolManager {
         }
         add_usize(&self.budget_metrics.visible_result_bytes, visible_bytes);
         let spilled_bytes = result
-            .metadata
-            .get("artifact_payload_bytes")
-            .and_then(|value| value.parse::<u64>().ok())
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.payload_bytes)
             .unwrap_or(0);
         self.budget_metrics
             .spilled_payload_bytes
@@ -532,9 +532,9 @@ impl ToolManager {
             duration_ms,
             paginated,
             artifact_sha256 = result
-                .metadata
-                .get("artifact_sha256")
-                .map(String::as_str)
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.sha256.as_str())
                 .unwrap_or(""),
             "tool result budget"
         );
@@ -1220,6 +1220,7 @@ fn add_usize(counter: &AtomicU64, value: usize) {
 #[cfg(test)]
 mod execute_with_context_tests {
     use super::*;
+    use echo_core::tools::artifact::ToolOutputArtifactRef;
     use echo_core::tools::{
         InvocationResourceGuard, Tool, ToolContext, ToolOutputChannel, ToolParameters, ToolResult,
         ToolStreamEvent,
@@ -2032,9 +2033,13 @@ mod execute_with_context_tests {
         result
             .metadata
             .insert("page.truncated".to_string(), "true".to_string());
-        result
-            .metadata
-            .insert("artifact_payload_bytes".to_string(), "4096".to_string());
+        result.artifact = Some(ToolOutputArtifactRef {
+            path: PathBuf::from("/tmp/content-free-tool-artifact"),
+            artifact_bytes: 4096,
+            payload_bytes: 4096,
+            sha256: "0".repeat(64),
+            retention: "test".to_string(),
+        });
         manager.record_tool_result("read_artifact", &result, 128, 25);
 
         assert_eq!(

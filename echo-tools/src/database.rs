@@ -740,7 +740,7 @@ fn sql_page_result(
     };
     let mut result = ToolResult::success_json(visible_data);
     if let Some(artifact) = artifact {
-        apply_sql_artifact(&artifact, full_output.len(), &mut result);
+        apply_sql_artifact(artifact, full_output.len(), &mut result);
     } else if let Some(error) = artifact_error {
         result
             .metadata
@@ -807,11 +807,11 @@ fn char_preview(value: &str, max_chars: usize) -> String {
 }
 
 fn apply_sql_artifact(
-    artifact: &ToolOutputArtifactRef,
+    artifact: ToolOutputArtifactRef,
     original_bytes: usize,
     result: &mut ToolResult,
 ) {
-    artifact.extend_metadata(&mut result.metadata);
+    result.artifact = Some(artifact);
     result
         .metadata
         .insert("output_handling".to_string(), "spilled".to_string());
