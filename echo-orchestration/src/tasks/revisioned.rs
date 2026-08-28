@@ -481,6 +481,7 @@ impl InMemoryRevisionedTaskStore {
         claim: &TaskClaim,
         failure_fingerprint: Option<String>,
         error: String,
+        exhaustion: super::RuntimeRetryExhaustion,
     ) -> Result<super::RuntimeTaskRequeueOutcome, RevisionedTaskStoreError> {
         let mut graphs = self.graphs.write().await;
         let Some(graph) = graphs.get_mut(scope_id) else {
@@ -494,6 +495,7 @@ impl InMemoryRevisionedTaskStore {
             claim,
             failure_fingerprint,
             error,
+            exhaustion,
         )
         .map_err(|error| RevisionedTaskStoreError::Rejected {
             message: error.to_string(),

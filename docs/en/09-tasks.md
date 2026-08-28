@@ -98,6 +98,10 @@ a second ready-frontier loop or dependency state machine.
 
 The service handles transitive failure blocking, skip and pause states, bounded
 retries, cancellation settlement, superseded claims, and stall detection.
+Dispatch resolution preserves `Failed` and `TimedOut` as distinct terminal
+states. A requeue request declares which state applies if its retry budget is
+exhausted, and the framework commits that state through the same exact-claim
+compare-and-set path; persistence adapters must not reinterpret it afterward.
 Dependency failure is a typed `DagDependencyState` projection; it is not
 persisted as `TaskStatus::Blocked`, so retrying an ancestor removes the derived
 block automatically. `Blocked` remains available for explicit product policy,

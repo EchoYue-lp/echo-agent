@@ -89,7 +89,10 @@ controller 是持久化、Subagent 调度、review 和产品资源策略的薄�
 不得重新实现 ready-frontier 主循环或第二套依赖状态机。
 
 服务统一处理传递失败阻塞、跳过与暂停、有界重试、取消结算、过时 claim 和
-停滞检测。依赖失败只形成 typed `DagDependencyState` 投影，不会持久化为
+停滞检测。dispatch resolution 保留 `Failed` 与 `TimedOut` 两种不同终态；requeue
+request 会声明 retry budget 耗尽时应提交哪一种终态，framework 通过同一 exact-claim
+compare-and-set 路径提交，持久化 adapter 不得在事后重新解释。依赖失败只形成 typed
+`DagDependencyState` 投影，不会持久化为
 `TaskStatus::Blocked`；重试失败祖先后，派生阻塞会自动消失。`Blocked` 仍可表达
 review、缺少输入等显式产品策略。暂停会清除 claim，恢复到 Pending 时不消耗 retry。
 Skipped 依赖以 typed waiver 传给 Subagent，不会伪造依赖输出。attempt 级 claim

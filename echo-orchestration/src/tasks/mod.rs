@@ -44,7 +44,7 @@ pub use runtime::{
 };
 pub use runtime_executor::{
     RuntimeClaimAbandonment, RuntimeDagController, RuntimeDagOutcome, RuntimePlanSnapshot,
-    RuntimeStopDisposition, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
+    RuntimeRetryExhaustion, RuntimeStopDisposition, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
     RuntimeTaskResolutionRequest, RuntimeTaskServiceConfig,
 };
 pub use runtime_service::{

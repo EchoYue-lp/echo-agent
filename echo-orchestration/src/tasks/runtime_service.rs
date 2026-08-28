@@ -14,7 +14,8 @@ use tokio_util::sync::CancellationToken;
 use super::runtime_executor::RuntimeDagExecutor;
 use super::{
     RuntimeDagController, RuntimeDagOutcome, RuntimeInterruptionDisposition, RuntimePlanSnapshot,
-    RuntimeTaskClaimOutcome, RuntimeTaskServiceConfig, Task, TaskClaim, TaskId, TaskStatus,
+    RuntimeRetryExhaustion, RuntimeTaskClaimOutcome, RuntimeTaskServiceConfig, Task, TaskClaim,
+    TaskId, TaskStatus,
 };
 use super::{RuntimeTaskResolution, RuntimeTaskResolutionRequest};
 use crate::planning::PlanValidator;
@@ -62,7 +63,8 @@ pub enum RuntimeTaskSettlementOutcome {
 pub enum RuntimeTaskRequeueOutcome {
     /// The exact claim was returned to Pending and consumed one retry.
     Requeued,
-    /// The retry budget was already exhausted; the exact claim became Failed.
+    /// The retry budget was already exhausted; the exact claim reached the
+    /// requested typed failure state.
     Exhausted,
     /// The physical claim is no longer current, so no state changed.
     Superseded,
@@ -230,6 +232,7 @@ pub fn requeue_runtime_claim(
     claim: &TaskClaim,
     failure_fingerprint: Option<String>,
     error: String,
+    exhaustion: RuntimeRetryExhaustion,
 ) -> std::result::Result<RuntimeTaskRequeueOutcome, RuntimeTaskMutationError> {
     let Some(task) = claimed_task_mut(snapshot, task_id, claim)? else {
         return Ok(RuntimeTaskRequeueOutcome::Superseded);
@@ -238,7 +241,7 @@ pub fn requeue_runtime_claim(
         task.execution.status = task
             .execution
             .status
-            .transition_to(TaskStatus::Failed(error))
+            .transition_to(retry_exhaustion_status(exhaustion, error))
             .map_err(|message| RuntimeTaskMutationError::InvalidTransition { message })?;
         task.execution.failure_fingerprint = failure_fingerprint;
         task.execution.claim = None;
@@ -287,15 +290,19 @@ pub fn settle_runtime_resolution(
         RuntimeTaskResolutionRequest::Requeue {
             failure_fingerprint,
             error,
+            exhaustion,
         } => match requeue_runtime_claim(
             snapshot,
             task_id,
             claim,
             failure_fingerprint,
             error.clone(),
+            exhaustion,
         )? {
             RuntimeTaskRequeueOutcome::Requeued => Ok(RuntimeTaskResolution::Pending),
-            RuntimeTaskRequeueOutcome::Exhausted => Ok(RuntimeTaskResolution::Failed { error }),
+            RuntimeTaskRequeueOutcome::Exhausted => {
+                Ok(retry_exhaustion_resolution(exhaustion, error))
+            }
             RuntimeTaskRequeueOutcome::Superseded => Ok(RuntimeTaskResolution::Superseded),
         },
         RuntimeTaskResolutionRequest::Skipped => settle_requested_status(
@@ -312,6 +319,15 @@ pub fn settle_runtime_resolution(
             TaskStatus::Failed(error.clone()),
             RuntimeTaskResolution::Failed { error },
         ),
+        RuntimeTaskResolutionRequest::TimedOut { error } => settle_requested_status(
+            snapshot,
+            task_id,
+            claim,
+            TaskStatus::TimedOut {
+                error: error.clone(),
+            },
+            RuntimeTaskResolution::TimedOut { error },
+        ),
         RuntimeTaskResolutionRequest::Blocked { error, disposition } => settle_requested_status(
             snapshot,
             task_id,
@@ -326,6 +342,23 @@ pub fn settle_runtime_resolution(
             TaskStatus::Cancelled,
             RuntimeTaskResolution::Cancelled,
         ),
+    }
+}
+
+fn retry_exhaustion_status(exhaustion: RuntimeRetryExhaustion, error: String) -> TaskStatus {
+    match exhaustion {
+        RuntimeRetryExhaustion::Failed => TaskStatus::Failed(error),
+        RuntimeRetryExhaustion::TimedOut => TaskStatus::TimedOut { error },
+    }
+}
+
+fn retry_exhaustion_resolution(
+    exhaustion: RuntimeRetryExhaustion,
+    error: String,
+) -> RuntimeTaskResolution {
+    match exhaustion {
+        RuntimeRetryExhaustion::Failed => RuntimeTaskResolution::Failed { error },
+        RuntimeRetryExhaustion::TimedOut => RuntimeTaskResolution::TimedOut { error },
     }
 }
 
@@ -774,6 +807,7 @@ mod tests {
                 &claim,
                 Some("fingerprint".to_string()),
                 "transient".to_string(),
+                RuntimeRetryExhaustion::Failed,
             )?,
             RuntimeTaskRequeueOutcome::Requeued
         );
@@ -794,9 +828,10 @@ mod tests {
     -> std::result::Result<(), RuntimeTaskMutationError> {
         let completed = task("completed");
         let retrying = task("retrying");
+        let timed_out = task("timed-out");
         let mut snapshot = RuntimePlanSnapshot {
             revision: 3,
-            tasks: vec![completed.clone(), retrying.clone()],
+            tasks: vec![completed.clone(), retrying.clone(), timed_out.clone()],
         };
         let completed_claim = match claim_runtime_task(&mut snapshot, &completed, 3)? {
             RuntimeTaskClaimOutcome::Claimed(claim) => claim,
@@ -811,6 +846,14 @@ mod tests {
             RuntimeTaskClaimOutcome::ReloadSnapshot => {
                 return Err(RuntimeTaskMutationError::InvalidTransition {
                     message: "retry request claim unexpectedly reloaded".to_string(),
+                });
+            }
+        };
+        let timeout_claim = match claim_runtime_task(&mut snapshot, &timed_out, 3)? {
+            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+            RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                return Err(RuntimeTaskMutationError::InvalidTransition {
+                    message: "timeout request claim unexpectedly reloaded".to_string(),
                 });
             }
         };
@@ -832,9 +875,23 @@ mod tests {
                 RuntimeTaskResolutionRequest::Requeue {
                     failure_fingerprint: Some("transient".to_string()),
                     error: "retry later".to_string(),
+                    exhaustion: RuntimeRetryExhaustion::Failed,
                 },
             )?,
             RuntimeTaskResolution::Pending
+        );
+        assert_eq!(
+            settle_runtime_resolution(
+                &mut snapshot,
+                "timed-out",
+                &timeout_claim,
+                RuntimeTaskResolutionRequest::TimedOut {
+                    error: "provider deadline elapsed".to_string(),
+                },
+            )?,
+            RuntimeTaskResolution::TimedOut {
+                error: "provider deadline elapsed".to_string(),
+            }
         );
         assert_eq!(
             settle_runtime_resolution(
@@ -861,11 +918,79 @@ mod tests {
             .ok_or_else(|| RuntimeTaskMutationError::InvalidTransition {
                 message: "retry request task is missing".to_string(),
             })?;
+        let timed_out = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.spec.id == "timed-out")
+            .ok_or_else(|| RuntimeTaskMutationError::InvalidTransition {
+                message: "timeout request task is missing".to_string(),
+            })?;
         assert_eq!(completed.execution.status, TaskStatus::Completed);
         assert!(completed.execution.claim.is_none());
         assert_eq!(retrying.execution.status, TaskStatus::Pending);
         assert_eq!(retrying.execution.retry_count, 1);
         assert!(retrying.execution.claim.is_none());
+        assert_eq!(
+            timed_out.execution.status,
+            TaskStatus::TimedOut {
+                error: "provider deadline elapsed".to_string(),
+            }
+        );
+        assert!(timed_out.execution.claim.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn retry_exhaustion_preserves_typed_timeout()
+    -> std::result::Result<(), RuntimeTaskMutationError> {
+        let mut expected = task("timeout");
+        expected.spec.max_retries = 0;
+        let mut snapshot = RuntimePlanSnapshot {
+            revision: 1,
+            tasks: vec![expected.clone()],
+        };
+        let claim = match claim_runtime_task(&mut snapshot, &expected, 1)? {
+            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+            RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                return Err(RuntimeTaskMutationError::InvalidTransition {
+                    message: "timeout claim unexpectedly reloaded".to_string(),
+                });
+            }
+        };
+
+        assert_eq!(
+            settle_runtime_resolution(
+                &mut snapshot,
+                "timeout",
+                &claim,
+                RuntimeTaskResolutionRequest::Requeue {
+                    failure_fingerprint: Some("timeout-fingerprint".to_string()),
+                    error: "provider deadline elapsed".to_string(),
+                    exhaustion: RuntimeRetryExhaustion::TimedOut,
+                },
+            )?,
+            RuntimeTaskResolution::TimedOut {
+                error: "provider deadline elapsed".to_string(),
+            }
+        );
+        let exhausted =
+            snapshot
+                .tasks
+                .first()
+                .ok_or_else(|| RuntimeTaskMutationError::InvalidTransition {
+                    message: "timeout task is missing".to_string(),
+                })?;
+        assert_eq!(
+            exhausted.execution.status,
+            TaskStatus::TimedOut {
+                error: "provider deadline elapsed".to_string(),
+            }
+        );
+        assert_eq!(
+            exhausted.execution.failure_fingerprint.as_deref(),
+            Some("timeout-fingerprint")
+        );
+        assert!(exhausted.execution.claim.is_none());
         Ok(())
     }
 
@@ -894,6 +1019,7 @@ mod tests {
                 &claim,
                 Some("fp-zero".to_string()),
                 "no retry".to_string(),
+                RuntimeRetryExhaustion::Failed,
             )?,
             RuntimeTaskRequeueOutcome::Exhausted
         );
@@ -943,6 +1069,7 @@ mod tests {
                     &claim,
                     None,
                     format!("retry {retry_count}"),
+                    RuntimeRetryExhaustion::Failed,
                 )?,
                 RuntimeTaskRequeueOutcome::Requeued
             );
@@ -972,11 +1099,19 @@ mod tests {
                 &final_claim,
                 Some("fp-final".to_string()),
                 "exhausted".to_string(),
+                RuntimeRetryExhaustion::Failed,
             )?,
             RuntimeTaskRequeueOutcome::Exhausted
         );
         assert_eq!(
-            requeue_runtime_claim(&mut snapshot, "a", &final_claim, None, "late".to_string(),)?,
+            requeue_runtime_claim(
+                &mut snapshot,
+                "a",
+                &final_claim,
+                None,
+                "late".to_string(),
+                RuntimeRetryExhaustion::Failed,
+            )?,
             RuntimeTaskRequeueOutcome::Superseded
         );
         let exhausted =

@@ -46,9 +46,13 @@ pub enum RuntimeTaskResolutionRequest {
     Requeue {
         failure_fingerprint: Option<String>,
         error: String,
+        exhaustion: RuntimeRetryExhaustion,
     },
     Skipped,
     Failed {
+        error: String,
+    },
+    TimedOut {
         error: String,
     },
     Blocked {
@@ -67,12 +71,26 @@ pub enum RuntimeTaskResolution {
     Failed {
         error: String,
     },
+    TimedOut {
+        error: String,
+    },
     Blocked {
         error: String,
         disposition: RuntimeStopDisposition,
     },
     Cancelled,
     Superseded,
+}
+
+/// Terminal state used when a requeued claim consumes its final retry.
+///
+/// The retry decision remains separate from the terminal classification so an
+/// application can preserve a typed timeout without mutating canonical task
+/// state after framework settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeRetryExhaustion {
+    Failed,
+    TimedOut,
 }
 
 /// Result of atomically claiming a task from one loaded plan revision.
@@ -677,7 +695,8 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     | RuntimeTaskResolution::Pending
                     | RuntimeTaskResolution::Skipped
                     | RuntimeTaskResolution::Superseded => {}
-                    RuntimeTaskResolution::Failed { error } => {
+                    RuntimeTaskResolution::Failed { error }
+                    | RuntimeTaskResolution::TimedOut { error } => {
                         failure_errors.entry(task.spec.id).or_insert(error);
                     }
                     RuntimeTaskResolution::Blocked { error, disposition } => {
@@ -893,13 +912,27 @@ fn resolution_matches_request(
         (RuntimeTaskResolutionRequest::Requeue { .. }, RuntimeTaskResolution::Pending) => true,
         (
             RuntimeTaskResolutionRequest::Requeue {
-                error: requested, ..
+                error: requested,
+                exhaustion: RuntimeRetryExhaustion::Failed,
+                ..
             },
             RuntimeTaskResolution::Failed { error: settled },
         )
         | (
+            RuntimeTaskResolutionRequest::Requeue {
+                error: requested,
+                exhaustion: RuntimeRetryExhaustion::TimedOut,
+                ..
+            },
+            RuntimeTaskResolution::TimedOut { error: settled },
+        )
+        | (
             RuntimeTaskResolutionRequest::Failed { error: requested },
             RuntimeTaskResolution::Failed { error: settled },
+        )
+        | (
+            RuntimeTaskResolutionRequest::TimedOut { error: requested },
+            RuntimeTaskResolution::TimedOut { error: settled },
         ) => requested == settled,
         (
             RuntimeTaskResolutionRequest::Blocked {
