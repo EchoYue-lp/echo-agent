@@ -40,6 +40,10 @@ pub struct SkillRegistry {
     /// Used during activation when the SKILL.md body is empty.
     legacy_instructions: HashMap<String, String>,
 
+    /// Frozen SKILL.md documents supplied by a prepared plugin generation.
+    /// Non-plugin discovery intentionally remains lazy and filesystem-backed.
+    prepared_documents: HashMap<String, String>,
+
     /// Skills activated in the current session (dedup set)
     activated: std::sync::Mutex<HashSet<String>>,
 
@@ -80,6 +84,7 @@ impl SkillRegistry {
             session_id,
             descriptors: HashMap::new(),
             legacy_instructions: HashMap::new(),
+            prepared_documents: HashMap::new(),
             activated: std::sync::Mutex::new(HashSet::new()),
             code_skills: HashMap::new(),
             sandbox: None,
@@ -195,11 +200,30 @@ impl SkillRegistry {
         descriptor: SkillDescriptor,
         legacy_instructions: Option<String>,
     ) {
+        self.register_descriptor_with_legacy_and_document(descriptor, legacy_instructions, None);
+    }
+
+    /// Register a parsed descriptor together with the immutable SKILL.md used
+    /// to prepare its plugin generation.
+    pub fn register_descriptor_with_legacy_and_document(
+        &mut self,
+        descriptor: SkillDescriptor,
+        legacy_instructions: Option<String>,
+        prepared_document: Option<String>,
+    ) {
+        let name = descriptor.name.clone();
         if let Some(legacy) = legacy_instructions
             && !legacy.trim().is_empty()
         {
-            self.legacy_instructions
-                .insert(descriptor.name.clone(), legacy);
+            self.legacy_instructions.insert(name.clone(), legacy);
+        }
+        match prepared_document {
+            Some(document) => {
+                self.prepared_documents.insert(name, document);
+            }
+            None => {
+                self.prepared_documents.remove(&name);
+            }
         }
         self.register_descriptor(descriptor);
     }
@@ -219,6 +243,7 @@ impl SkillRegistry {
             }
         }
         self.legacy_instructions.remove(name);
+        self.prepared_documents.remove(name);
         self.plugin_variables.remove(name);
         self.activated
             .lock()
@@ -406,13 +431,16 @@ impl SkillRegistry {
             ))
         })?;
 
-        let raw_content = tokio::fs::read_to_string(location).await.map_err(|e| {
-            echo_core::error::ReactError::Other(format!(
-                "Failed to read SKILL.md at '{}': {}",
-                location.display(),
-                e
-            ))
-        })?;
+        let raw_content = match self.prepared_documents.get(name) {
+            Some(document) => document.clone(),
+            None => tokio::fs::read_to_string(location).await.map_err(|e| {
+                echo_core::error::ReactError::Other(format!(
+                    "Failed to read SKILL.md at '{}': {}",
+                    location.display(),
+                    e
+                ))
+            })?,
+        };
 
         let mut raw_instructions = extract_body(&raw_content);
 

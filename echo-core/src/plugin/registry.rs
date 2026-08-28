@@ -76,6 +76,48 @@ pub struct ResolvedComponents {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum ExpectedPathKind {
+    File,
+    Directory,
+}
+
+async fn classify_optional_path(
+    path: &Path,
+    expected: ExpectedPathKind,
+    plugin_id: &str,
+    component: &str,
+    diagnostics: &mut Vec<String>,
+) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => {
+            let matches = match expected {
+                ExpectedPathKind::File => metadata.is_file(),
+                ExpectedPathKind::Directory => metadata.is_dir(),
+            };
+            if !matches {
+                let expected_name = match expected {
+                    ExpectedPathKind::File => "a regular file",
+                    ExpectedPathKind::Directory => "a directory",
+                };
+                diagnostics.push(format!(
+                    "Plugin '{plugin_id}' {component} path '{}' is not {expected_name}",
+                    path.display()
+                ));
+            }
+            matches
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            diagnostics.push(format!(
+                "Plugin '{plugin_id}' could not inspect {component} path '{}': {error}",
+                path.display()
+            ));
+            false
+        }
+    }
+}
+
 /// Persistent registry state, serialized to `plugins.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RegistryState {
@@ -95,6 +137,18 @@ pub struct PluginRegistry {
     user_plugins_dir: PathBuf,
     /// Project root for resolving Project/Local scopes.
     project_root: Option<PathBuf>,
+    /// Per-instance cache fence used by the facade preparation manager.
+    preparation_cache_id: String,
+    /// Monotonic revision advanced by every explicit reload or committed mutation.
+    revision: u64,
+    scan_diagnostics: Vec<PluginRegistryDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginRegistryDiagnostic {
+    pub path: PathBuf,
+    pub message: String,
+    pub is_error: bool,
 }
 
 impl PluginRegistry {
@@ -111,6 +165,9 @@ impl PluginRegistry {
             data_dir,
             user_plugins_dir,
             project_root,
+            preparation_cache_id: uuid::Uuid::new_v4().to_string(),
+            revision: 0,
+            scan_diagnostics: Vec::new(),
         }
     }
 
@@ -130,7 +187,50 @@ impl PluginRegistry {
             data_dir,
             user_plugins_dir,
             project_root,
+            preparation_cache_id: uuid::Uuid::new_v4().to_string(),
+            revision: 0,
+            scan_diagnostics: Vec::new(),
         }
+    }
+
+    /// Current committed registry revision.
+    ///
+    /// Scans advance the revision even when discovery later fails because the
+    /// in-memory registry may already have been cleared or partially rebuilt.
+    /// Successful install, uninstall, enable, disable, and configure mutations
+    /// advance it after their durable state commit.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Opaque per-instance identity for the shared preparation cache.
+    #[doc(hidden)]
+    pub fn preparation_cache_id(&self) -> &str {
+        &self.preparation_cache_id
+    }
+
+    pub fn scan_diagnostics(&self) -> &[PluginRegistryDiagnostic] {
+        &self.scan_diagnostics
+    }
+
+    fn ensure_revision_available(&self) -> Result<(), String> {
+        self.revision
+            .checked_add(1)
+            .map(|_| ())
+            .ok_or_else(|| "Plugin registry revision exhausted".to_string())
+    }
+
+    fn ensure_revision_available_io(&self) -> std::io::Result<()> {
+        self.ensure_revision_available()
+            .map_err(std::io::Error::other)
+    }
+
+    fn advance_revision(&mut self) -> Result<(), String> {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "Plugin registry revision exhausted".to_string())?;
+        Ok(())
     }
 
     // ── Discovery ──────────────────────────────────────────────────────
@@ -147,7 +247,10 @@ impl PluginRegistry {
     /// This is useful for embedded runtimes and isolated integration tests
     /// that intentionally expose a subset of the standard plugin scopes.
     pub fn scan_scopes(&mut self, scopes: &[PluginScope]) -> std::io::Result<usize> {
+        self.ensure_revision_available_io()?;
+        self.advance_revision().map_err(std::io::Error::other)?;
         self.plugins.clear();
+        self.scan_diagnostics.clear();
         let mut total = 0;
 
         for scope in scopes {
@@ -228,6 +331,15 @@ impl PluginRegistry {
                 Ok(manifest) => {
                     let validation_errors = manifest.validate();
                     if !validation_errors.is_empty() {
+                        self.scan_diagnostics.push(PluginRegistryDiagnostic {
+                            path: manifest_path.clone(),
+                            message: validation_errors
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("; "),
+                            is_error: true,
+                        });
                         tracing::warn!(
                             path = %manifest_path.display(),
                             errors = %validation_errors
@@ -241,6 +353,11 @@ impl PluginRegistry {
                     }
                     let unknown_fields = manifest.unknown_top_level_fields();
                     if !unknown_fields.is_empty() {
+                        self.scan_diagnostics.push(PluginRegistryDiagnostic {
+                            path: manifest_path.clone(),
+                            message: format!("unknown fields: {}", unknown_fields.join(", ")),
+                            is_error: false,
+                        });
                         tracing::warn!(
                             path = %manifest_path.display(),
                             fields = %unknown_fields.join(", "),
@@ -280,6 +397,11 @@ impl PluginRegistry {
                     count += 1;
                 }
                 Err(e) => {
+                    self.scan_diagnostics.push(PluginRegistryDiagnostic {
+                        path: manifest_path.clone(),
+                        message: e.to_string(),
+                        is_error: true,
+                    });
                     tracing::warn!(
                         "Failed to load plugin manifest at {}: {e}",
                         manifest_path.display()
@@ -304,16 +426,19 @@ impl PluginRegistry {
         source: &InstallSource,
         scope: PluginScope,
     ) -> Result<PluginId, String> {
+        self.ensure_revision_available()?;
         let target_dir = scope.resolve_dir(&self.user_plugins_dir, self.project_root.as_deref());
         std::fs::create_dir_all(&target_dir)
             .map_err(|e| format!("Failed to create plugin directory: {e}"))?;
 
-        match source {
+        let plugin_id = match source {
             InstallSource::Local(src_path) => self.install_local(src_path, &target_dir, scope),
             InstallSource::Git { url, subdir } => {
                 self.install_git(url, subdir.as_deref(), &target_dir, scope)
             }
-        }
+        }?;
+        self.advance_revision()?;
+        Ok(plugin_id)
     }
 
     fn install_local(
@@ -472,6 +597,7 @@ impl PluginRegistry {
             .get(plugin_id)
             .cloned()
             .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
+        self.ensure_revision_available()?;
 
         let tombstone = entry
             .root
@@ -508,7 +634,7 @@ impl PluginRegistry {
                 tracing::warn!(path = %data.display(), %error, "plugin data cleanup deferred");
             }
         }
-        Ok(())
+        self.advance_revision()
     }
 
     // ── Enable / Disable ───────────────────────────────────────────────
@@ -523,6 +649,7 @@ impl PluginRegistry {
         if was_enabled {
             return Ok(());
         }
+        self.ensure_revision_available()?;
         let config_errors = entry.manifest.validate_user_config(&entry.user_config);
         if !config_errors.is_empty() {
             return Err(format!(
@@ -550,7 +677,7 @@ impl PluginRegistry {
             }
             return Err(error);
         }
-        Ok(())
+        self.advance_revision()
     }
 
     /// Disable an enabled plugin without uninstalling it.
@@ -563,6 +690,7 @@ impl PluginRegistry {
         if !was_enabled {
             return Ok(());
         }
+        self.ensure_revision_available()?;
 
         self.ensure_no_enabled_dependents(plugin_id)?;
         if let Some(entry) = self.plugins.get_mut(plugin_id) {
@@ -574,7 +702,7 @@ impl PluginRegistry {
             }
             return Err(error);
         }
-        Ok(())
+        self.advance_revision()
     }
 
     fn ensure_no_enabled_dependents(&self, plugin_id: &str) -> Result<(), String> {
@@ -615,6 +743,7 @@ impl PluginRegistry {
         plugin_id: &str,
         values: HashMap<String, serde_json::Value>,
     ) -> Result<(), String> {
+        self.ensure_revision_available()?;
         let resolved = {
             let entry = self
                 .plugins
@@ -645,7 +774,7 @@ impl PluginRegistry {
             }
             return Err(error);
         }
-        Ok(())
+        self.advance_revision()
     }
 
     /// Build the substitution context for a plugin's component files.
@@ -786,6 +915,118 @@ impl PluginRegistry {
             entry.resolved_components = Some(resolved.clone());
         }
 
+        Ok(resolved)
+    }
+
+    /// Resolve fixed component paths without blocking an async executor.
+    pub async fn resolve_components_async(
+        &mut self,
+        plugin_id: &str,
+    ) -> Result<ResolvedComponents, String> {
+        let root = self
+            .plugins
+            .get(plugin_id)
+            .map(|entry| entry.root.clone())
+            .ok_or_else(|| format!("Plugin '{plugin_id}' not found"))?;
+        let mut resolved = ResolvedComponents::default();
+
+        let skills_dir = root.join("skills");
+        if classify_optional_path(
+            &skills_dir,
+            ExpectedPathKind::Directory,
+            plugin_id,
+            "skills",
+            &mut resolved.diagnostics,
+        )
+        .await
+        {
+            resolved.skill_dirs.push(skills_dir);
+        }
+
+        let agents_dir = root.join("agents");
+        if classify_optional_path(
+            &agents_dir,
+            ExpectedPathKind::Directory,
+            plugin_id,
+            "agents",
+            &mut resolved.diagnostics,
+        )
+        .await
+        {
+            match tokio::fs::read_dir(&agents_dir).await {
+                Ok(mut entries) => loop {
+                    match entries.next_entry().await {
+                        Ok(Some(entry)) => {
+                            let path = entry.path();
+                            let is_file = entry
+                                .file_type()
+                                .await
+                                .map(|kind| kind.is_file())
+                                .unwrap_or(false);
+                            if is_file
+                                && path.extension().is_some_and(|extension| extension == "md")
+                            {
+                                resolved.agent_files.push(path);
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            resolved.diagnostics.push(format!(
+                                "Plugin '{plugin_id}' could not scan agents path '{}': {error}",
+                                agents_dir.display()
+                            ));
+                            break;
+                        }
+                    }
+                },
+                Err(error) => resolved.diagnostics.push(format!(
+                    "Plugin '{plugin_id}' could not scan agents path '{}': {error}",
+                    agents_dir.display()
+                )),
+            }
+            resolved.agent_files.sort();
+        }
+
+        let hooks_file = root.join("hooks/hooks.yaml");
+        if classify_optional_path(
+            &hooks_file,
+            ExpectedPathKind::File,
+            plugin_id,
+            "hooks",
+            &mut resolved.diagnostics,
+        )
+        .await
+        {
+            resolved.hooks_file = Some(hooks_file);
+        }
+        let mcp_file = root.join("mcp.json");
+        if classify_optional_path(
+            &mcp_file,
+            ExpectedPathKind::File,
+            plugin_id,
+            "MCP",
+            &mut resolved.diagnostics,
+        )
+        .await
+        {
+            resolved.mcp_config_file = Some(mcp_file);
+        }
+        let lsp_file = root.join("lsp.yaml");
+        if classify_optional_path(
+            &lsp_file,
+            ExpectedPathKind::File,
+            plugin_id,
+            "LSP",
+            &mut resolved.diagnostics,
+        )
+        .await
+        {
+            resolved.lsp_config_file = Some(lsp_file);
+        }
+
+        if let Some(entry) = self.plugins.get_mut(plugin_id) {
+            entry.resolved_components = Some(resolved.clone());
+        }
         Ok(resolved)
     }
 

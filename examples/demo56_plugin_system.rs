@@ -2,7 +2,9 @@
 //!
 //! All operations are local; no LLM calls are made.
 
-use echo_agent::plugin::{AGENT_PLUGIN_SCHEMA_V1, InstallSource, PluginRegistry, PluginScope};
+use echo_agent::plugin::{
+    AGENT_PLUGIN_SCHEMA_V1, InstallSource, PluginIntegrator, PluginRegistry, PluginScope,
+};
 use std::path::{Path, PathBuf};
 
 fn create_plugin(base: &Path, name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -35,7 +37,8 @@ fn create_plugin(base: &Path, name: &str) -> Result<PathBuf, Box<dyn std::error:
     Ok(root)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
     let sources = temporary.path().join("sources");
     let installed = temporary.path().join("installed");
@@ -56,6 +59,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(temporary.path().to_path_buf()),
     );
     let plugin_id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+    let integrator = PluginIntegrator::new();
+    let prepared = integrator.prepare(&mut registry).await;
+    println!(
+        "Prepared generation {} ({})",
+        prepared.generation(),
+        prepared.identity()
+    );
     let entry = registry
         .get(&plugin_id)
         .ok_or_else(|| format!("installed plugin '{plugin_id}' was not registered"))?;

@@ -20,6 +20,7 @@ use crate::llm::{LlmClient, LlmConfig, ThinkingConfig};
 use crate::mcp::McpServerEntry;
 #[cfg(feature = "mcp")]
 use crate::mcp::{McpClient, McpConfigFile, McpServerConfig};
+use crate::skills::external::SkillDescriptor;
 use crate::skills::external::activate_tool::ActivateSkillTool;
 use crate::skills::external::loader::{DiscoveryScope, SkillLoader};
 use crate::skills::external::resource_tool::ReadSkillResourceTool;
@@ -33,6 +34,12 @@ use tokio::sync::{OwnedMutexGuard, RwLock};
 use tracing::{info, warn};
 
 const SKILL_CATALOG_PROJECTION: &str = "echo-agent:skill-catalog";
+
+struct SkillDescriptorRegistration {
+    descriptor: SkillDescriptor,
+    legacy_instructions: Option<String>,
+    prepared_document: Option<String>,
+}
 
 pub(crate) async fn project_skill_activation(
     context: &Arc<tokio::sync::Mutex<ContextManager>>,
@@ -834,12 +841,28 @@ impl ReactAgent {
             None => loader.discover(scopes).await?,
         };
 
-        if descriptors.is_empty() {
+        let registrations = descriptors
+            .into_iter()
+            .map(|descriptor| SkillDescriptorRegistration {
+                legacy_instructions: loader.get_legacy_instructions(&descriptor.name).cloned(),
+                descriptor,
+                prepared_document: None,
+            })
+            .collect();
+        self.register_skill_descriptors(registrations, plugin).await
+    }
+
+    async fn register_skill_descriptors(
+        &mut self,
+        registrations: Vec<SkillDescriptorRegistration>,
+        plugin: Option<(&str, &crate::plugin::PluginVariables)>,
+    ) -> Result<Vec<String>> {
+        if registrations.is_empty() {
             info!(
                 agent = %self.config.agent_name,
                 "No skills found during discovery"
             );
-            return Ok(vec![]);
+            return Ok(Vec::new());
         }
 
         let mut names = Vec::new();
@@ -872,38 +895,62 @@ impl ReactAgent {
                     .skill_registry
                     .set_sandbox_manager(manager.clone());
             }
-            for mut desc in descriptors {
-                if self.tools.skill_registry.is_installed(&desc.name) {
+            for registration in registrations {
+                let SkillDescriptorRegistration {
+                    mut descriptor,
+                    legacy_instructions,
+                    prepared_document,
+                } = registration;
+                if self
+                    .skill_load_policy
+                    .as_ref()
+                    .is_some_and(|policy| !policy.allows(&descriptor))
+                {
+                    info!(
+                        agent = %self.config.agent_name,
+                        skill = %descriptor.name,
+                        "Skill excluded by load policy"
+                    );
+                    continue;
+                }
+                if self.tools.skill_registry.is_installed(&descriptor.name) {
                     warn!(
                         agent = %self.config.agent_name,
-                        skill = %desc.name,
+                        skill = %descriptor.name,
                         "Skill already installed, skipping duplicate"
                     );
                     continue;
                 }
 
-                let legacy = loader.get_legacy_instructions(&desc.name).cloned();
                 if let Some((source, _)) = plugin {
-                    desc.source = Some(source.to_string());
+                    descriptor.source = Some(source.to_string());
                 }
 
                 // Register hooks from frontmatter if present
-                if let Some(hooks_def) = &desc.hooks {
-                    let skill_dir = desc
+                if let Some(hooks_def) = &descriptor.hooks {
+                    let skill_dir = descriptor
                         .location
                         .parent()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
                     let mut hook_reg = self.tools.hook_registry.write().await;
-                    hook_reg.register(&desc.name, &skill_dir, hooks_def.clone());
+                    hook_reg.register(&descriptor.name, &skill_dir, hooks_def.clone());
                 }
 
-                let name = desc.name.clone();
+                let name = descriptor.name.clone();
                 names.push(name.clone());
                 self.tools
                     .skill_registry
-                    .register_descriptor_with_legacy(desc.clone(), legacy.clone());
-                reg.register_descriptor_with_legacy(desc, legacy);
+                    .register_descriptor_with_legacy_and_document(
+                        descriptor.clone(),
+                        legacy_instructions.clone(),
+                        prepared_document.clone(),
+                    );
+                reg.register_descriptor_with_legacy_and_document(
+                    descriptor,
+                    legacy_instructions,
+                    prepared_document,
+                );
                 if let Some((source, variables)) = plugin {
                     self.tools.skill_registry.tag_source_with_variables(
                         std::slice::from_ref(&name),
@@ -990,6 +1037,28 @@ impl ReactAgent {
         );
 
         Ok(names)
+    }
+
+    /// Register plugin Skills captured by an immutable prepared generation.
+    ///
+    /// This path performs no discovery or document reads. A target-specific
+    /// load policy is still evaluated before the frozen descriptor is applied.
+    pub async fn register_prepared_plugin_skills(
+        &mut self,
+        source: &str,
+        variables: &crate::plugin::PluginVariables,
+        skills: &[crate::plugin::PreparedPluginSkill],
+    ) -> Result<Vec<String>> {
+        let registrations = skills
+            .iter()
+            .map(|skill| SkillDescriptorRegistration {
+                descriptor: skill.descriptor().clone(),
+                legacy_instructions: skill.legacy_instructions().map(str::to_string),
+                prepared_document: Some(skill.document().to_string()),
+            })
+            .collect();
+        self.register_skill_descriptors(registrations, Some((source, variables)))
+            .await
     }
 
     /// Remove already-discovered skills that are no longer allowed by the

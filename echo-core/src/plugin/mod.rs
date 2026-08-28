@@ -13,6 +13,8 @@ pub use manifest::{
     AGENT_PLUGIN_SCHEMA_V1, PluginAuthor, PluginDependency, PluginManifest, PluginUserConfigEntry,
     PluginUserConfigType,
 };
-pub use registry::{PluginEntry, PluginId, PluginRegistry, ResolvedComponents};
+pub use registry::{
+    PluginEntry, PluginId, PluginRegistry, PluginRegistryDiagnostic, ResolvedComponents,
+};
 pub use scope::{InstallSource, PluginScope};
 pub use variables::PluginVariables;

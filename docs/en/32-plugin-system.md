@@ -128,6 +128,11 @@ Applications can override the plugin data base directory. embedding application 
 
 Loading proceeds in dependency order. Fatal manifest errors skip the package. Component errors remain isolated at the smallest practical boundary. Runtime replacement records ownership so disable, uninstall, and reload remove exactly the components contributed by each plugin.
 
+`PluginIntegrator::prepare` captures one immutable `PreparedPluginSet` with a monotonic generation,
+deterministic content identity, structured diagnostics, parsed Skills/Hooks/MCP, and owner-qualified
+Subagent/LSP documents. `wire_prepared` and rollback perform no component file reads. Disk changes
+become visible only after registry mutation or explicit invalidation. See [ADR 0012](../adr/0012-immutable-plugin-preparation.md).
+
 ## API
 
 ```rust,no_run

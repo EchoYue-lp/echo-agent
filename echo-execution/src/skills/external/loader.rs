@@ -83,6 +83,9 @@ pub struct SkillLoader {
     /// Legacy instructions from frontmatter, keyed by skill name.
     /// Preserved for activation when SKILL.md body is empty.
     legacy_instructions: HashMap<String, String>,
+    prepared_documents: HashMap<String, String>,
+    prepared_identity_documents: HashMap<String, Vec<(PathBuf, String)>>,
+    discovery_diagnostics: Vec<SkillDiscoveryDiagnostic>,
     /// Optional authority consulted after parsing and before registration.
     policy: Option<Arc<dyn SkillLoadPolicy>>,
     /// Optional plugin variable context applied before SKILL.md frontmatter
@@ -95,6 +98,9 @@ impl SkillLoader {
         Self {
             descriptors: HashMap::new(),
             legacy_instructions: HashMap::new(),
+            prepared_documents: HashMap::new(),
+            prepared_identity_documents: HashMap::new(),
+            discovery_diagnostics: Vec::new(),
             policy: None,
             plugin_variables: None,
         }
@@ -123,7 +129,10 @@ impl SkillLoader {
         for scope in scopes {
             let dirs = scope_to_dirs(scope);
             for dir in dirs {
-                if !dir.exists() {
+                if !tokio::fs::metadata(&dir)
+                    .await
+                    .is_ok_and(|metadata| metadata.is_dir())
+                {
                     debug!(
                         "Skill directory does not exist, skipping: {}",
                         dir.display()
@@ -131,7 +140,7 @@ impl SkillLoader {
                     continue;
                 }
                 let found = self.scan_directory(&dir, 0, true).await?;
-                for (desc, legacy_instr) in found {
+                for (desc, legacy_instr, document, identity_documents) in found {
                     if self
                         .policy
                         .as_ref()
@@ -157,6 +166,9 @@ impl SkillLoader {
                                 .insert(desc.name.clone(), legacy_instr);
                         }
                         self.descriptors.insert(desc.name.clone(), desc.clone());
+                        self.prepared_documents.insert(desc.name.clone(), document);
+                        self.prepared_identity_documents
+                            .insert(desc.name.clone(), identity_documents);
                         results.push(desc);
                     }
                 }
@@ -180,12 +192,15 @@ impl SkillLoader {
         dir: impl Into<PathBuf>,
     ) -> Result<Vec<SkillDescriptor>> {
         let dir = dir.into();
-        if !dir.exists() {
+        if !tokio::fs::metadata(&dir)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
             return Ok(Vec::new());
         }
         let found = self.scan_directory(&dir, 0, false).await?;
         let mut results = Vec::new();
-        for (desc, legacy_instr) in found {
+        for (desc, legacy_instr, document, identity_documents) in found {
             if self
                 .policy
                 .as_ref()
@@ -212,6 +227,9 @@ impl SkillLoader {
                     .insert(desc.name.clone(), legacy_instr);
             }
             self.descriptors.insert(desc.name.clone(), desc.clone());
+            self.prepared_documents.insert(desc.name.clone(), document);
+            self.prepared_identity_documents
+                .insert(desc.name.clone(), identity_documents);
             results.push(desc);
         }
         validate_and_sort_dependencies(&results);
@@ -228,11 +246,11 @@ impl SkillLoader {
 
     /// Scan a single directory for SKILL.md files.
     async fn scan_directory(
-        &self,
+        &mut self,
         dir: &Path,
         depth: usize,
         recursive: bool,
-    ) -> Result<Vec<(SkillDescriptor, String)>> {
+    ) -> Result<Vec<(SkillDescriptor, String, String, Vec<(PathBuf, String)>)>> {
         if depth > MAX_SCAN_DEPTH {
             return Ok(vec![]);
         }
@@ -249,7 +267,7 @@ impl SkillLoader {
             .map_err(|e| ReactError::Other(format!("Error reading directory entry: {}", e)))?
         {
             let path = entry.path();
-            if !path.is_dir() {
+            if !entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
 
@@ -263,7 +281,10 @@ impl SkillLoader {
             }
 
             let skill_file = path.join(SKILL_FILE);
-            if skill_file.exists() {
+            if tokio::fs::metadata(&skill_file)
+                .await
+                .is_ok_and(|metadata| metadata.is_file())
+            {
                 match parse_skill_file_with_variables(
                     &skill_file,
                     &dir_name,
@@ -271,16 +292,21 @@ impl SkillLoader {
                 )
                 .await
                 {
-                    Ok((mut desc, legacy_instr)) => {
+                    Ok((mut desc, legacy_instr, document)) => {
+                        let mut identity_documents = vec![(skill_file.clone(), document.clone())];
                         // Merge external hooks.json (embedding application format) if present alongside SKILL.md.
                         let hooks_path = path.join(HOOKS_FILE);
-                        if hooks_path.exists() {
+                        if tokio::fs::metadata(&hooks_path)
+                            .await
+                            .is_ok_and(|metadata| metadata.is_file())
+                        {
                             match tokio::fs::read_to_string(&hooks_path).await {
                                 Ok(text) => {
                                     let text = match &self.plugin_variables {
                                         Some(variables) => variables.substitute(&text),
                                         None => text,
                                     };
+                                    identity_documents.push((hooks_path.clone(), text.clone()));
                                     match serde_json::from_str::<HooksDefinition>(&text) {
                                         Ok(extra) => {
                                             info!(
@@ -294,6 +320,13 @@ impl SkillLoader {
                                             }
                                         }
                                         Err(e) => {
+                                            self.discovery_diagnostics.push(
+                                                SkillDiscoveryDiagnostic {
+                                                    path: hooks_path.clone(),
+                                                    message: e.to_string(),
+                                                    is_error: false,
+                                                },
+                                            );
                                             warn!(
                                                 "Failed to parse '{}' for skill '{}': {}",
                                                 hooks_path.display(),
@@ -304,6 +337,11 @@ impl SkillLoader {
                                     }
                                 }
                                 Err(e) => {
+                                    self.discovery_diagnostics.push(SkillDiscoveryDiagnostic {
+                                        path: hooks_path.clone(),
+                                        message: e.to_string(),
+                                        is_error: false,
+                                    });
                                     warn!("Cannot read '{}': {}", hooks_path.display(), e);
                                 }
                             }
@@ -313,9 +351,14 @@ impl SkillLoader {
                             desc.name,
                             skill_file.display()
                         );
-                        found.push((desc, legacy_instr));
+                        found.push((desc, legacy_instr, document, identity_documents));
                     }
                     Err(e) => {
+                        self.discovery_diagnostics.push(SkillDiscoveryDiagnostic {
+                            path: skill_file.clone(),
+                            message: e.to_string(),
+                            is_error: true,
+                        });
                         warn!(
                             "Failed to parse '{}', skipping: {}",
                             skill_file.display(),
@@ -365,6 +408,27 @@ impl SkillLoader {
     pub fn get_legacy_instructions(&self, name: &str) -> Option<&String> {
         self.legacy_instructions.get(name)
     }
+
+    pub fn get_prepared_document(&self, name: &str) -> Option<&String> {
+        self.prepared_documents.get(name)
+    }
+
+    pub fn get_prepared_identity_documents(&self, name: &str) -> Option<&[(PathBuf, String)]> {
+        self.prepared_identity_documents
+            .get(name)
+            .map(Vec::as_slice)
+    }
+
+    pub fn discovery_diagnostics(&self) -> &[SkillDiscoveryDiagnostic] {
+        &self.discovery_diagnostics
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillDiscoveryDiagnostic {
+    pub path: PathBuf,
+    pub message: String,
+    pub is_error: bool,
 }
 
 impl Default for SkillLoader {
@@ -389,7 +453,7 @@ async fn parse_skill_file_with_variables(
     path: &Path,
     parent_dir_name: &str,
     variables: Option<&echo_core::plugin::PluginVariables>,
-) -> Result<(SkillDescriptor, String)> {
+) -> Result<(SkillDescriptor, String, String)> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| ReactError::Other(format!("Failed to read '{}': {}", path.display(), e)))?;
@@ -437,7 +501,7 @@ async fn parse_skill_file_with_variables(
         );
     }
 
-    Ok((descriptor, legacy_instr))
+    Ok((descriptor, legacy_instr, content))
 }
 
 /// Parse YAML frontmatter from a SKILL.md file.

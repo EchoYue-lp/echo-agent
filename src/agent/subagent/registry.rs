@@ -307,7 +307,7 @@ impl SubagentRegistry {
     /// Sync variant of [`register_definition`](Self::register_definition).
     ///
     /// Uses `try_write` to avoid `block_on` deadlock from synchronous
-    /// contexts (e.g. `PluginIntegrator::wire_all` collection phase).
+    /// contexts that cannot await this registry.
     /// Logs a warning and returns `false` on lock contention.
     pub fn register_definition_sync(&self, def: SubagentDefinition) -> bool {
         let name = def.name.clone();

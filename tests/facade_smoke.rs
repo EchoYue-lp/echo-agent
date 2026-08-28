@@ -1,6 +1,9 @@
 use echo_agent::agent::AgentInvocationContext;
 use echo_agent::config::FrameworkConfig;
 use echo_agent::paths::DataRoot;
+use echo_agent::plugin::{
+    PluginIntegrator, PluginPreparationDiagnostic, PluginWiringError, PreparedPluginSet,
+};
 use echo_agent::runtime::{AgentTurnDriver, TurnMode};
 use echo_agent::state::journal::{
     EventJournal, JournalAppendError, JournalBatchAppendError, JournalBatchCommitStatus,
@@ -52,6 +55,17 @@ fn tracked_steering_types_are_available_from_the_public_facade() {
         echo_agent::agent::AgentSteerState::Accepted.phase(),
         echo_agent::agent::AgentSteerPhase::Accepted
     );
+}
+
+#[test]
+fn prepared_plugin_generation_types_are_available_from_the_public_facade() {
+    fn public_type<T>() {}
+
+    public_type::<PreparedPluginSet>();
+    public_type::<PluginPreparationDiagnostic>();
+    public_type::<PluginWiringError>();
+    let integrator = PluginIntegrator::new();
+    let _shared_integrator = integrator.clone();
 }
 
 #[test]
