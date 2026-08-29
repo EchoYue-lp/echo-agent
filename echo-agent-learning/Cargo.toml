@@ -1,0 +1,157 @@
+[package]
+name = "echo-agent-learning"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+license = "MIT"
+description = "Learning lessons, runnable examples, and public-facade contracts for echo-agent"
+
+[features]
+default = []
+full = [
+    "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent",
+    "web", "media", "data", "sqlite", "channels", "git", "database", "rag",
+    "chart", "content-guard", "project-rules", "shell", "files", "research",
+    "eval", "improve", "statistics", "testing",
+]
+a2a = ["echo_agent/a2a"]
+mcp = ["echo_agent/mcp"]
+lsp = ["echo_agent/lsp"]
+telemetry = ["echo_agent/telemetry"]
+human-loop = ["echo_agent/human-loop"]
+topology = ["echo_agent/topology"]
+subagent = ["echo_agent/subagent"]
+web = ["echo_agent/web"]
+media = ["echo_agent/media"]
+data = ["echo_agent/data"]
+sqlite = ["echo_agent/sqlite"]
+channels = ["echo_agent/channels"]
+git = ["echo_agent/git"]
+database = ["echo_agent/database"]
+rag = ["echo_agent/rag"]
+chart = ["echo_agent/chart"]
+content-guard = ["echo_agent/content-guard"]
+project-rules = ["echo_agent/project-rules"]
+shell = ["echo_agent/shell"]
+files = ["echo_agent/files"]
+research = ["echo_agent/research"]
+eval = ["echo_agent/eval"]
+improve = ["echo_agent/improve"]
+statistics = ["echo_agent/statistics"]
+testing = ["echo_agent/testing"]
+
+[dependencies]
+echo_agent = { version = "0.2.0", path = "..", default-features = false }
+async-stream = "0.3"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+fastrand = "2"
+futures = "0.3"
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+schemars = "0.8"
+sha2 = "0.10"
+shlex = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[[example]]
+name = "demo03_approval"
+required-features = ["human-loop"]
+[[example]]
+name = "demo05_compressor"
+required-features = ["human-loop"]
+[[example]]
+name = "demo06_mcp"
+required-features = ["mcp"]
+[[example]]
+name = "demo07_skills"
+required-features = ["files"]
+[[example]]
+name = "demo08_external_skills"
+required-features = ["files"]
+[[example]]
+name = "demo09_file_shell"
+required-features = ["files", "shell"]
+[[example]]
+name = "demo18_semantic_memory"
+required-features = ["web"]
+[[example]]
+name = "demo19_guard"
+required-features = ["content-guard"]
+[[example]]
+name = "demo20_audit"
+required-features = ["human-loop"]
+[[example]]
+name = "demo23_a2a"
+required-features = ["a2a"]
+[[example]]
+name = "demo27_sqlite_memory"
+required-features = ["sqlite"]
+[[example]]
+name = "demo29_sandbox"
+required-features = ["shell"]
+[[example]]
+name = "demo36_multimodal"
+required-features = ["media"]
+[[example]]
+name = "demo38_im_channels"
+required-features = ["channels"]
+[[example]]
+name = "demo41_web_tools"
+required-features = ["web"]
+[[example]]
+name = "demo42_playwright_mcp"
+required-features = ["mcp"]
+[[example]]
+name = "demo44_code_laboratory"
+required-features = ["content-guard", "shell"]
+[[example]]
+name = "demo45_customer_service"
+required-features = ["sqlite", "human-loop", "content-guard"]
+[[example]]
+name = "demo47_enterprise"
+required-features = ["testing"]
+[[example]]
+name = "demo46_data_analyst"
+required-features = ["sqlite", "data"]
+[[example]]
+name = "demo48_personal_assistant"
+required-features = ["sqlite", "subagent"]
+[[example]]
+name = "demo49_research_agent"
+required-features = ["sqlite", "web", "files"]
+[[example]]
+name = "demo58_git_worktree"
+required-features = ["git"]
+[[example]]
+name = "demo59_code_search"
+required-features = ["files"]
+[[example]]
+name = "demo61_agent_factory"
+required-features = ["testing"]
+[[example]]
+name = "demo68_human_gate"
+required-features = ["subagent", "human-loop"]
+[[example]]
+name = "demo70_scheduler"
+
+[[example]]
+name = "comprehensive_agent"
+required-features = ["testing"]
+
+[[bin]]
+name = "facade-consumer"
+path = "src/bin/facade_consumer.rs"

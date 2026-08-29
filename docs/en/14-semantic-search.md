@@ -210,4 +210,4 @@ let hits = store.semantic_search(&["test"], "greeting", 3).await?;
 3. **Cold start (empty index)**: If no vec file exists, `semantic_search()` silently falls back to keyword search — no errors.
 4. **API latency**: Each `put()` and `semantic_search()` requires one embedding API call. Monitor rate limits in high-concurrency scenarios.
 
-See: `examples/demo18_semantic_memory.rs`
+See: `echo-agent-learning/examples/demo18_semantic_memory.rs`

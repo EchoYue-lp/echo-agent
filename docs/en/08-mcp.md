@@ -484,4 +484,4 @@ Potential MCP errors:
 
 ---
 
-See: `examples/demo06_mcp.rs`
+See: `echo-agent-learning/examples/demo06_mcp.rs`

@@ -244,7 +244,7 @@ let result = compressor.compress_in_place(&mut messages, current_tokens, target_
 println!("应用的级别: {:?}", result.levels_applied);
 ```
 
-详见 [demo53_adaptive_compression.rs](../../tests/example_contracts/demo53_adaptive_compression.rs)。
+详见 [demo53_adaptive_compression.rs](../../echo-agent-learning/tests/example_contracts/demo53_adaptive_compression.rs)。
 
 ---
 
@@ -429,7 +429,7 @@ let ctx = ContextManager::builder(4096)
 | 工具密集型工作流 | `AdaptiveCompressor`（自动升级 + L1 工具折叠） |
 | 测试环境 | `SlidingWindowCompressor(5)` + `token_limit: 100` |
 
-对应示例：`examples/demo05_compressor.rs`、`tests/example_contracts/demo53_adaptive_compression.rs`
+对应示例：`echo-agent-learning/examples/demo05_compressor.rs`、`echo-agent-learning/tests/example_contracts/demo53_adaptive_compression.rs`
 
 ---
 

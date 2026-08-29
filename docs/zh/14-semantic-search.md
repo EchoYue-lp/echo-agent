@@ -211,4 +211,4 @@ let hits = store.semantic_search(&["test"], "greeting", 3).await?;
 3. **冷启动（索引为空）**：若 vec 文件不存在或为空，`semantic_search()` 自动回退到关键词检索，不报错
 4. **API 延迟**：每次 `put()` 和 `semantic_search()` 都需要一次嵌入 API 调用，高并发场景需关注限流
 
-对应示例：`examples/demo18_semantic_memory.rs`
+对应示例：`echo-agent-learning/examples/demo18_semantic_memory.rs`

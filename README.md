@@ -14,7 +14,7 @@
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/runtime-tokio-blue)](https://tokio.rs/)
 
-[中文文档](./README.zh.md) &middot; [Documentation](./docs/en/README.md) &middot; [Examples](./examples/) &middot; [Changelog](./CHANGELOG.md)
+[中文文档](./README.zh.md) &middot; [Documentation](./docs/en/README.md) &middot; [Examples](./echo-agent-learning/examples/) &middot; [Changelog](./CHANGELOG.md)
 
 </div>
 
@@ -106,11 +106,11 @@ manager.start_all(handler).await?;
 ### Run examples
 
 ```bash
-cargo run --example demo01_tools          # Custom tools
-cargo run --example demo25_macros         # Macro system
-cargo run --example demo34_workflow_stream # Workflow streaming
-cargo run --example demo36_multimodal     # Multi-modal messages
-cargo run --example demo38_im_channels --features channels  # IM channels
+cargo run -p echo-agent-learning --example demo01_tools          # Custom tools
+cargo run -p echo-agent-learning --example demo25_macros         # Macro system
+cargo run -p echo-agent-learning --example demo34_workflow_stream # Workflow streaming
+cargo run -p echo-agent-learning --example demo36_multimodal     # Multi-modal messages
+cargo run -p echo-agent-learning --example demo38_im_channels --features channels  # IM channels
 ```
 
 ### Feature Flags
@@ -263,10 +263,8 @@ echo-agent/
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
 ├── echo-tools/          Domain tools: chart, data, database, git, media, web, rag
-├── echo-agent-examples/ Non-published external-consumer facade examples
-├── echo-rust-learning/  Non-published Rust lessons and offline exercises
+├── echo-agent-learning/ Non-published lessons, demos, composite examples, and facade contracts
 ├── src/                 Agent engine, re-exports, and facade layer
-├── examples/            Runnable framework feature examples
 └── docs/                Framework consumer documentation (en + zh)
 ```
 
@@ -966,78 +964,80 @@ fn main() -> echo_agent::error::Result<()> {
 ## Examples
 
 Examples are classified into `Acceptance`, `Conditional acceptance`, and `Teaching` contracts.
-See `examples/README.md` for the full bucketed inventory and maintenance rules.
+See `echo-agent-learning/examples/README.md` for the full bucketed inventory and maintenance rules.
 
 | # | Example | Demonstrates |
 |---|---------|-------------|
-| 01 | [`demo01_tools`](examples/demo01_tools.rs) | Custom tools with `#[tool]` |
-| 02 | [`demo02_tasks`](examples/demo02_tasks.rs) | DAG task planning |
-| 03 | [`demo03_approval`](examples/demo03_approval.rs) | Human-in-the-loop |
-| 04 | [`demo04_subagent`](tests/example_contracts/demo04_subagent.rs) | Multi-agent orchestration |
-| 05 | [`demo05_compressor`](examples/demo05_compressor.rs) | Context compression |
-| 06 | [`demo06_mcp`](examples/demo06_mcp.rs) | MCP tool server |
-| 07 | [`demo07_skills`](examples/demo07_skills.rs) | Built-in skills |
-| 08 | [`demo08_external_skills`](examples/demo08_external_skills.rs) | External skill loading |
-| 09 | [`demo09_file_shell`](examples/demo09_file_shell.rs) | File & shell tools |
-| 10 | [`demo10_streaming`](examples/demo10_streaming.rs) | Streaming output |
-| 11 | [`demo11_callbacks`](examples/demo11_callbacks.rs) | Lifecycle callbacks |
-| 12 | [`demo12_resilience`](tests/example_contracts/demo12_resilience.rs) | Retry & fault tolerance |
-| 13 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | Tool execution config |
-| 15 | [`demo15_structured_output`](examples/demo15_structured_output.rs) | JSON Schema output |
-| 17 | [`demo17_chat`](examples/demo17_chat.rs) | Interactive chat |
-| 18 | [`demo18_semantic_memory`](examples/demo18_semantic_memory.rs) | Semantic memory |
-| 19 | [`demo19_guard`](examples/demo19_guard.rs) | Guard system |
-| 20 | [`demo20_audit`](examples/demo20_audit.rs) | Audit logging |
-| 23 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A protocol |
-| 24 | [`demo24_topology`](tests/example_contracts/demo24_topology.rs) | Topology visualization |
-| 25 | [`demo25_macros`](examples/demo25_macros.rs) | Macro system showcase |
-| 26 | [`demo26_provider_factory`](examples/demo26_provider_factory.rs) | Dynamic LLM factory |
-| 27 | [`demo27_sqlite_memory`](examples/demo27_sqlite_memory.rs) | SQLite persistence |
-| 28 | [`demo28_workflow`](examples/demo28_workflow.rs) | Workflow pipeline |
-| 29 | [`demo29_sandbox`](examples/demo29_sandbox.rs) | Sandbox execution |
-| 30 | [`demo30_mcp_server`](tests/example_contracts/demo30_mcp_server.rs) | MCP server mode |
-| 31 | [`demo31_memory_tools`](tests/example_contracts/demo31_memory_tools.rs) | Memory tool injection |
-| 32 | [`demo32_token_budget`](examples/demo32_token_budget.rs) | Token budget control |
-| 33 | [`demo33_retry_policy`](examples/demo33_retry_policy.rs) | Unified retry |
-| 34 | [`demo34_workflow_stream`](tests/example_contracts/demo34_workflow_stream.rs) | Workflow streaming |
-| 35 | [`demo35_dynamic_tools`](examples/demo35_dynamic_tools.rs) | Dynamic tool management |
-| 36 | [`demo36_multimodal`](examples/demo36_multimodal.rs) | Multi-modal messages |
-| 37 | [`demo37_declarative_workflow`](tests/example_contracts/demo37_declarative_workflow.rs) | YAML/JSON workflows |
-| 38 | [`demo38_im_channels`](examples/demo38_im_channels.rs) | IM channel integration |
-| 39 | [`demo39_workflow`](tests/example_contracts/demo39_workflow.rs) | Graph workflow engine |
-| 40 | [`demo40_snapshot`](examples/demo40_snapshot.rs) | Snapshot & rollback |
-| 41 | [`demo41_web_tools`](examples/demo41_web_tools.rs) | Web search + fetch |
-| 42 | [`demo42_playwright_mcp`](examples/demo42_playwright_mcp.rs) | Playwright MCP browser automation |
-| 43 | [`demo43_data_tools`](tests/example_contracts/demo43_data_tools.rs) | Excel / CSV / Word / Text processing |
-| 50 | [`demo50_eval`](tests/example_contracts/demo50_eval.rs) | Eval system: cases, criteria, constraints, replay, HTML reports |
-| 51 | [`demo51_self_improvement`](tests/example_contracts/demo51_self_improvement.rs) | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver |
-| 53 | [`demo53_adaptive_compression`](tests/example_contracts/demo53_adaptive_compression.rs) | 5-level adaptive compression (Snip→Micro→Collapse→Compact→Reactive) |
-| 54 | [`demo54_headless`](tests/example_contracts/demo54_headless.rs) | Headless mode: single-prompt CI/CD execution |
-| 55 | [`demo55_lsp_tools`](tests/example_contracts/demo55_lsp_tools.rs) | LSP tools: go-to-definition, find-references, diagnostics |
-| 56 | [`demo56_plugin_system`](examples/demo56_plugin_system.rs) | Plugin system: manifest, registry, lifecycle, scope |
-| 57 | [`demo57_data_pipeline`](tests/example_contracts/demo57_data_pipeline.rs) | Code-first data pipeline: persist script → execute → verify artifacts |
-| 58 | [`demo58_git_worktree`](examples/demo58_git_worktree.rs) | Git worktree isolation + checkpoint rollback |
-| 59 | [`demo59_code_search`](examples/demo59_code_search.rs) | Ripgrep-powered code search with structured output |
-| 60 | [`demo60_data_quality`](tests/example_contracts/demo60_data_quality.rs) | Data quality profiling + statistical analysis |
-| 61 | [`demo61_agent_factory`](examples/demo61_agent_factory.rs) | Agent factory, mode engine, prompt templates |
-| 62 | [`demo62_prompt_templates`](tests/example_contracts/demo62_prompt_templates.rs) | Prompt template manager with variable substitution |
-| 64 | [`demo64_tool_pipeline`](tests/example_contracts/demo64_tool_pipeline.rs) | Tool execution pipeline + approval stack |
-| 65 | [`demo65_context_assembler`](tests/example_contracts/demo65_context_assembler.rs) | ContextAssembler: budget-aware context assembly with priority ordering |
-| 66 | [`demo66_context_selector`](tests/example_contracts/demo66_context_selector.rs) | ContextSelector: score and select files by task relevance |
-| 67 | [`demo67_progress`](tests/example_contracts/demo67_progress.rs) | Progress reporting |
-| 68 | [`demo68_human_gate`](examples/demo68_human_gate.rs) | Human approval gate |
-| 70 | [`demo70_scheduler`](examples/demo70_scheduler.rs) | Task scheduling |
+| 01 | [`demo01_tools`](echo-agent-learning/examples/demo01_tools.rs) | Custom tools with `#[tool]` |
+| 02 | [`demo02_tasks`](echo-agent-learning/examples/demo02_tasks.rs) | DAG task planning |
+| 03 | [`demo03_approval`](echo-agent-learning/examples/demo03_approval.rs) | Human-in-the-loop |
+| 04 | [`demo04_subagent`](echo-agent-learning/tests/example_contracts/demo04_subagent.rs) | Multi-agent orchestration |
+| 05 | [`demo05_compressor`](echo-agent-learning/examples/demo05_compressor.rs) | Context compression |
+| 06 | [`demo06_mcp`](echo-agent-learning/examples/demo06_mcp.rs) | MCP tool server |
+| 07 | [`demo07_skills`](echo-agent-learning/examples/demo07_skills.rs) | Built-in skills |
+| 08 | [`demo08_external_skills`](echo-agent-learning/examples/demo08_external_skills.rs) | External skill loading |
+| 09 | [`demo09_file_shell`](echo-agent-learning/examples/demo09_file_shell.rs) | File & shell tools |
+| 10 | [`demo10_streaming`](echo-agent-learning/examples/demo10_streaming.rs) | Streaming output |
+| 11 | [`demo11_callbacks`](echo-agent-learning/examples/demo11_callbacks.rs) | Lifecycle callbacks |
+| 12 | [`demo12_resilience`](echo-agent-learning/tests/example_contracts/demo12_resilience.rs) | Retry & fault tolerance |
+| 13 | [`demo13_tool_execution`](echo-agent-learning/examples/demo13_tool_execution.rs) | Tool execution config |
+| 15 | [`demo15_structured_output`](echo-agent-learning/examples/demo15_structured_output.rs) | JSON Schema output |
+| 17 | [`demo17_chat`](echo-agent-learning/examples/demo17_chat.rs) | Interactive chat |
+| 18 | [`demo18_semantic_memory`](echo-agent-learning/examples/demo18_semantic_memory.rs) | Semantic memory |
+| 19 | [`demo19_guard`](echo-agent-learning/examples/demo19_guard.rs) | Guard system |
+| 20 | [`demo20_audit`](echo-agent-learning/examples/demo20_audit.rs) | Audit logging |
+| 23 | [`demo23_a2a`](echo-agent-learning/examples/demo23_a2a.rs) | A2A protocol |
+| 24 | [`demo24_topology`](echo-agent-learning/tests/example_contracts/demo24_topology.rs) | Topology visualization |
+| 25 | [`demo25_macros`](echo-agent-learning/examples/demo25_macros.rs) | Macro system showcase |
+| 26 | [`demo26_provider_factory`](echo-agent-learning/examples/demo26_provider_factory.rs) | Dynamic LLM factory |
+| 27 | [`demo27_sqlite_memory`](echo-agent-learning/examples/demo27_sqlite_memory.rs) | SQLite persistence |
+| 28 | [`demo28_workflow`](echo-agent-learning/examples/demo28_workflow.rs) | Workflow pipeline |
+| 29 | [`demo29_sandbox`](echo-agent-learning/examples/demo29_sandbox.rs) | Sandbox execution |
+| 30 | [`demo30_mcp_server`](echo-agent-learning/tests/example_contracts/demo30_mcp_server.rs) | MCP server mode |
+| 31 | [`demo31_memory_tools`](echo-agent-learning/tests/example_contracts/demo31_memory_tools.rs) | Memory tool injection |
+| 32 | [`demo32_token_budget`](echo-agent-learning/examples/demo32_token_budget.rs) | Token budget control |
+| 33 | [`demo33_retry_policy`](echo-agent-learning/examples/demo33_retry_policy.rs) | Unified retry |
+| 34 | [`demo34_workflow_stream`](echo-agent-learning/tests/example_contracts/demo34_workflow_stream.rs) | Workflow streaming |
+| 35 | [`demo35_dynamic_tools`](echo-agent-learning/examples/demo35_dynamic_tools.rs) | Dynamic tool management |
+| 36 | [`demo36_multimodal`](echo-agent-learning/examples/demo36_multimodal.rs) | Multi-modal messages |
+| 37 | [`demo37_declarative_workflow`](echo-agent-learning/tests/example_contracts/demo37_declarative_workflow.rs) | YAML/JSON workflows |
+| 38 | [`demo38_im_channels`](echo-agent-learning/examples/demo38_im_channels.rs) | IM channel integration |
+| 39 | [`demo39_workflow`](echo-agent-learning/tests/example_contracts/demo39_workflow.rs) | Graph workflow engine |
+| 40 | [`demo40_snapshot`](echo-agent-learning/examples/demo40_snapshot.rs) | Snapshot & rollback |
+| 41 | [`demo41_web_tools`](echo-agent-learning/examples/demo41_web_tools.rs) | Web search + fetch |
+| 42 | [`demo42_playwright_mcp`](echo-agent-learning/examples/demo42_playwright_mcp.rs) | Playwright MCP browser automation |
+| 43 | [`demo43_data_tools`](echo-agent-learning/tests/example_contracts/demo43_data_tools.rs) | Excel / CSV / Word / Text processing |
+| 50 | [`demo50_eval`](echo-agent-learning/tests/example_contracts/demo50_eval.rs) | Eval system: cases, criteria, constraints, replay, HTML reports |
+| 51 | [`demo51_self_improvement`](echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs) | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver |
+| 53 | [`demo53_adaptive_compression`](echo-agent-learning/tests/example_contracts/demo53_adaptive_compression.rs) | 5-level adaptive compression (Snip→Micro→Collapse→Compact→Reactive) |
+| 54 | [`demo54_headless`](echo-agent-learning/tests/example_contracts/demo54_headless.rs) | Headless mode: single-prompt CI/CD execution |
+| 55 | [`demo55_lsp_tools`](echo-agent-learning/tests/example_contracts/demo55_lsp_tools.rs) | LSP tools: go-to-definition, find-references, diagnostics |
+| 56 | [`demo56_plugin_system`](echo-agent-learning/examples/demo56_plugin_system.rs) | Plugin system: manifest, registry, lifecycle, scope |
+| 57 | [`demo57_data_pipeline`](echo-agent-learning/tests/example_contracts/demo57_data_pipeline.rs) | Code-first data pipeline: persist script → execute → verify artifacts |
+| 58 | [`demo58_git_worktree`](echo-agent-learning/examples/demo58_git_worktree.rs) | Git worktree isolation + checkpoint rollback |
+| 59 | [`demo59_code_search`](echo-agent-learning/examples/demo59_code_search.rs) | Ripgrep-powered code search with structured output |
+| 60 | [`demo60_data_quality`](echo-agent-learning/tests/example_contracts/demo60_data_quality.rs) | Data quality profiling + statistical analysis |
+| 61 | [`demo61_agent_factory`](echo-agent-learning/examples/demo61_agent_factory.rs) | Agent factory and prompt templates |
+| 62 | [`demo62_prompt_templates`](echo-agent-learning/tests/example_contracts/demo62_prompt_templates.rs) | Prompt template manager with variable substitution |
+| 64 | [`demo64_tool_pipeline`](echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs) | Tool execution pipeline + approval stack |
+| 65 | [`demo65_context_assembler`](echo-agent-learning/tests/example_contracts/demo65_context_assembler.rs) | ContextAssembler: budget-aware context assembly with priority ordering |
+| 66 | [`demo66_context_selector`](echo-agent-learning/tests/example_contracts/demo66_context_selector.rs) | ContextSelector: score and select files by task relevance |
+| 67 | [`demo67_progress`](echo-agent-learning/tests/example_contracts/demo67_progress.rs) | Progress reporting |
+| 68 | [`demo68_human_gate`](echo-agent-learning/examples/demo68_human_gate.rs) | Human approval gate |
+| 70 | [`demo70_scheduler`](echo-agent-learning/examples/demo70_scheduler.rs) | Task scheduling |
 
-Plus **6 comprehensive examples** demonstrating real-world use cases:
+Plus **6 comprehensive examples** demonstrating real-world use cases, and a
+small public-facade composition example:
 
 | Example | Scenario |
 |---------|----------|
-| [`demo44_code_laboratory`](examples/demo44_code_laboratory.rs) | Code execution assistant |
-| [`demo45_customer_service`](examples/demo45_customer_service.rs) | Intelligent customer service |
-| [`demo46_data_analyst`](examples/demo46_data_analyst.rs) | Data analysis assistant |
-| [`demo47_enterprise`](examples/demo47_enterprise.rs) | Enterprise workflow automation |
-| [`demo48_personal_assistant`](examples/demo48_personal_assistant.rs) | Personal smart assistant |
-| [`demo49_research_agent`](examples/demo49_research_agent.rs) | Research & report assistant |
+| [`demo44_code_laboratory`](echo-agent-learning/examples/demo44_code_laboratory.rs) | Code execution assistant |
+| [`demo45_customer_service`](echo-agent-learning/examples/demo45_customer_service.rs) | Intelligent customer service |
+| [`demo46_data_analyst`](echo-agent-learning/examples/demo46_data_analyst.rs) | Data analysis assistant |
+| [`demo47_enterprise`](echo-agent-learning/examples/demo47_enterprise.rs) | Enterprise workflow automation |
+| [`demo48_personal_assistant`](echo-agent-learning/examples/demo48_personal_assistant.rs) | Personal smart assistant |
+| [`demo49_research_agent`](echo-agent-learning/examples/demo49_research_agent.rs) | Research & report assistant |
+| [`comprehensive_agent`](echo-agent-learning/examples/comprehensive_agent.rs) | Deterministic tool + ReAct composition |
 
 ---
 
@@ -1060,7 +1060,7 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 
 | Topic | English | Chinese |
 |-------|---------|---------|
-| Rust for Contributors | — | [ZH](echo-rust-learning/docs/zh/README.md) |
+| Rust for Contributors | — | [ZH](echo-agent-learning/docs/zh/README.md) |
 | ReAct Agent | [EN](docs/en/01-react-agent.md) | [ZH](docs/zh/01-react-agent.md) |
 | Tool System | [EN](docs/en/02-tools.md) | [ZH](docs/zh/02-tools.md) |
 | Memory System | [EN](docs/en/03-memory.md) | [ZH](docs/zh/03-memory.md) |
@@ -1096,7 +1096,7 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Pipelines | [EN](docs/en/35-pipelines.md) | [ZH](docs/zh/35-pipelines.md) |
 | Data Quality & Statistics | [EN](docs/en/36-data-quality-statistics.md) | [ZH](docs/zh/36-data-quality-statistics.md) |
 | Code Search | [EN](docs/en/37-code-search.md) | [ZH](docs/zh/37-code-search.md) |
-| Agent Factory & Modes | [EN](docs/en/38-factory-modes.md) | [ZH](docs/zh/38-factory-modes.md) |
+| Agent Factory & Model Profiles | [EN](docs/en/38-factory-modes.md) | [ZH](docs/zh/38-factory-modes.md) |
 | Security | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
 
 ---

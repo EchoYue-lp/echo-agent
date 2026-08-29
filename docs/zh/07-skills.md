@@ -521,5 +521,5 @@ println!("已安装 {} 个 skill", agent.skill_count());
 ## 示例
 
 参见示例文件：
-- `examples/demo07_skills.rs` —— Code-based skill 演示
-- `examples/demo08_external_skills.rs` —— File-based skill 完整功能演示（渐进披露 + 脚本执行 + 内联命令 + hooks）
+- `echo-agent-learning/examples/demo07_skills.rs` —— Code-based skill 演示
+- `echo-agent-learning/examples/demo08_external_skills.rs` —— File-based skill 完整功能演示（渐进披露 + 脚本执行 + 内联命令 + hooks）

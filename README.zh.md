@@ -14,7 +14,7 @@
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20%E5%85%BC%E5%AE%B9-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/runtime-tokio-blue)](https://tokio.rs/)
 
-[English](./README.md) &middot; [文档中心](./docs/zh/README.md) &middot; [Rust 学习指南](./echo-rust-learning/docs/zh/README.md) &middot; [示例](./examples/) &middot; [更新日志](./CHANGELOG.md)
+[English](./README.md) &middot; [文档中心](./docs/zh/README.md) &middot; [Rust 学习指南](./echo-agent-learning/docs/zh/README.md) &middot; [示例](./echo-agent-learning/examples/) &middot; [更新日志](./CHANGELOG.md)
 
 </div>
 
@@ -103,11 +103,11 @@ manager.start_all(handler).await?;
 ### 运行示例
 
 ```bash
-cargo run --example demo01_tools          # 自定义工具
-cargo run --example demo25_macros         # 宏系统
-cargo run --example demo34_workflow_stream # 工作流流式
-cargo run --example demo36_multimodal     # 多模态消息
-cargo run --example demo38_im_channels --features channels  # IM 通道
+cargo run -p echo-agent-learning --example demo01_tools          # 自定义工具
+cargo run -p echo-agent-learning --example demo25_macros         # 宏系统
+cargo run -p echo-agent-learning --example demo34_workflow_stream # 工作流流式
+cargo run -p echo-agent-learning --example demo36_multimodal     # 多模态消息
+cargo run -p echo-agent-learning --example demo38_im_channels --features channels  # IM 通道
 ```
 
 ---
@@ -259,10 +259,8 @@ echo-agent/
 ├── echo-orchestration/  工作流、人工审批和 DAG 任务
 ├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
 ├── echo-tools/          领域工具：chart、data、database、git、media、web、rag
-├── echo-agent-examples/ 不发布的 facade 外部消费者示例
-├── echo-rust-learning/  非发布的 Rust 教学 crate 与离线练习
+├── echo-agent-learning/ 不发布的学习课程、Demo、综合示例和 facade 合同
 ├── src/                 Agent 引擎、重导出和门面层
-├── examples/            可运行的框架功能示例
 └── docs/                框架消费者文档（en + zh）
 ```
 
@@ -699,63 +697,64 @@ agent.set_circuit_breaker(cb_config);
 ## 示例
 
 所有示例现在按 `验收样例`、`条件验收样例`、`教学示例` 三类维护。
-完整分层清单和维护规则见 `examples/README.md`。
+完整分层清单和维护规则见 `echo-agent-learning/examples/README.md`。
 
 | # | 示例 | 演示内容 |
 |---|------|---------|
-| 01 | [`demo01_tools`](examples/demo01_tools.rs) | `#[tool]` 宏自定义工具 |
-| 02 | [`demo02_tasks`](examples/demo02_tasks.rs) | DAG 任务规划 |
-| 03 | [`demo03_approval`](examples/demo03_approval.rs) | 人工审批 |
-| 04 | [`demo04_subagent`](tests/example_contracts/demo04_subagent.rs) | 多 Agent 编排 |
-| 05 | [`demo05_compressor`](examples/demo05_compressor.rs) | 上下文压缩 |
-| 06 | [`demo06_mcp`](examples/demo06_mcp.rs) | MCP 工具服务器 |
-| 07 | [`demo07_skills`](examples/demo07_skills.rs) | 内置技能 |
-| 08 | [`demo08_external_skills`](examples/demo08_external_skills.rs) | 外部技能加载 |
-| 09 | [`demo09_file_shell`](examples/demo09_file_shell.rs) | 文件 & Shell 工具 |
-| 10 | [`demo10_streaming`](examples/demo10_streaming.rs) | 流式输出 |
-| 11 | [`demo11_callbacks`](examples/demo11_callbacks.rs) | 生命周期回调 |
-| 12 | [`demo12_resilience`](tests/example_contracts/demo12_resilience.rs) | 重试与容错 |
-| 13 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | 工具执行配置 |
-| 15 | [`demo15_structured_output`](examples/demo15_structured_output.rs) | JSON Schema 输出 |
-| 17 | [`demo17_chat`](examples/demo17_chat.rs) | 交互式对话 |
-| 18 | [`demo18_semantic_memory`](examples/demo18_semantic_memory.rs) | 语义记忆 |
-| 19 | [`demo19_guard`](examples/demo19_guard.rs) | 护栏系统 |
-| 20 | [`demo20_audit`](examples/demo20_audit.rs) | 审计日志 |
-| 23 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A 协议 |
-| 24 | [`demo24_topology`](tests/example_contracts/demo24_topology.rs) | 拓扑可视化 |
-| 25 | [`demo25_macros`](examples/demo25_macros.rs) | 宏系统展示 |
-| 26 | [`demo26_provider_factory`](examples/demo26_provider_factory.rs) | 动态 LLM 工厂 |
-| 27 | [`demo27_sqlite_memory`](examples/demo27_sqlite_memory.rs) | SQLite 持久化 |
-| 28 | [`demo28_workflow`](examples/demo28_workflow.rs) | 工作流管道 |
-| 29 | [`demo29_sandbox`](examples/demo29_sandbox.rs) | 沙箱执行 |
-| 30 | [`demo30_mcp_server`](tests/example_contracts/demo30_mcp_server.rs) | MCP 服务端 |
-| 31 | [`demo31_memory_tools`](tests/example_contracts/demo31_memory_tools.rs) | 记忆工具注入 |
-| 32 | [`demo32_token_budget`](examples/demo32_token_budget.rs) | Token 预算管控 |
-| 33 | [`demo33_retry_policy`](examples/demo33_retry_policy.rs) | 统一重试 |
-| 34 | [`demo34_workflow_stream`](tests/example_contracts/demo34_workflow_stream.rs) | 工作流流式 |
-| 35 | [`demo35_dynamic_tools`](examples/demo35_dynamic_tools.rs) | 动态工具管理 |
-| 36 | [`demo36_multimodal`](examples/demo36_multimodal.rs) | 多模态消息 |
-| 37 | [`demo37_declarative_workflow`](tests/example_contracts/demo37_declarative_workflow.rs) | YAML/JSON 工作流 |
-| 38 | [`demo38_im_channels`](examples/demo38_im_channels.rs) | IM 通道集成 |
-| 39 | [`demo39_workflow`](tests/example_contracts/demo39_workflow.rs) | 图工作流引擎 |
-| 40 | [`demo40_snapshot`](examples/demo40_snapshot.rs) | 快照与回滚 |
-| 41 | [`demo41_web_tools`](examples/demo41_web_tools.rs) | Web 搜索 + 获取 |
-| 42 | [`demo42_playwright_mcp`](examples/demo42_playwright_mcp.rs) | Playwright MCP 浏览器自动化 |
-| 43 | [`demo43_data_tools`](tests/example_contracts/demo43_data_tools.rs) | Excel / CSV / Word / Text 数据处理 |
-| 67 | [`demo67_progress`](tests/example_contracts/demo67_progress.rs) | 进度事件 |
-| 68 | [`demo68_human_gate`](examples/demo68_human_gate.rs) | 人工审批门禁 |
-| 70 | [`demo70_scheduler`](examples/demo70_scheduler.rs) | 任务调度 |
+| 01 | [`demo01_tools`](echo-agent-learning/examples/demo01_tools.rs) | `#[tool]` 宏自定义工具 |
+| 02 | [`demo02_tasks`](echo-agent-learning/examples/demo02_tasks.rs) | DAG 任务规划 |
+| 03 | [`demo03_approval`](echo-agent-learning/examples/demo03_approval.rs) | 人工审批 |
+| 04 | [`demo04_subagent`](echo-agent-learning/tests/example_contracts/demo04_subagent.rs) | 多 Agent 编排 |
+| 05 | [`demo05_compressor`](echo-agent-learning/examples/demo05_compressor.rs) | 上下文压缩 |
+| 06 | [`demo06_mcp`](echo-agent-learning/examples/demo06_mcp.rs) | MCP 工具服务器 |
+| 07 | [`demo07_skills`](echo-agent-learning/examples/demo07_skills.rs) | 内置技能 |
+| 08 | [`demo08_external_skills`](echo-agent-learning/examples/demo08_external_skills.rs) | 外部技能加载 |
+| 09 | [`demo09_file_shell`](echo-agent-learning/examples/demo09_file_shell.rs) | 文件 & Shell 工具 |
+| 10 | [`demo10_streaming`](echo-agent-learning/examples/demo10_streaming.rs) | 流式输出 |
+| 11 | [`demo11_callbacks`](echo-agent-learning/examples/demo11_callbacks.rs) | 生命周期回调 |
+| 12 | [`demo12_resilience`](echo-agent-learning/tests/example_contracts/demo12_resilience.rs) | 重试与容错 |
+| 13 | [`demo13_tool_execution`](echo-agent-learning/examples/demo13_tool_execution.rs) | 工具执行配置 |
+| 15 | [`demo15_structured_output`](echo-agent-learning/examples/demo15_structured_output.rs) | JSON Schema 输出 |
+| 17 | [`demo17_chat`](echo-agent-learning/examples/demo17_chat.rs) | 交互式对话 |
+| 18 | [`demo18_semantic_memory`](echo-agent-learning/examples/demo18_semantic_memory.rs) | 语义记忆 |
+| 19 | [`demo19_guard`](echo-agent-learning/examples/demo19_guard.rs) | 护栏系统 |
+| 20 | [`demo20_audit`](echo-agent-learning/examples/demo20_audit.rs) | 审计日志 |
+| 23 | [`demo23_a2a`](echo-agent-learning/examples/demo23_a2a.rs) | A2A 协议 |
+| 24 | [`demo24_topology`](echo-agent-learning/tests/example_contracts/demo24_topology.rs) | 拓扑可视化 |
+| 25 | [`demo25_macros`](echo-agent-learning/examples/demo25_macros.rs) | 宏系统展示 |
+| 26 | [`demo26_provider_factory`](echo-agent-learning/examples/demo26_provider_factory.rs) | 动态 LLM 工厂 |
+| 27 | [`demo27_sqlite_memory`](echo-agent-learning/examples/demo27_sqlite_memory.rs) | SQLite 持久化 |
+| 28 | [`demo28_workflow`](echo-agent-learning/examples/demo28_workflow.rs) | 工作流管道 |
+| 29 | [`demo29_sandbox`](echo-agent-learning/examples/demo29_sandbox.rs) | 沙箱执行 |
+| 30 | [`demo30_mcp_server`](echo-agent-learning/tests/example_contracts/demo30_mcp_server.rs) | MCP 服务端 |
+| 31 | [`demo31_memory_tools`](echo-agent-learning/tests/example_contracts/demo31_memory_tools.rs) | 记忆工具注入 |
+| 32 | [`demo32_token_budget`](echo-agent-learning/examples/demo32_token_budget.rs) | Token 预算管控 |
+| 33 | [`demo33_retry_policy`](echo-agent-learning/examples/demo33_retry_policy.rs) | 统一重试 |
+| 34 | [`demo34_workflow_stream`](echo-agent-learning/tests/example_contracts/demo34_workflow_stream.rs) | 工作流流式 |
+| 35 | [`demo35_dynamic_tools`](echo-agent-learning/examples/demo35_dynamic_tools.rs) | 动态工具管理 |
+| 36 | [`demo36_multimodal`](echo-agent-learning/examples/demo36_multimodal.rs) | 多模态消息 |
+| 37 | [`demo37_declarative_workflow`](echo-agent-learning/tests/example_contracts/demo37_declarative_workflow.rs) | YAML/JSON 工作流 |
+| 38 | [`demo38_im_channels`](echo-agent-learning/examples/demo38_im_channels.rs) | IM 通道集成 |
+| 39 | [`demo39_workflow`](echo-agent-learning/tests/example_contracts/demo39_workflow.rs) | 图工作流引擎 |
+| 40 | [`demo40_snapshot`](echo-agent-learning/examples/demo40_snapshot.rs) | 快照与回滚 |
+| 41 | [`demo41_web_tools`](echo-agent-learning/examples/demo41_web_tools.rs) | Web 搜索 + 获取 |
+| 42 | [`demo42_playwright_mcp`](echo-agent-learning/examples/demo42_playwright_mcp.rs) | Playwright MCP 浏览器自动化 |
+| 43 | [`demo43_data_tools`](echo-agent-learning/tests/example_contracts/demo43_data_tools.rs) | Excel / CSV / Word / Text 数据处理 |
+| 67 | [`demo67_progress`](echo-agent-learning/tests/example_contracts/demo67_progress.rs) | 进度事件 |
+| 68 | [`demo68_human_gate`](echo-agent-learning/examples/demo68_human_gate.rs) | 人工审批门禁 |
+| 70 | [`demo70_scheduler`](echo-agent-learning/examples/demo70_scheduler.rs) | 任务调度 |
 
-另有 **6 个综合示例** 展示真实场景应用：
+另有 **6 个综合示例** 展示真实场景应用，并提供一个小型公共门面组合示例：
 
 | 示例 | 场景 |
 |------|------|
-| [`demo44_code_laboratory`](examples/demo44_code_laboratory.rs) | 代码执行助手 |
-| [`demo45_customer_service`](examples/demo45_customer_service.rs) | 智能客服 |
-| [`demo46_data_analyst`](examples/demo46_data_analyst.rs) | 数据分析助手 |
-| [`demo47_enterprise`](examples/demo47_enterprise.rs) | 企业工作流自动化 |
-| [`demo48_personal_assistant`](examples/demo48_personal_assistant.rs) | 个人智能助手 |
-| [`demo49_research_agent`](examples/demo49_research_agent.rs) | 研究报告助手 |
+| [`demo44_code_laboratory`](echo-agent-learning/examples/demo44_code_laboratory.rs) | 代码执行助手 |
+| [`demo45_customer_service`](echo-agent-learning/examples/demo45_customer_service.rs) | 智能客服 |
+| [`demo46_data_analyst`](echo-agent-learning/examples/demo46_data_analyst.rs) | 数据分析助手 |
+| [`demo47_enterprise`](echo-agent-learning/examples/demo47_enterprise.rs) | 企业工作流自动化 |
+| [`demo48_personal_assistant`](echo-agent-learning/examples/demo48_personal_assistant.rs) | 个人智能助手 |
+| [`demo49_research_agent`](echo-agent-learning/examples/demo49_research_agent.rs) | 研究报告助手 |
+| [`comprehensive_agent`](echo-agent-learning/examples/comprehensive_agent.rs) | 确定性的工具 + ReAct 组合 |
 
 ---
 
@@ -778,7 +777,7 @@ agent.set_circuit_breaker(cb_config);
 
 | 主题 | English | 中文 |
 |------|---------|------|
-| 面向贡献者的 Rust 教程 | — | [ZH](echo-rust-learning/docs/zh/README.md) |
+| 面向贡献者的 Rust 教程 | — | [ZH](echo-agent-learning/docs/zh/README.md) |
 | ReAct Agent | [EN](docs/en/01-react-agent.md) | [ZH](docs/zh/01-react-agent.md) |
 | 工具系统 | [EN](docs/en/02-tools.md) | [ZH](docs/zh/02-tools.md) |
 | 记忆系统 | [EN](docs/en/03-memory.md) | [ZH](docs/zh/03-memory.md) |

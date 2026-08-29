@@ -146,7 +146,7 @@ async fn chat_sse(task: String) -> Sse<impl futures::Stream<Item = Result<axum::
 2. **`FinalAnswer` is a sentinel**: Once received, the stream is logically complete — break out of the loop
 3. **Error handling**: Every event in the stream is `Result<AgentEvent>` — handle LLM or tool errors that may occur mid-stream
 
-See: `examples/demo10_streaming.rs`
+See: `echo-agent-learning/examples/demo10_streaming.rs`
 
 ---
 

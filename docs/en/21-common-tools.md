@@ -56,7 +56,7 @@ Provider priority in `auto()`:
 - `BRAVE_SEARCH_API_KEY` -> Brave
 - otherwise DuckDuckGo
 
-See: `examples/demo41_web_tools.rs`
+See: `echo-agent-learning/examples/demo41_web_tools.rs`
 
 ---
 
@@ -117,7 +117,7 @@ Use `WebFetchTool` instead when:
 - you only need text
 - no interaction is needed
 
-See: `examples/demo42_playwright_mcp.rs`
+See: `echo-agent-learning/examples/demo42_playwright_mcp.rs`
 
 ---
 
@@ -141,7 +141,7 @@ Typical use cases:
 - filter rows matching a business rule
 - group data by category and aggregate revenue
 
-See: `tests/example_contracts/demo43_data_tools.rs`
+See: `echo-agent-learning/tests/example_contracts/demo43_data_tools.rs`
 
 ---
 

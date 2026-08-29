@@ -226,10 +226,10 @@ You've built your first agent with tools! Here's where to go deeper:
 Or run the examples from the repo directly:
 
 ```bash
-cargo run --example demo01_tools          # Custom tools
-cargo run --example demo10_streaming      # Streaming output
-cargo run --example demo04_subagent       # Multi-agent orchestration
-cargo run --example demo06_mcp            # MCP protocol integration
+cargo run -p echo-agent-learning --example demo01_tools          # Custom tools
+cargo run -p echo-agent-learning --example demo10_streaming      # Streaming output
+cargo run -p echo-agent-learning --example demo04_subagent       # Multi-agent orchestration
+cargo run -p echo-agent-learning --example demo06_mcp            # MCP protocol integration
 ```
 
-See the full list of demos in the [examples/](../../examples/) directory.
+See the full list of demos in the [echo-agent-learning/examples/](../../echo-agent-learning/examples/) directory.

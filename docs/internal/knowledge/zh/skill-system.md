@@ -127,8 +127,8 @@ You are an expert code reviewer. When reviewing code, consider:
 
 ## References
 
-- [Review Checklist](../../../../examples/demo_skills/code_review/references/checklist.md)
-- [Style Guide](../../../../examples/demo_skills/code_review/references/style_guide.md)
+- [Review Checklist](../../../../echo-agent-learning/examples/demo_skills/code_review/references/checklist.md)
+- [Style Guide](../../../../echo-agent-learning/examples/demo_skills/code_review/references/style_guide.md)
 ```
 
 ---

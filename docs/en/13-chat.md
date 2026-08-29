@@ -302,4 +302,4 @@ async fn chat_stream_handler(
 3. **Context growth**: Long conversations accumulate tokens — use `set_compressor()` to prevent context overflow
 4. **Mixing `execute()` and `chat()`**: `execute()` always resets history on each call, discarding any context accumulated by prior `chat()` calls
 
-See: `examples/demo17_chat.rs`
+See: `echo-agent-learning/examples/demo17_chat.rs`

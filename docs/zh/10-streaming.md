@@ -149,7 +149,7 @@ async fn chat_stream(
 2. **`FinalAnswer` 是信号**：收到 `FinalAnswer` 事件后，流理论上已结束，建议 `break` 退出循环
 3. **错误处理**：流中的每个事件都是 `Result<AgentEvent>`，需要处理中途发生的 LLM 或工具错误
 
-对应示例：`examples/demo10_streaming.rs`
+对应示例：`echo-agent-learning/examples/demo10_streaming.rs`
 
 ---
 

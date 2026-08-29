@@ -1,7 +1,6 @@
 [workspace]
 members = [
-    "echo-agent-examples",
-    "echo-rust-learning",
+    "echo-agent-learning",
     "echo-core",
     "echo-macros",
     "echo-execution",
@@ -12,8 +11,7 @@ members = [
 ]
 default-members = [
     ".",
-    "echo-agent-examples",
-    "echo-rust-learning",
+    "echo-agent-learning",
     "echo-core",
     "echo-macros",
     "echo-execution",
@@ -39,7 +37,6 @@ keywords = ["ai", "agent", "llm", "react", "mcp"]
 categories = ["development-tools", "asynchronous", "web-programming::http-client"]
 
 exclude = [
-    "/examples/demo_skills/",
     "/docs/internal/",
     ".github/",
     ".claude/",
@@ -140,128 +137,6 @@ axum = { version = "0.7", optional = true }
 # matching key family and never accepts caller-supplied mixed algorithm lists.
 jsonwebtoken = { version = "9", optional = true }
 rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
-
-[[example]]
-name = "demo27_sqlite_memory"
-required-features = ["sqlite"]
-
-[[example]]
-name = "demo45_customer_service"
-required-features = ["sqlite", "human-loop", "content-guard"]
-
-[[example]]
-name = "demo48_personal_assistant"
-required-features = ["sqlite", "subagent"]
-
-[[example]]
-name = "demo46_data_analyst"
-required-features = ["sqlite"]
-
-[[example]]
-name = "demo44_code_laboratory"
-required-features = ["content-guard"]
-
-[[example]]
-name = "demo07_skills"
-required-features = ["files"]
-
-[[example]]
-name = "demo06_mcp"
-required-features = ["mcp"]
-
-[[example]]
-name = "demo15_structured_output"
-
-[[example]]
-name = "demo18_semantic_memory"
-
-[[example]]
-name = "demo23_a2a"
-required-features = ["a2a"]
-
-[[example]]
-name = "demo25_macros"
-
-[[example]]
-name = "demo26_provider_factory"
-
-[[example]]
-name = "demo28_workflow"
-
-[[example]]
-name = "demo29_sandbox"
-
-[[example]]
-name = "demo36_multimodal"
-
-[[example]]
-name = "demo38_im_channels"
-required-features = ["channels"]
-
-[[example]]
-name = "demo41_web_tools"
-required-features = ["web"]
-
-[[example]]
-name = "demo42_browser_mcp"
-path = "examples/demo42_playwright_mcp.rs"
-required-features = ["mcp"]
-
-[[example]]
-name = "demo47_enterprise"
-required-features = ["testing"]
-
-[[example]]
-name = "demo05_compressor"
-required-features = ["human-loop"]
-
-[[example]]
-name = "demo20_audit"
-required-features = ["human-loop"]
-
-[[example]]
-name = "demo03_approval"
-required-features = ["human-loop"]
-
-[[example]]
-name = "demo49_research_agent"
-required-features = ["sqlite", "web", "files"]
-
-[[example]]
-name = "demo09_file_shell"
-required-features = ["files", "shell"]
-
-[[example]]
-name = "demo08_external_skills"
-
-[[example]]
-name = "demo35_dynamic_tools"
-
-[[example]]
-name = "demo56_plugin_system"
-
-[[example]]
-name = "demo58_git_worktree"
-required-features = ["git"]
-
-[[example]]
-name = "demo59_code_search"
-required-features = ["files"]
-
-[[example]]
-name = "demo61_agent_factory"
-required-features = ["testing"]
-
-[[example]]
-name = "demo68_human_gate"
-required-features = ["subagent", "human-loop"]
-
-[[example]]
-name = "demo70_scheduler"
-
-[[example]]
-name = "demo19_guard"
-required-features = ["content-guard"]
 
 [dev-dependencies]
 proptest = "1"

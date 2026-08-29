@@ -259,4 +259,4 @@ First guard to return `Block` stops the chain.
 
 Place LlmGuard at the end of the chain to avoid unnecessary calls.
 
-See: `examples/demo19_guard.rs`
+See: `echo-agent-learning/examples/demo19_guard.rs`

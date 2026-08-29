@@ -511,7 +511,7 @@ LSP 操作可能以多种方式失败：
 
 ## 参见
 
-- `examples/` — LSP 集成示例
+- `echo-agent-learning/examples/` — LSP 集成示例
 - [02-tools.md](02-tools.md) — 工具系统概览
 - [08-mcp.md](08-mcp.md) — MCP 协议集成（外部工具服务）
 - [28-config-reference.md](28-config-reference.md) — 完整配置参考

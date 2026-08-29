@@ -284,8 +284,8 @@ let report: SalesReport = extractor_agent.extract(&raw_answer, schema).await?;
 
 ## 完整示例
 
-对应示例：`examples/demo15_structured_output.rs`
+对应示例：`echo-agent-learning/examples/demo15_structured_output.rs`
 
 ```bash
-cargo run --example demo15_structured_output
+cargo run -p echo-agent-learning --example demo15_structured_output
 ```

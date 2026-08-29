@@ -259,4 +259,4 @@ manager.add_input_guard(Box::new(guard3));  // 第三个
 
 将 LlmGuard 放在链条末尾以避免不必要的调用。
 
-对应示例：`examples/demo19_guard.rs`
+对应示例：`echo-agent-learning/examples/demo19_guard.rs`

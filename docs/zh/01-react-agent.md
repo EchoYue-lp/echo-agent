@@ -220,7 +220,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-对应示例：`examples/demo01_tools.rs`、`examples/demo11_callbacks.rs`
+对应示例：`echo-agent-learning/examples/demo01_tools.rs`、`echo-agent-learning/examples/demo11_callbacks.rs`
 
 ---
 

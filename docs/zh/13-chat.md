@@ -300,4 +300,4 @@ async fn chat_stream_handler(
 3. **上下文增长**：长时间对话会累积大量 token，建议配合 `set_compressor()` 使用
 4. **`execute()` 不影响 `chat()` 的历史**：混用 `execute()` 和 `chat()` 时，`execute()` 每次调用都会重置历史，之前 `chat()` 积累的上下文会丢失
 
-对应示例：`examples/demo17_chat.rs`
+对应示例：`echo-agent-learning/examples/demo17_chat.rs`

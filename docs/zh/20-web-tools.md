@@ -227,4 +227,4 @@ echo_agent = { version = "1.3", features = ["web"] }
 
 ---
 
-对应示例：`examples/demo41_web_tools.rs`
+对应示例：`echo-agent-learning/examples/demo41_web_tools.rs`

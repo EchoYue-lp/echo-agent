@@ -511,7 +511,7 @@ Any LSP-compliant server that supports stdio transport works. Common choices:
 
 ## See Also
 
-- `examples/` — demo for LSP integration
+- `echo-agent-learning/examples/` — demo for LSP integration
 - [02-tools.md](02-tools.md) — Tool system overview
 - [08-mcp.md](08-mcp.md) — MCP integration (external tool services)
 - [28-config-reference.md](28-config-reference.md) — Full configuration reference

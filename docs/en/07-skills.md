@@ -532,5 +532,5 @@ If a downstream eval harness or doc still mentions `SkillGateway`, treat it as h
 ## Examples
 
 See the example files:
-- `examples/demo07_skills.rs` — Code-based skill demo
-- `examples/demo08_external_skills.rs` — File-based skill full feature demo (progressive disclosure + script execution + inline commands + hooks)
+- `echo-agent-learning/examples/demo07_skills.rs` — Code-based skill demo
+- `echo-agent-learning/examples/demo08_external_skills.rs` — File-based skill full feature demo (progressive disclosure + script execution + inline commands + hooks)

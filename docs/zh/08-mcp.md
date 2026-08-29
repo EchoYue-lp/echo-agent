@@ -484,4 +484,4 @@ MCP 操作可能产生的错误：
 
 ---
 
-对应示例：`examples/demo06_mcp.rs`
+对应示例：`echo-agent-learning/examples/demo06_mcp.rs`

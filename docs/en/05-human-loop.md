@@ -371,9 +371,9 @@ Agent about to execute tool "delete_file"
 
 ## Example Files
 
-- `examples/demo03_approval.rs` — dual-path example: covers both LLM-triggered `human_in_loop` input requests and permission confirmation for a sensitive tool
-- `examples/demo05_compressor.rs` — real `add_need_appeal_tool()` path: validates the approval-tool flow through `PermissionService` and approval events
-- `examples/demo20_audit.rs` — Audit logging + permission example
+- `echo-agent-learning/examples/demo03_approval.rs` — dual-path example: covers both LLM-triggered `human_in_loop` input requests and permission confirmation for a sensitive tool
+- `echo-agent-learning/examples/demo05_compressor.rs` — real `add_need_appeal_tool()` path: validates the approval-tool flow through `PermissionService` and approval events
+- `echo-agent-learning/examples/demo20_audit.rs` — Audit logging + permission example
 
 ## `add_need_appeal_tool()` Semantics
 

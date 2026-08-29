@@ -56,7 +56,7 @@ agent.add_tool(Box::new(WebSearchTool::auto()));
 - `BRAVE_SEARCH_API_KEY` -> Brave
 - 否则 DuckDuckGo
 
-参考示例：`examples/demo41_web_tools.rs`
+参考示例：`echo-agent-learning/examples/demo41_web_tools.rs`
 
 ---
 
@@ -117,7 +117,7 @@ agent.add_tool(Box::new(
 - 只需要文本
 - 不需要点击或输入
 
-参考示例：`examples/demo42_playwright_mcp.rs`
+参考示例：`echo-agent-learning/examples/demo42_playwright_mcp.rs`
 
 ---
 
@@ -141,7 +141,7 @@ agent.add_tool(Box::new(
 - 筛选满足业务条件的记录
 - 按分类聚合收入或数量
 
-参考示例：`tests/example_contracts/demo43_data_tools.rs`
+参考示例：`echo-agent-learning/tests/example_contracts/demo43_data_tools.rs`
 
 ---
 

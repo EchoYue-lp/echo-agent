@@ -226,10 +226,10 @@ futures = "0.3"
 也可以直接运行仓库中的示例：
 
 ```bash
-cargo run --example demo01_tools          # 自定义工具
-cargo run --example demo10_streaming      # 流式输出
-cargo run --example demo04_subagent       # 多 Agent 编排
-cargo run --example demo06_mcp            # MCP 协议集成
+cargo run -p echo-agent-learning --example demo01_tools          # 自定义工具
+cargo run -p echo-agent-learning --example demo10_streaming      # 流式输出
+cargo run -p echo-agent-learning --example demo04_subagent       # 多 Agent 编排
+cargo run -p echo-agent-learning --example demo06_mcp            # MCP 协议集成
 ```
 
-完整示例列表见 [examples/](../../examples/) 目录。
+完整示例列表见 [echo-agent-learning/examples/](../../echo-agent-learning/examples/) 目录。

@@ -371,9 +371,9 @@ Agent 准备执行工具 "delete_file"
 
 ## 示例文件
 
-- `examples/demo03_approval.rs` — 双场景示例：既覆盖 LLM 主动调用 `human_in_loop` 请求额外输入，也覆盖敏感工具触发权限确认
-- `examples/demo05_compressor.rs` — `add_need_appeal_tool()` 真实路径示例：通过需要审批的工具验证 `PermissionService` / 审批事件链路
-- `examples/demo20_audit.rs` — 审计日志 + 权限模型示例
+- `echo-agent-learning/examples/demo03_approval.rs` — 双场景示例：既覆盖 LLM 主动调用 `human_in_loop` 请求额外输入，也覆盖敏感工具触发权限确认
+- `echo-agent-learning/examples/demo05_compressor.rs` — `add_need_appeal_tool()` 真实路径示例：通过需要审批的工具验证 `PermissionService` / 审批事件链路
+- `echo-agent-learning/examples/demo20_audit.rs` — 审计日志 + 权限模型示例
 
 ## `add_need_appeal_tool()` 行为说明
 

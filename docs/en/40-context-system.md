@@ -60,5 +60,5 @@ assert_eq!(selected, vec![PathBuf::from("src/auth.rs")]);
 `score_files` exposes scores; `select_relevant` returns at most `max_files`.
 Equal scores are ordered by path so repeated runs are deterministic.
 
-See `tests/example_contracts/demo65_context_assembler.rs` and
-`tests/example_contracts/demo66_context_selector.rs` for runnable examples.
+See `echo-agent-learning/tests/example_contracts/demo65_context_assembler.rs` and
+`echo-agent-learning/tests/example_contracts/demo66_context_selector.rs` for runnable examples.

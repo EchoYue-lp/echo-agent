@@ -114,7 +114,8 @@ pub struct ContextSources {
 /// `ContextManager`. Use `ContextAssembler` when building custom execution
 /// loops that need structured context assembly from multiple sources.
 ///
-/// See `examples/demo65_context_assembler.rs` for a complete example.
+/// See `echo-agent-learning/tests/example_contracts/demo65_context_assembler.rs`
+/// for a complete example.
 pub struct ContextAssembler {
     /// Optional token budget. When set, assembly respects per-source limits.
     pub budget: Option<ContextBudget>,

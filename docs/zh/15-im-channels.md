@@ -337,5 +337,5 @@ manager.stop_all().await?;
 
 ```bash
 # 配置环境变量后
-cargo run --example demo38_im_channels --features channels
+cargo run -p echo-agent-learning --example demo38_im_channels --features channels
 ```
