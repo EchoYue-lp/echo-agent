@@ -83,18 +83,18 @@ agent.add_skill(Box::new(ResearchSkill));
 
 ```
 skills/
-├── code_review/
+├── code-review/
 │   ├── SKILL.md          # 技能定义（必需）
 │   └── references/
 │       ├── checklist.md  # 参考文档
 │       └── style_guide.md
 │
-├── data_analyst/
+├── data-analyst/
 │   ├── SKILL.md
 │   └── references/
 │       └── statistical_methods.md
 │
-└── web_researcher/
+└── web-researcher/
     ├── SKILL.md
     └── references/
         ├── research_template.md
@@ -105,10 +105,12 @@ skills/
 
 ```markdown
 ---
-name: code_review
+name: code-review
 description: Comprehensive code review capability
-version: 1.0.0
-author: echo-agent
+metadata:
+  version: "1.0.0"
+  author: echo-agent
+  tags: "code, review"
 ---
 
 # Code Review Skill
@@ -127,8 +129,8 @@ You are an expert code reviewer. When reviewing code, consider:
 
 ## References
 
-- [Review Checklist](../../../../echo-agent-learning/examples/demo_skills/code_review/references/checklist.md)
-- [Style Guide](../../../../echo-agent-learning/examples/demo_skills/code_review/references/style_guide.md)
+- [Review Checklist](../../../../echo-agent-learning/examples/demo_skills/code-review/references/checklist.md)
+- [Style Guide](../../../../echo-agent-learning/examples/demo_skills/code-review/references/style_guide.md)
 ```
 
 ---
@@ -275,21 +277,7 @@ pub enum HookAction {
 }
 ```
 
-**示例：代码审查 Skill 的 Hook**
-
-```yaml
-# skills/code_review/SKILL.md
----
-name: code_review
-hooks:
-  - tool: "review_file"
-    event: before_call
-    action: validate_file_exists
-  - tool: "suggest_fix"
-    event: after_call
-    action: format_as_diff
----
-```
+Skill 文件只使用官方字段。Hooks 由宿主应用配置或 Plugin Hook component 提供。
 
 ---
 
@@ -364,8 +352,8 @@ echo-agent 的 Skill 系统对齐 [agentskills.io](https://agentskills.io/specif
 
 ### 1. Skill 命名
 
-- 使用小写字母和下划线：`code_review`, `data_analyst`
-- 命名应反映领域：`web_researcher` 而非 `research`
+- 使用小写字母、数字和连字符：`code-review`, `data-analyst`
+- 命名应反映领域：`web-researcher` 而非 `research`
 - 避免与内置 Skill 冲突
 
 ### 2. 提示词注入

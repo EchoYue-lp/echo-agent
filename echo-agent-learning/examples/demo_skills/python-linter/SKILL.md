@@ -1,25 +1,10 @@
 ---
 name: python-linter
-description: >-
-  Lint and format Python files using ruff. Activates automatically when
-  Python files are touched. Use to check code quality and fix style issues.
-paths:
-  - "*.py"
-  - "**/*.py"
-allowed-tools:
-  - read_skill_resource
-  - run_skill_script
-  - Bash
-shell: bash
-hooks:
-  PreToolUse:
-    - matcher: "Bash"
-      hooks:
-        - type: prompt
-          prompt: "When running bash commands for Python linting, prefer using ruff over pylint for speed."
+description: Lint and format Python files using ruff. Activates automatically when Python files are touched. Use to check code quality and fix style issues.
+allowed-tools: read_skill_resource run_skill_script Bash
 metadata:
   author: echo-agent
-  version: "1.0.0"
+  version: 1.0.0
 ---
 
 ## Python Linter

@@ -45,8 +45,8 @@ pub struct AgentFailure {
     pub message: String,
 }
 
-impl AgentFailure {
-    pub fn from_react_error(error: &ReactError) -> Self {
+impl From<&ReactError> for AgentFailure {
+    fn from(error: &ReactError) -> Self {
         let (category, terminal_kind, retryable, code, http_status) = match error {
             ReactError::Llm(inner) => match inner.as_ref() {
                 LlmError::NetworkError(_) => (
@@ -220,7 +220,9 @@ impl AgentFailure {
             message: error.to_string(),
         }
     }
+}
 
+impl AgentFailure {
     pub fn message(source: &str, message: impl Into<String>) -> Self {
         Self {
             category: AgentFailureCategory::Other,
@@ -699,7 +701,7 @@ mod agent_failure_tests {
             ),
         ];
         for (error, category, terminal, retryable, status) in cases {
-            let failure = AgentFailure::from_react_error(&error);
+            let failure = AgentFailure::from(&error);
             assert_eq!(failure.category, category);
             assert_eq!(failure.terminal_kind, terminal);
             assert_eq!(failure.retryable, retryable);

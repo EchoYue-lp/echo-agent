@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use echo_core::tools::ToolContext;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 
 use super::{
@@ -56,6 +56,24 @@ pub struct TaskDraft {
     pub extension: serde_json::Value,
 }
 
+impl TaskDraft {
+    /// Attach a typed extension before the framework applies product policy.
+    pub fn with_extension<T: Serialize>(
+        mut self,
+        extension: T,
+    ) -> std::result::Result<Self, String> {
+        self.extension = serde_json::to_value(extension)
+            .map_err(|error| format!("failed to encode task draft extension: {error}"))?;
+        Ok(self)
+    }
+
+    /// Decode the draft extension into the caller's typed value.
+    pub fn extension_as<T: DeserializeOwned>(&self) -> std::result::Result<T, String> {
+        serde_json::from_value(self.extension.clone())
+            .map_err(|error| format!("failed to decode task draft extension: {error}"))
+    }
+}
+
 /// Parsed `task_create` input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskCreateInput {
@@ -77,6 +95,30 @@ pub struct TaskSpecPatch {
     /// Product-owned partial extension. Object values are recursively merged;
     /// non-object values replace the existing extension.
     pub extension: Option<serde_json::Value>,
+}
+
+impl TaskSpecPatch {
+    /// Set a complete typed extension on this patch. Use the raw `extension`
+    /// field only for partial object merges.
+    pub fn with_extension<T: Serialize>(
+        mut self,
+        extension: T,
+    ) -> std::result::Result<Self, String> {
+        self.extension = Some(
+            serde_json::to_value(extension)
+                .map_err(|error| format!("failed to encode task patch extension: {error}"))?,
+        );
+        Ok(self)
+    }
+
+    /// Decode a complete extension when this patch carries one.
+    pub fn extension_as<T: DeserializeOwned>(&self) -> std::result::Result<Option<T>, String> {
+        self.extension
+            .clone()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| format!("failed to decode task patch extension: {error}"))
+    }
 }
 
 /// Canonical operation applied by the framework patch engine.
@@ -1309,6 +1351,29 @@ mod tests {
             spec.extension.pointer("/review/role"),
             Some(&serde_json::json!("senior-reviewer"))
         );
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct TypedDraftExtension {
+        role: String,
+        priority: u32,
+    }
+
+    #[test]
+    fn draft_and_patch_extensions_round_trip_through_typed_api() -> Result<(), String> {
+        let extension = TypedDraftExtension {
+            role: "explorer".to_string(),
+            priority: 1,
+        };
+        let draft = draft("task-1", &[]).with_extension(extension.clone())?;
+        assert_eq!(draft.extension_as::<TypedDraftExtension>()?, extension);
+
+        let patch = TaskSpecPatch::default().with_extension(extension.clone())?;
+        assert_eq!(
+            patch.extension_as::<TypedDraftExtension>()?,
+            Some(extension)
+        );
+        Ok(())
     }
 
     struct PreparationTrackingPolicy {

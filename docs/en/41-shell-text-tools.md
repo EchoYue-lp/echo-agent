@@ -34,6 +34,38 @@
 - Default strict mode: commands not in whitelist are rejected
 - Sandbox mode: commands with metacharacters run via `sh -c`
 
+### Deterministic Background-Cell Watch
+
+When `ShellTool` launches with `background=true`, consumers can retain and
+observe the cell without a model-driven polling Agent:
+
+```rust,no_run
+use echo_agent::tasks::{
+    CommandCellWatchConfig, CommandCellWatcher,
+};
+use echo_agent::agent::CancellationToken;
+
+# async fn observe(
+#   registry: std::sync::Arc<dyn echo_agent::tools::cell::CommandCellRegistry>
+# ) -> echo_agent::error::Result<()> {
+let watcher = CommandCellWatcher::acquire(
+    registry,
+    "cell-id",
+    CommandCellWatchConfig::default(),
+)?;
+let terminal = watcher
+    .wait_terminal(&CancellationToken::new())
+    .await?;
+assert!(terminal.snapshot.phase.is_terminal());
+# Ok(())
+# }
+```
+
+The watcher owns a retention lease, reuses the returned byte cursor, and exits
+only after the typed terminal and available output are drained. Cancellation
+behavior is explicit through `CommandCellWatchCancellation`; it never stops the
+underlying command implicitly.
+
 ---
 
 ## TextSearchTool — Text File Search

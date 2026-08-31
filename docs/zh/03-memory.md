@@ -16,6 +16,12 @@ echo-agent 的记忆系统包含三个正交层次，每层解决不同的"记�
 
 ## 运行时检查点：RuntimeStateStore
 
+`MemoryScope` 同样是类型化的 framework 值，文档化别名统一通过标准 `scope.parse()` API
+解析。
+
+能力档案和用户偏好档案通过稳定的 `echo_agent::profiles` facade 提供，包括
+`AgentProfile`、`UserProfile` 和 `ProfileStore`。
+
 ### 解决什么问题
 
 LLM 的上下文窗口在每次请求结束后就消失了，进程也可能在循环中途崩溃。没有运行时检查点，长任务被中断就需要从头开始；用户想在明天继续昨天的对话也只能重新输入。

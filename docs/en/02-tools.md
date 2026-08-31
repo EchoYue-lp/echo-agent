@@ -593,7 +593,7 @@ Tool Call → InterventionStage → ParseValidate → PlanMode → PreToolUseHoo
 ### Configuring the Pipeline
 
 ```rust
-use echo_agent::agent::react::run::pipeline::ToolExecutionPipeline;
+use echo_agent::agent::ToolExecutionPipeline;
 use echo_agent::prelude::*;
 
 let pipeline = ToolExecutionPipeline::default();

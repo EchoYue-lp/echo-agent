@@ -61,21 +61,11 @@ impl fmt::Display for PluginPreparationDiagnostic {
 /// Frozen Skill parsed from one package read.
 #[derive(Debug, Clone)]
 pub struct PreparedPluginSkill {
-    descriptor: crate::skills::external::SkillDescriptor,
-    legacy_instructions: Option<String>,
-    document: String,
+    document: crate::skills::external::SkillDocument,
 }
 
 impl PreparedPluginSkill {
-    pub fn descriptor(&self) -> &crate::skills::external::SkillDescriptor {
-        &self.descriptor
-    }
-
-    pub fn legacy_instructions(&self) -> Option<&str> {
-        self.legacy_instructions.as_deref()
-    }
-
-    pub fn document(&self) -> &str {
+    pub fn document(&self) -> &crate::skills::external::SkillDocument {
         &self.document
     }
 }
@@ -395,8 +385,7 @@ impl PluginIntegrator {
                         descriptors.sort_by(|left, right| left.name.cmp(&right.name));
                         for descriptor in descriptors {
                             let name = descriptor.name.clone();
-                            let Some(document) = loader.get_prepared_document(&name).cloned()
-                            else {
+                            let Some(document) = loader.get_document(&name).cloned() else {
                                 diagnostics.push(error_diagnostic(
                                     Some(&plugin_id),
                                     "skill",
@@ -416,11 +405,7 @@ impl PluginIntegrator {
                                     );
                                 }
                             }
-                            skills.push(PreparedPluginSkill {
-                                legacy_instructions: loader.get_legacy_instructions(&name).cloned(),
-                                descriptor,
-                                document,
-                            });
+                            skills.push(PreparedPluginSkill { document });
                         }
                     }
                     Err(error) => diagnostics.push(error_diagnostic(
@@ -881,7 +866,6 @@ mod tests {
             root.join("skills/example/SKILL.md"),
             "---\nname: example\ndescription: Example\n---\nfirst\n",
         )?;
-        std::fs::write(root.join("skills/example/hooks.json"), "{}\n")?;
         std::fs::write(
             root.join("agents/reviewer.md"),
             "---\nname: reviewer\ndescription: Reviews changes\n---\nReview carefully.\n",
@@ -1036,7 +1020,6 @@ mod tests {
                 "skills/example/SKILL.md",
                 "---\nname: example\ndescription: Example\n---\nsecond\n",
             ),
-            ("skills/example/hooks.json", "{ }\n"),
             ("hooks/hooks.yaml", "SessionStart: []\n"),
             (
                 "mcp.json",

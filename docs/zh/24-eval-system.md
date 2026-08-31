@@ -387,4 +387,8 @@ echo_agent = { version = "0.2", features = ["eval"] }
 - 发布前（回归套件）
 - 定期执行（CI/CD 质量门禁）
 
+Agent builder 不提供自动 eval recorder。生产 Agent 由 `ReactAgentBuilder` 构造，再显式
+传给 `EvalRunner::run`，或向 `run_all` 提供创建全新 Agent 的 factory。这样 eval 执行保持
+显式，不会让生产 turn 静默获得第二套生命周期或持久化 owner。
+
 另见：[25 - 自进化系统](./25-self-improvement.md) 了解评估如何驱动改进循环。

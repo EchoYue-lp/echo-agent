@@ -22,8 +22,9 @@ pub mod usage;
 pub use builder::SubagentBuilder;
 pub use context::{ContextInheritance, SubagentContext};
 pub use control::{
-    SubagentAttemptIdentity, SubagentControlError, SubagentControlPhase,
-    SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageReceipt,
+    SubagentAttemptIdentity, SubagentCommandIdentity, SubagentCommandPhase, SubagentControlError,
+    SubagentControlPhase, SubagentGuidanceQueueReceipt, SubagentInterruptOutcome,
+    SubagentMessageReceipt,
 };
 pub use events::{SubagentEvent, SubagentEventBus};
 pub use executor::{
@@ -37,9 +38,10 @@ pub use isolation::{
 };
 pub use prompt::{
     CompiledSubagentInvocation, CompiledSubagentSystemPrompt, ContextTransferPolicy,
-    DefaultSubagentPromptCompiler, PromptDiagnostics, PromptSectionDiagnostic,
-    SubagentPromptCompiler, SubagentPromptInput, SubagentSystemPromptInput, filter_history,
-    with_compiled_task,
+    DefaultSubagentPromptCompiler, PromptActor, PromptDiagnostics, PromptSectionDiagnostic,
+    SubagentExecutionBoundary, SubagentInvocation, SubagentPromptCompiler,
+    SubagentSystemPromptInput, SubagentTaskContext, ToolCapability, ToolCapabilitySnapshot,
+    compiled_current_message, filter_history, remove_duplicate_current_message, with_compiled_task,
 };
 pub use registry::{AgentFactory, FnAgentFactory, SubagentRegistry};
 pub use team::{
@@ -47,7 +49,9 @@ pub use team::{
     TeamRuntime, TeamSpec, TeamStrategy, execute_team, execute_team_on_runtime,
 };
 pub use types::{
-    ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentArtifact, SubagentDefinition,
-    SubagentEvidence, SubagentEvidenceSource, SubagentKind, SubagentOutcome, SubagentResult,
-    SubagentStatus, parse_subagent_outcome, render_result_contract, split_subagent_output,
+    ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentAccessMode, SubagentArtifact,
+    SubagentDefinition, SubagentEvidence, SubagentEvidenceSource, SubagentKind, SubagentOutcome,
+    SubagentResult, SubagentStatus, SubagentTouchedFiles, SubagentVerification,
+    SubagentVerificationStatus, parse_json_objects, parse_subagent_outcome, render_result_contract,
+    split_subagent_output,
 };

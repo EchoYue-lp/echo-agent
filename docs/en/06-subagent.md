@@ -29,6 +29,10 @@ role or a second execution engine.
 
 ## Context Isolation
 
+`SubagentStatus` is a framework-owned lifecycle value. Parse its stable wire
+spelling with the standard `status.parse()` API rather than a source-specific
+helper.
+
 This is the most critical property of a multi-Agent system. echo-agent guarantees it architecturally:
 
 ```
@@ -40,11 +44,17 @@ Main Agent conversation  = [system, user, assistant, ...]
 
 math_agent.execute("Calculate 7 * 8")
     ↑
-    Only receives this string — knows nothing about PROJECT-OMEGA
+    Receives the compiled current Message; attachments are preserved
+    Fresh mode receives no transcript; structured inheritance may add only
+    filtered user messages and complete assistant final messages
+    Parent system/tool/reasoning messages never transfer
     math_agent has a completely independent ContextManager instance
 ```
 
-**`agent_tool` passes only the task string — no context whatsoever.**
+**`agent_tool` never transfers the parent system prompt or runtime trace.** The
+default fresh path carries only the compiled current task message. Fork,
+teammate, and team paths can explicitly inherit bounded structured history;
+that history remains real messages rather than prompt text.
 
 | Isolation Dimension | Guarantee |
 |--------------------|-----------|
@@ -107,6 +117,25 @@ println!("{}", result);
 
 ## Subagent Dispatch Flow
 
+Every path first calls the configured `SubagentPromptCompiler`:
+
+- `compile_system` runs after the concrete Subagent tool surface is built, so
+  capability text comes from registered definitions, descriptions, and the
+  current shared visibility policy.
+- `SubagentDefinition::access_mode` is the typed read/write authority; tags are
+  discovery metadata and are never decoded into an execution boundary.
+- `compile_invocation` owns task, constraints, optional product payload,
+  effective working directory, invocation tool allowlist, filtered structured
+  history, and the current typed message including attachments.
+- Sync, fork, teammate, and team execution consume the compiled messages
+  directly; the executor neither appends a second prompt envelope nor rebuilds
+  the current message afterward.
+
+`ContextTransferPolicy::Fresh` carries no conversation transcript.
+`InheritStructured` keeps only provider-safe user messages and complete
+assistant final messages; system prompts, tool calls/results, reasoning, and
+runtime projections are excluded.
+
 ```
 main_agent.execute("...")
     │
@@ -116,7 +145,8 @@ main_agent.execute("...")
     ├─ AgentDispatchTool::execute()
     │      ├─ Find "math_agent" in the subagents HashMap
     │      ├─ Lock (AsyncMutex — serializes concurrent calls to same Subagent)
-    │      └─ math_agent.execute("Calculate 25 * 3")
+    │      ├─ SubagentPromptCompiler::compile_invocation(...)
+    │      └─ math_agent.execute(compiled messages)
     │              ├─ Runs with its own independent context
     │              ├─ Uses its own tools (add/multiply)
     │              └─ Returns "75"
@@ -162,3 +192,30 @@ let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
 4. **Use the revisioned task graph for complex task relationships** instead of prompt-only hidden state
 
 See: `echo-agent-learning/tests/example_contracts/demo04_subagent.rs`
+
+## Structured Outcome Views
+
+`SubagentOutcome` is the framework-owned result contract. In addition to the
+raw structured `evidence`, it exposes generic verification and file-access
+views derived from that evidence:
+
+```rust
+let checks = outcome.verification();
+let files = outcome.touched_files();
+```
+
+These views are part of the framework result and can be persisted or rendered
+directly by an application. An application does not need to copy the outcome
+into a second framework-shaped result type; only genuinely product-specific
+wire fields should remain in the application.
+
+`SubagentResult` is the execution envelope returned by a dispatch. It carries
+runtime metadata such as the full output, duration, usage, mode, and the typed
+`SubagentOutcome`. Lifecycle events expose that typed value as `outcome`, so
+consumers do not have to infer whether a `result` field is the envelope or its
+terminal payload.
+
+`ExecutionUsage` is the canonical durable usage value for delegated Subagents
+and finite primary-Agent turns. Both result surfaces expose it directly with
+`result.usage()` or `turn_receipt.usage()`. Applications do not need a
+source-named adapter, conversion trait, or parallel execution-usage DTO.

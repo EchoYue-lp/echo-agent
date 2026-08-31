@@ -52,14 +52,17 @@ impl PluginScope {
     pub fn all() -> &'static [PluginScope] {
         &[PluginScope::User, PluginScope::Project, PluginScope::Local]
     }
+}
 
-    /// Parse from a CLI string argument.
-    pub fn from_arg(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "user" | "u" => Some(Self::User),
-            "project" | "p" => Some(Self::Project),
-            "local" | "l" => Some(Self::Local),
-            _ => None,
+impl std::str::FromStr for PluginScope {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "user" | "u" => Ok(Self::User),
+            "project" | "p" => Ok(Self::Project),
+            "local" | "l" => Ok(Self::Local),
+            _ => Err(format!("unknown plugin scope: {value}")),
         }
     }
 }
@@ -170,10 +173,10 @@ mod tests {
     }
 
     #[test]
-    fn test_scope_from_arg() {
-        assert_eq!(PluginScope::from_arg("user"), Some(PluginScope::User));
-        assert_eq!(PluginScope::from_arg("project"), Some(PluginScope::Project));
-        assert_eq!(PluginScope::from_arg("local"), Some(PluginScope::Local));
-        assert_eq!(PluginScope::from_arg("invalid"), None);
+    fn test_scope_from_str() {
+        assert_eq!("user".parse(), Ok(PluginScope::User));
+        assert_eq!("project".parse(), Ok(PluginScope::Project));
+        assert_eq!("local".parse(), Ok(PluginScope::Local));
+        assert!("invalid".parse::<PluginScope>().is_err());
     }
 }

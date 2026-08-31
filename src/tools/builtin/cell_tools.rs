@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::debug;
 
-/// Default long-poll yield budget (30s), matching the Codex awaiter's start.
+/// Default long-poll yield budget (30s).
 const DEFAULT_YIELD_MS: u64 = 30_000;
 /// Upper bound for one wait round (1h), matching Codex
 /// `background_terminal_max_timeout = 3600000`.

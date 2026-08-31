@@ -70,21 +70,20 @@ impl MemoryScope {
             Self::Run,
         ]
     }
+}
 
-    /// Parse from a string.
-    ///
-    /// This intentionally returns `Option` and accepts aliases, unlike a
-    /// strict `FromStr` implementation.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "user" => Some(Self::User),
-            "project" | "proj" => Some(Self::Project),
-            "repo" => Some(Self::Repo),
-            "task" => Some(Self::Task),
-            "session" | "sess" => Some(Self::Session),
-            "run" => Some(Self::Run),
-            _ => None,
+impl std::str::FromStr for MemoryScope {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "user" => Ok(Self::User),
+            "project" | "proj" => Ok(Self::Project),
+            "repo" => Ok(Self::Repo),
+            "task" => Ok(Self::Task),
+            "session" | "sess" => Ok(Self::Session),
+            "run" => Ok(Self::Run),
+            _ => Err(format!("unknown memory scope: {value}")),
         }
     }
 }

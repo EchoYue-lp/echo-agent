@@ -83,7 +83,7 @@
 use async_trait::async_trait;
 use echo_core::agent::{
     Agent, AgentEvent, AgentInvocationContext, AgentSteerTurnOutcome, CancellationToken,
-    EventEnvelope, EventIdentity, MessageId, TurnId, envelope_event_stream_after,
+    EventEnvelope, EventIdentity, ExecutionUsage, MessageId, TurnId, envelope_event_stream_after,
 };
 use echo_core::error::{AgentFailure, ReactError};
 use echo_core::llm::Message;
@@ -399,7 +399,7 @@ impl TurnOutcome {
     /// cancellation maps to [`Self::Cancelled`], mirroring the framework's
     /// typed failure contract. Custom sinks can use this to project terminal
     /// envelopes the same way the driver does.
-    pub fn from_agent_event(event: &AgentEvent) -> Option<Self> {
+    pub fn classify(event: &AgentEvent) -> Option<Self> {
         match event {
             AgentEvent::FinalAnswer(_) => Some(Self::Completed),
             AgentEvent::Cancelled => Some(Self::Cancelled),
@@ -441,12 +441,59 @@ pub struct TurnReceipt {
 }
 
 impl TurnReceipt {
+    /// Return the stable usage facts carried by this completed turn.
+    pub fn usage(&self) -> ExecutionUsage {
+        ExecutionUsage {
+            duration_ms: Some(u64::try_from(self.elapsed.as_millis()).unwrap_or(u64::MAX)),
+            tokens_used: (self.llm_calls > 0)
+                .then(|| self.prompt_tokens.saturating_add(self.completion_tokens)),
+            iterations: None,
+        }
+    }
+
     /// Stable status string for projections (`completed`/`cancelled`/`failed`).
     pub fn status(&self) -> &'static str {
         self.outcome.status()
     }
 
-    fn failed(
+    /// Construct a typed failure receipt when execution cannot start or a
+    /// caller must report a failure before a stream exists.
+    pub fn failed(
+        turn_id: impl Into<String>,
+        failure: AgentFailure,
+    ) -> echo_core::error::Result<Self> {
+        Ok(Self {
+            turn_id: TurnId::new(turn_id)?,
+            outcome: TurnOutcome::Failed(failure),
+            final_answer: None,
+            final_message_id: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            llm_calls: 0,
+            compaction_count: 0,
+            last_event_sequence: 0,
+            elapsed: Duration::ZERO,
+        })
+    }
+
+    /// Construct a typed cancellation receipt when execution is stopped
+    /// before a stream can produce its normal terminal event.
+    pub fn cancelled(turn_id: impl Into<String>) -> echo_core::error::Result<Self> {
+        Ok(Self {
+            turn_id: TurnId::new(turn_id)?,
+            outcome: TurnOutcome::Cancelled,
+            final_answer: None,
+            final_message_id: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            llm_calls: 0,
+            compaction_count: 0,
+            last_event_sequence: 0,
+            elapsed: Duration::ZERO,
+        })
+    }
+
+    fn failure_receipt(
         turn_id: TurnId,
         failure: AgentFailure,
         last_event_sequence: u64,
@@ -516,9 +563,9 @@ impl AgentTurnDriver {
             if let Some(lifecycle) = input_lifecycle.as_ref() {
                 lifecycle.settle(AgentSteerTurnOutcome::Failed);
             }
-            return TurnReceipt::failed(
+            return TurnReceipt::failure_receipt(
                 turn_id,
-                AgentFailure::from_react_error(&error),
+                AgentFailure::from(&error),
                 request.last_persisted_sequence,
                 started,
             );
@@ -606,7 +653,7 @@ impl AgentTurnDriver {
                 if let Some(lifecycle) = input_lifecycle.as_ref() {
                     lifecycle.settle(AgentSteerTurnOutcome::Failed);
                 }
-                let failure = AgentFailure::from_react_error(&error);
+                let failure = AgentFailure::from(&error);
                 let next_sequence = request.last_persisted_sequence.checked_add(1);
                 let mut last_event_sequence = request.last_persisted_sequence;
                 if let Some(sequence) = next_sequence
@@ -619,15 +666,20 @@ impl AgentTurnDriver {
                 {
                     last_event_sequence = envelope.sequence;
                     if let Err(sink_error) = sink.on_event(envelope).await {
-                        return TurnReceipt::failed(
+                        return TurnReceipt::failure_receipt(
                             turn_id,
-                            AgentFailure::from_react_error(&sink_error),
+                            AgentFailure::from(&sink_error),
                             last_event_sequence,
                             started,
                         );
                     }
                 }
-                return TurnReceipt::failed(turn_id, failure, last_event_sequence, started);
+                return TurnReceipt::failure_receipt(
+                    turn_id,
+                    failure,
+                    last_event_sequence,
+                    started,
+                );
             }
         };
         let mut outcome: Option<TurnOutcome> = None;
@@ -646,7 +698,7 @@ impl AgentTurnDriver {
                 Err(error) => {
                     // The transport only errors before the first event (an
                     // invalid identity); map it to a typed failure.
-                    outcome = Some(TurnOutcome::Failed(AgentFailure::from_react_error(&error)));
+                    outcome = Some(TurnOutcome::Failed(AgentFailure::from(&error)));
                     break;
                 }
             };
@@ -699,7 +751,7 @@ impl AgentTurnDriver {
                 }
                 Err(error) => {
                     token.cancel();
-                    outcome = Some(TurnOutcome::Failed(AgentFailure::from_react_error(&error)));
+                    outcome = Some(TurnOutcome::Failed(AgentFailure::from(&error)));
                     final_answer = None;
                     final_message_id = None;
                     break;
@@ -708,7 +760,7 @@ impl AgentTurnDriver {
         }
 
         let outcome = outcome.unwrap_or_else(|| {
-            TurnOutcome::Failed(AgentFailure::from_react_error(&ReactError::Other(
+            TurnOutcome::Failed(AgentFailure::from(&ReactError::Other(
                 "turn stream ended without a terminal event".to_string(),
             )))
         });
@@ -1114,12 +1166,12 @@ mod tests {
 
     #[tokio::test]
     async fn error_terminal_maps_typed_failure() {
-        let failure = AgentFailure::from_react_error(&ReactError::Other("boom".to_string()));
+        let failure = AgentFailure::from(&ReactError::Other("boom".to_string()));
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
             vec![AgentEvent::Error {
                 source: "test".to_string(),
                 message: "boom".to_string(),
-                failure: AgentFailure::from_react_error(&ReactError::Other("boom".to_string())),
+                failure: AgentFailure::from(&ReactError::Other("boom".to_string())),
             }]
         }));
         let request = TurnRequest::new(identity("fail"), "hello");
@@ -1524,7 +1576,7 @@ mod tests {
             tokio::time::sleep(StdDuration::from_millis(5)).await;
             self.events.lock().await.push((
                 envelope.sequence,
-                TurnOutcome::from_agent_event(&envelope.payload).is_some(),
+                TurnOutcome::classify(&envelope.payload).is_some(),
             ));
             Ok(SinkControl::Continue)
         }
@@ -1618,7 +1670,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let terminals: Vec<&EventEnvelope> = envelopes
             .iter()
-            .filter(|envelope| TurnOutcome::from_agent_event(&envelope.payload).is_some())
+            .filter(|envelope| TurnOutcome::classify(&envelope.payload).is_some())
             .collect();
         assert_eq!(terminals.len(), 1);
         assert!(matches!(

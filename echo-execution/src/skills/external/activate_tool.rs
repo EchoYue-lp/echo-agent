@@ -192,10 +192,10 @@ mod tests {
         std::fs::create_dir_all(&skill_dir)?;
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: git-skill\ndescription: Inspect git state\nallowed-tools: [git_*]\n---\nUse git tools.\n",
+            "---\nname: git-skill\ndescription: Inspect git state\nallowed-tools: git_*\n---\nUse git tools.\n",
         )?;
         let mut loader = SkillLoader::new();
-        let descriptors = loader.discover_from_dir(&root).await?;
+        let descriptors = loader.discover_directory(&root).await?;
         let mut registry = SkillRegistry::new();
         for descriptor in descriptors {
             registry.register_descriptor(descriptor);

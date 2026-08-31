@@ -1,6 +1,6 @@
 pub mod anthropic;
 pub mod anthropic_cache;
-pub mod client;
+pub(crate) mod client;
 pub mod config;
 pub mod openai;
 pub mod responses;

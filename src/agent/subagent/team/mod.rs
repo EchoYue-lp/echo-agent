@@ -316,6 +316,7 @@ impl Team {
                         runtime_context: None,
                         message: None,
                         prompt_payload: None,
+                        prompt_context: None,
                         constraints: Vec::new(),
                         background: false,
                     })
@@ -639,7 +640,7 @@ where
                 let settlement = execution.await;
                 let detail = match settlement {
                     Err(error)
-                        if AgentFailure::from_react_error(&error).terminal_kind
+                        if AgentFailure::from(&error).terminal_kind
                             != AgentTerminalKind::Cancelled =>
                     {
                         format!(
@@ -1455,7 +1456,7 @@ fn aggregate_usage<'a>(outputs: impl Iterator<Item = &'a SubagentResult>) -> Opt
     let mut has_usage = false;
     let mut models = BTreeSet::new();
     for result in outputs {
-        let Some(usage) = &result.usage else {
+        let Some(usage) = &result.llm_usage else {
             continue;
         };
         has_usage = true;

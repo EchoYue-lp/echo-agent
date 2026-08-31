@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::usage::LlmUsageStats;
+use echo_core::agent::ExecutionUsage;
 
 // ── Execution Mode ────────────────────────────────────────────────────────────
 
@@ -85,6 +86,13 @@ pub enum SubagentKind {
     },
 }
 
+/// Mutation authority declared by a Subagent definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentAccessMode {
+    ReadOnly,
+    Write,
+}
+
 // ── Subagent Definition ───────────────────────────────────────────────────────
 
 /// Declarative specification of a subagent.
@@ -99,6 +107,9 @@ pub struct SubagentDefinition {
     pub description: String,
     /// How this agent is sourced.
     pub kind: SubagentKind,
+    /// Typed mutation boundary. Tags are discovery metadata and must never be
+    /// decoded back into this authority.
+    pub access_mode: SubagentAccessMode,
     /// Default execution mode when dispatched.
     pub execution_mode: ExecutionMode,
     /// Model override (None = inherit from parent).
@@ -107,7 +118,7 @@ pub struct SubagentDefinition {
     /// `echo_core::llm::ThinkingConfig::parse_spec` syntax (`low`/`medium`/
     /// `high`/`disabled`/budget number; `auto`/empty = model default).
     /// `None` = inherit the parent generation's thinking. Used by cheap
-    /// long-running roles such as a cell-waiting awaiter (`thinking: low`).
+    /// long-running roles that intentionally use reduced reasoning depth.
     pub thinking: Option<String>,
     /// System prompt override (None = inherit or auto-generate).
     pub system_prompt: Option<String>,
@@ -154,6 +165,7 @@ impl SubagentDefinition {
             name: name.into(),
             description: description.into(),
             kind: SubagentKind::BuiltIn,
+            access_mode: SubagentAccessMode::Write,
             execution_mode: ExecutionMode::Sync,
             model: None,
             thinking: None,
@@ -201,6 +213,7 @@ const MAX_ATTRIBUTES_CHARS: usize = 4_000;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentStatus {
+    Running,
     Completed,
     #[default]
     Failed,
@@ -211,10 +224,27 @@ pub enum SubagentStatus {
 impl SubagentStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+impl std::str::FromStr for SubagentStatus {
+    type Err = String;
+
+    /// Parse the stable wire spelling used by runtime projections.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "timed_out" => Ok(Self::TimedOut),
+            _ => Err(format!("unknown Subagent status: {value}")),
         }
     }
 }
@@ -259,6 +289,31 @@ pub struct SubagentEvidence {
     pub attributes: serde_json::Value,
 }
 
+/// Verification check derived from structured subagent evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentVerification {
+    pub check: String,
+    pub status: SubagentVerificationStatus,
+    pub details: String,
+    pub source: SubagentEvidenceSource,
+}
+
+/// Outcome of a verification check observed or reported by a subagent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentVerificationStatus {
+    Passed,
+    Failed,
+    NotRun,
+}
+
+/// Files referenced by observed subagent tool evidence.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentTouchedFiles {
+    pub read: Vec<String>,
+    pub written: Vec<String>,
+}
+
 /// Parent-facing, serializable result contract for a subagent dispatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentOutcome {
@@ -271,8 +326,14 @@ pub struct SubagentOutcome {
     pub artifacts: Vec<SubagentArtifact>,
     #[serde(default)]
     pub evidence: Vec<SubagentEvidence>,
+    /// Verification views derived from the generic evidence stream.
+    #[serde(default)]
+    pub verification: Vec<SubagentVerification>,
     #[serde(default)]
     pub remaining_work: Vec<String>,
+    /// Read/write paths derived from observed tool evidence.
+    #[serde(default)]
+    pub touched_files: SubagentTouchedFiles,
 }
 
 impl Default for SubagentOutcome {
@@ -283,7 +344,9 @@ impl Default for SubagentOutcome {
             summary: String::new(),
             artifacts: Vec::new(),
             evidence: Vec::new(),
+            verification: Vec::new(),
             remaining_work: Vec::new(),
+            touched_files: SubagentTouchedFiles::default(),
         }
     }
 }
@@ -294,19 +357,118 @@ impl SubagentOutcome {
         summary: impl Into<String>,
         remaining_work: Vec<String>,
     ) -> Self {
+        let summary = bounded_text(summary.into().trim(), DEFAULT_SUMMARY_CHARS);
+        let remaining_work = bounded_unique(remaining_work, MAX_RESULT_ITEMS, MAX_DETAIL_CHARS);
         Self {
             contract_version: SUBAGENT_RESULT_CONTRACT_VERSION,
             status,
-            summary: summary.into(),
+            summary,
             artifacts: Vec::new(),
             evidence: Vec::new(),
+            verification: Vec::new(),
             remaining_work,
+            touched_files: SubagentTouchedFiles::default(),
         }
     }
 
     pub fn is_completed(&self) -> bool {
         self.status == SubagentStatus::Completed
     }
+
+    /// Refresh generic verification and file-access views from evidence.
+    pub fn refresh_derived_views(&mut self) {
+        self.verification = self
+            .evidence
+            .iter()
+            .filter_map(project_verification_evidence)
+            .collect();
+        let mut touched = SubagentTouchedFiles::default();
+        for evidence in &self.evidence {
+            let Some((write, path)) = project_tool_file_access(evidence) else {
+                continue;
+            };
+            let target = if write {
+                &mut touched.written
+            } else {
+                &mut touched.read
+            };
+            if !target.iter().any(|existing| existing == &path) {
+                target.push(path);
+            }
+        }
+        self.touched_files = touched;
+    }
+
+    /// Borrow the derived verification view without rebuilding it.
+    pub fn verification(&self) -> &[SubagentVerification] {
+        &self.verification
+    }
+
+    /// Borrow the derived read/write file view without rebuilding it.
+    pub fn touched_files(&self) -> &SubagentTouchedFiles {
+        &self.touched_files
+    }
+}
+
+fn project_verification_evidence(evidence: &SubagentEvidence) -> Option<SubagentVerification> {
+    let check = if evidence.kind == "verification" {
+        Some(evidence.subject.clone())
+    } else if evidence.kind == "tool_result" {
+        evidence
+            .attributes
+            .get("args")
+            .and_then(|args| verification_check_from_tool(&evidence.subject, args))
+    } else {
+        None
+    }?;
+    Some(SubagentVerification {
+        check,
+        status: match evidence.outcome.as_deref() {
+            Some("passed" | "succeeded") => SubagentVerificationStatus::Passed,
+            Some("failed") => SubagentVerificationStatus::Failed,
+            _ => SubagentVerificationStatus::NotRun,
+        },
+        details: evidence.details.clone(),
+        source: evidence.source,
+    })
+}
+
+fn verification_check_from_tool(name: &str, args: &serde_json::Value) -> Option<String> {
+    let normalized = name.to_ascii_lowercase().replace('-', "_");
+    if !matches!(
+        normalized.as_str(),
+        "shell" | "bash" | "terminal" | "run_code" | "execute_command"
+    ) {
+        return None;
+    }
+    ["command", "cmd", "code", "script"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn project_tool_file_access(evidence: &SubagentEvidence) -> Option<(bool, String)> {
+    let normalized = evidence.subject.to_ascii_lowercase().replace('-', "_");
+    let write = normalized.contains("write")
+        || normalized.contains("edit")
+        || normalized.contains("delete")
+        || normalized.contains("patch");
+    let read = normalized.contains("read")
+        || normalized.contains("search")
+        || normalized.contains("glob")
+        || normalized.contains("grep");
+    if !write && !read {
+        return None;
+    }
+    let args = evidence.attributes.get("args")?;
+    ["path", "file_path", "target", "directory"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|path| (write, path.to_string()))
 }
 
 /// Render the canonical model-facing result contract parsed by
@@ -326,13 +488,33 @@ Runtime owns terminal status and observed evidence. Report only real artifacts a
     )
 }
 
+/// Parse fenced or standalone JSON objects embedded in a subagent response.
+/// Product layers may inspect named optional fields while the terminal
+/// `## Result` object remains parsed by [`parse_subagent_outcome`].
+pub fn parse_json_objects(raw: &str) -> Vec<serde_json::Value> {
+    let mut objects = Vec::new();
+    for block in raw.split("```json").skip(1) {
+        if let Some(json) = block.split("```").next()
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(json.trim())
+            && value.is_object()
+        {
+            objects.push(value);
+        }
+    }
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && value.is_object()
+    {
+        objects.push(value);
+    }
+    objects
+}
+
 #[derive(Debug, Deserialize)]
 struct ReportedSubagentOutcome {
     #[serde(default)]
     contract_version: u32,
-    #[allow(dead_code)]
-    #[serde(default)]
-    status: Option<SubagentStatus>,
     summary: String,
     #[serde(default)]
     artifacts: Vec<SubagentArtifact>,
@@ -410,11 +592,13 @@ pub fn parse_subagent_outcome(
                     evidence
                 })
                 .collect(),
+            verification: Vec::new(),
             remaining_work: bounded_unique(
                 reported.remaining_work,
                 MAX_RESULT_ITEMS,
                 MAX_DETAIL_CHARS,
             ),
+            touched_files: SubagentTouchedFiles::default(),
         }
     } else {
         let (summary, artifact_paths) = split_subagent_output(raw);
@@ -434,11 +618,14 @@ pub fn parse_subagent_outcome(
                 })
                 .collect(),
             evidence: Vec::new(),
+            verification: Vec::new(),
             remaining_work: Vec::new(),
+            touched_files: SubagentTouchedFiles::default(),
         }
     };
 
     normalize_outcome(&mut outcome);
+    outcome.refresh_derived_views();
     for artifact in &mut outcome.artifacts {
         artifact.bytes = None;
         artifact.sha256 = None;
@@ -550,10 +737,24 @@ pub struct SubagentResult {
     /// Cumulative LLM usage across all calls in this dispatch.
     /// `None` when the agent produced no `LlmUsage` events (e.g. cancelled
     /// before first LLM call, or the provider never returned usage).
-    pub usage: Option<LlmUsageStats>,
+    pub llm_usage: Option<LlmUsageStats>,
 }
 
 impl SubagentResult {
+    /// Return the stable usage facts for persistence or reporting.
+    pub fn usage(&self) -> ExecutionUsage {
+        let duration_ms = u64::try_from(self.duration.as_millis()).unwrap_or(u64::MAX);
+        let iterations = u64::try_from(self.iterations).unwrap_or(u64::MAX);
+        ExecutionUsage {
+            duration_ms: Some(duration_ms),
+            tokens_used: self
+                .llm_usage
+                .as_ref()
+                .map(|usage| usage.prompt_tokens.saturating_add(usage.completion_tokens)),
+            iterations: Some(iterations),
+        }
+    }
+
     /// Create a result for a synchronous (blocking) subagent execution.
     ///
     /// # Parameters
@@ -574,7 +775,7 @@ impl SubagentResult {
             was_truncated: false,
             mode: ExecutionMode::Sync,
             isolation_observed: ObservedIsolation::default(),
-            usage: None,
+            llm_usage: None,
         }
         .with_structured(None, None)
     }
@@ -605,7 +806,7 @@ impl SubagentResult {
             was_truncated: false,
             mode: ExecutionMode::Fork,
             isolation_observed: ObservedIsolation::default(),
-            usage: None,
+            llm_usage: None,
         }
         .with_structured(None, None)
     }
@@ -641,7 +842,7 @@ impl SubagentResult {
             was_truncated: false,
             mode,
             isolation_observed: ObservedIsolation::default(),
-            usage: None,
+            llm_usage: None,
         }
     }
 }
@@ -729,10 +930,24 @@ mod tests {
 
     #[test]
     fn test_subagent_result_sync() {
-        let result = SubagentResult::sync_result("a", "ok".into(), Duration::from_millis(100));
+        let mut result = SubagentResult::sync_result("a", "ok".into(), Duration::from_millis(100));
+        result.iterations = 3;
+        result.llm_usage = Some(LlmUsageStats {
+            prompt_tokens: 7,
+            completion_tokens: 5,
+            ..LlmUsageStats::default()
+        });
         assert_eq!(result.mode, ExecutionMode::Sync);
         assert_eq!(result.output, "ok");
         assert_eq!(result.outcome.status, SubagentStatus::Completed);
+        assert_eq!(
+            result.usage(),
+            ExecutionUsage {
+                duration_ms: Some(100),
+                tokens_used: Some(12),
+                iterations: Some(3),
+            }
+        );
     }
 
     #[test]
@@ -763,6 +978,15 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn structured_outcome_exposes_generic_evidence_views() -> Result<(), String> {
+        let raw = "## Result\n```json\n{\"contract_version\":2,\"status\":\"completed\",\"summary\":\"done\",\"artifacts\":[],\"evidence\":[{\"kind\":\"verification\",\"subject\":\"cargo check\",\"outcome\":\"passed\",\"details\":\"ok\"},{\"kind\":\"tool_result\",\"subject\":\"write_file\",\"outcome\":\"succeeded\",\"attributes\":{\"args\":{\"path\":\"src/lib.rs\"}}}],\"remaining_work\":[]}\n```";
+        let outcome = parse_subagent_outcome(raw, SubagentStatus::Completed, None, None);
+        assert_eq!(outcome.verification().len(), 1);
+        assert_eq!(outcome.touched_files().written, vec!["src/lib.rs"]);
         Ok(())
     }
 

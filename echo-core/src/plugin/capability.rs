@@ -37,19 +37,6 @@ pub enum PluginCapability {
 }
 
 impl PluginCapability {
-    /// Parse a capability string from the manifest.
-    pub fn from_str_loose(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "skill" | "skills" => Some(Self::Skill),
-            "hook" | "hooks" => Some(Self::Hook),
-            "mcp" | "mcp_server" | "mcpserver" | "mcp_servers" => Some(Self::McpServer),
-            "lsp" | "lsp_server" | "lspserver" | "lsp_servers" => Some(Self::LspServer),
-            "agent" | "agents" => Some(Self::Agent),
-            "tool" | "tools" => Some(Self::Tool),
-            _ => None,
-        }
-    }
-
     /// Human-readable display name.
     pub fn display_name(self) -> &'static str {
         match self {
@@ -59,6 +46,22 @@ impl PluginCapability {
             Self::LspServer => "LSP Servers",
             Self::Agent => "Agents",
             Self::Tool => "Tools",
+        }
+    }
+}
+
+impl std::str::FromStr for PluginCapability {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "skill" | "skills" => Ok(Self::Skill),
+            "hook" | "hooks" => Ok(Self::Hook),
+            "mcp" | "mcp_server" | "mcpserver" | "mcp_servers" => Ok(Self::McpServer),
+            "lsp" | "lsp_server" | "lspserver" | "lsp_servers" => Ok(Self::LspServer),
+            "agent" | "agents" => Ok(Self::Agent),
+            "tool" | "tools" => Ok(Self::Tool),
+            _ => Err(format!("unknown plugin capability: {value}")),
         }
     }
 }

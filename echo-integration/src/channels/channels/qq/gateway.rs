@@ -23,8 +23,6 @@ use tracing::{debug, info, warn};
 const OP_DISPATCH: u32 = 0; // Event message
 const OP_HEARTBEAT: u32 = 1; // Heartbeat request (client sends)
 const OP_IDENTIFY: u32 = 2; // Authentication (client sends)
-#[allow(dead_code)]
-const OP_RESUME: u32 = 6; // Resume session (client sends) - used for reconnection
 const OP_RECONNECT: u32 = 7; // Reconnect request (server sends)
 const OP_HELLO: u32 = 10; // Hello (server sends, contains heartbeat interval)
 const OP_HEARTBEAT_ACK: u32 = 11; // Heartbeat acknowledgment (server sends)
@@ -34,15 +32,7 @@ const OP_HEARTBEAT_ACK: u32 = 11; // Heartbeat acknowledgment (server sends)
 /// Important: GROUP_AND_C2C_EVENT (1<<25) contains QQ direct and group @message events
 const INTENT_GUILDS: u32 = 1 << 0; // Guild events (default permission)
 const INTENT_GUILD_MEMBERS: u32 = 1 << 1; // Guild member events (default permission)
-#[allow(dead_code)]
-const INTENT_GUILD_MESSAGES: u32 = 1 << 9; // Guild message events (private-domain bot)
-#[allow(dead_code)]
-const INTENT_GUILD_MESSAGE_REACTIONS: u32 = 1 << 10; // Guild message reactions
-#[allow(dead_code)]
-const INTENT_DIRECT_MESSAGE: u32 = 1 << 12; // Guild direct message events
 const INTENT_GROUP_AND_C2C_EVENT: u32 = 1 << 25; // QQ direct + group chat events (critical! includes C2C_MESSAGE_CREATE)
-#[allow(dead_code)]
-const INTENT_PUBLIC_GUILD_MESSAGES: u32 = 1 << 30; // Public guild message events (guild @bot, default permission)
 
 pub(super) async fn connect_to_gateway(
     wss_url: String,

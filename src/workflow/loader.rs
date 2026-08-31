@@ -48,7 +48,7 @@
 
 use crate::agent::react::builder::ReactAgentBuilder;
 use crate::error::{AgentError, ReactError, Result};
-use crate::llm::config::LlmConfig;
+use crate::llm::LlmConfig;
 use crate::workflow::Graph;
 use crate::workflow::GraphBuilder;
 use crate::workflow::SharedState;

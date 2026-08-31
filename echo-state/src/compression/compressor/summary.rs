@@ -262,6 +262,7 @@ impl SummaryCompressor {
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
                     cancel_token: cancel_token.clone(),
+                    timeouts: None,
                     user_id: None,
                     cache_hints: None,
                 })
@@ -304,6 +305,7 @@ impl SummaryCompressor {
                 response_format: None,
                 thinking: None,
                 cancel_token,
+                timeouts: None,
                 user_id: None,
                 cache_hints: None,
             })
@@ -552,6 +554,7 @@ impl IncrementalSummaryCompressor {
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
                     cancel_token: cancel_token.clone(),
+                    timeouts: None,
                     user_id: None,
                     cache_hints: None,
                 })
@@ -622,6 +625,7 @@ impl IncrementalSummaryCompressor {
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
                     cancel_token,
+                    timeouts: None,
                     user_id: None,
                     cache_hints: None,
                 })

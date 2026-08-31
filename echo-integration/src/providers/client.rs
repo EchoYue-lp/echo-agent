@@ -1,26 +1,33 @@
 use echo_core::error::{LlmError, Result};
+use echo_core::llm::LlmTimeouts;
 use echo_core::llm::types::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
 use futures::Stream;
 use futures::StreamExt;
 use reqwest::Client;
+use reqwest::RequestBuilder;
 use reqwest::header::HeaderMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, trace};
-
-fn env_duration_ms(name: &str, default_ms: u64) -> Option<Duration> {
-    let ms = std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(default_ms);
-    (ms > 0).then(|| Duration::from_millis(ms))
-}
 
 fn timeout_error(kind: &str, duration: Duration) -> LlmError {
     LlmError::NetworkError(format!(
         "LLM stream {kind} timeout after {}ms",
         duration.as_millis()
     ))
+}
+
+async fn wait_for_deadline(
+    timeout: Option<Duration>,
+    deadline: Option<tokio::time::Instant>,
+) -> Duration {
+    match (timeout, deadline) {
+        (Some(timeout), Some(deadline)) => {
+            tokio::time::sleep_until(deadline).await;
+            timeout
+        }
+        _ => std::future::pending().await,
+    }
 }
 
 pub(crate) fn split_sse_event(buffer: &mut String) -> Option<String> {
@@ -158,11 +165,12 @@ fn parse_sse_chunk(data: &str) -> Result<Option<ParsedSseChunk>> {
 }
 
 #[tracing::instrument(skip(client, request_body, header_map), fields(model = %request_body.model))]
-pub async fn post(
+pub(crate) async fn post(
     client: Arc<Client>,
     request_body: &ChatCompletionRequest,
     header_map: HeaderMap,
     url: &str,
+    timeouts: LlmTimeouts,
 ) -> Result<ChatCompletionResponse> {
     trace!(
         model = %request_body.model,
@@ -176,6 +184,7 @@ pub async fn post(
             .map_err(|error| LlmError::InvalidResponse(error.to_string()))?,
         header_map,
         url,
+        timeouts,
     )
     .await?;
     let completion_response: ChatCompletionResponse = serde_json::from_value(value)
@@ -195,11 +204,14 @@ pub(crate) async fn post_json(
     request_body: serde_json::Value,
     header_map: HeaderMap,
     url: &str,
+    timeouts: LlmTimeouts,
 ) -> Result<serde_json::Value> {
-    let response = client
-        .post(url)
-        .headers(header_map)
-        .json(&request_body)
+    let request = client.post(url).headers(header_map).json(&request_body);
+    let request = match timeouts.request_timeout() {
+        Some(timeout) => request.timeout(timeout),
+        None => request,
+    };
+    let response = request
         .send()
         .await
         .map_err(|e| LlmError::NetworkError(e.to_string()))?;
@@ -235,17 +247,19 @@ pub(crate) async fn post_json(
 /// `cancel_token` enables aborting the stream: the cancellation signal is checked
 /// between each SSE chunk, and iteration stops immediately once cancelled.
 #[tracing::instrument(skip(client, request_body, header_map, url, cancel_token), fields(model = %request_body.model))]
-pub async fn stream_post(
+pub(crate) async fn stream_post(
     client: Arc<Client>,
     request_body: ChatCompletionRequest,
     header_map: HeaderMap,
     url: String,
+    timeouts: LlmTimeouts,
     cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<impl Stream<Item = Result<ChatCompletionChunk>>> {
     let model = request_body.model.clone();
     let body = serde_json::to_value(request_body)
         .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
-    let raw_stream = stream_json_sse(client, body, header_map, url, model, cancel_token).await?;
+    let request = client.post(url).headers(header_map).json(&body);
+    let raw_stream = stream_json_sse(request, model, timeouts, cancel_token).await?;
     Ok(async_stream::try_stream! {
         futures::pin_mut!(raw_stream);
         while let Some(event) = raw_stream.next().await {
@@ -262,30 +276,28 @@ pub async fn stream_post(
 }
 
 /// Send a JSON request and decode its SSE response without assuming a provider
-/// event schema. Chat Completions and Responses share this transport while
-/// retaining independent wire adapters.
+/// event schema. Chat Completions, Responses, and Anthropic share this
+/// transport while retaining independent semantic event adapters.
 pub(crate) async fn stream_json_sse(
-    client: Arc<Client>,
-    request_body: serde_json::Value,
-    header_map: HeaderMap,
-    url: String,
+    request: RequestBuilder,
     model: String,
+    timeouts: LlmTimeouts,
     cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<impl Stream<Item = Result<JsonSseEvent>>> {
+    let first_chunk_timeout = timeouts.first_chunk_timeout();
+    let idle_timeout = timeouts.idle_timeout();
+    let overall_timeout = timeouts.overall_timeout();
+    let overall_deadline = overall_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
     info!(
-        "Stream completion: model={}, url={}, first_chunk_timeout_ms={:?}, idle_timeout_ms={:?}, overall_timeout_ms={:?}",
+        "Stream completion: model={}, first_chunk_timeout_ms={:?}, idle_timeout_ms={:?}, overall_timeout_ms={:?}",
         model,
-        url,
-        env_duration_ms("ECHO_AGENT_STREAM_FIRST_CHUNK_TIMEOUT_MS", 30_000).map(|d| d.as_millis()),
-        env_duration_ms("ECHO_AGENT_STREAM_IDLE_TIMEOUT_MS", 60_000).map(|d| d.as_millis()),
-        env_duration_ms("ECHO_AGENT_STREAM_OVERALL_TIMEOUT_MS", 0).map(|d| d.as_millis())
+        first_chunk_timeout.map(|duration| duration.as_millis()),
+        idle_timeout.map(|duration| duration.as_millis()),
+        overall_timeout.map(|duration| duration.as_millis())
     );
 
-    let request_future = async {
-        let response = client
-            .post(&url)
-            .headers(header_map)
-            .json(&request_body)
+    let start_stream = async {
+        let response = request
             .send()
             .await
             .map_err(|error| LlmError::NetworkError(error.to_string()))?;
@@ -297,9 +309,18 @@ pub(crate) async fn stream_json_sse(
                 .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(LlmError::ApiError { status, message });
         }
-        Ok(response)
+        let mut byte_stream = Box::pin(response.bytes_stream());
+        let first_bytes = byte_stream
+            .next()
+            .await
+            .ok_or_else(|| {
+                LlmError::InvalidResponse("LLM stream ended before the first chunk".to_string())
+            })?
+            .map_err(|error| LlmError::NetworkError(error.to_string()))?;
+        Ok((byte_stream, first_bytes))
     };
-    let response = tokio::select! {
+    tokio::pin!(start_stream);
+    let (mut byte_stream, first_bytes) = tokio::select! {
         biased;
         _ = async {
             match cancel_token.as_ref() {
@@ -307,34 +328,18 @@ pub(crate) async fn stream_json_sse(
                 None => std::future::pending().await,
             }
         } => return Err(LlmError::NetworkError("LLM stream cancelled".to_string()).into()),
-        response = request_future => response?,
-    };
-
-    let mut byte_stream = Box::pin(response.bytes_stream());
-    let first_chunk_timeout = env_duration_ms("ECHO_AGENT_STREAM_FIRST_CHUNK_TIMEOUT_MS", 30_000);
-    let idle_timeout = env_duration_ms("ECHO_AGENT_STREAM_IDLE_TIMEOUT_MS", 60_000);
-    let overall_timeout = env_duration_ms("ECHO_AGENT_STREAM_OVERALL_TIMEOUT_MS", 0);
-    let first_bytes = tokio::select! {
-        biased;
-        _ = async {
-            match cancel_token.as_ref() {
-                Some(token) => token.cancelled().await,
-                None => std::future::pending().await,
-            }
-        } => return Err(LlmError::NetworkError("LLM stream cancelled".to_string()).into()),
+        duration = wait_for_deadline(overall_timeout, overall_deadline) => {
+            return Err(timeout_error("overall", duration).into());
+        },
         result = async {
             match first_chunk_timeout {
-                Some(duration) => tokio::time::timeout(duration, byte_stream.next())
+                Some(duration) => tokio::time::timeout(duration, &mut start_stream)
                     .await
                     .map_err(|_| timeout_error("first chunk", duration)),
-                None => Ok(byte_stream.next().await),
+                None => Ok((&mut start_stream).await),
             }
         } => result?,
-    }
-    .ok_or_else(|| {
-        LlmError::InvalidResponse("LLM stream ended before the first chunk".to_string())
-    })?
-    .map_err(|error| LlmError::NetworkError(error.to_string()))?;
+    }?;
 
     Ok(async_stream::try_stream! {
         let mut decoder = SseDecoder::new();
@@ -353,8 +358,6 @@ pub(crate) async fn stream_json_sse(
             }
         }
 
-        let overall_sleep = overall_timeout.map(tokio::time::sleep);
-        tokio::pin!(overall_sleep);
         loop {
             let next_bytes = byte_stream.next();
             tokio::pin!(next_bytes);
@@ -366,15 +369,8 @@ pub(crate) async fn stream_json_sse(
                         None => std::future::pending().await,
                     }
                 } => Err(LlmError::NetworkError("LLM stream cancelled".to_string())),
-                _ = async {
-                    if let Some(sleep) = overall_sleep.as_mut().as_pin_mut() {
-                        sleep.await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => match overall_timeout {
-                    Some(timeout) => Err(timeout_error("overall", timeout)),
-                    None => Err(LlmError::NetworkError("LLM stream timeout completed unexpectedly".to_string())),
+                duration = wait_for_deadline(overall_timeout, overall_deadline) => {
+                    Err(timeout_error("overall", duration))
                 },
                 result = async {
                     match idle_timeout {
@@ -522,6 +518,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_chunk_timeout_covers_request_start_through_first_bytes() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = vec![0_u8; 2048];
+            let _request_bytes = socket.read(&mut request).await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+                .await?;
+            std::io::Result::Ok(())
+        });
+        let request = Client::new()
+            .post(format!("http://{address}"))
+            .json(&serde_json::json!({"model": "test", "stream": true}));
+        let timeouts = LlmTimeouts::default()
+            .with_first_chunk_timeout(Duration::from_millis(20))
+            .without_overall_timeout();
+        let result = stream_json_sse(request, "test".to_string(), timeouts, None).await;
+        let message = result
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(message.contains("first chunk timeout"));
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancellation_interrupts_parked_byte_stream() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
@@ -544,12 +570,13 @@ mod tests {
         });
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let request = Client::new()
+            .post(format!("http://{address}"))
+            .json(&serde_json::json!({"model": "test", "stream": true}));
         let stream = stream_json_sse(
-            Arc::new(Client::new()),
-            serde_json::json!({"model": "test", "stream": true}),
-            HeaderMap::new(),
-            format!("http://{address}"),
+            request,
             "test".to_string(),
+            LlmTimeouts::default(),
             Some(cancel_token.clone()),
         )
         .await?;

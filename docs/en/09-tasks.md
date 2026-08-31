@@ -31,6 +31,39 @@ count, failure fingerprint, and an optional attempt-scoped claim. Coding kinds,
 Subagent selection, files, tools, checks, review, and UI projections belong in
 an application-owned typed extension.
 
+Use the typed extension helpers when an application owns a concrete extension
+schema. They keep the framework's stored JSON representation while keeping
+serialization and task identity errors in one public API:
+
+```rust,no_run
+use echo_agent::tasks::TaskSpec;
+use serde::{Deserialize, Serialize};
+use std::error::Error;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ApplicationTaskData {
+    role: String,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let spec = TaskSpec {
+        id: "inspect".into(),
+        title: "Inspect the repository".into(),
+        description: "Read the relevant files".into(),
+        depends_on: Vec::new(),
+        max_retries: 1,
+        extension: serde_json::Value::Null,
+    }
+    .with_extension(ApplicationTaskData { role: "explorer".into() })?;
+    let _data: ApplicationTaskData = spec.extension_as()?;
+    Ok(())
+}
+```
+
+`TaskDraft` and `TaskSpecPatch` expose the same helpers. A patch returns
+`Option<T>` from `extension_as`, so callers can distinguish an omitted
+extension from an explicitly supplied one.
+
 The shared lifecycle includes `Pending`, `Running`, `Blocked`, `Retrying`,
 `Paused`, `Completed`, `Failed`, `TimedOut`, `Skipped`, and `Cancelled`.
 Transitions are validated by `TaskStatus::transition_to`.

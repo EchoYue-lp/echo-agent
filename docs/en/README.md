@@ -8,6 +8,12 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 ## Documentation Index
 
+### Framework Boundaries
+
+| Doc | Module | Key Concepts |
+| --- | --- | --- |
+| [39 - Framework and Application Boundary](./39-framework-application-boundary.md) | Architecture | Product-neutral framework capability, EKO policy, and one authority |
+
 ### Core Features
 
 | Doc                                                 | Module            | Key Concepts                                                                              |
@@ -21,7 +27,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [07 - Skill System](./07-skills.md)                 | Skills            | Capability packs, prompt injection, external SKILL.md loading                             |
 | [08 - MCP Integration](./08-mcp.md)                 | MCP               | stdio/HTTP transport, tool adaptation, multi-server management                            |
 | [09 - Task Planning](./09-tasks.md)                 | Tasks / DAG       | DAG, topological sort, cycle detection, Mermaid visualization                             |
-| [10 - Streaming Output](./10-streaming.md)          | Streaming         | execute_stream, AgentEvent, SSE, TTFT                                                     |
+| [10 - Streaming Output](./10-streaming.md)          | Streaming         | execute_stream, AgentEvent, SSE, LlmTimeouts, TTFT                                        |
 | [11 - Structured Output](./11-structured-output.md) | Structured Output | ResponseFormat, JsonSchema, extract(), extract_json()                                     |
 | [12 - Mock Testing Utilities](./12-mock.md)         | Testing           | MockLlmClient, MockTool, MockAgent, InMemoryStore                                         |
 | [13 - Multi-Turn Chat](./13-chat.md)                | Chat              | chat(), chat_stream(), cross-turn memory, reset()                                         |
@@ -60,6 +66,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [38 - Agent Factory & Modes](./38-factory-modes.md)               | Agent Factory / Mode Engine / Prompt Templates | mode switching, localization, template rendering                                        |
 | [40 - Context System](./40-context-system.md)                     | Context System                                 | ContextAssembler, ContextBudgeter, ContextSelector, priority ordering, budget awareness |
 | [41 - Persistence Concepts](./41-persistence-concepts.md)         | Store / Journal / Checkpoint / Trace           | persistence boundaries, fact authority, recovery snapshots, observability               |
+| [41 - Delivery Ledger](./41-delivery-ledger.md)                    | Delivery lifecycle                             | Typed route/payload envelope, FIFO, attempts, settlement, and bounded terminal retention  |
 
 ### Getting Started Guides
 
@@ -85,6 +92,14 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [0008 - Canonical Runtime Task Authority](../adr/0008-canonical-runtime-task-authority.md) | One revisioned graph owns task CRUD, execution, and settlement    |
 | [0009 - Tracked Input Receipts](../adr/0009-tracked-input-receipts.md) | Active and initial inputs expose accepted, drained, and terminal boundaries |
 | [0010 - Canonical Turn Receipt Accounting](../adr/0010-canonical-turn-receipt-accounting.md) | One framework receipt owns generic terminal, usage, compaction, and final-message facts |
+| [0015 - Keyed Execution Admission](../adr/0015-keyed-execution-admission.md) | Reusable opaque-key leases, retirement fences, and shutdown waiting |
+| [0019 - Typed Delivery Ledger API](../adr/0019-typed-delivery-ledger-api.md) | Typed route/payload delivery with one framework record and reducer |
+| [0020 - Structured Subagent Outcome Views](../adr/0020-structured-subagent-outcome-views.md) | Generic verification and file-access views remain in the framework outcome |
+| [0021 - Framework-Native Domain Values](../adr/0021-framework-native-domain-values.md) | Applications consume reusable framework values without source-named conversions |
+| [0022 - Typed LLM Timeouts](../adr/0022-typed-llm-timeouts.md) | Client defaults and per-request stream boundaries share one typed contract |
+| [0023 - Current Skill Frontmatter](../adr/0023-current-skill-frontmatter.md) | Markdown body and directory resources replace legacy frontmatter content fields |
+| [0024 - Unified Subagent Prompt Compilation](../adr/0024-unified-subagent-prompt-compilation.md) | One injected compiler owns registration and dispatch prompt framing |
+| [0025 - Deterministic Command-Cell Watcher](../adr/0025-deterministic-command-cell-watcher.md) | A retained typed watcher replaces model-driven command polling |
 
 ---
 

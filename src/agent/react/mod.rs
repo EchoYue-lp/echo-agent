@@ -20,7 +20,7 @@ use crate::error::{LlmError, ReactError, Result};
 use crate::guard::GuardManager;
 #[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopProvider, PermissionService};
-use crate::llm::config::LlmConfig;
+use crate::llm::LlmConfig;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
 use crate::memory::snapshot::{SnapshotManager, StateSnapshot};
@@ -515,6 +515,7 @@ impl ReactAgent {
                             runtime_context: None,
                             message: None,
                             prompt_payload: None,
+                            prompt_context: None,
                             constraints: Vec::new(),
                             background: false,
                         })
@@ -607,7 +608,7 @@ impl ReactAgent {
                 mcp_manager: McpManager::new(),
                 sandbox_manager: None,
                 intervention_callbacks: Vec::new(),
-                disabled_tools: Arc::new(std::sync::RwLock::new(None)),
+                tool_visibility: echo_core::agent::ToolVisibilityPolicy::default(),
             },
             guard: GuardSubsystem {
                 guard_manager: None,
@@ -1052,7 +1053,7 @@ impl ReactAgent {
 
     /// Set the agent's thinking-depth config. Applied to every chat request
     /// issued by this agent. Applications set it at runtime after resolving the
-    /// active model's [`crate::llm::core::capabilities::ThinkingProfile`].
+    /// active model's [`crate::llm::ThinkingProfile`].
     pub fn set_thinking(&mut self, thinking: Option<crate::llm::ThinkingConfig>) {
         self.thinking = thinking;
     }
@@ -1083,6 +1084,15 @@ impl ReactAgent {
             return override_prompt.clone();
         }
         self.config.system_prompt.clone()
+    }
+
+    /// Replace the stable system prompt and refresh the canonical context.
+    pub fn replace_system_prompt(&mut self, prompt: impl Into<String>) {
+        self.config.system_prompt = prompt.into();
+        if let Ok(mut override_prompt) = self.mutable_system_prompt.write() {
+            *override_prompt = None;
+        }
+        self.refresh_root_system_prompt();
     }
 
     /// Mutable reference to the agent config for runtime adjustments.
@@ -1157,7 +1167,7 @@ impl ReactAgent {
     /// use std::sync::Arc;
     ///
     /// # fn main() -> echo_agent::error::Result<()> {
-    /// # let config = unimplemented!();
+    /// # let config = echo_agent::agent::AgentConfig::new("model", "agent", "Help the user.");
     /// let inner = Arc::new(FileStore::new("~/.echo-agent/store.json")?);
     /// let embedder = Arc::new(HttpEmbedder::from_env());
     /// let store = Arc::new(
@@ -2226,6 +2236,7 @@ impl ReactAgent {
                 runtime_context,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             };
@@ -2296,6 +2307,7 @@ impl ReactAgent {
             runtime_context,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -2416,6 +2428,7 @@ impl ReactAgent {
             runtime_context,
             allowed_tools,
             None,
+            None,
         )
         .await
     }
@@ -2433,6 +2446,7 @@ impl ReactAgent {
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
         allowed_tools: Option<Vec<String>>,
         prompt_payload: Option<serde_json::Value>,
+        prompt_context: Option<crate::agent::subagent::SubagentTaskContext>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
         self.delegate_to_agent_with_prompt_payload_inner(
             target,
@@ -2443,6 +2457,7 @@ impl ReactAgent {
             runtime_context,
             allowed_tools,
             prompt_payload,
+            prompt_context,
             None,
         )
         .await
@@ -2461,6 +2476,7 @@ impl ReactAgent {
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
         allowed_tools: Option<Vec<String>>,
         prompt_payload: Option<serde_json::Value>,
+        prompt_context: Option<crate::agent::subagent::SubagentTaskContext>,
         identity: crate::agent::subagent::SubagentAttemptIdentity,
     ) -> Result<crate::agent::subagent::SubagentResult> {
         self.delegate_to_agent_with_prompt_payload_inner(
@@ -2472,6 +2488,7 @@ impl ReactAgent {
             runtime_context,
             allowed_tools,
             prompt_payload,
+            prompt_context,
             Some(identity),
         )
         .await
@@ -2489,6 +2506,7 @@ impl ReactAgent {
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
         allowed_tools: Option<Vec<String>>,
         prompt_payload: Option<serde_json::Value>,
+        prompt_context: Option<crate::agent::subagent::SubagentTaskContext>,
         identity: Option<crate::agent::subagent::SubagentAttemptIdentity>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
@@ -2528,6 +2546,7 @@ impl ReactAgent {
             runtime_context,
             message: None,
             prompt_payload,
+            prompt_context,
             constraints: Vec::new(),
             background: false,
         };
@@ -2623,6 +2642,7 @@ impl ReactAgent {
             runtime_context,
             allowed_tools,
             None,
+            None,
         )
         .await
     }
@@ -2641,6 +2661,7 @@ impl ReactAgent {
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
         allowed_tools: Option<Vec<String>>,
         prompt_payload: Option<serde_json::Value>,
+        prompt_context: Option<crate::agent::subagent::SubagentTaskContext>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
         self.delegate_to_agent_with_message_and_prompt_payload_inner(
             target,
@@ -2652,6 +2673,7 @@ impl ReactAgent {
             runtime_context,
             allowed_tools,
             prompt_payload,
+            prompt_context,
             None,
         )
         .await
@@ -2671,6 +2693,7 @@ impl ReactAgent {
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
         allowed_tools: Option<Vec<String>>,
         prompt_payload: Option<serde_json::Value>,
+        prompt_context: Option<crate::agent::subagent::SubagentTaskContext>,
         identity: crate::agent::subagent::SubagentAttemptIdentity,
     ) -> Result<crate::agent::subagent::SubagentResult> {
         self.delegate_to_agent_with_message_and_prompt_payload_inner(
@@ -2683,6 +2706,7 @@ impl ReactAgent {
             runtime_context,
             allowed_tools,
             prompt_payload,
+            prompt_context,
             Some(identity),
         )
         .await
@@ -2701,6 +2725,7 @@ impl ReactAgent {
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
         allowed_tools: Option<Vec<String>>,
         prompt_payload: Option<serde_json::Value>,
+        prompt_context: Option<crate::agent::subagent::SubagentTaskContext>,
         identity: Option<crate::agent::subagent::SubagentAttemptIdentity>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
@@ -2738,6 +2763,7 @@ impl ReactAgent {
             runtime_context,
             message: Some(message),
             prompt_payload,
+            prompt_context,
             constraints: Vec::new(),
             background: false,
         };
@@ -3296,6 +3322,18 @@ impl Agent for ReactAgent {
             .collect()
     }
 
+    fn disabled_tool_names(&self) -> std::collections::HashSet<String> {
+        ReactAgent::disabled_tool_names(self)
+    }
+
+    fn tool_visibility_policy(&self) -> echo_core::agent::ToolVisibilityPolicy {
+        ReactAgent::tool_visibility_policy(self)
+    }
+
+    fn working_dir(&self) -> Option<std::path::PathBuf> {
+        ReactAgent::working_dir(self)
+    }
+
     fn skill_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .tools
@@ -3354,10 +3392,24 @@ impl Agent for ReactAgent {
     }
 
     fn set_system_prompt(&self, prompt: &str) {
+        let prompt = prompt.to_string();
         *self
             .mutable_system_prompt
             .write()
-            .unwrap_or_else(|e| e.into_inner()) = Some(prompt.to_string());
+            .unwrap_or_else(|e| e.into_inner()) = Some(prompt.clone());
+        if let Ok(mut context) = self.memory.context.try_lock() {
+            let mut messages = context.messages().to_vec();
+            if let Some(system) = messages
+                .iter_mut()
+                .find(|message| matches!(message.role, echo_core::llm::types::Role::System))
+            {
+                *system = echo_core::llm::types::Message::system(prompt.clone());
+            } else {
+                messages.insert(0, echo_core::llm::types::Message::system(prompt.clone()));
+            }
+            context.set_messages(messages);
+            context.set_canonical_system_prompt(Some(prompt));
+        }
     }
 
     fn delegate_to<'a>(&'a self, target: &'a str, task: &'a str) -> BoxFuture<'a, Result<String>> {

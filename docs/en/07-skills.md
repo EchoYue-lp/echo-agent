@@ -14,7 +14,11 @@ Tool:  a single atomic operation ("read file")
 Skill: a domain capability pack ("filesystem" = read_file + write_file + list_dir + usage guidance)
 ```
 
-The framework contract (`Skill` trait + `SkillRegistry`) lives in `echo-core` and `echo-execution`. Product catalogues are separate consumers of this API. For example, embedding application currently stores its user-facing catalogue under `<application-data>/skills/`; that application-owned behavior is documented by the [embedding application SkillsHub source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub), not by this framework API.
+The framework contract (`Skill`, `SkillDocument`, and `SkillRegistry`) lives in
+`echo-core` and `echo-execution`. `SkillDocument::parse` and `parse_at` are the
+single parsing and validation API for runtime discovery, product catalogues,
+and installation checks. Product catalogues remain separate consumers that
+project the typed descriptor; they do not parse frontmatter themselves.
 
 ---
 
@@ -115,38 +119,9 @@ description: >-
   Professional code review skill: identify defects, security risks,
   and best practice violations. Use when asked to review code quality.
 license: Apache-2.0
-shell: bash
-paths:
-  - "*.rs"
-  - "*.py"
-triggers:
-  - review my code
-  - find bugs
-allowed-tools:
-  - read_skill_resource
-  - run_skill_script
-  - Bash
-depends_on:
-  - coding
+allowed-tools: read_skill_resource run_skill_script Bash
 metadata:
   team: backend
-hooks:
-  PreToolUse:
-    - matcher: "Bash"
-      hooks:
-        - type: prompt
-          prompt: "Verify command safety before execution"
-  PostToolUse:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: "${SKILL_DIR}/scripts/log_usage.sh"
-          timeout: 5
-sandbox:
-  isolation: process
-  network: deny
-  allowed_paths:
-    - "${SKILL_DIR}"
 ---
 
 ## Code Review
@@ -161,34 +136,62 @@ Current environment: !`uname -s`
 Skill directory: ${SKILL_DIR}
 ```
 
+Per-skill Hooks are not part of the agentskills.io file format. Configure
+Hooks in the host application's Hook configuration or plugin component; see
+[Hooks System](./23-hooks.md).
+
 ### Frontmatter Fields (Current)
 
 Defined by `SkillDescriptor` and `RawFrontmatter` in `echo-execution/src/skills/external/types.rs`.
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Unique name, kebab-case, 1-64 chars |
-| `description` | Yes | Description, max 1024 chars, explains when to use |
-| `license` | | SPDX license identifier |
-| `compatibility` | | Free-form compatibility note (echo-agent versions, OS, etc.) |
-| `shell` | | Shell for inline commands: `bash` (default) or `powershell` |
-| `paths` | | Conditional activation file glob patterns (e.g., `["*.py"]`) — also surfaced in catalog |
-| `triggers` | | User-phrase triggers consumed by `KeywordClassifier` (see [Two activation paths](#two-skill-activation-paths)) |
-| `allowed-tools` (alias `allowed_tools`) | | Whitelist of pre-registered tools this skill is allowed to use — **not** a list of tools to register |
-| `depends_on` | | Other skills auto-activated first; cycles are detected and warned by `SkillLoader` |
-| `hooks` | | Rules for any of the 31 main Hook events; see [Hooks System](./23-hooks.md) |
-| `sandbox` | | Per-skill sandbox policy: `isolation`, `network`, `allowed_paths`, `denied_paths`, `timeout` |
-| `metadata` | | Arbitrary key-value pairs |
+| `name` | Yes | Unique name, kebab-case, 1-64 chars, must match the skill directory name |
+| `description` | Yes | Description, max 1024 chars, explains what it does and when to use it — this text drives skill routing |
+| `license` | | SPDX license identifier or bundled license file reference |
+| `compatibility` | | Free-form environment requirements (OS, binaries, network), max 500 chars |
+| `metadata` | | Arbitrary string → string key-value pairs |
+| `allowed-tools` | | Space-separated whitelist of pre-registered tools this skill is allowed to use — **not** a list of tools to register |
 
-### Frontmatter Fields (Legacy)
+### One Format Authority
 
-The following fields still parse but are deprecated; activating a skill that uses them logs a deprecation warning at load time. They will be removed in a future release.
+`SKILL.md` has one content model: frontmatter describes the catalog entry and
+the Markdown body is the instruction source. Supporting files live beside it,
+normally under `references/`, `scripts/`, or `assets/`.
 
-| Legacy field | Replacement |
-|--------------|-------------|
-| `version` / `author` / `tags` | Move into `metadata:` |
-| `instructions` | Place the body directly in the Markdown after the closing `---` |
-| `resources` | Drop in favour of automatic enumeration of `references/`, `scripts/`, `assets/` |
+Only the official agentskills.io fields above are accepted. Unknown top-level
+fields are rejected so misspelled configuration cannot silently change runtime
+behavior, and the legacy echo-agent extension fields (`version`, `author`,
+`tags`, `instructions`, `resources`, and the former top-level `triggers`,
+`hooks`, `shell`, `paths`, `sandbox`, `depends_on`) fail parsing outright:
+put string extension metadata under `metadata`, instructions after the closing
+`---`, supporting files in the skill directory. Hooks are host configuration,
+not Skill file content.
+Routing is description-driven — write when-to-use scenarios and keywords into
+`description`. See [ADR 0023](../adr/0023-current-skill-frontmatter.md) and
+[ADR 0026](../adr/0026-official-skill-frontmatter-only.md).
+
+Validate skills with the in-process equivalent of `skills-ref validate`:
+
+```rust,no_run
+use echo_agent::skills::external::validate_skill_dir;
+
+# fn inspect(dir: &std::path::Path) {
+let report = validate_skill_dir(dir);
+assert!(report.is_valid(), "{:?}", report.violations);
+# }
+```
+
+```rust,no_run
+use echo_agent::skills::external::SkillDocument;
+
+# fn inspect(source: &str) -> echo_agent::error::Result<()> {
+let document = SkillDocument::parse(source)?;
+println!("{}", document.descriptor().name);
+println!("{}", document.instructions());
+# Ok(())
+# }
+```
 
 ### Inline Command Execution
 
@@ -278,7 +281,11 @@ If the same agent later calls `discover_skills()` again and finds additional fil
 
 ### Dependencies and Cycle Detection
 
-When a skill declares `depends_on`, `SkillRegistry` recursively activates every dependency before the requested skill. `SkillLoader` detects cycles with a DFS pass and produces a warning; duplicates are deduplicated and one acyclic activation order is picked.
+When a descriptor declares `depends_on` (a programmatic field — the standard
+frontmatter has no source for it), `SkillRegistry` recursively activates every
+dependency before the requested skill. `SkillLoader` detects cycles with a DFS
+pass over declared dependencies and produces a warning; duplicates are
+deduplicated and one acyclic activation order is picked.
 
 ---
 
@@ -304,7 +311,12 @@ Skill directory: ...
 
 ### Where triggers come from
 
-Consumers can populate `KeywordClassifier` from each `SkillDescriptor.triggers`. If a skill has no triggers, keyword routing cannot select it; explicit API activation and the LLM tool path remain available.
+The standard frontmatter has no trigger field, so file-based skills arrive
+with an empty `SkillDescriptor.triggers`. Consumers derive keyword routing
+from the `description` text (description-driven routing, as the spec
+recommends), or populate `triggers` on programmatically registered
+descriptors. If a skill has no triggers, keyword routing cannot select it;
+explicit API activation and the LLM tool path remain available.
 
 ---
 
@@ -381,10 +393,12 @@ last non-empty override. Permission decisions themselves still follow the strict
 priority order (`deny > ask > allow`).
 
 For a plugin-owned Skill, `PluginVariables` substitution is applied to the
-complete `SKILL.md` before frontmatter parsing. `${ECHO_PLUGIN_ROOT}`,
-`${ECHO_PLUGIN_DATA}`, `${ECHO_PROJECT_DIR}`, `${user_config.KEY}`, and supported
-environment placeholders therefore work in Skill metadata, instructions, and
-frontmatter Hook actions alike.
+complete `SKILL.md` before parsing. Plugin Hooks belong to the plugin's Hook
+component, not the Skill file.
+`${ECHO_PLUGIN_ROOT}`, `${ECHO_PLUGIN_DATA}`, `${ECHO_PROJECT_DIR}`,
+`${user_config.KEY}`, and supported environment placeholders therefore work in
+Skill metadata and instructions. Plugin Hooks are loaded from the plugin Hook
+component, not the Skill file.
 
 ### Matcher Rules
 
@@ -396,13 +410,13 @@ frontmatter Hook actions alike.
 
 ## Conditional Activation by Path
 
-Skills with `paths` are always discoverable in the catalog, but runtime activation is
-guarded by a matching `context_path`:
+Descriptors with `paths` (a programmatic field — the standard frontmatter has
+no source for it) are always discoverable in the catalog, but runtime
+activation is guarded by a matching `context_path`:
 
-```yaml
-paths:
-  - "*.py"
-  - "tests/**"
+```rust
+# // populate on a programmatically registered descriptor
+# descriptor.paths = vec!["*.py".to_string(), "tests/**".to_string()];
 ```
 
 The catalog shows: `- python-linter: ... [activates for: *.py, tests/**]`
@@ -423,16 +437,16 @@ returns an error instead of loading the skill.
 
 ## allowed-tools Whitelist
 
-`allowed-tools` does **not** register tools — it filters tool calls against the union of every activated skill's whitelist (`registry.rs:178-199`):
+`allowed-tools` does **not** register tools — it filters tool calls against the union of every activated skill's whitelist (`registry.rs:178-199`). The official wire format is one space-separated plain string:
 
 ```yaml
-allowed-tools:
-  - read_skill_resource
-  - run_skill_script
-  - Bash
-  - "Bash(git:*)"
-  - "*"           # wildcard
+allowed-tools: read_skill_resource run_skill_script Bash(git:*)
 ```
+
+Quote a value containing a YAML alias indicator when necessary (for example,
+`allowed-tools: "*"`). Programmatic descriptors may still set any matcher
+list, but standard-format files and validators require the space-separated
+string form.
 
 Match semantics (`types.rs:277-307`):
 - exact name (`"read_skill_resource"`)
@@ -488,9 +502,17 @@ Applications may add a separate catalogue. embedding application's current `Skil
 
 ## Skill Telemetry
 
-A separate module `echo-state/src/skill_telemetry.rs` defines `SkillExecutionRecord` and `SkillTelemetry` types backed by the `Store` trait under namespace `["agent", "skill_telemetry"]`.
+A public `echo_agent::skill_telemetry` module defines `SkillExecutionRecord`,
+`SkillTelemetry`, and `SkillTelemetryStore`, backed by the `Store` trait under
+namespace `["agent", "skill_telemetry"]`. Consumers should use this facade
+path rather than depending on the split `echo-state` crate.
 
-⚠️ **The runtime does not currently write to this store.** No `record_execution` call site exists in the agent runtime today; the schema is in place but the producer side is not yet wired into activation paths.
+The unified tool execution path records one observation for each currently
+active skill after every tool result. Writes are serialized by one process-wide
+framework lock and are best-effort: a missing store or telemetry write failure
+never changes the tool's success, failure, or retry behavior. An injected
+`Curator` is touched
+only when the host explicitly supplies one.
 
 ---
 
@@ -533,4 +555,4 @@ If a downstream eval harness or doc still mentions `SkillGateway`, treat it as h
 
 See the example files:
 - `echo-agent-learning/examples/demo07_skills.rs` — Code-based skill demo
-- `echo-agent-learning/examples/demo08_external_skills.rs` — File-based skill full feature demo (progressive disclosure + script execution + inline commands + hooks)
+- `echo-agent-learning/examples/demo08_external_skills.rs` — File-based Skill full feature demo (progressive disclosure + script execution + inline commands)

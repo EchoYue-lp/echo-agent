@@ -159,7 +159,7 @@ fn demos_use_only_the_public_facade_and_safe_string_access()
     )?;
     let json_index = Regex::new(r#"\b(?:json|value|response|resp|summary|item\.value)\s*\["#)?;
     let text_byte_count = Regex::new(r#"\b(?:content|text|output|code|word|prompt|id)\.len\(\)"#)?;
-    let worker_term = Regex::new(r#"(?i)\bworkers?\b"#)?;
+    let deprecated_execution_role_term = Regex::new(r#"(?i)\bworkers?\b"#)?;
     let mut violations = Vec::new();
 
     for (name, path) in demo_sources()? {
@@ -202,9 +202,9 @@ fn demos_use_only_the_public_facade_and_safe_string_access()
                     line_index + 1
                 ));
             }
-            if worker_term.is_match(line) {
+            if deprecated_execution_role_term.is_match(line) {
                 violations.push(format!(
-                    "{name}:{} uses retired worker terminology",
+                    "{name}:{} uses retired execution-role terminology",
                     line_index + 1
                 ));
             }

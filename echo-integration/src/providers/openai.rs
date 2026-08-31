@@ -175,10 +175,7 @@ impl OpenAiClient {
     }
 
     fn build_http_client() -> Client {
-        Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_default()
+        Client::new()
     }
 }
 
@@ -188,6 +185,7 @@ impl LlmClient for OpenAiClient {
         Box::pin(
             async move {
                 self.config.validate_input_modalities(&request.messages)?;
+                let timeouts = request.timeouts.unwrap_or(self.config.timeouts);
                 let t = translate_thinking_openai_compat(
                     &self.config.model,
                     self.config.api_protocol,
@@ -225,6 +223,7 @@ impl LlmClient for OpenAiClient {
                     &req,
                     self.header_map.clone(),
                     &self.config.base_url,
+                    timeouts,
                 )
                 .await?;
 
@@ -249,6 +248,7 @@ impl LlmClient for OpenAiClient {
         Box::pin(
             async move {
                 self.config.validate_input_modalities(&request.messages)?;
+                let timeouts = request.timeouts.unwrap_or(self.config.timeouts);
                 let t = translate_thinking_openai_compat(
                     &self.config.model,
                     self.config.api_protocol,
@@ -285,6 +285,7 @@ impl LlmClient for OpenAiClient {
                     req,
                     self.header_map.clone(),
                     self.config.base_url.clone(),
+                    timeouts,
                     request.cancel_token,
                 )
                 .await?;

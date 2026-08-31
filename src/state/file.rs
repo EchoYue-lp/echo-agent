@@ -5,8 +5,8 @@
 //! stable scope binding, lifecycle phase, and checkpoint atomically. The
 //! `_scope_index` files are rebuildable projections, never deletion authority.
 //!
-//! This is the no-SQLite alternative to [`SqliteRuntimeStateStore`](crate::state::sqlite::SqliteRuntimeStateStore)
-//! (`sqlite` feature). Suitable for a single-process local agent (typical
+//! This is the no-SQLite alternative to `SqliteRuntimeStateStore` (feature
+//! `sqlite`). Suitable for a single-process local agent (typical
 //! echo-agent consumer). For multi-process concurrency, use the SQLite backend.
 //!
 //! ## Robustness

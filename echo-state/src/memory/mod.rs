@@ -28,6 +28,7 @@ pub mod store;
 pub mod typed_store;
 
 // Re-export traits and data types from echo-core (backward compatibility)
+pub use echo_core::memory::MemoryScope;
 pub use echo_core::memory::conversation::{
     Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
     StoredMessage,

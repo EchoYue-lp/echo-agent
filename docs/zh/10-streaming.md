@@ -209,30 +209,50 @@ turn summary。workspace routing、UI retention pin、webhook delivery 等产品
 
 ---
 
-## 流式超时机制（规划中）
+## LLM 超时
 
-> **注意：** 以下 API 为设计规划，尚未在当前版本中实现。流式超时通过 LLM 客户端层的请求超时控制。
+`LlmTimeouts` 是完整请求与流式请求共用的唯一 provider-neutral 超时合同。
+`LlmConfig` 保存 client 默认值，`ChatRequest` 可用同一种类型覆盖单次调用：
 
-SSE 客户端计划内置三级超时保护：
+```rust
+use echo_agent::prelude::*;
+use std::time::Duration;
 
-| 超时类型 | 计划值 | 作用 |
-|---------|--------|------|
-| **first_chunk** | 30s | 等待首个 chunk 的最大时间 |
-| **idle** | 60s | 两个 chunk 之间的最大空闲时间 |
-| **overall** | 300s | 整个流的总超时 |
+let timeouts = LlmTimeouts::default()
+    .with_request_timeout(Duration::from_secs(90))
+    .with_first_chunk_timeout(Duration::from_secs(20))
+    .with_idle_timeout(Duration::from_secs(45))
+    .without_overall_timeout();
 
-当前可通过 `AgentConfig` 的 `request_timeout` 控制 LLM 请求超时。
+let config = LlmConfig::for_provider(
+    "compatible",
+    "https://api.example.com/v1",
+    "token",
+    "model",
+    LlmApiProtocol::ChatCompletions,
+)?
+.with_timeouts(timeouts);
 
-### Stream Loop 架构
-
-v0.2.1 将单体 `stream_loop.rs` 拆分为模块化子目录：
-
+let request = ChatRequest::new(vec![Message::user("你好".to_string())])
+    .with_timeouts(timeouts.with_first_chunk_timeout(Duration::from_secs(10)));
 ```
-src/agent/react/run/stream_loop/
-├── mod.rs           # 入口和主编排
-├── llm_stream.rs    # LLM 流式请求和 SSE 解析
-└── processor.rs     # 事件处理和分发
-```
+
+| 边界 | 默认值 | 范围 |
+| --- | ---: | --- |
+| `request` | 120s | 完整的非流式请求及 response body |
+| `first_chunk` | 30s | 从请求开始到收到第一批 response bytes |
+| `idle` | 60s | 流式 byte chunk 之间允许的最大间隔 |
+| `overall` | 关闭 | 包含请求启动在内的完整 stream |
+
+对应的 `without_*_timeout()` 方法关闭该边界；序列化配置中的 null 或 0 毫秒也按关闭
+处理。Chat Completions、
+Responses 和 Anthropic Messages 共用同一条 SSE transport，统一负责请求启动、取消、
+UTF-8 安全解码、first/idle/overall 超时以及截断 event 拒绝。provider adapter 只把
+语义 JSON event 翻译为 `ChatChunk`。
+
+完整请求和 stream timeout 分开是有意设计：健康的长 stream 可以超过非流式请求
+超时，而停滞的 stream 仍会在 first chunk 或 idle 边界失败。超时继续作为 typed LLM
+network error 进入既有 retry policy。
 
 ### 工具输出落盘与截断
 

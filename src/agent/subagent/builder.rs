@@ -2,14 +2,14 @@
 
 use std::path::PathBuf;
 
-use super::types::{ExecutionMode, SubagentDefinition, SubagentKind};
+use super::types::{ExecutionMode, SubagentAccessMode, SubagentDefinition, SubagentKind};
 
 /// Builder for creating [`SubagentDefinition`] instances with a fluent API.
 ///
 /// # Example
 ///
 /// ```rust
-/// use echo_agent::agent::subagent::SubagentBuilder;
+/// use echo_agent::subagent::SubagentBuilder;
 ///
 /// let def = SubagentBuilder::new("researcher")
 ///     .description("Researches topics thoroughly")
@@ -37,6 +37,7 @@ impl SubagentBuilder {
                 name: name.into(),
                 description: String::new(),
                 kind: SubagentKind::BuiltIn,
+                access_mode: SubagentAccessMode::Write,
                 execution_mode: ExecutionMode::Sync,
                 model: None,
                 thinking: None,
@@ -80,6 +81,18 @@ impl SubagentBuilder {
         self.definition.kind = SubagentKind::Plugin {
             source: source.into(),
         };
+        self
+    }
+
+    /// Declare that this role may inspect but not mutate its environment.
+    pub fn read_only(mut self) -> Self {
+        self.definition.access_mode = SubagentAccessMode::ReadOnly;
+        self
+    }
+
+    /// Declare that this role may mutate within its runtime boundary.
+    pub fn write_access(mut self) -> Self {
+        self.definition.access_mode = SubagentAccessMode::Write;
         self
     }
 

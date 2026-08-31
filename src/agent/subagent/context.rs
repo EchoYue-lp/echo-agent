@@ -33,7 +33,7 @@ use super::types::ExecutionMode;
 /// Historical mode presets:
 /// - **Sync**: no inheritance ([`Self::sync_default`] == fresh).
 /// - **Fork mode preset**: inherits tools + recent history.
-/// - **Teammate**: no inheritance; execution is controlled by its background handle.
+/// - **Teammate/Team**: bounded structured history, never parent system text.
 #[derive(Debug, Clone)]
 pub struct ContextInheritance {
     /// Inherit specific tools by name. `None` = inherit all.
@@ -80,11 +80,11 @@ impl ContextInheritance {
         }
     }
 
-    /// Teammate mode default: nothing inherited.
+    /// Teammate/Team default: bounded history without tools or memory.
     pub fn teammate_default() -> Self {
         Self {
-            inherit_tools: None,
-            inherit_history: None,
+            inherit_tools: Some(Vec::new()),
+            inherit_history: Some(2),
             inherit_memory: false,
             inject_metadata: HashMap::new(),
         }
@@ -321,9 +321,11 @@ mod tests {
     }
 
     #[test]
-    fn test_teammate_default_no_inheritance() {
+    fn test_teammate_default_uses_bounded_history() {
         let inh = ContextInheritance::teammate_default();
-        assert!(inh.inherit_history.is_none());
+        assert_eq!(inh.inherit_history, Some(2));
+        assert_eq!(inh.inherit_tools, Some(Vec::new()));
+        assert!(!inh.inherit_memory);
     }
 
     #[test]
@@ -337,10 +339,9 @@ mod tests {
             ContextInheritance::for_mode(&ExecutionMode::Fork).inherit_history,
             Some(2)
         );
-        assert!(
-            ContextInheritance::for_mode(&ExecutionMode::Teammate)
-                .inherit_history
-                .is_none()
+        assert_eq!(
+            ContextInheritance::for_mode(&ExecutionMode::Teammate).inherit_history,
+            Some(2)
         );
     }
 

@@ -1,10 +1,12 @@
 //! Prompt compilation contracts shared by subagent dispatch paths.
 
+use echo_core::llm::ToolDefinition;
 use echo_core::llm::types::{ContentPart, Message, MessageContent, Role};
 use serde_json::Value;
+use std::collections::HashSet;
+use std::path::PathBuf;
 
-use super::context::SubagentContext;
-use super::types::ExecutionMode;
+use super::types::{ExecutionMode, SubagentAccessMode};
 
 /// Controls whether a dispatch starts fresh or receives filtered parent turns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -12,6 +14,75 @@ pub enum ContextTransferPolicy {
     #[default]
     Fresh,
     InheritStructured,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCapability {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCapabilitySnapshot {
+    pub tools: Vec<ToolCapability>,
+    pub visible_tools: Vec<String>,
+    pub disabled_tools: Vec<String>,
+}
+
+impl ToolCapabilitySnapshot {
+    pub fn from_definitions(
+        definitions: &[ToolDefinition],
+        disabled_tools: &HashSet<String>,
+    ) -> Self {
+        let mut tools = definitions
+            .iter()
+            .map(|definition| ToolCapability {
+                name: definition.function.name.clone(),
+                description: definition
+                    .function
+                    .description
+                    .trim()
+                    .chars()
+                    .take(240)
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        tools.dedup_by(|left, right| left.name == right.name);
+        let registered = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<HashSet<_>>();
+        let visible_tools = tools
+            .iter()
+            .filter(|tool| !disabled_tools.contains(&tool.name))
+            .map(|tool| tool.name.clone())
+            .collect();
+        let mut disabled_tools = disabled_tools
+            .iter()
+            .filter(|name| registered.contains(name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        disabled_tools.sort();
+        Self {
+            tools,
+            visible_tools,
+            disabled_tools,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptActor {
+    Subagent,
+    Primary,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SubagentExecutionBoundary<'a> {
+    pub access: SubagentAccessMode,
+    pub isolation: &'a str,
+    pub can_delegate: bool,
 }
 
 /// Stable provenance for one compiler-owned prompt section.
@@ -46,18 +117,12 @@ impl PromptDiagnostics {
 /// Registration-time facts used to compile a cache-stable role system prompt.
 #[derive(Debug, Clone)]
 pub struct SubagentSystemPromptInput<'a> {
+    pub actor: PromptActor,
     pub name: &'a str,
     pub description: &'a str,
     pub role_prompt: &'a str,
-    pub readonly: bool,
-    pub can_delegate: bool,
-    pub isolation: &'a str,
-    /// Optional static environment grounding (for example OS/arch — facts that
-    /// do not change per dispatch). Product compilers render it as a system-prompt
-    /// section; the framework default compiler ignores it. Dynamic per-dispatch
-    /// state (cwd, workspace root) must NOT go here — it belongs in the
-    /// invocation, where the runtime knows the actual working directory.
-    pub environment: Option<String>,
+    pub capabilities: &'a ToolCapabilitySnapshot,
+    pub boundary: SubagentExecutionBoundary<'a>,
 }
 
 /// Registration-time compiler result.
@@ -67,29 +132,57 @@ pub struct CompiledSubagentSystemPrompt {
     pub diagnostics: PromptDiagnostics,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SubagentTaskContext {
+    pub task_title: Option<String>,
+    pub user_goal: Option<String>,
+    pub workspace: Option<PathBuf>,
+    pub files: Vec<String>,
+    pub execution_checks: Vec<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub required_artifacts: Vec<String>,
+    pub constraints: Vec<String>,
+}
+
 /// Dispatch-time facts presented to a prompt compiler.
-pub struct SubagentPromptInput<'a> {
+pub struct SubagentInvocation<'a> {
     pub agent_name: &'a str,
     pub task: &'a str,
     pub mode: ExecutionMode,
     pub transfer_policy: ContextTransferPolicy,
-    pub parent_context: Option<&'a SubagentContext>,
-    pub inherit_history: Option<usize>,
+    pub history: &'a [Message],
+    pub history_limit: Option<usize>,
+    /// Current typed input, including any binary attachments. The compiler owns
+    /// its final text framing and must preserve non-text content.
+    pub current_message: Option<&'a Message>,
+    pub context: &'a SubagentTaskContext,
+    /// Present only when this invocation narrows the stable registered tool
+    /// surface. Product compilers render the override, not a duplicate catalog.
+    pub capability_override: Option<&'a ToolCapabilitySnapshot>,
     /// Opaque product-layer payload. Framework compilers ignore it.
     pub payload: Option<&'a Value>,
-    /// Explicit task constraints from the dispatch request (e.g. the
-    /// `agent_tool` `constraints` parameter). Carried independently of
-    /// `parent_context` so fresh-context dispatches can still express
-    /// boundaries. Product compilers render them in the task context.
-    pub constraints: &'a [String],
 }
 
 /// Dispatch-time compiler result consumed by the executor.
 #[derive(Debug, Clone, Default)]
 pub struct CompiledSubagentInvocation {
-    pub task_input: String,
-    pub history: Vec<Message>,
+    pub messages: Vec<Message>,
     pub diagnostics: PromptDiagnostics,
+}
+
+impl CompiledSubagentInvocation {
+    pub fn task_input(&self) -> String {
+        self.messages
+            .last()
+            .and_then(Message::text_content)
+            .unwrap_or_default()
+    }
+
+    pub fn history(&self) -> &[Message] {
+        self.messages
+            .get(..self.messages.len().saturating_sub(1))
+            .unwrap_or_default()
+    }
 }
 
 /// One prompt compiler instance owns registration-time and dispatch-time framing.
@@ -97,7 +190,7 @@ pub trait SubagentPromptCompiler: Send + Sync {
     fn compile_system(&self, input: &SubagentSystemPromptInput<'_>)
     -> CompiledSubagentSystemPrompt;
 
-    fn compile_invocation(&self, input: &SubagentPromptInput<'_>) -> CompiledSubagentInvocation;
+    fn compile_invocation(&self, input: &SubagentInvocation<'_>) -> CompiledSubagentInvocation;
 }
 
 /// Product-neutral fallback used by framework consumers that do not inject a compiler.
@@ -117,32 +210,63 @@ impl SubagentPromptCompiler for DefaultSubagentPromptCompiler {
         }
     }
 
-    fn compile_invocation(&self, input: &SubagentPromptInput<'_>) -> CompiledSubagentInvocation {
+    fn compile_invocation(&self, input: &SubagentInvocation<'_>) -> CompiledSubagentInvocation {
         let mut diagnostics = PromptDiagnostics::default();
         diagnostics.record("task", "dispatch_request");
-        let history = if input.transfer_policy == ContextTransferPolicy::InheritStructured {
-            input
-                .parent_context
-                .map(|context| filter_history(&context.messages, input.inherit_history))
-                .unwrap_or_default()
+        let mut history = if input.transfer_policy == ContextTransferPolicy::InheritStructured {
+            filter_history(input.history, input.history_limit)
         } else {
             Vec::new()
         };
-        let task_input = if input.constraints.is_empty() {
+        remove_duplicate_current_message(&mut history, input.current_message);
+        let task_input = if input.context.constraints.is_empty() {
             input.task.to_string()
         } else {
             diagnostics.record("constraints", "dispatch_request.constraints");
             format!(
                 "{}\n\n[constraints]\n{}\n[/constraints]",
                 input.task.trim(),
-                input.constraints.join("\n")
+                input.context.constraints.join("\n")
             )
         };
+        let task_input = match input.context.workspace.as_deref() {
+            Some(path) => format!(
+                "{task_input}\n\n[workspace]\n- root: {}\n[/workspace]",
+                path.display()
+            ),
+            None => task_input,
+        };
+        let mut messages = history;
+        messages.push(compiled_current_message(input.current_message, &task_input));
         CompiledSubagentInvocation {
-            task_input,
-            history,
+            messages,
             diagnostics,
         }
+    }
+}
+
+/// Build the final current user message while retaining binary attachments.
+pub fn compiled_current_message(message: Option<&Message>, task_input: &str) -> Message {
+    message
+        .cloned()
+        .map(|message| with_compiled_task(message, task_input))
+        .unwrap_or_else(|| Message::user(task_input.to_string()))
+}
+
+/// Avoid replaying the exact current user text immediately before the compiled
+/// invocation. The current message remains authoritative because it may also
+/// carry attachments that the history projection intentionally does not own.
+pub fn remove_duplicate_current_message(history: &mut Vec<Message>, current: Option<&Message>) {
+    let Some(current_text) = current.and_then(Message::text_content) else {
+        return;
+    };
+    if history.last().is_some_and(|message| {
+        message.role == Role::User
+            && message
+                .text_content()
+                .is_some_and(|text| text.trim() == current_text.trim())
+    }) {
+        history.pop();
     }
 }
 
@@ -298,23 +422,54 @@ mod tests {
 
     #[test]
     fn default_compiler_renders_dispatch_constraints() {
-        let constraints = vec![
-            "Only edit src/prompt.rs".to_string(),
-            "Run cargo test".to_string(),
-        ];
-        let compiled = DefaultSubagentPromptCompiler.compile_invocation(&SubagentPromptInput {
+        let context = SubagentTaskContext {
+            constraints: vec![
+                "Only edit src/prompt.rs".to_string(),
+                "Run cargo test".to_string(),
+            ],
+            ..SubagentTaskContext::default()
+        };
+        let compiled = DefaultSubagentPromptCompiler.compile_invocation(&SubagentInvocation {
             agent_name: "implementer",
             task: "Update prompt compilation",
             mode: ExecutionMode::Sync,
             transfer_policy: ContextTransferPolicy::Fresh,
-            parent_context: None,
-            inherit_history: None,
+            history: &[],
+            history_limit: None,
+            current_message: None,
+            context: &context,
+            capability_override: None,
             payload: None,
-            constraints: &constraints,
         });
 
         assert_eq!(compiled.diagnostics.count("constraints"), 1);
-        assert!(compiled.task_input.contains("Only edit src/prompt.rs"));
-        assert!(compiled.task_input.contains("Run cargo test"));
+        assert!(compiled.task_input().contains("Only edit src/prompt.rs"));
+        assert!(compiled.task_input().contains("Run cargo test"));
+    }
+
+    #[test]
+    fn default_compiler_owns_isolated_working_directory_framing() {
+        let context = SubagentTaskContext {
+            workspace: Some(std::path::PathBuf::from("/tmp/eko-work-42")),
+            ..SubagentTaskContext::default()
+        };
+        let compiled = DefaultSubagentPromptCompiler.compile_invocation(&SubagentInvocation {
+            agent_name: "implementer",
+            task: "Update prompt compilation",
+            mode: ExecutionMode::Fork,
+            transfer_policy: ContextTransferPolicy::Fresh,
+            history: &[],
+            history_limit: None,
+            current_message: None,
+            context: &context,
+            capability_override: None,
+            payload: None,
+        });
+
+        assert!(
+            compiled
+                .task_input()
+                .contains("[workspace]\n- root: /tmp/eko-work-42\n[/workspace]")
+        );
     }
 }

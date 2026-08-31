@@ -1,4 +1,4 @@
-use echo_agent::agent::AgentInvocationContext;
+use echo_agent::agent::{AgentConfig, AgentInvocationContext};
 use echo_agent::config::FrameworkConfig;
 use echo_agent::paths::DataRoot;
 use echo_agent::plugin::{
@@ -23,6 +23,7 @@ use echo_agent::tools::{InvocationResourceGuard, StandardToolPack, ToolPack};
 #[test]
 fn public_facade_composes_without_split_crates() {
     let config = FrameworkConfig::default();
+    let _agent_config: AgentConfig = config.clone().into();
     let root = DataRoot::new("/tmp/echo-agent-smoke");
     let pack = StandardToolPack::new();
 
@@ -55,6 +56,39 @@ fn tracked_steering_types_are_available_from_the_public_facade() {
         echo_agent::agent::AgentSteerState::Accepted.phase(),
         echo_agent::agent::AgentSteerPhase::Accepted
     );
+}
+
+#[test]
+fn typed_delivery_facade_is_the_public_sdk_entry_point() {
+    fn public_type<T>() {}
+
+    public_type::<echo_agent::delivery::DeliveryEnvelope<String, serde_json::Value>>();
+    public_type::<echo_agent::delivery::DeliveryTransition>();
+    public_type::<echo_agent::delivery::DeliverySettlement>();
+}
+
+#[test]
+fn llm_timeouts_are_available_from_client_and_request_facades() {
+    let timeouts = echo_agent::llm::LlmTimeouts::default()
+        .with_first_chunk_timeout(std::time::Duration::from_secs(10))
+        .without_overall_timeout();
+    let request = echo_agent::llm::ChatRequest::default().with_timeouts(timeouts);
+    assert_eq!(request.timeouts, Some(timeouts));
+}
+
+#[cfg(feature = "subagent")]
+#[test]
+fn subagent_facade_exposes_receipts_and_usage_contract() {
+    fn public_type<T>() {}
+
+    public_type::<echo_agent::subagent::SubagentResult>();
+    public_type::<echo_agent::subagent::SubagentOutcome>();
+    public_type::<echo_agent::runtime::ExecutionUsage>();
+    let _subagent_usage: fn(
+        &echo_agent::subagent::SubagentResult,
+    ) -> echo_agent::runtime::ExecutionUsage = echo_agent::subagent::SubagentResult::usage;
+    let _turn_usage: fn(&echo_agent::runtime::TurnReceipt) -> echo_agent::runtime::ExecutionUsage =
+        echo_agent::runtime::TurnReceipt::usage;
 }
 
 #[test]

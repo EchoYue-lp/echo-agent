@@ -78,8 +78,8 @@ pub enum SubagentEvent {
         iterations: Option<u64>,
         /// Final output text produced by the subagent.
         output: String,
-        /// Structured terminal result consumed by the parent/application.
-        result: SubagentOutcome,
+        /// Structured terminal outcome consumed by the parent/application.
+        outcome: SubagentOutcome,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).
@@ -95,8 +95,8 @@ pub enum SubagentEvent {
         error: String,
         /// Failed or timed-out terminal status.
         status: SubagentStatus,
-        /// Structured terminal result, including remaining work.
-        result: SubagentOutcome,
+        /// Structured terminal outcome, including remaining work.
+        outcome: SubagentOutcome,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).
@@ -108,8 +108,8 @@ pub enum SubagentEvent {
         parent: String,
         /// Name of the subagent whose dispatch was cancelled.
         agent: String,
-        /// Structured cancelled result.
-        result: SubagentOutcome,
+        /// Structured cancelled outcome.
+        outcome: SubagentOutcome,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).

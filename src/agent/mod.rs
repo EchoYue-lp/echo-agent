@@ -13,7 +13,7 @@
 //! | ReAct reasoning | [`react`] — the default loop |
 //! | Task planning | Tools (plan, create_task, update_task) |
 //! | Self-reflection | [`critic`] — evaluation and feedback tools |
-//! | Subagent coordination | [`subagent`] — multi-agent orchestration |
+//! | Subagent coordination | `subagent` — multi-agent orchestration |
 //!
 //! # Quick Start
 //!
@@ -37,20 +37,15 @@ pub use echo_core::agent::builder::AgentBuilder as AgentBuilderTrait;
 pub use echo_core::agent::{
     AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentEvent, AgentInputLifecycle,
     AgentInvocationContext, AgentSteerPhase, AgentSteerReceipt, AgentSteerState,
-    AgentSteerTurnOutcome, CancellationToken, EventEnvelope, EventIdentity, InterventionCallback,
-    InterventionResult, StepType, ToolInvocation, ToolInvocationRewrite, envelope_event_stream,
-    envelope_event_stream_after, validate_event_trajectory,
+    AgentSteerTurnOutcome, CancellationToken, EventEnvelope, EventIdentity, ExecutionUsage,
+    InterventionCallback, InterventionResult, StepType, ToolInvocation, ToolInvocationRewrite,
+    ToolVisibilityPolicy, envelope_event_stream, envelope_event_stream_after,
+    validate_event_trajectory,
 };
-
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-
-/// Subagent registry type alias
-#[allow(dead_code)]
-pub(crate) type SubagentMap = Arc<RwLock<HashMap<String, Arc<dyn Agent>>>>;
 
 // ── Core sub-modules ───────────────────────────────────────────────────────
 
+pub mod admission;
 pub mod callbacks;
 pub mod config;
 pub mod critic;
@@ -65,13 +60,19 @@ pub mod subagent;
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
+pub use crate::agent::admission::{
+    KeyedExecutionAdmission, KeyedExecutionAdmissionError, KeyedExecutionLease,
+    KeyedExecutionRetirement,
+};
 pub use crate::agent::handle::AgentHandle;
 pub use crate::agent::react::builder::ReactAgentBuilder;
+pub use crate::agent::react::run::pipeline::ToolExecutionPipeline;
 pub use crate::agent::react::structured::StructuredAgent;
 pub use crate::agent::react::{
     PreparedAgentModelDeactivation, PreparedAgentModelGeneration, PreparedCriticUpdate,
     PreparedTokenLimit, ReactAgent,
 };
+pub use crate::agent::snapshot::AgentRunSnapshot;
 pub use crate::agent::steer::TurnSteerError;
 pub use config::AgentConfig;
 

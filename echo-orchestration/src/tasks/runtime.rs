@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use echo_core::error::Result;
 pub use echo_core::tools::NestedDelegationPolicy;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use tokio_util::sync::CancellationToken;
@@ -136,6 +136,26 @@ pub struct TaskSpec {
 }
 
 impl TaskSpec {
+    /// Attach a typed product extension without exposing serialization details
+    /// at every application boundary. The framework stores the extension as
+    /// JSON so task graph hashing, persistence, and generic tools remain
+    /// product-neutral.
+    pub fn with_extension<T: Serialize>(
+        mut self,
+        extension: T,
+    ) -> std::result::Result<Self, String> {
+        self.extension = serde_json::to_value(extension).map_err(|error| {
+            format!("failed to encode extension for task '{}': {error}", self.id)
+        })?;
+        Ok(self)
+    }
+
+    /// Decode the product extension into the caller's typed value.
+    pub fn extension_as<T: DeserializeOwned>(&self) -> std::result::Result<T, String> {
+        serde_json::from_value(self.extension.clone())
+            .map_err(|error| format!("failed to decode extension for task '{}': {error}", self.id))
+    }
+
     /// Stable SHA-256 identity for one immutable task specification.
     pub fn stable_hash(&self) -> std::result::Result<String, String> {
         let bytes = serde_json::to_vec(self).map_err(|error| {
@@ -610,6 +630,7 @@ mod tests {
         TaskStatus, TaskSubagentContext,
     };
     use crate::tasks::runtime::{DagExecutionState, Task};
+    use serde::{Deserialize, Serialize};
 
     #[test]
     fn terminal_statuses_are_classified() {
@@ -679,6 +700,46 @@ mod tests {
 
         assert_eq!(decoded, summary);
         Ok(())
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct TypedTaskExtension {
+        role: String,
+        priority: u32,
+    }
+
+    #[test]
+    fn task_spec_typed_extension_round_trips_without_manual_json() -> Result<(), String> {
+        let extension = TypedTaskExtension {
+            role: "explorer".to_string(),
+            priority: 2,
+        };
+        let spec = TaskSpec {
+            id: "task-1".to_string(),
+            title: "Inspect".to_string(),
+            description: "Inspect the repository".to_string(),
+            depends_on: Vec::new(),
+            max_retries: 1,
+            extension: serde_json::Value::Null,
+        }
+        .with_extension(extension.clone())?;
+
+        assert_eq!(spec.extension_as::<TypedTaskExtension>()?, extension);
+        Ok(())
+    }
+
+    #[test]
+    fn task_spec_typed_extension_error_identifies_task() {
+        let spec = TaskSpec {
+            id: "task-invalid".to_string(),
+            title: String::new(),
+            description: String::new(),
+            depends_on: Vec::new(),
+            max_retries: 0,
+            extension: serde_json::json!({ "priority": "not-a-number" }),
+        };
+        let error = spec.extension_as::<TypedTaskExtension>().err();
+        assert!(error.is_some_and(|message| message.contains("task-invalid")));
     }
 
     fn runtime_task(id: &str, status: TaskStatus, deps: &[&str]) -> Task {

@@ -68,6 +68,7 @@ impl ResponsesClient {
             request,
             self.header_map.clone(),
             &self.config.base_url,
+            self.config.timeouts,
         )
         .await
     }
@@ -78,12 +79,15 @@ impl ResponsesClient {
         request: Value,
         cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<'static, Result<Value>>> {
+        let request = self
+            .client
+            .post(&self.config.base_url)
+            .headers(self.header_map.clone())
+            .json(&request);
         let raw_stream = stream_json_sse(
-            self.client.clone(),
             request,
-            self.header_map.clone(),
-            self.config.base_url.clone(),
             self.config.model.clone(),
+            self.config.timeouts,
             cancel_token,
         )
         .await?;
@@ -100,10 +104,7 @@ impl ResponsesClient {
     }
 
     fn build_http_client() -> Client {
-        Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_default()
+        Client::new()
     }
 
     fn request_body(&self, request: &ChatRequest, stream: bool) -> Value {
@@ -156,12 +157,14 @@ impl LlmClient for ResponsesClient {
         Box::pin(
             async move {
                 self.config.validate_input_modalities(&request.messages)?;
+                let timeouts = request.timeouts.unwrap_or(self.config.timeouts);
                 let body = self.request_body(&request, false);
                 let raw = post_json(
                     self.client.clone(),
                     body,
                     self.header_map.clone(),
                     &self.config.base_url,
+                    timeouts,
                 )
                 .await?;
                 response_to_chat(raw)
@@ -178,17 +181,17 @@ impl LlmClient for ResponsesClient {
         Box::pin(
             async move {
                 self.config.validate_input_modalities(&request.messages)?;
+                let timeouts = request.timeouts.unwrap_or(self.config.timeouts);
                 let cancel_token = request.cancel_token.clone();
                 let body = self.request_body(&request, true);
-                let raw_stream = stream_json_sse(
-                    self.client.clone(),
-                    body,
-                    self.header_map.clone(),
-                    self.config.base_url.clone(),
-                    self.config.model.clone(),
-                    cancel_token,
-                )
-                .await?;
+                let request = self
+                    .client
+                    .post(&self.config.base_url)
+                    .headers(self.header_map.clone())
+                    .json(&body);
+                let raw_stream =
+                    stream_json_sse(request, self.config.model.clone(), timeouts, cancel_token)
+                        .await?;
                 Ok(adapt_responses_stream(raw_stream))
             }
             .instrument(info_span!("openai_responses_stream", model = %model)),
@@ -1099,6 +1102,7 @@ mod tests {
             model: "gpt-test".to_string(),
             input_modalities: echo_core::llm::ModelInputModality::all_supported(),
             thinking_protocol: echo_core::llm::ThinkingProtocol::OpenaiReasoningEffort,
+            timeouts: echo_core::llm::LlmTimeouts::default(),
         }
     }
 

@@ -7,7 +7,7 @@
 use echo_core::error::{ConfigError, LlmError, Result};
 use echo_core::llm::capabilities::resolve_thinking_profile;
 use echo_core::llm::types::{ContentPart, Message, MessageContent};
-use echo_core::llm::{LlmApiProtocol, ModelInputModality, ThinkingProtocol};
+use echo_core::llm::{LlmApiProtocol, LlmTimeouts, ModelInputModality, ThinkingProtocol};
 use serde::{Deserialize, Serialize};
 
 /// Resolve a provider API root or complete endpoint for one explicit protocol.
@@ -79,6 +79,9 @@ pub struct LlmConfig {
     /// Thinking wire dialect resolved centrally from the runtime contract.
     #[serde(default)]
     pub thinking_protocol: ThinkingProtocol,
+    /// Request and streaming timeout policy shared by every provider transport.
+    #[serde(default)]
+    pub timeouts: LlmTimeouts,
 }
 
 impl std::fmt::Debug for LlmConfig {
@@ -92,6 +95,7 @@ impl std::fmt::Debug for LlmConfig {
             .field("model", &self.model)
             .field("input_modalities", &self.input_modalities)
             .field("thinking_protocol", &self.thinking_protocol)
+            .field("timeouts", &self.timeouts)
             .finish()
     }
 }
@@ -126,12 +130,19 @@ impl LlmConfig {
             model,
             input_modalities: ModelInputModality::text_only(),
             thinking_protocol,
+            timeouts: LlmTimeouts::default(),
         })
     }
 
     /// Set the concrete model's accepted input modalities.
     pub fn with_input_modalities(mut self, input_modalities: Vec<ModelInputModality>) -> Self {
         self.input_modalities = normalize_input_modalities(input_modalities);
+        self
+    }
+
+    /// Set the timeout policy used by the concrete provider client.
+    pub fn with_timeouts(mut self, timeouts: LlmTimeouts) -> Self {
+        self.timeouts = timeouts;
         self
     }
 
@@ -150,7 +161,8 @@ impl LlmConfig {
                     &self.api_key,
                     &self.model,
                 )
-                .with_input_modalities(self.input_modalities.clone()),
+                .with_input_modalities(self.input_modalities.clone())
+                .with_timeouts(self.timeouts),
             )),
         }
     }
@@ -262,16 +274,22 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
         assert_eq!(text.input_modalities, ModelInputModality::text_only());
+        assert_eq!(text.timeouts, LlmTimeouts::default());
 
-        let multimodal = text.with_input_modalities(vec![
-            ModelInputModality::Image,
-            ModelInputModality::Audio,
-            ModelInputModality::Video,
-        ]);
+        let timeouts =
+            LlmTimeouts::default().with_first_chunk_timeout(std::time::Duration::from_secs(15));
+        let multimodal = text
+            .with_input_modalities(vec![
+                ModelInputModality::Image,
+                ModelInputModality::Audio,
+                ModelInputModality::Video,
+            ])
+            .with_timeouts(timeouts);
         assert_eq!(
             multimodal.input_modalities,
             ModelInputModality::all_supported()
         );
+        assert_eq!(multimodal.timeouts, timeouts);
         Ok(())
     }
 

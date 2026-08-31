@@ -82,6 +82,7 @@ fn test_llm_config(model: &str) -> crate::llm::LlmConfig {
         model: model.to_string(),
         input_modalities: crate::llm::ModelInputModality::text_only(),
         thinking_protocol: crate::llm::ThinkingProtocol::None,
+        timeouts: crate::llm::LlmTimeouts::default(),
     }
 }
 
@@ -1732,7 +1733,7 @@ async fn intent_router_skill_activation_survives_compression_markers() -> Result
 }
 
 #[tokio::test]
-async fn plugin_skill_variables_cover_frontmatter_hooks_and_body() -> Result<(), String> {
+async fn plugin_skill_variables_cover_body() -> Result<(), String> {
     let base = std::env::temp_dir().join(format!(
         "echo-agent-plugin-skill-variables-{}",
         uuid::Uuid::new_v4()
@@ -1743,11 +1744,10 @@ async fn plugin_skill_variables_cover_frontmatter_hooks_and_body() -> Result<(),
         .map_err(|error| format!("create skill dir: {error}"))?;
     tokio::fs::write(
         skill_dir.join("SKILL.md"),
-        "---\nname: configured-skill\ndescription: Configured skill\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: notify ${user_config.endpoint}\n---\nUse ${user_config.endpoint}.\n",
+        "---\nname: configured-skill\ndescription: Configured skill\n---\nUse ${user_config.endpoint}.\n",
     )
     .await
     .map_err(|error| format!("write skill file: {error}"))?;
-
     let variables = crate::plugin::PluginVariables::new(
         base.clone(),
         base.join("plugin-data/configured-plugin"),
@@ -1769,18 +1769,7 @@ async fn plugin_skill_variables_cover_frontmatter_hooks_and_body() -> Result<(),
         .into_iter()
         .find(|descriptor| descriptor.name == "configured-skill")
         .ok_or_else(|| "configured plugin skill was not registered".to_string())?;
-    let action = descriptor
-        .hooks
-        .as_ref()
-        .and_then(|definition| definition.rules_for(HookEvent::PreToolUse).first())
-        .and_then(|rule| rule.hooks.first())
-        .ok_or_else(|| "configured frontmatter hook was not registered".to_string())?;
-    match action {
-        HookAction::Command { command, .. } => {
-            assert_eq!(command, "notify http://localhost:9100");
-        }
-        _ => return Err("configured hook is not a command".to_string()),
-    }
+    assert!(descriptor.hooks.is_none());
 
     agent
         .activate_skill("configured-skill")
@@ -1898,7 +1887,7 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
     tokio::fs::create_dir_all(&skill_dir).await.unwrap();
     tokio::fs::write(
         skill_dir.join("SKILL.md"),
-        "---\nname: python-linter\ndescription: Lint Python files\npaths:\n  - \"*.py\"\n---\n\nLint the current Python file.\n",
+        "---\nname: python-linter\ndescription: Lint Python files\n---\n\nLint the current Python file.\n",
     )
     .await
     .unwrap();
@@ -1909,6 +1898,22 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
         .discover_skills(&[DiscoveryScope::Custom(base.clone())])
         .await
         .unwrap();
+
+    // The standard frontmatter has no `paths` source; conditional activation
+    // is a programmatic descriptor field, so patch it on both registries the
+    // activate_skill tool can resolve through.
+    let mut conditional = agent
+        .skill_registry()
+        .get_descriptor("python-linter")
+        .cloned()
+        .expect("discovered descriptor");
+    conditional.paths = vec!["*.py".to_string()];
+    agent
+        .skill_registry_mut()
+        .register_descriptor(conditional.clone());
+    if let Some(shared) = agent.tools.progressive_skill_registry.clone() {
+        shared.write().await.register_descriptor(conditional);
+    }
 
     let missing = agent
         .tools

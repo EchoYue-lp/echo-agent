@@ -34,17 +34,18 @@ skills/
 
 ### SKILL.md 格式
 
+只使用官方 agentskills.io 字段——没有 trigger 字段；路由是 description-driven，
+把"何时使用"的场景与关键词写进 `description`：
+
 ```markdown
 ---
 name: my-skill
-description: 简短描述技能用途
+description: >-
+  简短描述技能用途与适用场景，包含应路由到该技能的用户语句。
 metadata:
   version: "1.0.0"
   author: Your Name
-  tags: [domain, category]
-triggers:
-  - "关键词1"
-  - "关键词2"
+  tags: "domain, category"
 ---
 
 # My Skill
@@ -63,6 +64,9 @@ triggers:
   - 参数：`--input <file>` `--output <file>`
 ```
 
+官方 Skill 格式没有 per-skill Hook 字段或 sidecar。请在宿主应用或 Plugin
+Hook component 中配置 Hooks（见 [Hooks 系统](./23-hooks.md)）。
+
 ### 三层渐进式披露
 
 | 层级 | 内容 | 触发方式 | Token 开销 |
@@ -76,7 +80,7 @@ triggers:
 ### 编写高质量 SKILL.md
 
 **✅ 好的写法：**
-- 明确的 `triggers`（避免太宽泛导致误激活）
+- description 写明具体的适用场景与路由语句（路由是 description-driven）
 - 结构化的使用指南（标题、列表、代码块）
 - 提供输出格式示例
 - 保持 Tier 2 < 5000 tokens

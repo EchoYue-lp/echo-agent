@@ -13,7 +13,7 @@
 //! - `wait` long-polls a cell: it returns when the cell reaches a terminal
 //!   phase, new output appears, or the caller's yield budget expires. It is
 //!   **retry-safe**: the terminal state is readable repeatedly (multiple
-//!   waiters — e.g. main agent + awaiter subagent — can all observe the same
+//!   waiters — e.g. a main Agent and a deterministic watcher — can all observe the same
 //!   final state), and output is consumed via a byte-cursor the caller passes
 //!   back on the next call.
 //! - `stop` kills the underlying process; `list` snapshots every cell.

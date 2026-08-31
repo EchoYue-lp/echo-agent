@@ -15,8 +15,8 @@
 //! ```
 //!
 //! - [`trace`]: 执行追踪基础设施 — 完整记录单次执行的 Run/RunEvent/RunStore
-//! - [`eval`]: 评测框架 — 定义 EvalCase/SuccessCriteria，基于 trace 运行评测
-//! - [`improve`]: 离线辅助 — 显式轨迹导出；与 `eval` 同时启用时提供离线评测优化
+//! - `eval`: 评测框架 — 定义 EvalCase/SuccessCriteria，基于 trace 运行评测
+//! - `improve`: 离线辅助 — 显式轨迹导出；与 `eval` 同时启用时提供离线评测优化
 //! - [`evolution`]: 结构化演化 — typed memory、证据候选、change audit、security、skill lifecycle
 //!
 
@@ -32,6 +32,10 @@ pub use echo_core::__macro_support;
 
 pub mod agent;
 pub mod audit;
+/// Provider-neutral token budget contracts.
+pub mod budget {
+    pub use echo_core::budget::*;
+}
 pub mod compression;
 pub mod config;
 pub mod context;
@@ -55,6 +59,18 @@ pub mod memory;
 pub mod memory_promoter;
 pub mod paths;
 pub mod plugin;
+/// Durable, route/payload-typed delivery primitives.
+///
+/// This is the canonical SDK surface for durable delivery. Applications keep
+/// their own route and payload types; no application-shaped conversion layer
+/// is required.
+pub mod delivery {
+    pub use crate::state::delivery::*;
+}
+/// Agent capability and user-preference profile contracts.
+pub mod profiles {
+    pub use echo_state::profiles::*;
+}
 pub mod retry;
 pub mod runtime;
 pub mod sandbox;
@@ -62,6 +78,10 @@ pub mod scheduler;
 pub mod security;
 pub mod skills;
 pub mod state;
+/// Skill execution telemetry contracts and store.
+pub mod skill_telemetry {
+    pub use echo_state::skill_telemetry::*;
+}
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tokenizer;
@@ -69,6 +89,16 @@ pub mod tools;
 pub mod trace;
 pub mod utils;
 pub mod workflow;
+
+/// Subagent execution, lifecycle, and typed outcome contracts.
+///
+/// The facade keeps consumers on the public SDK surface instead of reaching
+/// through the internal `agent` module tree.
+#[cfg(feature = "subagent")]
+#[cfg_attr(docsrs, doc(cfg(feature = "subagent")))]
+pub mod subagent {
+    pub use crate::agent::subagent::*;
+}
 
 // ── Optional modules (feature-gated) ────────────────────────────────────────
 
@@ -118,21 +148,6 @@ pub use echo_macros::{
     Tool, audit_logger, callback, compressor, guard, handler, permission_policy, tool,
 };
 
-/// Direct access to split workspace crates during migration.
-///
-/// This keeps `echo_agent` usable as a facade while still giving callers an
-/// explicit path to the underlying crate APIs when they need to avoid facade
-/// drift or migrate imports incrementally.
-pub mod workspace {
-    pub use echo_core as core;
-    pub use echo_execution as execution;
-    pub use echo_integration as integration;
-    pub use echo_macros as macros;
-    pub use echo_orchestration as orchestration;
-    pub use echo_state as state;
-    pub use echo_tools as tools;
-}
-
 // ── Prelude ─────────────────────────────────────────────────────────────────
 
 /// Common type re-exports.
@@ -142,17 +157,39 @@ pub mod prelude {
     // Agent
     pub use crate::agent::{
         AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle,
-        AgentSteerPhase, AgentSteerReceipt, AgentSteerState, AgentSteerTurnOutcome,
-        CancellationToken, EventEnvelope, EventIdentity, InterventionCallback, InterventionResult,
+        AgentRunSnapshot, AgentSteerPhase, AgentSteerReceipt, AgentSteerState,
+        AgentSteerTurnOutcome, CancellationToken, EventEnvelope, EventIdentity, ExecutionUsage,
+        InterventionCallback, InterventionResult, KeyedExecutionAdmission,
+        KeyedExecutionAdmissionError, KeyedExecutionLease, KeyedExecutionRetirement,
         PreparedAgentModelDeactivation, PreparedAgentModelGeneration, PreparedCriticUpdate,
         PreparedTokenLimit, ReactAgent, ReactAgentBuilder, StepType, StructuredAgent,
-        ToolInvocation, ToolInvocationRewrite, envelope_event_stream, envelope_event_stream_after,
-        validate_event_trajectory,
+        ToolExecutionPipeline, ToolInvocation, ToolInvocationRewrite, envelope_event_stream,
+        envelope_event_stream_after, validate_event_trajectory,
+    };
+    // Durable delivery
+    pub use crate::state::delivery::{
+        DeliveryClaim, DeliveryClaimDraft, DeliveryEnvelope, DeliveryEvent, DeliveryInFlight,
+        DeliveryLedger, DeliveryLedgerConfig, DeliveryLedgerError, DeliveryLedgerProjection,
+        DeliveryOutcome, DeliveryPayload, DeliveryPhase, DeliveryRecord, DeliveryRoute,
+        DeliverySettlement, DeliveryTransition,
+    };
+    // Subagent results and generic evidence views
+    #[cfg(feature = "subagent")]
+    pub use crate::agent::subagent::{
+        BackgroundSubagentHandle, DispatchRequest, SubagentArtifact, SubagentAttemptIdentity,
+        SubagentBuilder, SubagentCommandIdentity, SubagentCommandPhase, SubagentControlError,
+        SubagentControlPhase, SubagentEvent, SubagentEventBus, SubagentEvidence,
+        SubagentEvidenceSource, SubagentExecutor, SubagentExecutorConfig,
+        SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageReceipt,
+        SubagentOutcome, SubagentResult, SubagentStatus, SubagentTouchedFiles,
+        SubagentVerification, SubagentVerificationStatus, TeamAgent, TeamAgentBuilder, TeamConfig,
+        TeamExecutionResult, TeamMember, TeamRole, TeamRuntime, TeamSpec, TeamStrategy,
     };
     // Prompt Template
+    pub use crate::budget::TokenBudgetConfig;
     pub use echo_core::agent::{PromptTemplateManager, RunBudgetPolicy};
     // Config
-    pub use crate::config::{AgentYamlConfig, FrameworkConfig, ModelConfig};
+    pub use crate::config::{AgentSettings, FrameworkConfig, ModelConfig};
 
     /// Convenience alias for [`ReactAgentBuilder`], the canonical builder type.
     pub type AgentBuilder = ReactAgentBuilder;
@@ -161,16 +198,20 @@ pub mod prelude {
     pub use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
     pub use crate::llm::{
         AnthropicClient, ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmApiProtocol,
-        LlmClient, LlmConfig, ModelInputModality, ModelProfile, ModelProfileOverride,
+        LlmClient, LlmConfig, LlmTimeouts, ModelInputModality, ModelProfile, ModelProfileOverride,
         ModelProfileResolver, OpenAiClient, ProviderCapabilities, ResponseFormat, ResponsesClient,
-        SimpleChatOptions, ToolDefinition, resolve_protocol_endpoint,
+        SimpleChatOptions, ThinkingProfile, ToolDefinition, infer_context_window,
+        resolve_protocol_endpoint, resolve_thinking_profile,
     };
 
     // Tools
     pub use crate::tools::builtin::think::ThinkTool;
+    pub use crate::tools::control::{
+        ToolControlError, ToolControlMutation, ToolControlService, ToolControlSnapshot,
+    };
     pub use crate::tools::permission::{
         DefaultPermissionPolicy, PermissionDecision, PermissionMode, PermissionPolicy,
-        ToolPermission,
+        PermissionRule, RuleBehavior, RuleMatcher, RuleRegistry, RuleSource, ToolPermission,
     };
     pub use crate::tools::{
         CommandPolicy, CommandPolicyDecision, StandardToolPack, Tool, ToolAccess, ToolCapabilities,
@@ -211,12 +252,16 @@ pub mod prelude {
         Embedder, EmbeddingStore, FileStore, HttpEmbedder, InMemoryStore, SnapshotManager,
         SnapshotPolicy, StateSnapshot, Store, StoreItem,
     };
+    pub use crate::profiles::{AgentProfile, ProfileStore, UserProfile};
+    pub use crate::skill_telemetry::{SkillExecutionRecord, SkillTelemetry, SkillTelemetryStore};
     // Typed-memory metadata types. These live in echo_core::memory but are
     // re-exported here so downstream products (e.g. echo-agent-app-core's
     // TaskRuntime memory bridge) can reach them through the echo_agent facade
     // without depending on echo_core directly — keeping the facade as the
     // single integration surface.
-    pub use echo_core::memory::{MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType};
+    pub use echo_core::memory::{
+        MemoryMeta, MemoryRisk, MemoryScope, MemorySource, MemoryStatus, MemoryType,
+    };
 
     // Skills
     #[cfg(feature = "files")]
@@ -227,8 +272,8 @@ pub mod prelude {
         Skill, SkillInfo, SkillRegistry,
         external::{
             ActivateSkillTool, DiscoveryScope, PromptContext, ReadSkillResourceTool,
-            RunSkillScriptTool, SkillContent, SkillDescriptor, SkillLoadPolicy, SkillLoader,
-            SkillResourceEntry, SkillResourceKind, SkillSource,
+            RunSkillScriptTool, SkillContent, SkillDescriptor, SkillDocument, SkillLoadPolicy,
+            SkillLoader, SkillResourceEntry, SkillResourceKind, SkillSource,
         },
         hooks::{
             CompressHookStats, HookAction, HookContext, HookEvent, HookEventCategory, HookRegistry,

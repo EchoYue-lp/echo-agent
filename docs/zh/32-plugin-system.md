@@ -112,7 +112,7 @@ EchoAgent 向 stdio 子进程提供 `PLUGIN_ROOT` 和 `PLUGIN_DATA`。`${PLUGIN_
 
 ## 框架与应用分层
 
-通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义和 LSP 适配输出。embedding application 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 adapter 不重复拥有依赖排序、组件所有权或重载语义。
+通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义和 LSP 适配输出。embedding application 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 integration 不重复拥有依赖排序、组件所有权或重载语义。
 
 ## 发现与生命周期
 
@@ -151,6 +151,8 @@ registry.enable(&id)?;
 ```
 
 需要安装前报告时，使用 `PluginRegistry::validate_plugin_dir`。
+`PluginScope` 实现了标准 `FromStr`，并支持文档化的简写（`u`、`p`、`l`）；调用方可以
+统一使用 `scope.parse()` 解析配置和命令输入。
 
 ## 设计依据
 

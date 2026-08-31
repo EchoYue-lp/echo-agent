@@ -17,6 +17,11 @@ pub mod builtin {
     pub use echo_tools::skills::ShellSkill;
 }
 
+/// Dependency declarations and local availability probes for file-based Skills.
+pub mod dependency_probe {
+    pub use echo_execution::skills::dependency_probe::*;
+}
+
 /// File-based external skill loading (re-export from echo_execution).
 pub mod external {
     pub use echo_execution::skills::external::*;

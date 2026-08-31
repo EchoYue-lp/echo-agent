@@ -298,6 +298,16 @@ impl<E> Clone for JournalRecord<E> {
 }
 
 impl<E> JournalRecord<E> {
+    /// Build a record while preserving the physical batch identity and
+    /// sequence assigned by another typed journal adapter.
+    pub fn from_parts(batch_id: impl Into<String>, sequence: u64, event: E) -> Self {
+        Self {
+            batch_id: batch_id.into(),
+            sequence,
+            event: Arc::new(event),
+        }
+    }
+
     /// Stable identity of the physical batch frame containing this record.
     pub fn batch_id(&self) -> &str {
         &self.batch_id
@@ -351,6 +361,16 @@ pub struct PreparedJournalBatch<E> {
     batch_id: String,
     events: Arc<[Arc<E>]>,
     payload_digest: String,
+}
+
+impl<E> Clone for PreparedJournalBatch<E> {
+    fn clone(&self) -> Self {
+        Self {
+            batch_id: self.batch_id.clone(),
+            events: Arc::clone(&self.events),
+            payload_digest: self.payload_digest.clone(),
+        }
+    }
 }
 
 impl<E: fmt::Debug> fmt::Debug for PreparedJournalBatch<E> {
@@ -456,7 +476,25 @@ fn payload_digest<E: Serialize>(batch_id: &str, events: &[Arc<E>]) -> Result<Str
 impl<E: JournalEvent> PreparedJournalBatch<E> {
     /// Own a non-empty ordered event set and prevalidate its serialization.
     pub fn new(events: Vec<E>) -> std::result::Result<Self, JournalBatchPrepareError> {
-        let batch_id = uuid::Uuid::new_v4().to_string();
+        Self::with_identity(uuid::Uuid::new_v4().to_string(), events)
+    }
+
+    /// Own an event set under an existing batch identity.
+    ///
+    /// Adapters use this to preserve a journal frame identity while converting
+    /// an event payload at a typed boundary. The payload digest is recomputed
+    /// for the converted event type, so lookup remains deterministic.
+    pub fn with_identity(
+        batch_id: impl Into<String>,
+        events: Vec<E>,
+    ) -> std::result::Result<Self, JournalBatchPrepareError> {
+        let batch_id = batch_id.into();
+        if batch_id.trim().is_empty() {
+            return Err(JournalBatchPrepareError {
+                batch_id,
+                error: "journal batch identity must not be empty".to_string(),
+            });
+        }
         if events.is_empty() {
             return Err(JournalBatchPrepareError {
                 batch_id,
@@ -509,6 +547,22 @@ impl<E: JournalEvent> PreparedJournalBatch<E> {
         self.events.as_ref()
     }
 
+    /// Verify that a committed receipt contains this exact prepared payload.
+    ///
+    /// Physical commit authorities may retry or reopen independently, but a
+    /// reducer must never fold a receipt for a different batch identity.
+    pub fn matches_receipt(&self, receipt: &JournalBatchAppendReceipt<E>) -> Result<bool> {
+        if self.batch_id != receipt.batch_id() || self.len() != receipt.records().len() {
+            return Ok(false);
+        }
+        let events = receipt
+            .records()
+            .iter()
+            .map(|record| Arc::clone(&record.event))
+            .collect::<Vec<_>>();
+        Ok(payload_digest(&self.batch_id, events.as_slice())? == self.payload_digest)
+    }
+
     fn validate_payload_integrity(&self) -> Result<()> {
         let current = payload_digest(&self.batch_id, self.events.as_ref())?;
         if current != self.payload_digest {
@@ -525,14 +579,7 @@ impl<E: JournalEvent> PreparedJournalBatch<E> {
         batch_id: String,
         events: Vec<E>,
     ) -> std::result::Result<Self, JournalBatchPrepareError> {
-        let mut prepared = Self::new(events)?;
-        prepared.batch_id = batch_id;
-        prepared.payload_digest = payload_digest(&prepared.batch_id, prepared.events.as_ref())
-            .map_err(|error| JournalBatchPrepareError {
-                batch_id: prepared.batch_id.clone(),
-                error: error.to_string(),
-            })?;
-        Ok(prepared)
+        Self::with_identity(batch_id, events)
     }
 }
 
@@ -870,7 +917,8 @@ pub type JournalBatchAppendResult<E> =
     std::result::Result<JournalBatchAppendReceipt<E>, JournalBatchAppendError<E>>;
 
 /// Durability result for one complete batch frame present in the journal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum JournalDurabilityStatus {
     /// A read-only lookup proved the frame identity but intentionally did not
     /// execute a new durability barrier.
@@ -944,6 +992,24 @@ impl<E> Clone for JournalBatchAppendReceipt<E> {
 }
 
 impl<E> JournalBatchAppendReceipt<E> {
+    /// Rebuild a receipt after mapping records across a typed adapter boundary.
+    pub fn from_parts(
+        batch_id: impl Into<String>,
+        records: Vec<JournalRecord<E>>,
+        durability: JournalDurabilityStatus,
+        commit: JournalBatchCommitStatus,
+    ) -> std::result::Result<Self, String> {
+        if records.is_empty() {
+            return Err("journal receipt must contain at least one record".to_string());
+        }
+        Ok(Self {
+            batch_id: batch_id.into(),
+            records: records.into(),
+            durability,
+            commit,
+        })
+    }
+
     /// Stable committed or idempotently resolved batch identity.
     pub fn batch_id(&self) -> &str {
         &self.batch_id
@@ -1514,44 +1580,69 @@ where
         &self,
         batch: PreparedJournalBatch<R::Event>,
     ) -> std::result::Result<ApplyBatchReceipt, CheckpointedApplyError<R::Event>> {
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let expected = batch.clone();
         let appended = self
             .journal
             .append_batch(batch)
             .map_err(CheckpointedApplyError::Journal)?;
-        let record_count = u64::try_from(appended.records.len()).map_err(|_| {
+        self.apply_committed(&expected, appended)
+    }
+
+    /// Fold a batch receipt that was committed by an external physical
+    /// authority. This keeps projection ownership in the framework while
+    /// allowing an application to supply a journal with custom reopen and
+    /// durability handling.
+    pub fn apply_committed(
+        &self,
+        expected: &PreparedJournalBatch<R::Event>,
+        appended: JournalBatchAppendReceipt<R::Event>,
+    ) -> std::result::Result<ApplyBatchReceipt, CheckpointedApplyError<R::Event>> {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let batch_id = appended.batch_id().to_string();
+        let receipt_matches = expected.matches_receipt(&appended).map_err(|error| {
             CheckpointedApplyError::CommittedInvariant {
-                batch_id: appended.batch_id.clone(),
+                batch_id: batch_id.clone(),
+                error: error.to_string(),
+            }
+        })?;
+        if !receipt_matches {
+            return Err(CheckpointedApplyError::CommittedInvariant {
+                batch_id,
+                error: "journal receipt does not match the prepared batch".to_string(),
+            });
+        }
+        let records = appended.records();
+        let record_count = u64::try_from(records.len()).map_err(|_| {
+            CheckpointedApplyError::CommittedInvariant {
+                batch_id: batch_id.clone(),
                 error: "record count exceeds supported range".to_string(),
             }
         })?;
-        let first_sequence = appended
-            .records
+        let first_sequence = records
             .first()
             .map(|record| record.sequence)
             .ok_or_else(|| CheckpointedApplyError::CommittedInvariant {
-                batch_id: appended.batch_id.clone(),
+                batch_id: batch_id.clone(),
                 error: "receipt contains no records".to_string(),
             })?;
-        let last_sequence = appended
-            .records
+        let last_sequence = records
             .last()
             .map(|record| record.sequence)
             .ok_or_else(|| CheckpointedApplyError::CommittedInvariant {
-                batch_id: appended.batch_id.clone(),
+                batch_id: batch_id.clone(),
                 error: "receipt contains no records".to_string(),
             })?;
         if first_sequence == 0 {
             return Err(CheckpointedApplyError::CommittedInvariant {
-                batch_id: appended.batch_id,
+                batch_id,
                 error: "receipt sequence must be positive".to_string(),
             });
         }
         let mut expected_sequence = first_sequence;
-        for record in appended.records.iter() {
-            if record.batch_id() != appended.batch_id || record.sequence != expected_sequence {
+        for record in records {
+            if record.batch_id() != appended.batch_id() || record.sequence != expected_sequence {
                 return Err(CheckpointedApplyError::CommittedInvariant {
-                    batch_id: appended.batch_id,
+                    batch_id: batch_id.clone(),
                     error: format!(
                         "receipt is not one contiguous batch at sequence {expected_sequence}"
                     ),
@@ -1559,21 +1650,20 @@ where
             }
             expected_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
                 CheckpointedApplyError::CommittedInvariant {
-                    batch_id: appended.batch_id.clone(),
+                    batch_id: batch_id.clone(),
                     error: "receipt sequence exhausted".to_string(),
                 }
             })?;
         }
         if last_sequence <= inner.last_applied
-            && appended.commit != JournalBatchCommitStatus::AlreadyCommitted
+            && appended.commit_status() != JournalBatchCommitStatus::AlreadyCommitted
         {
             return Err(CheckpointedApplyError::CommittedInvariant {
-                batch_id: appended.batch_id,
+                batch_id: batch_id.clone(),
                 error: "new commit is entirely behind the applied projection".to_string(),
             });
         }
-        let first_unapplied = appended
-            .records
+        let first_unapplied = records
             .iter()
             .position(|record| record.sequence > inner.last_applied);
         let folded_count = match first_unapplied {
@@ -1581,33 +1671,35 @@ where
             Some(index) => {
                 let required = inner.last_applied.checked_add(1).ok_or_else(|| {
                     CheckpointedApplyError::CommittedInvariant {
-                        batch_id: appended.batch_id.clone(),
+                        batch_id: batch_id.clone(),
                         error: "projection sequence exhausted before receipt suffix".to_string(),
                     }
                 })?;
-                let first_suffix = appended.records.get(index).ok_or_else(|| {
+                let first_suffix = records.get(index).ok_or_else(|| {
                     CheckpointedApplyError::CommittedInvariant {
-                        batch_id: appended.batch_id.clone(),
+                        batch_id: batch_id.clone(),
                         error: "receipt suffix index is missing".to_string(),
                     }
                 })?;
                 if first_suffix.sequence != required {
                     return Err(CheckpointedApplyError::CommittedInvariant {
-                        batch_id: appended.batch_id,
+                        batch_id: batch_id.clone(),
                         error: format!(
                             "projection gap: expected sequence {required} but receipt suffix starts at {}",
                             first_suffix.sequence
                         ),
                     });
                 }
-                if index > 0 && appended.commit != JournalBatchCommitStatus::AlreadyCommitted {
+                if index > 0
+                    && appended.commit_status() != JournalBatchCommitStatus::AlreadyCommitted
+                {
                     return Err(CheckpointedApplyError::CommittedInvariant {
-                        batch_id: appended.batch_id,
+                        batch_id: batch_id.clone(),
                         error: "new commit illegally overlaps the applied projection".to_string(),
                     });
                 }
                 let mut folded = 0_u64;
-                for record in appended.records.iter().skip(index) {
+                for record in records.iter().skip(index) {
                     inner.state.apply_record(record);
                     inner.last_applied = record.sequence;
                     folded = folded.saturating_add(1);
@@ -1633,12 +1725,12 @@ where
             CheckpointApplyStatus::NotDue
         };
         Ok(ApplyBatchReceipt {
-            batch_id: appended.batch_id,
+            batch_id,
             first_sequence,
             last_sequence,
             record_count,
-            journal: appended.durability,
-            commit: appended.commit,
+            journal: appended.durability().clone(),
+            commit: appended.commit_status(),
             checkpoint,
         })
     }
@@ -1777,6 +1869,12 @@ where
     pub fn with_state<T>(&self, f: impl FnOnce(&R) -> T) -> T {
         let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         f(&inner.state)
+    }
+
+    /// Mutably inspect the in-memory projection without bypassing the reducer lock.
+    pub fn with_state_mut<T>(&self, f: impl FnOnce(&mut R) -> T) -> T {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        f(&mut inner.state)
     }
 }
 

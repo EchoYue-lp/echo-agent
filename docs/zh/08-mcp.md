@@ -268,6 +268,11 @@ async fn main() -> echo_agent::error::Result<()> {
 }
 ```
 
+当配置源在 Agent 运行期间发生变化时，使用 `ReactAgent::reconcile_mcp_entry`。
+它接收类型化的 `McpServerEntry`（传入 `None` 表示删除），并把 replacement/unchanged
+判断交给 framework `McpManager`。替换准备失败时会保留 last-known-good 连接；应用只需
+在调用前后协调自己的文件和作用域策略。
+
 ### 方式二：通过 McpManager 管理连接
 
 ```rust

@@ -305,37 +305,11 @@ impl SkillMerger {
 }
 
 fn update_skill_frontmatter(content: &str, descriptor: &SkillDescriptor) -> Result<String> {
-    let rest = content.strip_prefix("---\n").ok_or_else(|| {
-        echo_core::error::ReactError::Other("SKILL.md is missing YAML frontmatter".to_string())
-    })?;
-    let end = rest.find("\n---\n").ok_or_else(|| {
-        echo_core::error::ReactError::Other("SKILL.md frontmatter is not closed".to_string())
-    })?;
-    let body = rest.get(end.saturating_add(5)..).ok_or_else(|| {
-        echo_core::error::ReactError::Other("invalid SKILL.md frontmatter boundary".to_string())
-    })?;
-    let yaml = rest.get(..end).ok_or_else(|| {
-        echo_core::error::ReactError::Other("invalid SKILL.md frontmatter".to_string())
-    })?;
-    let mut value: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)
+    let document = echo_execution::skills::external::SkillDocument::parse(content)
         .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?;
-    let mapping = value.as_mapping_mut().ok_or_else(|| {
-        echo_core::error::ReactError::Other("SKILL.md frontmatter must be a mapping".to_string())
-    })?;
-    for (key, values) in [
-        ("triggers", &descriptor.triggers),
-        ("paths", &descriptor.paths),
-        ("allowed-tools", &descriptor.allowed_tools),
-    ] {
-        mapping.insert(
-            serde_yaml_ng::Value::String(key.to_string()),
-            serde_yaml_ng::to_value(values)
-                .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?,
-        );
-    }
-    let rendered = serde_yaml_ng::to_string(&value)
-        .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?;
-    Ok(format!("---\n{}---\n{}", rendered, body))
+    document
+        .render_with_allowed_tools(&descriptor.allowed_tools)
+        .map_err(echo_core::error::ReactError::Other)
 }
 
 // ── Similarity helpers ──────────────────────────────────────────────────
@@ -656,8 +630,12 @@ mod tests {
         assert!(primary.allowed_tools.contains(&"Bash".to_string()));
         assert!(primary.allowed_tools.contains(&"Read".to_string()));
         assert!(primary.allowed_tools.contains(&"Write".to_string()));
+        // The persisted file is standard-format: the merged tool surface is
+        // written as a space-separated string, while routing triggers have
+        // no standard field and stay in the in-memory descriptor only.
         let persisted = std::fs::read_to_string(primary_path).map_err(|error| error.to_string())?;
-        assert!(persisted.contains("push"));
+        assert!(persisted.contains("allowed-tools: Bash Read Write"));
+        assert!(!persisted.contains("\ntriggers:"));
         std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
         Ok::<(), String>(())
     }

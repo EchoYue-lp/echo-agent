@@ -75,7 +75,7 @@ pub struct McpConfigFile {
 /// 支持两种模式：
 /// - **stdio**：提供 `command`，可选 `args` 和 `env`
 /// - **HTTP**：提供 `url`，可选 `headers` 和 `transport`
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct McpServerEntry {
     /// Explicit transport discriminator used by Agent Plugins 1.0.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]

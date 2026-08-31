@@ -15,7 +15,211 @@ pub use types::{
 
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+mod optional_duration_millis {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(value: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Option::<u64>::deserialize(deserializer)?
+            .filter(|millis| *millis > 0)
+            .map(Duration::from_millis))
+    }
+}
+
+fn default_request_timeout() -> Option<Duration> {
+    Some(DEFAULT_REQUEST_TIMEOUT)
+}
+
+fn default_first_chunk_timeout() -> Option<Duration> {
+    Some(DEFAULT_FIRST_CHUNK_TIMEOUT)
+}
+
+fn default_idle_timeout() -> Option<Duration> {
+    Some(DEFAULT_IDLE_TIMEOUT)
+}
+
+fn normalize_timeout(timeout: Duration) -> Option<Duration> {
+    (!timeout.is_zero()).then_some(timeout)
+}
+
+/// Provider-neutral timeout policy for LLM requests and streaming responses.
+///
+/// `request` applies to non-streaming calls. Streaming calls use independent
+/// first-chunk, idle, and overall boundaries so a long healthy stream is not
+/// mistaken for a stalled request. A `None` boundary is disabled; zero values
+/// are normalized to `None`. Serialized values use milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LlmTimeouts {
+    #[serde(default = "default_request_timeout", with = "optional_duration_millis")]
+    request: Option<Duration>,
+    #[serde(
+        default = "default_first_chunk_timeout",
+        with = "optional_duration_millis"
+    )]
+    first_chunk: Option<Duration>,
+    #[serde(default = "default_idle_timeout", with = "optional_duration_millis")]
+    idle: Option<Duration>,
+    #[serde(default, with = "optional_duration_millis")]
+    overall: Option<Duration>,
+}
+
+impl Default for LlmTimeouts {
+    fn default() -> Self {
+        Self {
+            request: default_request_timeout(),
+            first_chunk: default_first_chunk_timeout(),
+            idle: default_idle_timeout(),
+            overall: None,
+        }
+    }
+}
+
+impl LlmTimeouts {
+    /// Return the non-streaming request timeout.
+    pub fn request_timeout(self) -> Option<Duration> {
+        self.request
+    }
+
+    /// Return the timeout from request start through the first response bytes.
+    pub fn first_chunk_timeout(self) -> Option<Duration> {
+        self.first_chunk
+    }
+
+    /// Return the maximum idle duration between streaming byte chunks.
+    pub fn idle_timeout(self) -> Option<Duration> {
+        self.idle
+    }
+
+    /// Return the timeout covering the complete stream, including startup.
+    pub fn overall_timeout(self) -> Option<Duration> {
+        self.overall
+    }
+
+    /// Configure the non-streaming request timeout. Zero disables it.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request = normalize_timeout(timeout);
+        self
+    }
+
+    /// Disable the non-streaming request timeout.
+    pub fn without_request_timeout(mut self) -> Self {
+        self.request = None;
+        self
+    }
+
+    /// Configure the request-to-first-chunk timeout. Zero disables it.
+    pub fn with_first_chunk_timeout(mut self, timeout: Duration) -> Self {
+        self.first_chunk = normalize_timeout(timeout);
+        self
+    }
+
+    /// Disable the request-to-first-chunk timeout.
+    pub fn without_first_chunk_timeout(mut self) -> Self {
+        self.first_chunk = None;
+        self
+    }
+
+    /// Configure the inter-chunk idle timeout. Zero disables it.
+    pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle = normalize_timeout(timeout);
+        self
+    }
+
+    /// Disable the inter-chunk idle timeout.
+    pub fn without_idle_timeout(mut self) -> Self {
+        self.idle = None;
+        self
+    }
+
+    /// Configure the complete-stream timeout. Zero disables it.
+    pub fn with_overall_timeout(mut self, timeout: Duration) -> Self {
+        self.overall = normalize_timeout(timeout);
+        self
+    }
+
+    /// Disable the complete-stream timeout.
+    pub fn without_overall_timeout(mut self) -> Self {
+        self.overall = None;
+        self
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::LlmTimeouts;
+    use std::time::Duration;
+
+    #[test]
+    fn timeout_defaults_and_millisecond_wire_shape_are_stable() -> Result<(), String> {
+        let defaults = LlmTimeouts::default();
+        assert_eq!(defaults.request_timeout(), Some(Duration::from_secs(120)));
+        assert_eq!(
+            defaults.first_chunk_timeout(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(defaults.idle_timeout(), Some(Duration::from_secs(60)));
+        assert_eq!(defaults.overall_timeout(), None);
+
+        let configured = defaults
+            .with_request_timeout(Duration::from_millis(2_500))
+            .with_first_chunk_timeout(Duration::from_millis(750))
+            .without_idle_timeout()
+            .with_overall_timeout(Duration::from_secs(10));
+        let encoded = serde_json::to_value(configured).map_err(|error| error.to_string())?;
+        assert_eq!(
+            encoded.get("request").and_then(serde_json::Value::as_u64),
+            Some(2_500)
+        );
+        assert_eq!(
+            encoded
+                .get("first_chunk")
+                .and_then(serde_json::Value::as_u64),
+            Some(750)
+        );
+        assert!(encoded.get("idle").is_some_and(serde_json::Value::is_null));
+        assert_eq!(
+            encoded.get("overall").and_then(serde_json::Value::as_u64),
+            Some(10_000)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn zero_millisecond_timeouts_deserialize_as_disabled() -> Result<(), String> {
+        let decoded = serde_json::from_value::<LlmTimeouts>(serde_json::json!({
+            "request": 0,
+            "first_chunk": 0,
+            "idle": 0,
+            "overall": 0
+        }))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(decoded.request_timeout(), None);
+        assert_eq!(decoded.first_chunk_timeout(), None);
+        assert_eq!(decoded.idle_timeout(), None);
+        assert_eq!(decoded.overall_timeout(), None);
+        Ok(())
+    }
+}
 
 /// Input modalities accepted by one configured model.
 ///
@@ -313,6 +517,11 @@ pub struct ChatRequest {
     /// Optional cancellation token for aborting in-flight requests.
     /// When set and cancelled, streaming responses will stop at the next SSE boundary.
     pub cancel_token: Option<CancellationToken>,
+    /// Optional timeout override for this call.
+    ///
+    /// `None` uses the provider client's configured default. The same value
+    /// controls non-streaming and streaming boundaries.
+    pub timeouts: Option<LlmTimeouts>,
     /// Optional user identifier for KVCache isolation (DeepSeek, etc.).
     /// A stable, session-scoped ID enables the provider to reuse prompt cache
     /// entries across requests. Without this, cache hit rate can drop to <1%.
@@ -334,6 +543,12 @@ impl ChatRequest {
     /// Attach tool definitions to the request.
     pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
         self.tools = Some(tools);
+        self
+    }
+
+    /// Override the provider client's timeout policy for this request.
+    pub fn with_timeouts(mut self, timeouts: LlmTimeouts) -> Self {
+        self.timeouts = Some(timeouts);
         self
     }
 }

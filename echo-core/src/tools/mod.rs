@@ -2,6 +2,7 @@
 
 pub mod artifact;
 pub mod cell;
+pub mod control;
 pub mod pagination;
 pub mod permission;
 pub mod skill;

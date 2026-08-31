@@ -20,15 +20,28 @@ Active Subagent 消息使用 `SubagentExecutor::send_message_tracked`。返回�
 `AgentSteerReceipt`；mailbox 接收、上下文 drain 和所属 turn 结算只由嵌套
 receipt 负责。单独的 turn ID 不代表投递完成。
 
+`SubagentAttemptIdentity` 是 framework 所有的可序列化值，只包含逻辑 task、物理
+execution 和 attempt 编号。消费者需要关联 command 或 recovery 记录时可直接持久化
+此值，不需要再建立产品 identity 镜像。反序列化与 `new` 使用相同的不变量：task 和
+execution 非空，attempt 必须为正数。
+未知 identity 字段也会被拒绝。
+
+`SubagentResult::usage()` 返回所有消费者共用的可序列化 `ExecutionUsage`
+事实：耗时、provider 报告的总 token 和 iteration 数。产品可以把它投影到 UI，但不应
+重新定义一套 Rust usage 模型。
+
+持久化 control command 应直接使用 `SubagentCommandIdentity`。它在 exact attempt identity
+外增加通用的 run、plan-revision 和幂等字段，并校验完整 command envelope。
+它的 `SubagentCommandPhase` 是 durable lifecycle（`persisted`、`mailbox_accepted`、
+`drained`、`turn_settled`）；进程内绑定仍由独立的 `SubagentControlPhase` 表示。
+
 ## Team 意图
 
 `TeamSpec` 只保存已注册 Subagent 的名称，不持有 Agent 实例、关系 store 或
 scheduler。应用已经拥有 `SubagentRegistry` 时，优先使用这个入口。
 
 ```rust
-use echo_agent::agent::subagent::{
-    SubagentBuilder, TeamConfig, TeamSpec, TeamStrategy,
-};
+use echo_agent::prelude::*;
 
 let definition = SubagentBuilder::new("review-team")
     .description("从独立视角审查改动")
@@ -52,7 +65,7 @@ Team definition 与所有引用成员必须注册到同一 `SubagentRegistry`。
 框架复用方也可以直接组合已有 Agent 对象，而不会产生第二条执行路径：
 
 ```rust,ignore
-use echo_agent::agent::subagent::{TeamAgent, TeamStrategy};
+use echo_agent::prelude::*;
 
 let team = TeamAgent::builder()
     .name("review-team")

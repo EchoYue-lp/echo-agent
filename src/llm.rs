@@ -64,23 +64,8 @@
 //! # }
 //! ```
 
-/// Direct re-exports from `echo_core::llm`.
-pub mod core {
-    pub use echo_core::llm::*;
-
-    /// Canonical LLM wire types from `echo_core`.
-    pub mod types {
-        pub use echo_core::llm::types::*;
-    }
-}
-
-/// Direct re-exports from `echo_integration::providers`.
-pub mod integration {
-    pub use echo_integration::providers::*;
-}
-
 pub mod types {
-    //! Compatibility re-export of canonical wire types from `echo_core::llm::types`.
+    //! Canonical low-level LLM wire types.
     pub use echo_core::llm::types::*;
 }
 
@@ -89,33 +74,19 @@ pub mod cache {
     pub use echo_core::llm::cache::*;
 }
 
-pub mod config {
-    //! Compatibility re-export of provider config from `echo_integration`.
-    pub use echo_integration::providers::config::*;
-}
-
-pub mod providers {
-    //! Compatibility re-export of provider implementations from `echo_integration`.
-    pub use echo_integration::providers::anthropic::AnthropicClient;
-    pub use echo_integration::providers::openai::OpenAiClient;
-    pub use echo_integration::providers::responses::ResponsesClient;
-}
-
 // Core traits from echo-core
 pub use echo_core::llm::capabilities::{
     ModelProfile, ModelProfileOverride, ModelProfileResolver, ProviderCapabilities,
+    ThinkingProfile, infer_context_window, resolve_thinking_profile,
 };
 pub use echo_core::llm::{
-    ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, ModelInputModality,
-    SimpleChatOptions, ThinkingConfig, ThinkingLevel, ThinkingProtocol,
+    ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, LlmTimeouts,
+    ModelInputModality, SimpleChatOptions, ThinkingConfig, ThinkingLevel, ThinkingProtocol,
 };
 
-// Provider implementations from echo_integration::providers
-pub use echo_integration::providers::anthropic::AnthropicClient;
-pub use echo_integration::providers::openai::OpenAiClient;
-pub use echo_integration::providers::responses::ResponsesClient;
-
-// Explicit runtime configuration
-pub use config::{LlmConfig, resolve_protocol_endpoint};
+// Provider implementations and explicit runtime configuration.
+pub use echo_integration::providers::{
+    AnthropicClient, LlmConfig, OpenAiClient, ResponsesClient, resolve_protocol_endpoint,
+};
 
 pub use types::{JsonSchemaSpec, Message as LlmMessage, ResponseFormat, ToolDefinition};

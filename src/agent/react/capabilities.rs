@@ -19,7 +19,7 @@ use crate::llm::{LlmClient, LlmConfig, ThinkingConfig};
 #[cfg(feature = "mcp")]
 use crate::mcp::McpServerEntry;
 #[cfg(feature = "mcp")]
-use crate::mcp::{McpClient, McpConfigFile, McpServerConfig};
+use crate::mcp::{McpClient, McpConfigFile, McpServerConfig, McpTargetChange};
 use crate::skills::external::SkillDescriptor;
 use crate::skills::external::activate_tool::ActivateSkillTool;
 use crate::skills::external::loader::{DiscoveryScope, SkillLoader};
@@ -35,10 +35,25 @@ use tracing::{info, warn};
 
 const SKILL_CATALOG_PROJECTION: &str = "echo-agent:skill-catalog";
 
-struct SkillDescriptorRegistration {
-    descriptor: SkillDescriptor,
-    legacy_instructions: Option<String>,
-    prepared_document: Option<String>,
+enum SkillRegistration {
+    Filesystem(SkillDescriptor),
+    Prepared(crate::skills::external::SkillDocument),
+}
+
+impl SkillRegistration {
+    fn descriptor(&self) -> &SkillDescriptor {
+        match self {
+            Self::Filesystem(descriptor) => descriptor,
+            Self::Prepared(document) => document.descriptor(),
+        }
+    }
+
+    fn set_registration_source(&mut self, source: &str) {
+        match self {
+            Self::Filesystem(descriptor) => descriptor.source = Some(source.to_string()),
+            Self::Prepared(document) => document.set_registration_source(source),
+        }
+    }
 }
 
 pub(crate) async fn project_skill_activation(
@@ -685,6 +700,21 @@ impl ReactAgent {
         self.tools.set_disabled_tools(names);
     }
 
+    /// Snapshot the agent-wide tools currently hidden from future model calls.
+    pub fn disabled_tool_names(&self) -> std::collections::HashSet<String> {
+        self.tools.disabled_tool_names()
+    }
+
+    /// Return the shareable tool-visibility authority used by future runs.
+    pub fn tool_visibility_policy(&self) -> echo_core::agent::ToolVisibilityPolicy {
+        self.tools.tool_visibility.clone()
+    }
+
+    /// Bind this Agent to an existing tool-visibility authority.
+    pub fn use_tool_visibility_policy(&mut self, policy: echo_core::agent::ToolVisibilityPolicy) {
+        self.tools.tool_visibility = policy;
+    }
+
     /// Add Agent callback
     ///
     /// # Parameters
@@ -843,18 +873,14 @@ impl ReactAgent {
 
         let registrations = descriptors
             .into_iter()
-            .map(|descriptor| SkillDescriptorRegistration {
-                legacy_instructions: loader.get_legacy_instructions(&descriptor.name).cloned(),
-                descriptor,
-                prepared_document: None,
-            })
+            .map(SkillRegistration::Filesystem)
             .collect();
         self.register_skill_descriptors(registrations, plugin).await
     }
 
     async fn register_skill_descriptors(
         &mut self,
-        registrations: Vec<SkillDescriptorRegistration>,
+        registrations: Vec<SkillRegistration>,
         plugin: Option<(&str, &crate::plugin::PluginVariables)>,
     ) -> Result<Vec<String>> {
         if registrations.is_empty() {
@@ -895,62 +921,68 @@ impl ReactAgent {
                     .skill_registry
                     .set_sandbox_manager(manager.clone());
             }
-            for registration in registrations {
-                let SkillDescriptorRegistration {
-                    mut descriptor,
-                    legacy_instructions,
-                    prepared_document,
-                } = registration;
+            for mut registration in registrations {
                 if self
                     .skill_load_policy
                     .as_ref()
-                    .is_some_and(|policy| !policy.allows(&descriptor))
+                    .is_some_and(|policy| !policy.allows(registration.descriptor()))
                 {
                     info!(
                         agent = %self.config.agent_name,
-                        skill = %descriptor.name,
+                        skill = %registration.descriptor().name,
                         "Skill excluded by load policy"
                     );
                     continue;
                 }
-                if self.tools.skill_registry.is_installed(&descriptor.name) {
+                if self
+                    .tools
+                    .skill_registry
+                    .is_installed(&registration.descriptor().name)
+                {
                     warn!(
                         agent = %self.config.agent_name,
-                        skill = %descriptor.name,
+                        skill = %registration.descriptor().name,
                         "Skill already installed, skipping duplicate"
                     );
                     continue;
                 }
 
                 if let Some((source, _)) = plugin {
-                    descriptor.source = Some(source.to_string());
+                    registration.set_registration_source(source);
                 }
 
-                // Register hooks from frontmatter if present
-                if let Some(hooks_def) = &descriptor.hooks {
-                    let skill_dir = descriptor
+                // Register hooks from a programmatic descriptor if present.
+                if let Some(hooks_def) = &registration.descriptor().hooks {
+                    let skill_dir = registration
+                        .descriptor()
                         .location
                         .parent()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
                     let mut hook_reg = self.tools.hook_registry.write().await;
-                    hook_reg.register(&descriptor.name, &skill_dir, hooks_def.clone());
+                    hook_reg.register(
+                        &registration.descriptor().name,
+                        &skill_dir,
+                        hooks_def.clone(),
+                    );
                 }
 
-                let name = descriptor.name.clone();
+                let name = registration.descriptor().name.clone();
                 names.push(name.clone());
-                self.tools
-                    .skill_registry
-                    .register_descriptor_with_legacy_and_document(
-                        descriptor.clone(),
-                        legacy_instructions.clone(),
-                        prepared_document.clone(),
-                    );
-                reg.register_descriptor_with_legacy_and_document(
-                    descriptor,
-                    legacy_instructions,
-                    prepared_document,
-                );
+                match registration {
+                    SkillRegistration::Prepared(document) => {
+                        self.tools
+                            .skill_registry
+                            .register_prepared(document.clone());
+                        reg.register_prepared(document);
+                    }
+                    SkillRegistration::Filesystem(descriptor) => {
+                        self.tools
+                            .skill_registry
+                            .register_descriptor(descriptor.clone());
+                        reg.register_descriptor(descriptor);
+                    }
+                }
                 if let Some((source, variables)) = plugin {
                     self.tools.skill_registry.tag_source_with_variables(
                         std::slice::from_ref(&name),
@@ -1051,11 +1083,7 @@ impl ReactAgent {
     ) -> Result<Vec<String>> {
         let registrations = skills
             .iter()
-            .map(|skill| SkillDescriptorRegistration {
-                descriptor: skill.descriptor().clone(),
-                legacy_instructions: skill.legacy_instructions().map(str::to_string),
-                prepared_document: Some(skill.document().to_string()),
-            })
+            .map(|skill| SkillRegistration::Prepared(skill.document().clone()))
             .collect();
         self.register_skill_descriptors(registrations, Some((source, variables)))
             .await
@@ -1079,8 +1107,28 @@ impl ReactAgent {
             return removed;
         }
 
-        for name in &removed {
-            self.tools.skill_registry.remove_descriptor(name);
+        self.unregister_skill_names(&removed).await;
+
+        info!(
+            agent = %self.config.agent_name,
+            skills = ?removed,
+            "Skills removed by load policy reconciliation"
+        );
+        removed
+    }
+
+    /// Remove named file-based Skills from every runtime projection.
+    ///
+    /// This is the replacement primitive used by reload and policy
+    /// reconciliation. It clears descriptor, Hook, progressive-resource, and
+    /// prompt projections together so a subsequent discovery can replace a
+    /// changed `SKILL.md` without leaving stale metadata behind.
+    pub async fn unregister_skill_names(&mut self, names: &[String]) -> Vec<String> {
+        let mut removed = Vec::new();
+        for name in names {
+            if !self.tools.skill_registry.remove_descriptor(name) {
+                continue;
+            }
             self.tools
                 .hook_registry
                 .write()
@@ -1091,6 +1139,7 @@ impl ReactAgent {
                 .lock()
                 .await
                 .replace_projection(format!("echo-agent:skill:{name}"), None);
+            removed.push(name.clone());
         }
 
         if let Some(shared) = &self.tools.progressive_skill_registry {
@@ -1124,13 +1173,35 @@ impl ReactAgent {
             }
             self.replace_tool(Box::new(script_tool));
         }
-
-        info!(
-            agent = %self.config.agent_name,
-            skills = ?removed,
-            "Skills removed by load policy reconciliation"
-        );
         removed
+    }
+
+    /// Replace every Skill currently sourced from `skills_dir`.
+    ///
+    /// Discovery normally preserves an existing same-name descriptor. This
+    /// explicit reload API removes the directory's old registrations first,
+    /// allowing changed descriptions, triggers, resources, and Hooks to take
+    /// effect atomically on the next registration pass.
+    pub async fn reload_skills_from_dir(
+        &mut self,
+        skills_dir: impl Into<std::path::PathBuf>,
+    ) -> Result<Vec<String>> {
+        let skills_dir = skills_dir.into();
+        // Discovery canonicalizes every SKILL.md location (resolving symlinked
+        // path components), so the reload filter must compare canonical forms
+        // or a non-canonical argument silently matches nothing and the reload
+        // degrades to a no-op against the already-installed descriptors.
+        let skills_dir = tokio::fs::canonicalize(&skills_dir)
+            .await
+            .unwrap_or(skills_dir);
+        let names = self
+            .skill_descriptors()
+            .into_iter()
+            .filter(|descriptor| descriptor.location.starts_with(&skills_dir))
+            .map(|descriptor| descriptor.name)
+            .collect::<Vec<_>>();
+        self.unregister_skill_names(&names).await;
+        self.load_skills_from_dir(skills_dir).await
     }
 
     /// Discover skills from one explicit directory.
@@ -1143,7 +1214,8 @@ impl ReactAgent {
     }
 
     /// Discover plugin-owned skills with variable substitution applied before
-    /// frontmatter hooks are parsed and registered.
+    /// standard frontmatter and body parsing. Plugin Hooks are registered by
+    /// the plugin Hook component, not by the Skill file.
     pub async fn load_plugin_skills_from_dir(
         &mut self,
         skills_dir: impl Into<std::path::PathBuf>,
@@ -1410,35 +1482,79 @@ impl ReactAgent {
         config: McpServerConfig,
     ) -> crate::error::Result<Arc<McpClient>> {
         let name = config.name.clone();
-        // Reconnection must also remove tools that disappeared from the new
-        // server schema. McpManager replaces the client, but it cannot mutate
-        // the agent's ToolManager on its own.
-        if self.tools.mcp_manager.get_client(&name).is_some() {
-            self.disconnect_mcp(&name).await;
-        }
-        let tools = self.tools.mcp_manager.connect(config).await?;
-        let count = tools.len();
-        self.add_tools(tools);
-        self.sync_mcp_resource_tools();
-        let client = {
-            let mgr = &self.tools.mcp_manager;
-            mgr.get_client(&name).ok_or_else(|| {
-                crate::error::ReactError::Agent(Box::new(
-                    crate::error::AgentError::InitializationFailed(format!(
-                        "MCP client '{}' not found after connection",
-                        name
-                    )),
-                ))
-            })?
+        self.reconcile_mcp_target(&name, Some(config)).await?;
+        let client = self.tools.mcp_manager.get_client(&name).ok_or_else(|| {
+            crate::error::ReactError::Agent(Box::new(
+                crate::error::AgentError::InitializationFailed(format!(
+                    "MCP client '{}' not found after connection",
+                    name
+                )),
+            ))
+        })?;
+        Ok(client)
+    }
+
+    #[cfg(feature = "mcp")]
+    /// Reconcile one named MCP entry without tearing down a working target
+    /// before the replacement has been prepared.
+    ///
+    /// `Some(entry)` connects, replaces, or keeps the named server according
+    /// to the framework `McpManager` contract. `None` removes it. The Agent
+    /// owns only the exposed tool registration around that manager operation.
+    pub async fn reconcile_mcp_entry(
+        &mut self,
+        name: &str,
+        entry: Option<McpServerEntry>,
+    ) -> crate::error::Result<McpTargetChange> {
+        let desired = match entry {
+            Some(entry) if !entry.disabled => Some(entry.to_server_config(name)?),
+            Some(_) | None => None,
         };
+        self.reconcile_mcp_target(name, desired).await
+    }
+
+    #[cfg(feature = "mcp")]
+    async fn reconcile_mcp_target(
+        &mut self,
+        name: &str,
+        desired: Option<McpServerConfig>,
+    ) -> crate::error::Result<McpTargetChange> {
+        // McpManager prepares replacements before swapping the client. Remove
+        // old exposed tools only after that operation succeeds, otherwise a
+        // failed replacement leaves the last-known-good target untouched.
+        let previous_tool_names = self
+            .tools
+            .mcp_manager
+            .get_client(name)
+            .map(|client| {
+                client
+                    .tools()
+                    .iter()
+                    .map(|tool| crate::mcp::McpToolAdapter::exposed_name_for(name, &tool.name))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut receipt = self
+            .tools
+            .mcp_manager
+            .reconcile_target(name, desired)
+            .await?;
+        let change = receipt.change;
+        let tool_count = receipt.tools.len();
+        for tool_name in previous_tool_names {
+            self.remove_tool(&tool_name);
+        }
+        self.add_tools(std::mem::take(&mut receipt.tools));
+        self.sync_mcp_resource_tools();
+        self.setup_hook_mcp_executor().await;
         tracing::info!(
             agent = %self.config.agent_name,
             server = %name,
-            tools = count,
-            "MCP server connected"
+            ?change,
+            tools = tool_count,
+            "MCP server target reconciled"
         );
-        self.setup_hook_mcp_executor().await;
-        Ok(client)
+        Ok(change)
     }
 
     #[cfg(feature = "mcp")]

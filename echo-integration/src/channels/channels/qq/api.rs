@@ -172,11 +172,6 @@ impl TokenManager {
         info!("QQ Bot: token refreshed, expires in {}s", expires_in);
         Ok(token)
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn auth_header(&self, token: &str) -> String {
-        format!("QQBot {}", token)
-    }
 }
 
 // ── Gateway URL ───────────────────────────────────────────────────────────────

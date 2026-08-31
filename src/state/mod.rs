@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 /// Sequenced event journal and checkpoint-reducer primitives.
 ///
-/// Unknown outcomes retain the original [`PreparedJournalBatch`]. After
+/// Unknown outcomes retain the original [`PreparedJournalBatch`](crate::state::journal::PreparedJournalBatch). After
 /// reopening a file-backed authority, first perform a read-only lookup, then
 /// pass the same prepared value to `apply_batch`: an existing identity returns
 /// `AlreadyCommitted`, and the reducer folds only a not-yet-applied suffix.
@@ -73,6 +73,15 @@ use serde::{Deserialize, Serialize};
 /// ```
 pub mod journal {
     pub use echo_state::journal::*;
+}
+
+/// Typed durable delivery lifecycle primitives.
+///
+/// This is the stable framework facade for ordered message delivery. The
+/// route and payload remain caller-owned types; the framework owns only
+/// lifecycle identity, attempts, retention, and recovery.
+pub mod delivery {
+    pub use echo_state::delivery::*;
 }
 
 // ── AgentCheckpoint ────────────────────────────────────────────────────

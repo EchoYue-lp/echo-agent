@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- File-based skill frontmatter now accepts **official agentskills.io fields
+  only**: `name`, `description`, `license`, `compatibility`, `metadata`
+  (string → string), and a space-separated `allowed-tools` string. Non-official
+  top-level fields (the legacy `triggers` / `hooks` / `shell` / `paths` /
+  `sandbox` / `depends_on`) fail parsing; Skill files carry no private Hook
+  extension, and `HookAction::ActivateSkill` now accepts
+  its documented `activate_skill` wire name. LLM skill routing is
+  description-driven — `SkillDescriptor`'s `triggers`/`paths`/`depends_on`/
+  `sandbox`/`shell` remain programmatic API with no file-based source, the
+  skill draft generator emits standard fields only, and the merger persists
+  only the merged `allowed-tools` string. Added `validate_skill_markdown` /
+  `validate_skill_dir` (in-process `skills-ref validate` equivalent) and
+  `ReactAgent::reload_skills_from_dir` (canonicalized reload boundary that
+  replaces same-name registrations atomically).
+
 ### Added
 
 - `TurnReceipt` now carries the final message identity and explicit context

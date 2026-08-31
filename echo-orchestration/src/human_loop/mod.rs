@@ -801,7 +801,7 @@ pub enum HumanLoopResponse {
 /// - [`HumanLoopManager`]：事件驱动模式（推荐）
 /// - [`ConsoleHumanLoopProvider`]：命令行阻塞模式
 /// - [`WebhookHumanLoopProvider`]：HTTP 回调模式
-/// - [`WebSocketHumanLoopProvider`]：WebSocket 模式
+/// - `WebSocketHumanLoopProvider`：WebSocket 模式（启用 `websocket` feature）
 pub trait HumanLoopProvider: Send + Sync {
     /// 发起人工介入请求
     fn request(&self, req: HumanLoopRequest) -> BoxFuture<'_, Result<HumanLoopResponse>>;

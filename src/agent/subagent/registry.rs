@@ -1,9 +1,8 @@
 //! Subagent registry — discovery, registration, and lifecycle management
 //!
-//! Wraps the existing `SubagentMap` with declarative definitions, factory support,
-//! and lifecycle events. Backward compatible — `register_agent()` still works.
+//! Owns declarative definitions, lazy factories, and lifecycle events for
+//! registered Subagents.
 
-use crate::agent::SubagentMap;
 use crate::error::Result;
 use echo_core::agent::Agent;
 use futures::future::BoxFuture;
@@ -84,7 +83,7 @@ where
 
 /// Registry for subagent definitions and instances.
 ///
-/// Wraps the existing `SubagentMap` and adds:
+/// Owns the registered Subagent definitions and adds:
 /// - Definition-based lookup
 /// - Factory support for lazy instantiation
 /// - Lifecycle events
@@ -124,33 +123,6 @@ impl SubagentRegistry {
             instantiating_done: Arc::new(Notify::new()),
             event_bus,
         }
-    }
-
-    /// Migrate from an existing `SubagentMap` (backward compatible).
-    ///
-    /// Each agent gets a default Sync-mode `BuiltIn` definition.
-    pub fn from_subagent_map(map: SubagentMap) -> Self {
-        let registry = Self::new();
-        if let Ok(agents) = map.read() {
-            let Ok(mut state) = registry.state.try_write() else {
-                return registry;
-            };
-            for (name, agent) in agents.iter() {
-                let def = SubagentDefinition::simple_sync(name.clone());
-                let revision = state.next_revision();
-                state.entries.insert(
-                    name.clone(),
-                    RegistryEntry {
-                        definition: def,
-                        agent: Some(agent.clone()),
-                        factory: None,
-                        revision,
-                    },
-                );
-            }
-            registry.publish_catalog(&state);
-        }
-        registry
     }
 
     fn publish_catalog(&self, state: &RegistryState) {
@@ -790,25 +762,5 @@ mod tests {
         let agent = agent.as_ref();
         let result = agent.execute("test").await.unwrap();
         assert_eq!(result, "lazy result");
-    }
-
-    #[tokio::test]
-    async fn test_from_subagent_map() {
-        use crate::agent::SubagentMap;
-
-        let map: SubagentMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        {
-            let mut m = map.write().unwrap_or_else(|e| e.into_inner());
-            m.insert(
-                "migrated".to_string(),
-                Arc::new(MockAgent::new("migrated")) as Arc<dyn Agent>,
-            );
-        }
-
-        let registry = SubagentRegistry::from_subagent_map(map);
-        assert!(registry.contains("migrated").await);
-
-        let handle = registry.get_agent("migrated").await;
-        assert!(handle.is_some());
     }
 }

@@ -12,7 +12,8 @@ Hooks allow custom behavior to be injected at key points in the agent lifecycle.
 
 ## Skills Hooks
 
-The primary hook system. Hooks are configured in YAML (via `application configuration` or SKILL.md frontmatter) and executed by the `HookExecutor`.
+The primary hook system. Hooks are configured in YAML via host application or
+plugin configuration and executed by the `HookExecutor`.
 
 ### Hook Events
 
@@ -70,7 +71,11 @@ not emit the event.
 | `subagent` | Dispatch a named subagent through the agent's registered Subagent runtime |
 | `activate_skill` | Activate a discovered skill directly, without an LLM round trip |
 
-### YAML Configuration
+### Configuration
+
+Hooks are configured by the host application and plugins. The official
+agentskills.io Skill file format has no per-skill Hook field or sidecar;
+application configuration uses the following YAML mapping:
 
 ```yaml
 hooks:
@@ -166,8 +171,9 @@ These are the canonical wire names; `modified_input`, `message`, and
 `permission_mode` are not aliases. `permission_mode_override` may be returned
 by `PreToolUse` or `PermissionRequest`. It applies only to that tool call and is
 passed into the permission service without mutating the session's configured
-mode. Canonical values are `default`, `plan`, `auto`, `acceptEdits`,
-`bypassPermissions`, `bubble`, `dontAsk`, and `strict`.
+mode. Canonical values are `default`, `plan`, `auto-edit`, `full-auto`, `auto`,
+`bubble`, `dont-ask`, and `strict`; the framework also accepts documented legacy
+aliases when parsing.
 
 ### Sources, Reloading, and Dry Run
 
@@ -316,4 +322,5 @@ let agent = ReactAgentBuilder::new()
     .build()?;
 ```
 
-Skills hooks are configured via YAML and loaded automatically from `application configuration` or SKILL.md files.
+Skill files do not carry Hook configuration. Hooks are loaded from application
+configuration or plugin Hook components.

@@ -17,7 +17,7 @@ pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 #[serde(default)]
 pub struct FrameworkConfig {
     pub model: ModelConfig,
-    pub agent: AgentYamlConfig,
+    pub agent: AgentSettings,
 }
 
 fn resolve_context_window(explicit: Option<u32>, provider: &str, model_name: &str) -> usize {
@@ -27,55 +27,50 @@ fn resolve_context_window(explicit: Option<u32>, provider: &str, model_name: &st
         .clamp(1, 10_000_000) as usize
 }
 
-impl FrameworkConfig {
-    pub fn to_agent_config(&self) -> AgentConfig {
-        let context_window = resolve_context_window(
-            self.model.context_window,
-            &self.model.provider,
-            &self.model.name,
-        );
-        let token_limit = if self.agent.token_limit > 0 {
-            self.agent.token_limit
-        } else if self.model.context_window.is_some() {
+impl From<FrameworkConfig> for AgentConfig {
+    fn from(value: FrameworkConfig) -> Self {
+        let FrameworkConfig { model, agent } = value;
+        let context_window =
+            resolve_context_window(model.context_window, &model.provider, &model.name);
+        let token_limit = if agent.token_limit > 0 {
+            agent.token_limit
+        } else if model.context_window.is_some() {
             context_window
         } else {
             usize::MAX
         };
-        let token_budget_config =
-            if self.model.context_window.is_some() || self.agent.token_limit > 0 {
-                TokenBudgetConfig {
-                    total_window: Some(context_window),
-                    ..Default::default()
-                }
-            } else {
-                TokenBudgetConfig::default()
-            };
+        let token_budget_config = if model.context_window.is_some() || agent.token_limit > 0 {
+            TokenBudgetConfig {
+                total_window: Some(context_window),
+                ..Default::default()
+            }
+        } else {
+            TokenBudgetConfig::default()
+        };
 
-        let mut config = AgentConfig::standard(
-            &self.model.name,
-            &self.agent.name,
-            &self.agent.system_prompt,
-        )
-        .enable_tool(self.agent.enable_tools)
-        .enable_memory(self.agent.enable_memory)
-        .enable_human_in_loop(self.agent.enable_human_in_loop)
-        .max_iterations(self.agent.max_iterations)
-        .subagent_timeout_secs(self.agent.subagent_timeout_secs)
-        .memory_path(&self.agent.memory_path)
-        .temperature(self.model.temperature)
-        .max_tokens(self.model.max_tokens)
-        .token_limit(token_limit)
-        .token_budget(token_budget_config)
-        .tool_execution(crate::tools::ToolExecutionConfig {
-            timeout_ms: self.agent.tool_timeout_ms,
-            ..Default::default()
-        });
-        if self.agent.max_tool_output_tokens > 0 {
-            config = config.max_tool_output_tokens(self.agent.max_tool_output_tokens);
+        let mut config = AgentConfig::standard(&model.name, &agent.name, &agent.system_prompt)
+            .enable_tool(agent.enable_tools)
+            .enable_memory(agent.enable_memory)
+            .enable_human_in_loop(agent.enable_human_in_loop)
+            .max_iterations(agent.max_iterations)
+            .subagent_timeout_secs(agent.subagent_timeout_secs)
+            .memory_path(&agent.memory_path)
+            .temperature(model.temperature)
+            .max_tokens(model.max_tokens)
+            .token_limit(token_limit)
+            .token_budget(token_budget_config)
+            .tool_execution(crate::tools::ToolExecutionConfig {
+                timeout_ms: agent.tool_timeout_ms,
+                ..Default::default()
+            });
+        if agent.max_tool_output_tokens > 0 {
+            config = config.max_tool_output_tokens(agent.max_tool_output_tokens);
         }
         config
     }
+}
 
+impl FrameworkConfig {
     pub fn has_compressor(&self) -> bool {
         self.agent.token_limit > 0
             || self.model.context_window.is_some()
@@ -185,10 +180,13 @@ impl ModelConfig {
     }
 }
 
-/// Serializable Agent settings. Every path is supplied by the application.
+/// Serializable provider-neutral Agent settings.
+///
+/// The value is format-independent; applications may load it from YAML, JSON,
+/// environment variables, or another configuration source.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
-pub struct AgentYamlConfig {
+pub struct AgentSettings {
     pub name: String,
     pub system_prompt: String,
     pub max_iterations: usize,
@@ -204,7 +202,7 @@ pub struct AgentYamlConfig {
     pub subagent_timeout_secs: u64,
 }
 
-impl Default for AgentYamlConfig {
+impl Default for AgentSettings {
     fn default() -> Self {
         Self {
             name: "assistant".to_string(),

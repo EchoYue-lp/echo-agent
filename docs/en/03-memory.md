@@ -16,6 +16,13 @@ Runtime checkpoint and transcript address the same conversation from different a
 
 ## Runtime Checkpoint: RuntimeStateStore
 
+`MemoryScope` is also a typed framework value. It accepts the documented
+aliases through the standard `scope.parse()` API.
+
+Capability and preference profiles are available from the stable
+`echo_agent::profiles` facade (`AgentProfile`, `UserProfile`, and
+`ProfileStore`).
+
 ### Problem It Solves
 
 An LLM's context window vanishes after each request ends, and a process can crash mid-loop. Without a runtime checkpoint, a long task interrupted halfway requires starting over, and a user wanting to continue yesterday's conversation must repeat themselves.

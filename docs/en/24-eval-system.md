@@ -401,20 +401,10 @@ Eval is a **post-hoc analysis tool**, not a runtime hook. You run it:
 - Before releases (regression suite)
 - Periodically (CI/CD quality gates)
 
-### AgentRunner Integration
-
-The `AgentRunner` high-level builder supports attaching an `EvalRunner` for future auto-evaluation:
-
-```rust
-use echo_agent::runner::AgentRunner;
-use echo_agent::eval::EvalRunner;
-
-let runner = AgentRunner::new()
-    .model("qwen3-max")
-    .with_eval_recorder(EvalRunner::new("/tmp/eval"))
-    .build()?;
-```
-
-> **Status**: The eval recorder is stored but not yet executed automatically. Use `EvalRunner::run()` manually.
+There is intentionally no automatic eval recorder in the Agent builder.
+Construct the production Agent with `ReactAgentBuilder`, then pass that Agent to
+`EvalRunner::run` or provide a fresh-Agent factory to `run_all`. This keeps eval
+execution explicit and prevents production turns from silently acquiring a
+second lifecycle or persistence owner.
 
 See also: [25 - Self-Improvement](./25-self-improvement.md) for how eval feeds into the improvement loop.

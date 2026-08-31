@@ -5,11 +5,12 @@
 
 ## FrameworkConfig
 
-`FrameworkConfig` 是单个 Agent runtime 的可序列化适配器，只包含 provider-neutral
+`FrameworkConfig` 是单个 Agent runtime 的可序列化配置值，只包含 provider-neutral
 模型设置和 Agent 行为设置。
 
 ```rust
-use echo_agent::config::{AgentYamlConfig, FrameworkConfig, ModelConfig};
+use echo_agent::agent::AgentConfig;
+use echo_agent::config::{AgentSettings, FrameworkConfig, ModelConfig};
 use echo_agent::llm::LlmApiProtocol;
 
 let config = FrameworkConfig {
@@ -19,13 +20,13 @@ let config = FrameworkConfig {
         api_protocol: Some(LlmApiProtocol::ChatCompletions),
         ..Default::default()
     },
-    agent: AgentYamlConfig {
+    agent: AgentSettings {
         name: "assistant".into(),
         system_prompt: "帮助用户。".into(),
         ..Default::default()
     },
 };
-let agent_config = config.to_agent_config();
+let agent_config: AgentConfig = config.into();
 ```
 
 框架默认不启用工具、记忆、持久化或 HITL；这些策略必须由应用显式选择。
@@ -46,7 +47,18 @@ let memory_path = root.path("memory.json");
 ## PermissionMode
 
 `AgentConfig::permission_mode` 与 `ReactAgent::set_permission_mode` 接收类型化
-`PermissionMode`。字符串别名和产品展示名只存在于应用边界。
+`PermissionMode`。framework 直接拥有 canonical kebab-case id 和可接受的字符串别名；
+应用可以直接使用 `str::parse` 或 serde，不需要平行的 mode DTO。
+
+Provider 配置 view 也直接暴露 framework `LlmApiProtocol` 和
+`ModelInputModality`；应用应保留这些类型化 enum，只有在 transport 合同确实不同时才另设 wire 名称。
+
+## LLM 超时
+
+`LlmConfig::with_timeouts(LlmTimeouts)` 设置完整请求以及 stream first-chunk、idle、
+overall 边界的 provider-client 默认值；`ChatRequest::with_timeouts` 使用同一个类型覆盖
+单次调用。公开 API 使用 `Duration`，序列化的 `LlmTimeouts` 使用可选毫秒值。默认值与
+精确边界见[流式输出](./10-streaming.md#llm-超时)。
 
 ## 工具组合
 

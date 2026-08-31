@@ -17,6 +17,7 @@ use tracing::warn;
 
 use crate::sandbox::SandboxManager;
 use crate::skills::SkillInfo;
+use crate::skills::external::SkillDocument;
 use crate::skills::external::prompt_exec::{PromptContext, SkillSource, process_skill_content};
 use crate::skills::external::types::{
     SkillContent, SkillDescriptor, SkillResourceEntry, SkillResourceKind, SkillSandboxPolicy,
@@ -36,13 +37,9 @@ pub struct SkillRegistry {
     /// File-based skills: name -> descriptor (Tier 1 metadata)
     descriptors: HashMap<String, SkillDescriptor>,
 
-    /// Legacy instructions parsed from frontmatter, keyed by skill name.
-    /// Used during activation when the SKILL.md body is empty.
-    legacy_instructions: HashMap<String, String>,
-
     /// Frozen SKILL.md documents supplied by a prepared plugin generation.
     /// Non-plugin discovery intentionally remains lazy and filesystem-backed.
-    prepared_documents: HashMap<String, String>,
+    prepared_documents: HashMap<String, SkillDocument>,
 
     /// Skills activated in the current session (dedup set)
     activated: std::sync::Mutex<HashSet<String>>,
@@ -83,7 +80,6 @@ impl SkillRegistry {
         Self {
             session_id,
             descriptors: HashMap::new(),
-            legacy_instructions: HashMap::new(),
             prepared_documents: HashMap::new(),
             activated: std::sync::Mutex::new(HashSet::new()),
             code_skills: HashMap::new(),
@@ -98,6 +94,11 @@ impl SkillRegistry {
 
     /// Register a discovered file-based skill descriptor.
     pub fn register_descriptor(&mut self, descriptor: SkillDescriptor) {
+        self.prepared_documents.remove(&descriptor.name);
+        self.insert_descriptor(descriptor);
+    }
+
+    fn insert_descriptor(&mut self, descriptor: SkillDescriptor) {
         // Validate paths during registration
         for warning in descriptor.validate_paths() {
             warn!("Skill '{}': {}", descriptor.name, warning);
@@ -133,7 +134,7 @@ impl SkillRegistry {
     ///
     /// Used by the plugin runtime on disable/uninstall so the agent's
     /// SkillRegistry doesn't keep a disabled plugin's skills. Each removed
-    /// skill is also deactivated and purged from legacy/sandbox bookkeeping
+    /// skill is also deactivated and purged from runtime bookkeeping
     /// via `remove_descriptor`.
     pub fn unregister_by_source(&mut self, source: &str) -> usize {
         self.unregister_names_by_source(source).len()
@@ -194,38 +195,12 @@ impl SkillRegistry {
         }
     }
 
-    /// Register a discovered file-based skill descriptor and its legacy instructions.
-    pub fn register_descriptor_with_legacy(
-        &mut self,
-        descriptor: SkillDescriptor,
-        legacy_instructions: Option<String>,
-    ) {
-        self.register_descriptor_with_legacy_and_document(descriptor, legacy_instructions, None);
-    }
-
-    /// Register a parsed descriptor together with the immutable SKILL.md used
-    /// to prepare its plugin generation.
-    pub fn register_descriptor_with_legacy_and_document(
-        &mut self,
-        descriptor: SkillDescriptor,
-        legacy_instructions: Option<String>,
-        prepared_document: Option<String>,
-    ) {
+    /// Register one validated Skill from an immutable prepared generation.
+    pub fn register_prepared(&mut self, document: SkillDocument) {
+        let descriptor = document.descriptor().clone();
         let name = descriptor.name.clone();
-        if let Some(legacy) = legacy_instructions
-            && !legacy.trim().is_empty()
-        {
-            self.legacy_instructions.insert(name.clone(), legacy);
-        }
-        match prepared_document {
-            Some(document) => {
-                self.prepared_documents.insert(name, document);
-            }
-            None => {
-                self.prepared_documents.remove(&name);
-            }
-        }
-        self.register_descriptor(descriptor);
+        self.prepared_documents.insert(name, document);
+        self.insert_descriptor(descriptor);
     }
 
     /// Remove one file-based descriptor and all of its activation metadata.
@@ -242,7 +217,6 @@ impl SkillRegistry {
                 self.by_source.remove(&source);
             }
         }
-        self.legacy_instructions.remove(name);
         self.prepared_documents.remove(name);
         self.plugin_variables.remove(name);
         self.activated
@@ -402,13 +376,12 @@ impl SkillRegistry {
     /// This is the full activation path that:
     /// 1. Recursively activates dependencies first (if any)
     /// 2. Reads the `SKILL.md` body
-    /// 3. Falls back to legacy frontmatter `instructions` if body is empty
-    /// 4. Substitutes variables (`${SKILL_DIR}`, `${SESSION_ID}`, `${ARGUMENTS}`, etc.)
-    /// 5. Executes inline commands (`` !`cmd` `` and `` ```! cmd ``` ``),
+    /// 3. Substitutes variables (`${SKILL_DIR}`, `${SESSION_ID}`, `${ARGUMENTS}`, etc.)
+    /// 4. Executes inline commands (`` !`cmd` `` and `` ```! cmd ``` ``),
     ///    using the configured sandbox path when available, or the direct fallback
     ///    with minimal env + best-effort timeout termination otherwise
-    /// 6. Enumerates bundled resources
-    /// 7. Stores sandbox policy if declared
+    /// 5. Enumerates bundled resources
+    /// 6. Stores sandbox policy if declared
     pub async fn activate_with_args(
         &self,
         name: &str,
@@ -431,30 +404,20 @@ impl SkillRegistry {
             ))
         })?;
 
-        let raw_content = match self.prepared_documents.get(name) {
+        let document = match self.prepared_documents.get(name) {
             Some(document) => document.clone(),
-            None => tokio::fs::read_to_string(location).await.map_err(|e| {
-                echo_core::error::ReactError::Other(format!(
-                    "Failed to read SKILL.md at '{}': {}",
-                    location.display(),
-                    e
-                ))
-            })?,
+            None => {
+                let raw_content = tokio::fs::read_to_string(location).await.map_err(|e| {
+                    echo_core::error::ReactError::Other(format!(
+                        "Failed to read SKILL.md at '{}': {}",
+                        location.display(),
+                        e
+                    ))
+                })?;
+                SkillDocument::parse_at(&raw_content, location.clone())?
+            }
         };
-
-        let mut raw_instructions = extract_body(&raw_content);
-
-        // Fall back to legacy instructions from frontmatter if body is empty
-        if raw_instructions.trim().is_empty()
-            && let Some(legacy) = self.legacy_instructions.get(name)
-            && !legacy.trim().is_empty()
-        {
-            warn!(
-                "Skill '{}': using legacy frontmatter instructions (body is empty)",
-                name
-            );
-            raw_instructions = legacy.clone();
-        }
+        let mut raw_instructions = document.instructions().to_string();
         if let Some(variables) = self.plugin_variables.get(name) {
             raw_instructions = variables.substitute(&raw_instructions);
         }
@@ -672,11 +635,6 @@ impl SkillRegistry {
         self.list_code_skills()
     }
 
-    /// Get a skill's info by name (code-based only, for backward compat).
-    pub fn get(&self, name: &str) -> Option<&SkillInfo> {
-        self.code_skills.get(name)
-    }
-
     /// Core methodology skills that are injected directly into the system
     /// prompt at session start (not just listed in the catalog).
     pub const DEFAULT_BASELINE_SKILLS: &'static [&'static str] = &[
@@ -708,12 +666,25 @@ impl SkillRegistry {
             if !enabled_baseline.iter().any(|name| *name == desc.name) {
                 continue;
             }
-            // Read skill body from disk at {location}/SKILL.md
-            let skill_file = desc.location.join("SKILL.md");
-            let Ok(content) = std::fs::read_to_string(&skill_file) else {
-                continue;
+            let skill_file =
+                if desc.location.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+                    desc.location.clone()
+                } else {
+                    desc.location.join("SKILL.md")
+                };
+            let document = match self.prepared_documents.get(&desc.name) {
+                Some(document) => document.clone(),
+                None => {
+                    let Ok(content) = std::fs::read_to_string(&skill_file) else {
+                        continue;
+                    };
+                    let Ok(document) = SkillDocument::parse_at(&content, &skill_file) else {
+                        continue;
+                    };
+                    document
+                }
             };
-            let raw_body = strip_frontmatter(&content).unwrap_or(&content).trim();
+            let raw_body = document.instructions().trim();
             let substituted;
             let body = if let Some(variables) = self.plugin_variables.get(&desc.name) {
                 substituted = variables.substitute(raw_body);
@@ -733,19 +704,6 @@ impl SkillRegistry {
     }
 }
 
-/// Strip YAML frontmatter from SKILL.md content.
-/// Returns body after the closing `---`, or None if no frontmatter found.
-///
-fn strip_frontmatter(content: &str) -> Option<&str> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return None;
-    }
-    let after_first = trimmed.get(3..)?;
-    let end = after_first.find("\n---")?;
-    after_first.get(end.saturating_add(4)..)
-}
-
 impl Default for SkillRegistry {
     fn default() -> Self {
         Self::new()
@@ -760,34 +718,6 @@ pub type SharedRegistry = Arc<RwLock<SkillRegistry>>;
 /// Create a new shared registry from an existing one.
 pub fn shared_registry(registry: SkillRegistry) -> SharedRegistry {
     Arc::new(RwLock::new(registry))
-}
-
-// -- Helpers --
-
-/// Extract the Markdown body from a SKILL.md file (strip YAML frontmatter).
-fn extract_body(content: &str) -> String {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return content.to_string();
-    }
-
-    let after_open = trimmed
-        .get(3..)
-        .unwrap_or("")
-        .trim_start_matches('\r')
-        .trim_start_matches('\n');
-
-    if let Some(close_idx) = after_open.find("\n---") {
-        let after_close = after_open
-            .get(close_idx.saturating_add(4)..)
-            .unwrap_or_default();
-        after_close
-            .trim_start_matches('\r')
-            .trim_start_matches('\n')
-            .to_string()
-    } else {
-        String::new()
-    }
 }
 
 /// Enumerate resource files in `scripts/`, `references/`, `assets/` under a skill dir.
@@ -820,7 +750,7 @@ async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEn
         }
     }
 
-    // Also enumerate top-level .md files that aren't SKILL.md (legacy resource files)
+    // Also enumerate top-level text resources that are not SKILL.md.
     if let Ok(mut entries) = tokio::fs::read_dir(skill_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
@@ -845,14 +775,11 @@ async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEn
     resources
 }
 
-// -- Backward compatibility --
-
 // -- Tests --
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::path::PathBuf;
 
     fn make_descriptor(name: &str, desc: &str) -> SkillDescriptor {
@@ -970,67 +897,6 @@ mod tests {
     }
 
     #[test]
-    fn test_register_descriptor_with_legacy() {
-        let mut reg = SkillRegistry::new();
-        reg.register_descriptor_with_legacy(
-            make_descriptor("legacy-skill", "Legacy"),
-            Some("Use legacy instructions.".to_string()),
-        );
-
-        assert_eq!(
-            reg.legacy_instructions
-                .get("legacy-skill")
-                .map(String::as_str),
-            Some("Use legacy instructions.")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_activate_falls_back_to_legacy_instructions() {
-        let root = std::env::temp_dir().join(format!(
-            "echo-skill-registry-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let skill_dir = root.join("legacy-skill");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: legacy-skill\ndescription: Legacy skill\n---\n",
-        )
-        .unwrap();
-
-        let mut reg = SkillRegistry::new();
-        reg.register_descriptor_with_legacy(
-            SkillDescriptor {
-                source: None,
-                name: "legacy-skill".into(),
-                description: "Legacy skill".into(),
-                location: skill_dir.join("SKILL.md"),
-                license: None,
-                compatibility: None,
-                metadata: HashMap::new(),
-                allowed_tools: vec![],
-                shell: None,
-                paths: vec![],
-                triggers: vec![],
-                hooks: None,
-                sandbox: None,
-                depends_on: vec![],
-            },
-            Some("Use the legacy body".to_string()),
-        );
-
-        let content = reg
-            .activate_with_args("legacy-skill", &[], SkillSource::Local)
-            .await
-            .unwrap();
-        assert!(content.instructions.contains("Use the legacy body"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn test_catalog_prompt() {
         let mut reg = SkillRegistry::new();
         reg.register_descriptor(make_descriptor("code-review", "Review code"));
@@ -1077,27 +943,6 @@ mod tests {
 
         let names = reg.available_names();
         assert_eq!(names, vec!["a-skill", "b-skill"]);
-    }
-
-    #[test]
-    fn test_extract_body() {
-        let content = "---\nname: test\ndescription: Test\n---\n\n# Instructions\n\nDo stuff.";
-        let body = extract_body(content);
-        assert_eq!(body, "# Instructions\n\nDo stuff.");
-    }
-
-    #[test]
-    fn test_extract_body_no_frontmatter() {
-        let content = "# Just markdown\n\nNo frontmatter here.";
-        let body = extract_body(content);
-        assert_eq!(body, content);
-    }
-
-    #[test]
-    fn test_extract_body_malformed_frontmatter_returns_empty() {
-        let content = "---\nname: test\ndescription: missing terminator\n# Instructions";
-        let body = extract_body(content);
-        assert!(body.is_empty());
     }
 
     #[test]

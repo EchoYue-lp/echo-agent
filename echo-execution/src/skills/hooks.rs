@@ -72,7 +72,10 @@
 //! | `agent` | Invoke a configured subagent |
 //! | `activate_skill` | Activate a discovered skill directly |
 //!
-//! ## YAML format (SKILL.md frontmatter or application configuration)
+//! ## Format (application configuration)
+//!
+//! Skill files do not carry private Hook extensions. Hooks are supplied by
+//! host application configuration or plugin Hook components.
 //!
 //! ```yaml
 //! hooks:
@@ -198,6 +201,7 @@ pub enum HookAction {
     /// Directly activate a skill without going through the LLM.
     /// The hook engine calls `ReactAgent::activate_skill(skill)` when matched.
     /// `reason` is surfaced to the model as a system note explaining why.
+    #[serde(rename = "activate_skill")]
     ActivateSkill {
         /// Name of the skill to activate (must match a discovered skill).
         skill: String,
@@ -377,7 +381,8 @@ pub struct HookRule {
 
 // ── Hooks Definition ───────────────────────────────────────────────────
 
-/// Complete hooks definition from a skill's frontmatter or user config.
+/// Complete hooks definition from a programmatic Skill descriptor or host
+/// configuration.
 ///
 /// Uses a `HashMap<HookEvent, Vec<HookRule>>` so that any event type
 /// is automatically supported without modifying this struct.

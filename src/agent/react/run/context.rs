@@ -140,7 +140,7 @@ impl ReactAgent {
     pub(crate) async fn reset_messages(&self) {
         let mut ctx = self.memory.context.lock().await;
         ctx.clear();
-        ctx.push(Message::system(self.config.system_prompt.clone()));
+        ctx.push(Message::system(self.current_system_prompt()));
         drop(ctx);
         // Fire SessionStart hook with matcher "clear"
         let start_result = self

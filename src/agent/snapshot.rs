@@ -338,7 +338,7 @@ pub struct RuntimeConfig {
     pub supports_tool_choice_none: bool,
     /// Input modalities accepted by the configured model. `None` preserves
     /// compatibility for custom agents that do not provide an
-    /// [`crate::config::LlmConfig`].
+    /// [`crate::llm::LlmConfig`].
     pub input_modalities: Option<Vec<echo_core::llm::ModelInputModality>>,
     pub session_id: Option<String>,
     /// Identity used exclusively for `RuntimeStateStore` checkpoints.
@@ -456,13 +456,7 @@ impl ToolRuntime {
         invocation_disabled_tools: Option<&std::collections::HashSet<String>>,
         invocation_visible_tools: Option<&std::collections::HashSet<String>>,
     ) -> Self {
-        let mut disabled_tools = agent
-            .tools
-            .disabled_tools
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone())
-            .unwrap_or_default();
+        let mut disabled_tools = agent.tools.tool_visibility.disabled_names();
         if let Some(profile) = agent.config.model_profile.as_ref() {
             disabled_tools.extend(profile.excluded_tools.iter().cloned());
         }
@@ -603,6 +597,9 @@ pub struct AgentRunSnapshot {
     pub context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
     /// Tool execution state (tools, hooks).
     pub tools: Arc<ToolRuntime>,
+    /// Invocation-scoped activation names, updated when a skill is activated
+    /// through a tool during the turn.
+    skill_telemetry_active_skills: Arc<std::sync::Mutex<Vec<String>>>,
     /// Guard / safety state.
     pub guard: Arc<GuardRuntime>,
     /// Snapshot manager (from memory subsystem).
@@ -674,6 +671,8 @@ pub struct AgentRunSnapshot {
     /// always in sync with the running context — without each entry point
     /// having to re-implement the save logic.
     pub conversation_store: Option<Arc<dyn crate::memory::ConversationStore>>,
+    /// Long-term store used by the optional framework skill telemetry writer.
+    pub(crate) memory_store: Option<Arc<dyn crate::memory::Store>>,
     /// Optional Critic for final_answer verification.
     pub critic: Option<Arc<dyn echo_core::agent::Critic>>,
     /// Optional tool execution pipeline (15-stage middleware).
@@ -741,14 +740,17 @@ impl AgentRunSnapshot {
         {
             config.runtime_state_id = Some(runtime_state_id);
         }
+        let tools = ToolRuntime::from_agent(
+            agent,
+            invocation.and_then(|context| context.disabled_tools.as_ref()),
+            invocation.and_then(|context| context.visible_tools.as_ref()),
+        );
+        let skill_telemetry_active_skills =
+            Arc::new(std::sync::Mutex::new(tools.active_skill_names.clone()));
         Self {
             config: Arc::new(config),
             context: agent.memory.context.clone(),
-            tools: Arc::new(ToolRuntime::from_agent(
-                agent,
-                invocation.and_then(|context| context.disabled_tools.as_ref()),
-                invocation.and_then(|context| context.visible_tools.as_ref()),
-            )),
+            tools: Arc::new(tools),
             guard: Arc::new(GuardRuntime::from_agent(agent)),
             snapshot_manager: agent.memory.snapshot_manager.clone(),
             transcript_generation_id: invocation
@@ -837,6 +839,7 @@ impl AgentRunSnapshot {
             calibrated_tokenizer: Arc::clone(&agent.calibrated_tokenizer),
             state_store: agent.memory.state_store.clone(),
             conversation_store: agent.memory.conversation_store.clone(),
+            memory_store: agent.memory.store.clone(),
             critic: agent.critic.clone(),
             tool_execution_pipeline: agent.tool_execution_pipeline.clone(),
             memory_layer_manager: agent.memory_layer_manager.clone(),
@@ -846,7 +849,78 @@ impl AgentRunSnapshot {
                 .unwrap_or_else(|error| error.into_inner())
                 .clone(),
             skill_curator: agent.skill_curator.clone(),
+            skill_telemetry_active_skills,
         }
+    }
+
+    fn active_skill_names_for_telemetry(&self) -> Vec<String> {
+        self.skill_telemetry_active_skills
+            .lock()
+            .map(|names| names.clone())
+            .unwrap_or_else(|_| self.tools.active_skill_names.clone())
+    }
+
+    fn note_skill_activation(&self, skill_name: &str) {
+        let Ok(mut names) = self.skill_telemetry_active_skills.lock() else {
+            return;
+        };
+        if !names.iter().any(|name| name == skill_name) {
+            names.push(skill_name.to_string());
+            names.sort();
+        }
+    }
+
+    /// Persist one best-effort observation for every skill active in this
+    /// invocation. Telemetry is observability, not execution authority: a
+    /// missing store or failed write must never change the tool outcome.
+    fn record_skill_telemetry(
+        &self,
+        tool_name: &str,
+        duration_ms: u64,
+        success: bool,
+        error: Option<&str>,
+    ) {
+        let Some(store) = self.memory_store.clone() else {
+            return;
+        };
+        let skill_names = self.active_skill_names_for_telemetry();
+        if skill_names.is_empty() {
+            return;
+        }
+        let session_id = self.config.session_id.clone().unwrap_or_default();
+        let tool_name = tool_name.to_string();
+        let error_message = error.map(str::to_string);
+        let curator = self.skill_curator.clone();
+        let activated_at = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        tokio::spawn(async move {
+            let telemetry_store = crate::skill_telemetry::SkillTelemetryStore::new(store);
+            for skill_name in skill_names {
+                let record = crate::skill_telemetry::SkillExecutionRecord {
+                    skill_name: skill_name.clone(),
+                    session_id: session_id.clone(),
+                    activated_at,
+                    duration_ms,
+                    tools_used: vec![tool_name.clone()],
+                    tool_calls_count: 1,
+                    success,
+                    error_message: error_message.clone(),
+                };
+                if let Err(write_error) = telemetry_store.record_execution(&record).await {
+                    tracing::warn!(
+                        skill = %skill_name,
+                        error = %write_error,
+                        "skill telemetry write failed"
+                    );
+                }
+                if let Some(curator) = curator.as_ref() {
+                    let curator = curator.clone();
+                    let skill_name = skill_name.clone();
+                    let _ =
+                        tokio::task::spawn_blocking(move || curator.touch_skill(&skill_name, true))
+                            .await;
+                }
+            }
+        });
     }
 
     // ── Trace helpers ──────────────────────────────────────────────
@@ -938,7 +1012,7 @@ impl AgentRunSnapshot {
             conversation_id: conv_id.clone(),
             messages_json,
             current_plan,
-            active_skills: self.tools.active_skill_names.clone(),
+            active_skills: self.active_skill_names_for_telemetry(),
             blocked_reason,
             working_dir: self.config.working_dir.clone(),
             timestamp: chrono::Utc::now(),
@@ -1711,6 +1785,12 @@ impl AgentRunSnapshot {
                 }
             }
 
+            if let Some(result) = ctx.result.as_ref()
+                && let crate::tools::ToolResultKind::SkillActivation { name } = &result.kind
+            {
+                self.note_skill_activation(name);
+            }
+
             match pipeline_result {
                 Ok(()) => {
                     // Check if execution was blocked
@@ -1723,6 +1803,12 @@ impl AgentRunSnapshot {
                         });
                         let result = ToolResult::failure(failure.category, reason.clone())
                             .with_failure(failure);
+                        self.record_skill_telemetry(
+                            tool_name,
+                            ctx.duration_ms,
+                            false,
+                            Some(reason.as_str()),
+                        );
                         return Err(ToolCallFailure {
                             name: ctx.tool_name.clone(),
                             error: crate::error::ToolError::ExecutionFailed {
@@ -1740,6 +1826,13 @@ impl AgentRunSnapshot {
                             if let Some(output) = ctx.output {
                                 result.output = output;
                             }
+                            let telemetry_tool_name = ctx.tool_name.clone();
+                            self.record_skill_telemetry(
+                                &telemetry_tool_name,
+                                ctx.duration_ms,
+                                true,
+                                None,
+                            );
                             return Ok(ToolCallSuccess {
                                 name: ctx.tool_name,
                                 result,
@@ -1754,6 +1847,13 @@ impl AgentRunSnapshot {
                         });
                         result.error = Some(message.clone());
                         result.failure = Some(failure);
+                        let telemetry_tool_name = ctx.tool_name.clone();
+                        self.record_skill_telemetry(
+                            &telemetry_tool_name,
+                            ctx.duration_ms,
+                            false,
+                            Some(message.as_str()),
+                        );
                         return Err(ToolCallFailure {
                             name: ctx.tool_name.clone(),
                             error: crate::error::ToolError::ExecutionFailed {
@@ -1765,6 +1865,12 @@ impl AgentRunSnapshot {
                         });
                     }
                     let message = "Pipeline completed without result".to_string();
+                    self.record_skill_telemetry(
+                        tool_name,
+                        ctx.duration_ms,
+                        false,
+                        Some(message.as_str()),
+                    );
                     Err(ToolCallFailure {
                         name: ctx.tool_name,
                         error: crate::error::ReactError::Other(message.clone()),
@@ -1785,6 +1891,14 @@ impl AgentRunSnapshot {
                     let failure = ToolFailure::from_error(&error, may_have_side_effects);
                     let result = ToolResult::failure(failure.category, error.to_string())
                         .with_failure(failure);
+                    let telemetry_tool_name = ctx.tool_name.clone();
+                    let error_message = error.to_string();
+                    self.record_skill_telemetry(
+                        &telemetry_tool_name,
+                        ctx.duration_ms,
+                        false,
+                        Some(error_message.as_str()),
+                    );
                     Err(ToolCallFailure {
                         name: ctx.tool_name,
                         result,

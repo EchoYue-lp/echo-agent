@@ -181,7 +181,9 @@ fn render_skill_md(candidate: &SkillCandidate) -> String {
     let SkillCandidate {
         name,
         description,
-        trigger_patterns,
+        // Trigger patterns stay in curator state: the standard SKILL.md
+        // format has no field for routing triggers.
+        trigger_patterns: _,
         tool_sequence,
         sample_count,
         confidence,
@@ -190,21 +192,16 @@ fn render_skill_md(candidate: &SkillCandidate) -> String {
         created_at,
     } = candidate;
 
-    let triggers_yaml = trigger_patterns
-        .iter()
-        .map(|t| format!("    - \"{}\"", yaml_escape(t)))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let tools_yaml = if tool_sequence.is_empty() {
-        "    - Bash(*)".to_string()
-    } else {
+    // Official agentskills.io format: one space-separated plain string.
+    // Routing is description-driven; trigger patterns stay in curator state
+    // because the standard format has no field for them.
+    let tools_inline = (!tool_sequence.is_empty()).then(|| {
         tool_sequence
             .iter()
-            .map(|t| format!("    - \"{}\"", yaml_escape(t)))
+            .map(|t| yaml_escape(t))
             .collect::<Vec<_>>()
-            .join("\n")
-    };
+            .join(" ")
+    });
 
     let workflow_steps = if tool_sequence.is_empty() {
         "1. Analyze the user's request\n2. Apply the relevant tools\n3. Verify the result"
@@ -240,10 +237,7 @@ fn render_skill_md(candidate: &SkillCandidate) -> String {
 name: {safe_name}
 description: >-
     {safe_description}
-triggers:
-{triggers_yaml}
-allowed-tools:
-{tools_yaml}
+{allowed_tools_line}
 metadata:
     author: echo-agent
     source: auto-candidate
@@ -274,8 +268,9 @@ Confidence: {confidence:.0}%.
 "#,
         safe_name = safe_name,
         safe_description = safe_description,
-        triggers_yaml = triggers_yaml,
-        tools_yaml = tools_yaml,
+        allowed_tools_line = tools_inline
+            .map(|tools| format!("allowed-tools: {tools}"))
+            .unwrap_or_default(),
         sample_count = sample_count,
         confidence = confidence,
         safe_topic = safe_topic,
@@ -436,7 +431,10 @@ mod tests {
             serde_yaml_ng::from_str(yaml).expect("YAML should parse");
         assert_eq!(parsed["name"].as_str(), Some("cargo-build"));
         assert_eq!(parsed["metadata"]["lifecycle"].as_str(), Some("draft"));
-        assert!(parsed["triggers"].as_sequence().is_some());
+        // Standard-only layout: no routing namespace, string allowed-tools.
+        assert!(parsed.get("triggers").is_none());
+        assert!(parsed["metadata"].get("echo-agent").is_none());
+        assert!(parsed["allowed-tools"].as_str().is_some());
     }
 
     #[tokio::test]

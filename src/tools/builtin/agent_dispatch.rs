@@ -263,12 +263,20 @@ impl AgentDispatchTool {
                 "Dispatching task to subagent via SubagentExecutor"
             );
 
-            // Build parent context if factory is available.
-            // mode=fork → structured history inheritance; otherwise fresh.
+            // Build parent context if factory is available. Fork, teammate,
+            // and team all use the same structured-history policy; the
+            // compiler decides the final bounded message set. Fresh sync
+            // dispatches intentionally carry only the scoped parent goal.
             let parent_context = if let Some(ref f) = factory {
-                let ctx = if exec_mode == ExecutionMode::Fork {
+                let ctx = if matches!(
+                    exec_mode,
+                    ExecutionMode::Fork | ExecutionMode::Teammate | ExecutionMode::Team
+                ) {
                     let inheritance = ContextInheritance {
-                        inherit_history: def.inherit_history.or(Some(2)),
+                        // Preserve the complete raw snapshot here. The
+                        // configured prompt compiler performs the single
+                        // provider-safe filter and applies the role limit.
+                        inherit_history: Some(0),
                         ..ContextInheritance::fork_default()
                     };
                     f.build_with_inheritance(&inheritance).await
@@ -302,6 +310,7 @@ impl AgentDispatchTool {
                 runtime_context,
                 message: active_message,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints,
                 background: run_background,
             };
@@ -434,7 +443,7 @@ impl Tool for AgentDispatchTool {
                 "mode": {
                     "type": "string",
                     "enum": ["sync", "fork", "teammate", "team"],
-                    "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = independent background Subagent with a join/cancel handle. \"team\" = execute the role's TeamSpec through the canonical revisioned task DAG."
+                    "description": "Optional. Omit or \"sync\" = fresh context. \"fork\", \"teammate\", and \"team\" may receive only filtered recent user/final-assistant messages; parent system prompts, tool traffic, and reasoning are never transferred. Worktree/workspace isolation is automatic for roles that declare it. \"teammate\" returns a join/cancel handle. \"team\" executes the role's TeamSpec through the canonical revisioned task DAG."
                 },
                 "constraints": {
                     "type": "array",
@@ -501,7 +510,9 @@ mod tests {
                 source: crate::agent::subagent::SubagentEvidenceSource::Observed,
                 attributes: serde_json::Value::Null,
             }],
+            verification: Vec::new(),
             remaining_work: vec!["finish verification".to_string()],
+            touched_files: crate::agent::subagent::SubagentTouchedFiles::default(),
         };
         let serialized = serialize_parent_result(&outcome).map_err(|error| error.to_string())?;
         let decoded: SubagentOutcome =

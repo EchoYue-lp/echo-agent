@@ -14,7 +14,9 @@ Tool:  单一原子操作（"读取文件"）
 Skill: 领域能力包（"文件系统操作" = read_file + write_file + list_dir + 使用说明提示词）
 ```
 
-框架契约（`Skill` trait + `SkillRegistry`）位于 `echo-core` 与 `echo-execution`。产品目录是该 API 的独立消费方。例如，embedding application 当前把用户可见的目录放在 `<application-data>/skills/`；这项应用层行为应以 [embedding application SkillsHub 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src/skills_hub) 为准，不属于框架 API 契约。
+框架契约（`Skill`、`SkillDocument` 与 `SkillRegistry`）位于 `echo-core` 和
+`echo-execution`。`SkillDocument::parse` 与 `parse_at` 是运行时发现、产品目录和安装校验
+共用的唯一解析/验证 API。产品目录只投影 typed descriptor，不自行解析 frontmatter。
 
 ---
 
@@ -112,40 +114,11 @@ agent.add_skill(Box::new(ResearchSkill));
 name: code-review
 description: >-
   专业代码审查技能：识别代码缺陷、安全风险和最佳实践违规。
-  当用户要求审查代码质量时使用。
+  当用户要求审查代码质量、review 代码或查找 bug 时使用。
 license: Apache-2.0
-shell: bash
-paths:
-  - "*.rs"
-  - "*.py"
-triggers:
-  - 帮我 review 代码
-  - 找一下 bug
-allowed-tools:
-  - read_skill_resource
-  - run_skill_script
-  - Bash
-depends_on:
-  - coding
+allowed-tools: read_skill_resource run_skill_script Bash
 metadata:
   team: backend
-hooks:
-  PreToolUse:
-    - matcher: "Bash"
-      hooks:
-        - type: prompt
-          prompt: "执行前请先验证命令安全性"
-  PostToolUse:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: "${SKILL_DIR}/scripts/log_usage.sh"
-          timeout: 5
-sandbox:
-  isolation: process
-  network: deny
-  allowed_paths:
-    - "${SKILL_DIR}"
 ---
 
 ## 代码审查
@@ -160,34 +133,47 @@ sandbox:
 Skill 目录: ${SKILL_DIR}
 ```
 
+agentskills.io 官方 Skill 文件格式不包含 per-skill Hook 字段或 sidecar。
+请在宿主应用的 Hook 配置或 Plugin Hook component 中配置 Hooks，见
+[Hooks 系统](./23-hooks.md)。
+
 ### Frontmatter 字段（当前）
 
-定义在 `echo-agent/echo-execution/src/skills/external/types.rs`（`SkillDescriptor` 第 75 行 + `RawFrontmatter` 第 415 行）。
+定义在 `echo-agent/echo-execution/src/skills/external/types.rs`。
 
 | 字段 | 必需 | 说明 |
 |------|------|------|
-| `name` | 是 | 唯一名称，kebab-case，1-64 字符 |
-| `description` | 是 | 描述，最多 1024 字符，说明何时使用 |
-| `license` | | SPDX 许可证标识 |
-| `compatibility` | | 自由格式兼容性说明（echo-agent 版本、OS 等） |
-| `shell` | | 内联命令的 shell：`bash`（默认）或 `powershell` |
-| `paths` | | 条件激活的 glob 模式（如 `["*.py"]`），同时进入目录 |
-| `triggers` | | 用户语句触发词，由 `KeywordClassifier` 消费（参见 [两条激活路径](#两条-skill-激活路径)） |
-| `allowed-tools`（别名 `allowed_tools`） | | 已注册工具的白名单 —— **不**是要注册的工具列表 |
-| `depends_on` | | 自动先行激活的其他 skill；`SkillLoader` 用 DFS 检测循环并 warn |
-| `hooks` | | 31 个主 Hook 事件中的任意事件规则；见 [Hooks 系统](./23-hooks.md) |
-| `sandbox` | | 单 skill 沙箱策略：`isolation`、`network`、`allowed_paths`、`denied_paths`、`timeout` |
-| `metadata` | | 任意键值对 |
+| `name` | 是 | 唯一名称，kebab-case，1-64 字符，必须等于 Skill 目录名 |
+| `description` | 是 | 描述，最多 1024 字符，写清"做什么"与"何时使用"——路由由这段文本驱动 |
+| `license` | | SPDX 许可证标识或随附 license 文件引用 |
+| `compatibility` | | 自由格式环境要求（OS、二进制、网络等），最多 500 字符 |
+| `metadata` | | 任意 字符串 → 字符串 键值对 |
+| `allowed-tools` | | 空格分隔的已注册工具白名单 —— **不**是要注册的工具列表 |
 
-### Frontmatter 字段（Legacy）
+### 单一格式权威
 
-下列字段仍能被解析，但已废弃；激活使用它们的 skill 时会在加载阶段输出弃用警告，未来版本会移除。
+`SKILL.md` 只有一种内容模型：frontmatter 描述目录条目，Markdown 正文是指令唯一来源；
+支持文件与它放在同一 Skill 目录中，通常位于 `references/`、`scripts/` 或 `assets/`。
 
-| Legacy 字段 | 替代方案 |
-|------------|---------|
-| `version` / `author` / `tags` | 移入 `metadata:` |
-| `instructions` | 直接放在 `---` 之后的 Markdown 正文 |
-| `resources` | 自动枚举 `references/`、`scripts/`、`assets/`，无需声明 |
+只接受上表的官方 agentskills.io 字段。未知顶层字段一律拒绝，避免拼写错误静默改变
+运行时行为；echo-agent 旧字段（`version`、`author`、`tags`、`instructions`、
+`resources`，以及旧顶层扩展 `triggers`、`hooks`、`shell`、`paths`、`sandbox`、
+`depends_on`）会直接解析失败：字符串扩展元数据放进 `metadata`，指令写在结束 `---`
+之后，支持文件放进 Skill 目录。Hooks 属于宿主配置，不是 Skill 文件内容。路由是 description-driven——
+把"何时使用"的场景与关键词写进 `description`。参见
+[ADR 0023](../adr/0023-current-skill-frontmatter.md) 与
+[ADR 0026](../adr/0026-official-skill-frontmatter-only.md)。
+
+用进程内的 `skills-ref validate` 等价物校验 Skill：
+
+```rust,no_run
+use echo_agent::skills::external::validate_skill_dir;
+
+# fn inspect(dir: &std::path::Path) {
+let report = validate_skill_dir(dir);
+assert!(report.is_valid(), "{:?}", report.violations);
+# }
+```
 
 ### 内联命令执行
 
@@ -275,7 +261,9 @@ let skills = agent.load_skills_from_dir("./skills").await?;
 
 ### 依赖与循环检测
 
-skill 声明 `depends_on` 时，`SkillRegistry` 会在被请求 skill 之前递归激活每个依赖。`SkillLoader` 在加载阶段通过 DFS 检测依赖循环并产生警告；重复项被去重，最后选取一条无环的激活顺序。
+descriptor 声明 `depends_on`（程序化字段——标准 frontmatter 没有来源）时，
+`SkillRegistry` 会在被请求 skill 之前递归激活每个依赖。`SkillLoader` 在加载阶段
+通过 DFS 检测依赖循环并产生警告；重复项被去重，最后选取一条无环的激活顺序。
 
 ---
 
@@ -301,7 +289,11 @@ Skill directory: ...
 
 ### triggers 来自哪里
 
-消费方可以用每个 `SkillDescriptor.triggers` 填充 `KeywordClassifier`。如果某 skill 没有 trigger，关键词路由无法选择它；显式 API 激活与 LLM 工具路径仍然可用。
+标准 frontmatter 没有 trigger 字段，因此文件型 skill 的
+`SkillDescriptor.triggers` 为空。消费方从 `description` 文本派生关键词路由
+（description-driven，规范自身的建议），或在程序化注册的 descriptor 上填充
+`triggers`。如果某 skill 没有 trigger，关键词路由无法选择它；显式 API 激活与
+LLM 工具路径仍然可用。
 
 ---
 
@@ -374,8 +366,8 @@ Skill 与用户和插件 Hook 文件使用同一套 31 事件系统，覆盖工�
 
 插件拥有的 Skill 会在解析 frontmatter 前，对完整 `SKILL.md` 应用 `PluginVariables`
 替换。因此 `${ECHO_PLUGIN_ROOT}`、`${ECHO_PLUGIN_DATA}`、`${ECHO_PROJECT_DIR}`、
-`${user_config.KEY}` 及支持的环境变量占位符，在 Skill metadata、正文和 frontmatter
-Hook Action 中均生效。
+`${user_config.KEY}` 及支持的环境变量占位符，在 Skill metadata 与正文中均生效；Plugin
+Hook Action 属于 Plugin Hook component，不是 Skill 文件内容。
 
 ### Matcher 规则
 
@@ -387,12 +379,12 @@ Hook Action 中均生效。
 
 ## 路径条件激活
 
-带 `paths` 的 skill 始终出现在目录中，但运行时激活由匹配的 `context_path` 把守：
+带 `paths`（程序化字段——标准 frontmatter 没有来源）的 descriptor 始终出现在目录中，
+但运行时激活由匹配的 `context_path` 把守：
 
-```yaml
-paths:
-  - "*.py"
-  - "tests/**"
+```rust
+# // 在程序化注册的 descriptor 上填充
+# descriptor.paths = vec!["*.py".to_string(), "tests/**".to_string()];
 ```
 
 目录显示为：`- python-linter: ... [activates for: *.py, tests/**]`
@@ -412,16 +404,14 @@ paths:
 
 ## allowed-tools 白名单
 
-`allowed-tools` **不**注册工具 —— 它是用来过滤工具调用的白名单，对所有已激活 skill 的白名单取并集（`registry.rs:178-199`）：
+`allowed-tools` **不**注册工具 —— 它是用来过滤工具调用的白名单，对所有已激活 skill 的白名单取并集（`registry.rs:178-199`）。官方 wire 格式是一个空格分隔的 plain 字符串：
 
 ```yaml
-allowed-tools:
-  - read_skill_resource
-  - run_skill_script
-  - Bash
-  - "Bash(git:*)"
-  - "*"           # 通配
+allowed-tools: read_skill_resource run_skill_script Bash(git:*)
 ```
+
+如果值包含 YAML alias 指示符（例如 `*`），请使用引号（如 `allowed-tools: "*"`）。
+程序化 descriptor 仍可设置任意 matcher 列表，但标准格式文件与 validator 要求空格分隔字符串。
 
 匹配语义（`types.rs:277-307`）：
 - 精确名（`"read_skill_resource"`）
@@ -477,9 +467,14 @@ ctx.replace_projection(
 
 ## Skill 遥测（Telemetry）
 
-独立模块 `echo-state/src/skill_telemetry.rs` 定义了 `SkillExecutionRecord` 和 `SkillTelemetry` 类型，由 `Store` trait 在命名空间 `["agent", "skill_telemetry"]` 下背书。
+公开的 `echo_agent::skill_telemetry` 模块定义 `SkillExecutionRecord`、`SkillTelemetry` 和
+`SkillTelemetryStore`，由 `Store` trait 在命名空间 `["agent", "skill_telemetry"]` 下背书。
+调用方应使用这个 facade 路径，不要依赖拆分后的 `echo-state` crate。
 
-⚠️ **运行时目前并未向该 store 写入。** 至今没有任何 `record_execution` 调用点存在于 agent runtime；schema 已就位，但生产者侧尚未接入激活路径。
+统一的 tool execution 主路径会在每次 tool 结果产生后，为当前已激活的每个 skill 记录一条
+observation。framework 使用进程级共享锁串行化 read-modify-write；telemetry 缺少 store 或写入失败时只记录
+warning，不改变 tool 的成功、失败或 retry 语义。只有 host 显式注入 `Curator` 时才会刷新其
+活跃时间。
 
 ---
 

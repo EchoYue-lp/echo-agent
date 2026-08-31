@@ -3,7 +3,7 @@
 //! The memory system provides three layers, each with its own purpose:
 //!
 //! - **Store** — Long-term key-value storage with namespace isolation.
-//!   Backed by [`InMemoryStore`], [`FileStore`], or [`SqliteStore`] (requires feature `sqlite`).
+//!   Backed by [`InMemoryStore`], [`FileStore`], or `SqliteStore` (requires feature `sqlite`).
 //!   Used for L3 memory promotion (compression evicts → write here → recall later).
 //! - **ConversationStore** — User-visible transcript projection (one row per
 //!   message, `StoredMessage` shape). Drives the application UI history panes.
@@ -34,7 +34,7 @@
 //! |------|-------------|
 //! | [`Store`] | Trait for long-term memory backends |
 //! | [`InMemoryStore`] / [`FileStore`] | Built-in store implementations |
-//! | [`SqliteStore`] | SQLite-backed store (feature `sqlite`) |
+//! | `SqliteStore` | SQLite-backed store (feature `sqlite`) |
 //! | [`SnapshotManager`] | Capture and restore agent state at any point |
 //! | [`crate::state::RuntimeStateStore`] | Full runtime checkpoint for crash recovery |
 //! | [`ConversationStore`] | User-visible transcript projection |

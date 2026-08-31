@@ -116,6 +116,19 @@ RuleMatcher::Permission { permission: ToolPermission::Execute } // 按权限匹�
 RuleMatcher::All                                        // 匹配所有
 ```
 
+命令行或 UI 输入应直接解析 framework 类型，不要在应用层再定义一份规则 DTO。
+`RuleMatcher`、`RuleBehavior` 和 `RuleSource` 都实现了 `FromStr`，并会校验 wire
+格式：
+
+```rust
+use std::str::FromStr;
+use echo_agent::tools::permission::{RuleBehavior, RuleMatcher, RuleSource};
+
+let matcher = RuleMatcher::from_str("tool:read_file")?;
+let behavior = RuleBehavior::from_str("allow")?;
+let source = RuleSource::from_str("session")?;
+```
+
 ### 行为（RuleBehavior）
 
 ```rust
@@ -139,7 +152,7 @@ RuleBehavior::Ask { suggestions: vec!["确认执行".into()] }
 ### RuleRegistry — deny-first 评估
 
 ```rust
-use echo_agent::tools::permission::*;
+use echo_agent::prelude::*;
 
 let mut registry = RuleRegistry::new();
 

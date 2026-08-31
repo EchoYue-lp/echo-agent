@@ -37,11 +37,11 @@
 //!
 //! | Module | Tools | Feature |
 //! |--------|-------|---------|
-//! | [`builtin`] | `ThinkTool`, `FinalAnswerTool`, memory tools, data tools, git, RAG, chart | various |
-//! | [`web`] | `WebSearchTool`, `WebFetchTool` | `web` |
-//! | [`media`] | `ImageFetchTool`, PDF/Excel/Word tools | `media` |
-//! | [`files`] | File read/write/list/delete tools | `files` |
-//! | [`shell`] | Shell command execution (sandboxed) | `shell` |
+//! | `builtin` | `ThinkTool`, `FinalAnswerTool`, memory tools, data tools, git, RAG, chart | various |
+//! | `web` | `WebSearchTool`, `WebFetchTool` | `web` |
+//! | `media` | `ImageFetchTool`, PDF/Excel/Word tools | `media` |
+//! | `files` | File read/write/list/delete tools | `files` |
+//! | `shell` | Shell command execution (sandboxed) | `shell` |
 //!
 //! # Key Types
 //!
@@ -78,6 +78,10 @@ pub mod artifact {
 /// Long-running command-cell lifecycle contract (re-export from echo_core).
 pub mod cell {
     pub use echo_core::tools::cell::*;
+}
+/// Revisioned explicit tool-visibility control (re-export from echo-core).
+pub mod control {
+    pub use echo_core::tools::control::*;
 }
 /// Cursor pagination contract for collection-returning tools.
 pub mod pagination {

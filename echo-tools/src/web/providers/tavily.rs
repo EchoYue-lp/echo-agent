@@ -76,8 +76,6 @@ impl std::fmt::Debug for TavilyRequest {
 #[derive(Debug, Deserialize)]
 struct TavilyResponse {
     results: Vec<TavilyResult>,
-    #[allow(dead_code)]
-    answer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,22 +178,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tavily_request_serialization() {
+    fn test_tavily_request_serialization() -> std::result::Result<(), String> {
         let req = TavilyRequest {
             api_key: "test-key".into(),
             query: "rust programming".into(),
             max_results: 5,
             include_answer: false,
         };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["api_key"], "test-key");
-        assert_eq!(json["query"], "rust programming");
-        assert_eq!(json["max_results"], 5);
-        assert_eq!(json["include_answer"], false);
+        let json = serde_json::to_value(&req).map_err(|error| error.to_string())?;
+        assert_eq!(
+            json.get("api_key").and_then(serde_json::Value::as_str),
+            Some("test-key")
+        );
+        assert_eq!(
+            json.get("query").and_then(serde_json::Value::as_str),
+            Some("rust programming")
+        );
+        assert_eq!(
+            json.get("max_results").and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
+        assert_eq!(
+            json.get("include_answer")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_parse_tavily_response() {
+    fn test_parse_tavily_response() -> std::result::Result<(), String> {
         let json = r#"{
             "results": [
                 {
@@ -212,9 +224,8 @@ mod tests {
             "answer": "Rust is a systems programming language."
         }"#;
 
-        let resp: TavilyResponse = serde_json::from_str(json).unwrap();
+        let resp: TavilyResponse = serde_json::from_str(json).map_err(|error| error.to_string())?;
         assert_eq!(resp.results.len(), 2);
-        assert!(resp.answer.is_some());
 
         let results: Vec<SearchResult> = resp
             .results
@@ -234,18 +245,22 @@ mod tests {
             .collect();
 
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].title, "Rust Programming Language");
+        let first = results
+            .first()
+            .ok_or_else(|| "Tavily result fixture was empty".to_string())?;
+        assert_eq!(first.title, "Rust Programming Language");
         assert_eq!(
-            results[0].snippet,
+            first.snippet,
             "A language empowering everyone to build reliable and efficient software."
         );
+        Ok(())
     }
 
     #[test]
-    fn test_parse_tavily_empty_response() {
+    fn test_parse_tavily_empty_response() -> std::result::Result<(), String> {
         let json = r#"{"results": [], "answer": null}"#;
-        let resp: TavilyResponse = serde_json::from_str(json).unwrap();
+        let resp: TavilyResponse = serde_json::from_str(json).map_err(|error| error.to_string())?;
         assert!(resp.results.is_empty());
-        assert!(resp.answer.is_none());
+        Ok(())
     }
 }

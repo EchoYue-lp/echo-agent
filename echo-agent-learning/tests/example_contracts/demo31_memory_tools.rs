@@ -86,7 +86,7 @@ async fn contract_demo31_memory_tools() -> echo_agent::error::Result<()> {
 
     // ── 4. set_memory_store 也同样注册所有记忆工具 ─────────────────────────
     let config = AgentConfig::minimal("qwen3-max", "bare_agent");
-    let mut bare_agent = echo_agent::agent::react::ReactAgent::new(config);
+    let mut bare_agent = echo_agent::agent::ReactAgent::new(config);
     assert!(
         !bare_agent
             .tool_names()

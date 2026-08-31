@@ -115,4 +115,5 @@ this directory from `CARGO_MANIFEST_DIR`, so they work when invoked through
 `cargo run -p echo-agent-learning` from the workspace root.
 
 All example code follows the repository safety rules: no `unwrap`/`expect`, no
-panic macros, no unchecked UTF-8 slicing, and no `worker` terminology.
+panic macros, no unchecked UTF-8 slicing, and Subagent-only execution-role
+terminology.

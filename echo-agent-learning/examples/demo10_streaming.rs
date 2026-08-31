@@ -17,6 +17,7 @@ use echo_agent::prelude::*;
 use echo_agent::tool;
 use futures::StreamExt;
 use std::io::Write;
+use std::time::Duration;
 
 #[tool(name = "add", description = "两数相加")]
 async fn add(a: f64, b: f64) -> Result<ToolResult> {
@@ -77,7 +78,12 @@ async fn main() -> Result<()> {
 }
 
 async fn demo_raw_stream() -> echo_agent::error::Result<()> {
-    let llm_config = support::llm_config(None)?;
+    let llm_config = support::llm_config(None)?.with_timeouts(
+        LlmTimeouts::default()
+            .with_first_chunk_timeout(Duration::from_secs(30))
+            .with_idle_timeout(Duration::from_secs(60))
+            .without_overall_timeout(),
+    );
     let client = llm_config.build_client()?;
     let messages = vec![
         Message::system("你是一个助手，请用中文简洁作答。".to_string()),

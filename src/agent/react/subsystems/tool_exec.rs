@@ -51,7 +51,7 @@ pub(crate) struct ToolExecutionSubsystem {
     /// would affect other in-flight turns on pooled agents), this is a
     /// separate runtime flag — the tool stays registered and available to
     /// other agents; only the LLM tool list is filtered.
-    pub(crate) disabled_tools: Arc<std::sync::RwLock<Option<std::collections::HashSet<String>>>>,
+    pub(crate) tool_visibility: echo_core::agent::ToolVisibilityPolicy,
 }
 
 impl ToolExecutionSubsystem {
@@ -59,8 +59,10 @@ impl ToolExecutionSubsystem {
     ///
     /// Existing snapshots are immutable and are not affected.
     pub(crate) fn set_disabled_tools(&self, names: Option<std::collections::HashSet<String>>) {
-        if let Ok(mut guard) = self.disabled_tools.write() {
-            *guard = names;
-        }
+        self.tool_visibility.set_disabled(names);
+    }
+
+    pub(crate) fn disabled_tool_names(&self) -> std::collections::HashSet<String> {
+        self.tool_visibility.disabled_names()
     }
 }

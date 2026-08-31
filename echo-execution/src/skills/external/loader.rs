@@ -1,7 +1,8 @@
 //! Skill Loader -- multi-scope discovery and agentskills.io-compliant parsing.
 //!
-//! Supports the standard [agentskills.io](https://agentskills.io/specification) directory
-//! convention as well as the legacy echo-agent SKILL.md format (auto-detected with fallback).
+//! Supports the [agentskills.io](https://agentskills.io/specification) directory
+//! convention: official frontmatter fields only; routing is description-driven
+//! and per-skill files do not define private hook extensions.
 //!
 //! # Discovery scopes
 //!
@@ -17,18 +18,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde_yaml_ng::Value;
 use tracing::{debug, info, warn};
 
 use echo_core::error::{ReactError, Result};
 
-use super::types::{RawFrontmatter, SkillDescriptor};
-use crate::skills::hooks::HooksDefinition;
-
+use super::types::{RawFrontmatter, SkillDescriptor, SkillDocument};
 const SKILL_FILE: &str = "SKILL.md";
-/// Hook definition file (embedding application format) alongside SKILL.md.
-/// Distinct from superpowers' Claude-Code-format hooks.json; assets are
-/// transcribed to this format at integration time.
-const HOOKS_FILE: &str = "hooks.json";
 const MAX_SCAN_DEPTH: usize = 4;
 
 /// Directories to skip during scanning.
@@ -71,25 +67,20 @@ pub trait SkillLoadPolicy: Send + Sync {
 ///
 /// # Parsing behavior
 ///
-/// - **Standard format**: YAML frontmatter (`name`, `description` required),
+/// - **Current format**: YAML frontmatter (`name`, `description` required),
 ///   Markdown body = instructions.
-/// - **Legacy format**: If frontmatter contains `instructions:` or `resources:`,
-///   those are used instead of the body. A deprecation warning is logged.
-/// - **Lenient validation**: Name/description issues produce warnings but don't
-///   block loading (except missing `description`, which skips the skill).
+/// - **Strict file validation**: unknown fields, invalid types, name mismatch,
+///   and empty descriptions reject the document before registration.
 pub struct SkillLoader {
     /// Discovered descriptors keyed by skill name.
     descriptors: HashMap<String, SkillDescriptor>,
-    /// Legacy instructions from frontmatter, keyed by skill name.
-    /// Preserved for activation when SKILL.md body is empty.
-    legacy_instructions: HashMap<String, String>,
-    prepared_documents: HashMap<String, String>,
+    documents: HashMap<String, SkillDocument>,
     prepared_identity_documents: HashMap<String, Vec<(PathBuf, String)>>,
     discovery_diagnostics: Vec<SkillDiscoveryDiagnostic>,
     /// Optional authority consulted after parsing and before registration.
     policy: Option<Arc<dyn SkillLoadPolicy>>,
-    /// Optional plugin variable context applied before SKILL.md frontmatter
-    /// and adjacent hooks.json are parsed.
+    /// Optional plugin variable context applied before SKILL.md metadata and
+    /// body are parsed.
     plugin_variables: Option<echo_core::plugin::PluginVariables>,
 }
 
@@ -97,8 +88,7 @@ impl SkillLoader {
     pub fn new() -> Self {
         Self {
             descriptors: HashMap::new(),
-            legacy_instructions: HashMap::new(),
-            prepared_documents: HashMap::new(),
+            documents: HashMap::new(),
             prepared_identity_documents: HashMap::new(),
             discovery_diagnostics: Vec::new(),
             policy: None,
@@ -140,7 +130,8 @@ impl SkillLoader {
                     continue;
                 }
                 let found = self.scan_directory(&dir, 0, true).await?;
-                for (desc, legacy_instr, document, identity_documents) in found {
+                for (document, identity_documents) in found {
+                    let desc = document.descriptor().clone();
                     if self
                         .policy
                         .as_ref()
@@ -161,14 +152,11 @@ impl SkillLoader {
                             existing.location.display()
                         );
                     } else {
-                        if !legacy_instr.is_empty() {
-                            self.legacy_instructions
-                                .insert(desc.name.clone(), legacy_instr);
-                        }
-                        self.descriptors.insert(desc.name.clone(), desc.clone());
-                        self.prepared_documents.insert(desc.name.clone(), document);
+                        let name = desc.name.clone();
+                        self.descriptors.insert(name.clone(), desc.clone());
+                        self.documents.insert(name.clone(), document);
                         self.prepared_identity_documents
-                            .insert(desc.name.clone(), identity_documents);
+                            .insert(name, identity_documents);
                         results.push(desc);
                     }
                 }
@@ -200,7 +188,8 @@ impl SkillLoader {
         }
         let found = self.scan_directory(&dir, 0, false).await?;
         let mut results = Vec::new();
-        for (desc, legacy_instr, document, identity_documents) in found {
+        for (document, identity_documents) in found {
+            let desc = document.descriptor().clone();
             if self
                 .policy
                 .as_ref()
@@ -222,22 +211,19 @@ impl SkillLoader {
                 );
                 continue;
             }
-            if !legacy_instr.is_empty() {
-                self.legacy_instructions
-                    .insert(desc.name.clone(), legacy_instr);
-            }
-            self.descriptors.insert(desc.name.clone(), desc.clone());
-            self.prepared_documents.insert(desc.name.clone(), document);
+            let name = desc.name.clone();
+            self.descriptors.insert(name.clone(), desc.clone());
+            self.documents.insert(name.clone(), document);
             self.prepared_identity_documents
-                .insert(desc.name.clone(), identity_documents);
+                .insert(name, identity_documents);
             results.push(desc);
         }
         validate_and_sort_dependencies(&results);
         Ok(results)
     }
 
-    /// Convenience: discover from a single directory path (backward-compatible).
-    pub async fn discover_from_dir(
+    /// Discover Skills below one explicit directory.
+    pub async fn discover_directory(
         &mut self,
         dir: impl Into<PathBuf>,
     ) -> Result<Vec<SkillDescriptor>> {
@@ -250,7 +236,7 @@ impl SkillLoader {
         dir: &Path,
         depth: usize,
         recursive: bool,
-    ) -> Result<Vec<(SkillDescriptor, String, String, Vec<(PathBuf, String)>)>> {
+    ) -> Result<Vec<(SkillDocument, Vec<(PathBuf, String)>)>> {
         if depth > MAX_SCAN_DEPTH {
             return Ok(vec![]);
         }
@@ -285,6 +271,23 @@ impl SkillLoader {
                 .await
                 .is_ok_and(|metadata| metadata.is_file())
             {
+                let private_hook_file = path.join("hooks.json");
+                if tokio::fs::metadata(&private_hook_file)
+                    .await
+                    .is_ok_and(|metadata| metadata.is_file())
+                {
+                    self.discovery_diagnostics.push(SkillDiscoveryDiagnostic {
+                        path: private_hook_file.clone(),
+                        message: "hooks.json is not part of the official Agent Skills file format"
+                            .to_string(),
+                        is_error: true,
+                    });
+                    warn!(
+                        "Skipping skill '{}' because hooks.json is a private extension",
+                        path.display()
+                    );
+                    continue;
+                }
                 match parse_skill_file_with_variables(
                     &skill_file,
                     &dir_name,
@@ -292,66 +295,14 @@ impl SkillLoader {
                 )
                 .await
                 {
-                    Ok((mut desc, legacy_instr, document)) => {
-                        let mut identity_documents = vec![(skill_file.clone(), document.clone())];
-                        // Merge external hooks.json (embedding application format) if present alongside SKILL.md.
-                        let hooks_path = path.join(HOOKS_FILE);
-                        if tokio::fs::metadata(&hooks_path)
-                            .await
-                            .is_ok_and(|metadata| metadata.is_file())
-                        {
-                            match tokio::fs::read_to_string(&hooks_path).await {
-                                Ok(text) => {
-                                    let text = match &self.plugin_variables {
-                                        Some(variables) => variables.substitute(&text),
-                                        None => text,
-                                    };
-                                    identity_documents.push((hooks_path.clone(), text.clone()));
-                                    match serde_json::from_str::<HooksDefinition>(&text) {
-                                        Ok(extra) => {
-                                            info!(
-                                                "Merged hooks.json for skill '{}' from {}",
-                                                desc.name,
-                                                hooks_path.display()
-                                            );
-                                            match &mut desc.hooks {
-                                                Some(existing) => existing.merge(extra),
-                                                None => desc.hooks = Some(extra),
-                                            }
-                                        }
-                                        Err(e) => {
-                                            self.discovery_diagnostics.push(
-                                                SkillDiscoveryDiagnostic {
-                                                    path: hooks_path.clone(),
-                                                    message: e.to_string(),
-                                                    is_error: false,
-                                                },
-                                            );
-                                            warn!(
-                                                "Failed to parse '{}' for skill '{}': {}",
-                                                hooks_path.display(),
-                                                desc.name,
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    self.discovery_diagnostics.push(SkillDiscoveryDiagnostic {
-                                        path: hooks_path.clone(),
-                                        message: e.to_string(),
-                                        is_error: false,
-                                    });
-                                    warn!("Cannot read '{}': {}", hooks_path.display(), e);
-                                }
-                            }
-                        }
+                    Ok(document) => {
+                        let source = document.source().to_string();
                         info!(
                             "Discovered skill '{}' at {}",
-                            desc.name,
+                            document.descriptor().name,
                             skill_file.display()
                         );
-                        found.push((desc, legacy_instr, document, identity_documents));
+                        found.push((document, vec![(skill_file.clone(), source)]));
                     }
                     Err(e) => {
                         self.discovery_diagnostics.push(SkillDiscoveryDiagnostic {
@@ -404,13 +355,8 @@ impl SkillLoader {
         self.descriptors.len()
     }
 
-    /// Get legacy instructions for a skill by name, if any.
-    pub fn get_legacy_instructions(&self, name: &str) -> Option<&String> {
-        self.legacy_instructions.get(name)
-    }
-
-    pub fn get_prepared_document(&self, name: &str) -> Option<&String> {
-        self.prepared_documents.get(name)
+    pub fn get_document(&self, name: &str) -> Option<&SkillDocument> {
+        self.documents.get(name)
     }
 
     pub fn get_prepared_identity_documents(&self, name: &str) -> Option<&[(PathBuf, String)]> {
@@ -439,21 +385,19 @@ impl Default for SkillLoader {
 
 // -- Parsing --
 
-/// Parse a single SKILL.md file into a `SkillDescriptor` and optional legacy instructions.
+/// Parse a single SKILL.md file into catalog metadata and its prepared document.
 ///
-/// Implements lenient validation per agentskills.io integration guide:
-/// - Name mismatch with parent directory -> warn, load anyway
-/// - Name exceeds 64 chars -> warn, load anyway
-/// - Description missing/empty -> skip (return error)
-/// - Unparseable YAML -> skip (return error)
+/// Enforces the file-format parts of agentskills.io validation:
+/// - Name must match the containing skill directory
+/// - Name must satisfy the lowercase kebab-case constraints
+/// - Description must be present and non-empty
+/// - Unknown fields and invalid YAML are rejected
 ///
-/// Returns `(descriptor, legacy_instructions)` where `legacy_instructions`
-/// is empty if the skill uses the standard format.
 async fn parse_skill_file_with_variables(
     path: &Path,
     parent_dir_name: &str,
     variables: Option<&echo_core::plugin::PluginVariables>,
-) -> Result<(SkillDescriptor, String, String)> {
+) -> Result<SkillDocument> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| ReactError::Other(format!("Failed to read '{}': {}", path.display(), e)))?;
@@ -462,68 +406,76 @@ async fn parse_skill_file_with_variables(
         None => content,
     };
 
-    let raw = parse_frontmatter(&content)?;
+    let location = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let document = SkillDocument::parse_at(&content, location)?;
+    let descriptor = document.descriptor();
 
-    // Lenient validation
-    if raw.description.trim().is_empty() {
+    if descriptor.name != parent_dir_name {
         return Err(ReactError::Other(format!(
-            "Skill at '{}': description is empty (required per spec)",
-            path.display()
+            "Skill name '{}' must match directory '{}' per agentskills.io",
+            descriptor.name, parent_dir_name
         )));
     }
 
-    // Extract legacy instructions before consuming raw
-    let legacy_instr = raw.instructions.clone().unwrap_or_default();
-
-    let descriptor = raw.clone().into_descriptor(
-        path.to_path_buf()
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf()),
-    );
-
-    // Warn on name issues
-    if descriptor.name != parent_dir_name {
-        warn!(
-            "Skill '{}' name does not match directory '{}' (loading anyway)",
-            descriptor.name, parent_dir_name
-        );
-    }
-
-    for warning in descriptor.validate_name() {
-        warn!("Skill '{}': {}", descriptor.name, warning);
-    }
-
-    if raw.is_legacy_format() {
-        warn!(
-            "Skill '{}' uses legacy SKILL.md format (instructions/resources in frontmatter). \
-             Consider migrating to agentskills.io format where the body is the instructions.",
-            descriptor.name
-        );
-    }
-
-    Ok((descriptor, legacy_instr, content))
+    Ok(document)
 }
 
-/// Parse YAML frontmatter from a SKILL.md file.
-///
-/// Handles the common edge case of unquoted colons in values by retrying
-/// with the problematic value wrapped in quotes.
-/// Parse YAML frontmatter from a SKILL.md string into a `SkillDescriptor`.
-///
-/// Useful for manual/programmatic parsing of skill files.
-pub fn parse_skill_md(content: &str) -> Result<SkillDescriptor> {
-    let raw = parse_frontmatter(content)?;
-    Ok(raw.into_descriptor(std::path::PathBuf::new()))
+impl SkillDocument {
+    /// Parse and validate one in-memory `SKILL.md` document.
+    pub fn parse(content: &str) -> Result<Self> {
+        Self::parse_at(content, PathBuf::new())
+    }
+
+    /// Parse and validate one `SKILL.md` document with its source location.
+    pub fn parse_at(content: &str, location: impl Into<PathBuf>) -> Result<Self> {
+        let (raw, instructions) = parse_document(content)?;
+        let descriptor = raw.into_descriptor(location.into());
+        validate_official_descriptor(&descriptor)?;
+        Ok(Self::new(descriptor, instructions, content.to_string()))
+    }
 }
 
-fn parse_frontmatter(content: &str) -> Result<RawFrontmatter> {
-    let trimmed = content.trim_start();
+/// Validate official agentskills.io limits shared by every file-based entry
+/// point. Keeping these checks here prevents runtime discovery, SkillsHub,
+/// install, and the standalone validator from accepting different formats.
+fn validate_official_descriptor(descriptor: &SkillDescriptor) -> Result<()> {
+    let name_errors = descriptor.validate_name();
+    if !name_errors.is_empty() {
+        return Err(ReactError::Other(format!(
+            "Skill '{}' violates agentskills.io name rules: {}",
+            descriptor.name,
+            name_errors.join("; ")
+        )));
+    }
+    if descriptor.description.trim().is_empty() {
+        return Err(ReactError::Other(
+            "SKILL.md description is empty (required per spec)".to_string(),
+        ));
+    }
+    if descriptor.description.chars().count() > 1024 {
+        return Err(ReactError::Other(
+            "SKILL.md description exceeds the 1024-character limit".to_string(),
+        ));
+    }
+    if descriptor
+        .compatibility
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 500)
+    {
+        return Err(ReactError::Other(
+            "SKILL.md compatibility exceeds the 500-character limit".to_string(),
+        ));
+    }
+    Ok(())
+}
 
-    if !trimmed.starts_with("---") {
+fn parse_document(content: &str) -> Result<(RawFrontmatter, String)> {
+    if !content.starts_with("---") {
         return Err(ReactError::Other(
             "SKILL.md must begin with YAML frontmatter (---)".to_string(),
         ));
     }
+    let trimmed = content;
 
     // Skip the opening --- and the newline after it
     let after_open = trimmed
@@ -560,43 +512,63 @@ fn parse_frontmatter(content: &str) -> Result<RawFrontmatter> {
         ));
     }
 
-    serde_yaml_ng::from_str(yaml_str)
-        .map_err(|e| ReactError::Other(format!("SKILL.md YAML parse error: {}", e)))
+    validate_official_frontmatter_types(yaml_str)?;
+
+    let raw = serde_yaml_ng::from_str(yaml_str)
+        .map_err(|e| ReactError::Other(format!("SKILL.md YAML parse error: {}", e)))?;
+    let instructions = after_close_start
+        .get(close_line_end..)
+        .unwrap_or_default()
+        .trim_start_matches('\r')
+        .trim_start_matches('\n')
+        .to_string();
+    Ok((raw, instructions))
 }
 
-/// Extract the Markdown body from a SKILL.md file (strip frontmatter).
-///
-/// If the frontmatter contains a legacy `instructions` field, returns that
-/// instead of the body.
-pub fn extract_instructions(content: &str) -> String {
-    if let Ok(raw) = parse_frontmatter(content)
-        && let Some(instructions) = raw.instructions
-    {
-        return instructions;
+/// Reject present-but-null or otherwise non-string values before serde's
+/// `Option<T>` defaults can erase the distinction between omission and an
+/// invalid explicit value.
+fn validate_official_frontmatter_types(yaml: &str) -> Result<()> {
+    let value: Value = serde_yaml_ng::from_str(yaml)
+        .map_err(|error| ReactError::Other(format!("SKILL.md YAML parse error: {error}")))?;
+    let Some(mapping) = value.as_mapping() else {
+        return Err(ReactError::Other(
+            "SKILL.md frontmatter must be a YAML mapping".to_string(),
+        ));
+    };
+
+    for field in [
+        "name",
+        "description",
+        "license",
+        "compatibility",
+        "allowed-tools",
+    ] {
+        let key = Value::String(field.to_string());
+        if let Some(value) = mapping.get(&key)
+            && !matches!(value, Value::String(_))
+        {
+            return Err(ReactError::Other(format!(
+                "SKILL.md frontmatter field '{field}' must be a string"
+            )));
+        }
     }
 
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return content.to_string();
+    if let Some(metadata) = mapping.get(Value::String("metadata".to_string())) {
+        let Some(metadata) = metadata.as_mapping() else {
+            return Err(ReactError::Other(
+                "SKILL.md frontmatter field 'metadata' must be a mapping".to_string(),
+            ));
+        };
+        for (key, value) in metadata {
+            if key.as_str().is_none() || !matches!(value, Value::String(_)) {
+                return Err(ReactError::Other(
+                    "SKILL.md metadata keys and values must be strings".to_string(),
+                ));
+            }
+        }
     }
-
-    let after_open = trimmed
-        .get(3..)
-        .unwrap_or("")
-        .trim_start_matches('\r')
-        .trim_start_matches('\n');
-
-    if let Some(close_idx) = after_open.find("\n---") {
-        let after_close = after_open
-            .get(close_idx.saturating_add(4)..)
-            .unwrap_or_default();
-        after_close
-            .trim_start_matches('\r')
-            .trim_start_matches('\n')
-            .to_string()
-    } else {
-        content.to_string()
-    }
+    Ok(())
 }
 
 // -- Dependency validation --
@@ -696,7 +668,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_frontmatter_standard() -> std::result::Result<(), String> {
+    fn test_skill_document_standard() -> std::result::Result<(), String> {
         let content = r#"---
 name: pdf-processing
 description: Extract PDF text, fill forms, merge files. Use when handling PDFs.
@@ -710,15 +682,18 @@ metadata:
 
 Instructions here.
 "#;
-        let raw = parse_frontmatter(content).map_err(|error| error.to_string())?;
-        assert_eq!(raw.name, "pdf-processing");
-        assert_eq!(raw.license, Some("Apache-2.0".into()));
-        assert!(!raw.is_legacy_format());
+        let document = SkillDocument::parse(content).map_err(|error| error.to_string())?;
+        assert_eq!(document.descriptor().name, "pdf-processing");
+        assert_eq!(document.descriptor().license, Some("Apache-2.0".into()));
+        assert_eq!(
+            document.instructions().trim(),
+            "# PDF Processing\n\nInstructions here."
+        );
         Ok(())
     }
 
     #[test]
-    fn test_parse_frontmatter_legacy() -> std::result::Result<(), String> {
+    fn test_skill_document_rejects_removed_echo_agent_fields() {
         let content = r#"---
 name: code_review
 version: "1.0.0"
@@ -733,46 +708,55 @@ resources:
     description: "Review checklist"
 ---
 "#;
-        let raw = parse_frontmatter(content).map_err(|error| error.to_string())?;
-        assert_eq!(raw.name, "code_review");
-        assert!(raw.is_legacy_format());
-        assert!(raw.instructions.is_some());
-        Ok(())
+        assert!(SkillDocument::parse(content).is_err());
     }
 
     #[test]
-    fn test_parse_frontmatter_missing_description() -> std::result::Result<(), String> {
+    fn test_skill_document_rejects_empty_description() {
         let content = "---\nname: test\ndescription: \"\"\n---\n";
-        let raw = parse_frontmatter(content).map_err(|error| error.to_string())?;
-        assert!(raw.description.is_empty());
-        Ok(())
+        assert!(SkillDocument::parse(content).is_err());
     }
 
     #[test]
-    fn test_parse_frontmatter_no_frontmatter() {
+    fn test_skill_document_enforces_official_limits_and_types() {
+        let long_description = "x".repeat(1025);
+        let content = format!("---\nname: test\ndescription: {long_description}\n---\nBody");
+        assert!(SkillDocument::parse(&content).is_err());
+
+        let long_compatibility = "x".repeat(501);
+        let content = format!(
+            "---\nname: test\ndescription: Test\ncompatibility: {long_compatibility}\n---\nBody"
+        );
+        assert!(SkillDocument::parse(&content).is_err());
+
+        for field in ["license", "compatibility", "allowed-tools"] {
+            let content = format!("---\nname: test\ndescription: Test\n{field}: null\n---\nBody");
+            assert!(SkillDocument::parse(&content).is_err());
+        }
+        assert!(
+            SkillDocument::parse("---\nname: test\ndescription: Test\nmetadata: null\n---\nBody")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_skill_document_rejects_missing_frontmatter() {
         let content = "# Just markdown";
-        assert!(parse_frontmatter(content).is_err());
+        assert!(SkillDocument::parse(content).is_err());
     }
 
     #[test]
-    fn test_parse_frontmatter_unclosed() {
+    fn test_skill_document_rejects_unclosed_frontmatter() {
         let content = "---\nname: test\ndescription: Test\n";
-        assert!(parse_frontmatter(content).is_err());
+        assert!(SkillDocument::parse(content).is_err());
     }
 
     #[test]
-    fn test_extract_instructions_body() {
+    fn test_skill_document_uses_markdown_body_as_instructions() -> std::result::Result<(), String> {
         let content = "---\nname: test\ndescription: Test\n---\n\n# Instructions\n\nDo stuff.";
-        let body = extract_instructions(content);
-        assert_eq!(body, "# Instructions\n\nDo stuff.");
-    }
-
-    #[test]
-    fn test_extract_instructions_legacy() {
-        let content =
-            "---\nname: test\ndescription: Test\ninstructions: |\n  Do stuff.\n---\n\n# Body";
-        let body = extract_instructions(content);
-        assert_eq!(body.trim(), "Do stuff.");
+        let document = SkillDocument::parse(content).map_err(|error| error.to_string())?;
+        assert_eq!(document.instructions(), "# Instructions\n\nDo stuff.");
+        Ok(())
     }
 
     /// 验证 scan_directory 递归:嵌套布局 skills/<category>/<name>/SKILL.md
@@ -827,7 +811,7 @@ resources:
         )?;
 
         let mut loader = SkillLoader::new();
-        let descs = loader.discover_from_dir(root.clone()).await?;
+        let descs = loader.discover_directory(root.clone()).await?;
 
         let names: Vec<String> = descs.iter().map(|d| d.name.clone()).collect();
         assert!(
@@ -877,7 +861,7 @@ resources:
         }
 
         let mut loader = SkillLoader::new().with_policy(Arc::new(DenyBlocked));
-        let descriptors = loader.discover_from_dir(&root).await?;
+        let descriptors = loader.discover_directory(&root).await?;
         assert_eq!(descriptors.len(), 1);
         assert_eq!(
             descriptors.first().map(|value| value.name.as_str()),
@@ -924,7 +908,7 @@ resources:
     }
 
     #[tokio::test]
-    async fn plugin_variables_are_applied_before_frontmatter_hooks_are_parsed()
+    async fn plugin_variables_apply_to_frontmatter_and_body()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!(
             "echo_plugin_skill_variables_{}",
@@ -941,9 +925,8 @@ resources:
         std::fs::create_dir_all(&skill_dir)?;
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: configured-skill\ndescription: Uses ${user_config.endpoint}\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: notify ${user_config.endpoint}\n---\nBody ${user_config.endpoint}\n",
+            "---\nname: configured-skill\ndescription: Uses ${user_config.endpoint}\n---\nBody ${user_config.endpoint}\n",
         )?;
-
         let variables = echo_core::plugin::PluginVariables::new(
             root.clone(),
             root.join("plugin-data/configured-plugin"),
@@ -954,27 +937,75 @@ resources:
             "http://localhost:9100".to_string(),
         )]));
         let mut loader = SkillLoader::new().with_plugin_variables(variables);
-        let descriptors = loader.discover_from_dir(&root).await?;
+        let descriptors = loader.discover_directory(&root).await?;
         let descriptor = descriptors
             .first()
             .ok_or("plugin skill was not discovered")?;
         assert_eq!(descriptor.description, "Uses http://localhost:9100");
-        let action = descriptor
-            .hooks
-            .as_ref()
-            .and_then(|definition| {
-                definition
-                    .rules_for(echo_core::hooks::HookEvent::PreToolUse)
-                    .first()
-            })
-            .and_then(|rule| rule.hooks.first())
-            .ok_or("frontmatter hook was not parsed")?;
-        match action {
-            crate::skills::hooks::HookAction::Command { command, .. } => {
-                assert_eq!(command, "notify http://localhost:9100");
+        assert!(descriptor.hooks.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn standard_frontmatter_parses_without_private_extensions()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("echo_standard_skill_{}", uuid::Uuid::new_v4()));
+        struct Guard(std::path::PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
             }
-            _ => return Err("expected command hook".into()),
         }
+        let _guard = Guard(root.clone());
+        let skill_dir = root.join("routed-skill");
+        std::fs::create_dir_all(&skill_dir)?;
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: routed-skill\ndescription: Official layout with routing keywords.\nmetadata:\n  category: demo\nallowed-tools: shell read_file\n---\nBody",
+        )?;
+        let mut loader = SkillLoader::new();
+        let descriptors = loader.discover_directory(&root).await?;
+        let descriptor = descriptors
+            .first()
+            .ok_or("standard skill was not discovered")?;
+        assert!(descriptor.triggers.is_empty());
+        assert_eq!(
+            descriptor.allowed_tools,
+            vec!["shell".to_string(), "read_file".to_string()]
+        );
+        assert!(descriptor.hooks.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn private_hook_sidecar_is_rejected_during_discovery()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("echo_private_hook_{}", uuid::Uuid::new_v4()));
+        struct Guard(std::path::PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = Guard(root.clone());
+        let skill_dir = root.join("private-hook-skill");
+        std::fs::create_dir_all(&skill_dir)?;
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: private-hook-skill\ndescription: Invalid private extension.\n---\nBody",
+        )?;
+        std::fs::write(skill_dir.join("hooks.json"), "{}\n")?;
+
+        let mut loader = SkillLoader::new();
+        let descriptors = loader.discover_directory(&root).await?;
+        assert!(descriptors.is_empty());
+        assert!(
+            loader
+                .discovery_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.is_error && diagnostic.path.ends_with("hooks.json"))
+        );
         Ok(())
     }
 
@@ -998,9 +1029,12 @@ resources:
     #[test]
     fn test_allowed_tools_string() -> std::result::Result<(), String> {
         let content = "---\nname: test\ndescription: Test\nallowed-tools: Bash(git:*) Read\n---\n";
-        let raw = parse_frontmatter(content).map_err(|error| error.to_string())?;
-        let desc = raw.into_descriptor(PathBuf::from("/test/SKILL.md"));
-        assert_eq!(desc.allowed_tools, vec!["Bash(git:*)", "Read"]);
+        let document = SkillDocument::parse_at(content, PathBuf::from("/test/SKILL.md"))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            document.descriptor().allowed_tools,
+            vec!["Bash(git:*)", "Read"]
+        );
         Ok(())
     }
 }

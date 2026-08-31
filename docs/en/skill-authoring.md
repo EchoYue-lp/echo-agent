@@ -33,17 +33,20 @@ skills/
 
 ### SKILL.md Format
 
+Official agentskills.io fields only — there is no trigger field; routing is
+description-driven, so put when-to-use scenarios and keywords into
+`description`:
+
 ```markdown
 ---
 name: my-skill
-description: Short description of the skill
+description: >-
+  Short description of the skill and when to use it, including the user
+  phrases that should route here.
 metadata:
   version: "1.0.0"
   author: Your Name
-  tags: [domain, category]
-triggers:
-  - "keyword1"
-  - "keyword2"
+  tags: "domain, category"
 ---
 
 # My Skill
@@ -62,6 +65,9 @@ Detailed step-by-step instructions.
   - Args: `--input <file>` `--output <file>`
 ```
 
+The official Skill format has no per-skill Hook field or sidecar. Configure
+Hooks in the host application or plugin component (see [Hooks System](./23-hooks.md)).
+
 ### Three-Tier Progressive Disclosure
 
 | Tier | Content | Trigger | Token Cost |
@@ -75,7 +81,8 @@ Detailed step-by-step instructions.
 ### Writing High-Quality SKILL.md
 
 **✅ Good practices:**
-- Precise `triggers` (avoid overly broad patterns)
+- A description that names concrete when-to-use scenarios (routing is
+  description-driven)
 - Structured guide with headings, lists, code blocks
 - Output format examples
 - Keep Tier 2 under 5000 tokens

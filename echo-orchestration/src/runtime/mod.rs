@@ -11,5 +11,5 @@ pub use turn_driver::{
     TurnOutcome, TurnReceipt, TurnRequest,
 };
 
-/// Re-exported transport identity types used to build a [`turn_driver::TurnRequest`].
-pub use echo_core::agent::{EventEnvelope, EventIdentity};
+/// Re-exported result and transport types used by the turn runtime.
+pub use echo_core::agent::{EventEnvelope, EventIdentity, ExecutionUsage};

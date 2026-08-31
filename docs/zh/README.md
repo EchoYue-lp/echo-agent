@@ -6,6 +6,12 @@
 
 ## 文档索引
 
+### Framework 边界
+
+| 文档 | 模块 | 关键概念 |
+| --- | --- | --- |
+| [39 - Framework 与应用边界](./39-framework-application-boundary.md) | 架构 | 产品无关 framework 能力、EKO policy 和单一 authority |
+
 ### 核心功能
 
 | 文档                                       | 功能模块                 | 核心关键词                                                                      |
@@ -19,7 +25,7 @@
 | [07 - Skill 系统](07-skills.md)            | Skills                   | 能力包、系统提示词注入、外部 SKILL.md 加载                                      |
 | [08 - MCP 协议](08-mcp.md)                 | MCP                      | stdio/HTTP 传输、工具适配、多服务端管理                                         |
 | [09 - 任务规划](09-tasks.md)               | Tasks / DAG              | 有向无环图、拓扑排序、循环依赖检测、Mermaid 可视化                              |
-| [10 - 流式输出](10-streaming.md)           | Streaming                | execute_stream、AgentEvent、SSE、TTFT                                           |
+| [10 - 流式输出](10-streaming.md)           | Streaming                | execute_stream、AgentEvent、SSE、LlmTimeouts、TTFT                              |
 | [11 - 结构化输出](11-structured-output.md) | Structured Output        | ResponseFormat、JsonSchema、extract()、extract_json()                           |
 | [12 - Mock 测试工具](12-mock.md)           | Testing                  | MockLlmClient、MockTool、MockAgent、InMemoryStore                               |
 | [13 - 多轮对话](13-chat.md)                | Chat                     | chat()、chat_stream()、跨轮记忆、reset()                                        |
@@ -58,6 +64,7 @@
 | [38 - Agent 工厂与模式](38-factory-modes.md)         | Agent Factory / Mode Engine / Prompt Templates | 模式切换、本地化、模板渲染                                               |
 | [40 - Context 系统](40-context-system.md)            | Context System                                 | ContextAssembler、ContextBudgeter、ContextSelector、优先级排序、预算感知 |
 | [41 - 持久化概念](41-persistence-concepts.md)        | Store / Journal / Checkpoint / Trace           | 存储边界、事实权威、恢复快照、执行观测                                   |
+| [41 - Delivery Ledger](41-delivery-ledger.md)        | Delivery 生命周期                              | typed route/payload envelope、FIFO、attempt、settlement 与 terminal retention |
 
 ### 入门指南
 
@@ -84,6 +91,14 @@
 | [0008 - Runtime Task 单一权威](../adr/0008-canonical-runtime-task-authority.md) | 一个 revisioned graph 统一 Task CRUD、执行与结算           |
 | [0009 - Tracked Input Receipt](../adr/0009-tracked-input-receipts.md) | Active 与初始输入统一暴露 accepted、drained、terminal 边界 |
 | [0010 - 规范化 Turn Receipt 计量](../adr/0010-canonical-turn-receipt-accounting.md) | 通用 terminal、usage、compaction 与 final-message 事实只有一个 framework receipt 权威 |
+| [0015 - Keyed Execution Admission](../adr/0015-keyed-execution-admission.md) | 可复用 opaque-key lease、retirement fence 和 shutdown wait |
+| [0019 - Typed Delivery Ledger API](../adr/0019-typed-delivery-ledger-api.md) | typed route/payload delivery 与单一 framework record/reducer |
+| [0020 - Structured Subagent Outcome Views](../adr/0020-structured-subagent-outcome-views.md) | 通用 verification 与文件访问视图保留在 framework outcome |
+| [0021 - Framework-Native Domain Values](../adr/0021-framework-native-domain-values.md) | 应用直接消费可复用 framework 值，不使用来源命名转换 |
+| [0022 - Typed LLM Timeout](../adr/0022-typed-llm-timeouts.md) | client 默认值与单次请求 stream 边界共用一个 typed 合同 |
+| [0023 - 当前 Skill Frontmatter](../adr/0023-current-skill-frontmatter.md) | Markdown 正文与目录资源取代旧 frontmatter 内容字段 |
+| [0024 - Subagent 提示词统一编译](../adr/0024-unified-subagent-prompt-compilation.md) | 一个注入式 compiler 统一拥有注册与派发 prompt framing |
+| [0025 - 确定性 CommandCell watcher](../adr/0025-deterministic-command-cell-watcher.md) | retained typed watcher 取代模型驱动的命令轮询 |
 
 ---
 

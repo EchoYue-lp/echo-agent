@@ -8,6 +8,7 @@ use echo_core::agent::{
     Agent, AgentSteerError, AgentSteerReceipt, AgentSteerState, CancellationToken,
 };
 use echo_core::llm::types::Message;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -18,11 +19,129 @@ use super::types::SubagentStatus;
 const SETTLED_RETENTION: usize = 256;
 
 /// Stable identity for one attempt of a logical subagent task.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct SubagentAttemptIdentity {
     pub task_id: String,
     pub execution_id: String,
     pub attempt: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubagentAttemptIdentityFields {
+    task_id: String,
+    execution_id: String,
+    attempt: u32,
+}
+
+impl<'de> Deserialize<'de> for SubagentAttemptIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields = SubagentAttemptIdentityFields::deserialize(deserializer)?;
+        let identity = Self {
+            task_id: fields.task_id,
+            execution_id: fields.execution_id,
+            attempt: fields.attempt,
+        };
+        identity.validate().map_err(serde::de::Error::custom)?;
+        Ok(identity)
+    }
+}
+
+/// Durable identity for one idempotent command addressed to an exact
+/// Subagent attempt.
+///
+/// The command id and task-graph revision are generic lifecycle facts, so
+/// consumers can persist this value directly instead of defining a parallel
+/// command identity around [`SubagentAttemptIdentity`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct SubagentCommandIdentity {
+    pub run_id: String,
+    pub task_id: String,
+    pub execution_id: String,
+    pub plan_revision: u64,
+    pub attempt: u32,
+    pub command_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubagentCommandIdentityFields {
+    run_id: String,
+    task_id: String,
+    execution_id: String,
+    plan_revision: u64,
+    attempt: u32,
+    command_id: String,
+}
+
+impl<'de> Deserialize<'de> for SubagentCommandIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields = SubagentCommandIdentityFields::deserialize(deserializer)?;
+        let identity = Self {
+            run_id: fields.run_id,
+            task_id: fields.task_id,
+            execution_id: fields.execution_id,
+            plan_revision: fields.plan_revision,
+            attempt: fields.attempt,
+            command_id: fields.command_id,
+        };
+        identity.validate().map_err(serde::de::Error::custom)?;
+        Ok(identity)
+    }
+}
+
+impl SubagentCommandIdentity {
+    pub fn new(
+        run_id: impl Into<String>,
+        task_id: impl Into<String>,
+        execution_id: impl Into<String>,
+        plan_revision: u64,
+        attempt: u32,
+        command_id: impl Into<String>,
+    ) -> Result<Self, SubagentControlError> {
+        let identity = Self {
+            run_id: run_id.into(),
+            task_id: task_id.into(),
+            execution_id: execution_id.into(),
+            plan_revision,
+            attempt,
+            command_id: command_id.into(),
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    pub fn validate(&self) -> Result<(), SubagentControlError> {
+        if self.run_id.trim().is_empty() {
+            return Err(SubagentControlError::InvalidIdentity { field: "run_id" });
+        }
+        if self.plan_revision == 0 {
+            return Err(SubagentControlError::InvalidIdentity {
+                field: "plan_revision",
+            });
+        }
+        if self.command_id.trim().is_empty() {
+            return Err(SubagentControlError::InvalidIdentity {
+                field: "command_id",
+            });
+        }
+        self.attempt_identity().map(|_| ())
+    }
+
+    /// Return the live-control identity for this command's exact attempt.
+    pub fn attempt_identity(&self) -> Result<SubagentAttemptIdentity, SubagentControlError> {
+        SubagentAttemptIdentity::new(
+            self.task_id.clone(),
+            self.execution_id.clone(),
+            self.attempt,
+        )
+    }
 }
 
 impl SubagentAttemptIdentity {
@@ -67,6 +186,42 @@ pub enum SubagentControlPhase {
     Running,
     InterruptRequested,
     Settled,
+}
+
+/// Durable lifecycle phase for one Subagent command.
+///
+/// This phase is distinct from [`SubagentControlPhase`], which describes the
+/// in-process executor binding. It starts at durable command persistence and
+/// ends when the owning turn settles, so a consumer can expose one complete
+/// command receipt without inventing another lifecycle enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentCommandPhase {
+    Persisted,
+    MailboxAccepted,
+    Drained,
+    TurnSettled,
+}
+
+impl SubagentCommandPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Persisted => "persisted",
+            Self::MailboxAccepted => "mailbox_accepted",
+            Self::Drained => "drained",
+            Self::TurnSettled => "turn_settled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "persisted" => Some(Self::Persisted),
+            "mailbox_accepted" => Some(Self::MailboxAccepted),
+            "drained" => Some(Self::Drained),
+            "turn_settled" => Some(Self::TurnSettled),
+            _ => None,
+        }
+    }
 }
 
 /// Exact-attempt envelope for one live message accepted by the active Agent
@@ -795,6 +950,67 @@ mod tests {
             registry.queue_guidance("task", 1, "  "),
             Err(SubagentControlError::EmptyInstruction)
         );
+    }
+
+    #[test]
+    fn attempt_identity_round_trips_as_a_framework_value() -> Result<(), String> {
+        let identity = SubagentAttemptIdentity::new("task-1", "execution-1", 2)
+            .map_err(|error| error.to_string())?;
+        let encoded = serde_json::to_value(&identity).map_err(|error| error.to_string())?;
+        let decoded: SubagentAttemptIdentity =
+            serde_json::from_value(encoded).map_err(|error| error.to_string())?;
+        assert_eq!(decoded, identity);
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_identity_deserialization_rejects_invalid_values() {
+        let invalid = serde_json::json!({
+            "task_id": "",
+            "execution_id": "execution-1",
+            "attempt": 0,
+        });
+        assert!(serde_json::from_value::<SubagentAttemptIdentity>(invalid).is_err());
+        let unknown = serde_json::json!({
+            "task_id": "task-1",
+            "execution_id": "execution-1",
+            "attempt": 1,
+            "extra": true,
+        });
+        assert!(serde_json::from_value::<SubagentAttemptIdentity>(unknown).is_err());
+    }
+
+    #[test]
+    fn command_identity_round_trips_and_exposes_the_live_attempt() -> Result<(), String> {
+        let identity =
+            SubagentCommandIdentity::new("run-1", "task-1", "execution-1", 3, 2, "command-1")
+                .map_err(|error| error.to_string())?;
+        let encoded = serde_json::to_value(&identity).map_err(|error| error.to_string())?;
+        let decoded: SubagentCommandIdentity =
+            serde_json::from_value(encoded).map_err(|error| error.to_string())?;
+        assert_eq!(decoded, identity);
+        assert_eq!(
+            decoded
+                .attempt_identity()
+                .map_err(|error| error.to_string())?,
+            SubagentAttemptIdentity::new("task-1", "execution-1", 2)
+                .map_err(|error| error.to_string())?
+        );
+        assert!(SubagentCommandIdentity::new("run-1", "task-1", "execution-1", 1, 1, "").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn command_phase_wire_names_round_trip() {
+        for phase in [
+            SubagentCommandPhase::Persisted,
+            SubagentCommandPhase::MailboxAccepted,
+            SubagentCommandPhase::Drained,
+            SubagentCommandPhase::TurnSettled,
+        ] {
+            assert_eq!(SubagentCommandPhase::parse(phase.as_str()), Some(phase));
+        }
+        assert_eq!(SubagentCommandPhase::parse("unknown"), None);
     }
 
     #[tokio::test]

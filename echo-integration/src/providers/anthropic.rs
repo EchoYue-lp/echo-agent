@@ -10,14 +10,14 @@ use echo_core::llm::types::{
     FunctionCall, Message, MessageContent, ReasoningBlock, Role, ToolCall, Usage,
 };
 use echo_core::llm::{
-    ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, ModelInputModality,
-    ThinkingProtocol,
+    ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, LlmTimeouts,
+    ModelInputModality, ThinkingProtocol,
 };
 use futures::StreamExt;
 use futures::future::BoxFuture;
 
 use super::anthropic_cache::AnthropicCachePlan;
-use super::client::{SseDecoder, parse_sse_data};
+use super::client::{JsonSseEvent, stream_json_sse};
 use super::config::validate_model_input_modalities;
 use futures::stream::BoxStream;
 use reqwest::Client;
@@ -32,6 +32,7 @@ pub struct AnthropicClient {
     base_url: String,
     input_modalities: Vec<ModelInputModality>,
     thinking_protocol: ThinkingProtocol,
+    timeouts: LlmTimeouts,
 }
 
 impl AnthropicClient {
@@ -71,6 +72,7 @@ impl AnthropicClient {
             base_url,
             input_modalities: ModelInputModality::all_supported(),
             thinking_protocol,
+            timeouts: LlmTimeouts::default(),
         }
     }
 
@@ -95,6 +97,7 @@ impl AnthropicClient {
             base_url,
             input_modalities: ModelInputModality::all_supported(),
             thinking_protocol,
+            timeouts: LlmTimeouts::default(),
         }
     }
 
@@ -107,11 +110,14 @@ impl AnthropicClient {
         self
     }
 
+    /// Set the request and streaming timeout policy.
+    pub fn with_timeouts(mut self, timeouts: LlmTimeouts) -> Self {
+        self.timeouts = timeouts;
+        self
+    }
+
     fn build_http_client() -> Client {
-        Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_default()
+        Client::new()
     }
 
     fn convert_request(&self, request: &ChatRequest) -> AnthropicRequest {
@@ -293,7 +299,7 @@ impl AnthropicClient {
         // Convert system prompt to blocks format with cache_control.
         let system = (!system_parts.is_empty()).then(|| {
             let text = system_parts.join("\n\n");
-            AnthropicSystem::Blocks(vec![SystemBlock {
+            vec![SystemBlock {
                 block_type: "text".to_string(),
                 text,
                 cache_control: if cache_plan.has_system_breakpoint {
@@ -301,7 +307,7 @@ impl AnthropicClient {
                 } else {
                     None
                 },
-            }])
+            }]
         });
 
         // Place cache breakpoints on conversation messages.
@@ -462,16 +468,22 @@ impl LlmClient for AnthropicClient {
         Box::pin(
             async move {
                 self.validate_request_features(&request)?;
+                let timeouts = request.timeouts.unwrap_or(self.timeouts);
                 let body = self.convert_request(&request);
 
                 let request_future = async {
-                    let resp = self.client
+                    let request = self.client
                         .post(&self.base_url)
                         .header("x-api-key", &self.api_key)
                         .header("anthropic-version", "2023-06-01")
                         .header("anthropic-beta", "prompt-caching-2024-07-31")
                         .header("content-type", "application/json")
-                        .json(&body)
+                        .json(&body);
+                    let request = match timeouts.request_timeout() {
+                        Some(timeout) => request.timeout(timeout),
+                        None => request,
+                    };
+                    let resp = request
                         .send()
                         .await
                         .map_err(|e| LlmError::NetworkError(e.to_string()))?;
@@ -512,39 +524,24 @@ impl LlmClient for AnthropicClient {
         Box::pin(
             async move {
             self.validate_request_features(&request)?;
+            let timeouts = request.timeouts.unwrap_or(self.timeouts);
             let mut body = self.convert_request(&request);
             body.stream = Some(true);
 
-            let request_future = async {
-                let resp = self.client
-                    .post(&self.base_url)
-                    .header("x-api-key", &self.api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .header("anthropic-beta", "prompt-caching-2024-07-31")
-                    .header("content-type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| LlmError::NetworkError(e.to_string()))?;
-                let status = resp.status();
-                if !status.is_success() {
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(LlmError::ApiError { status: status.as_u16(), message: text });
-                }
-                Ok(resp)
-            };
-            let resp = tokio::select! {
-                biased;
-                _ = async {
-                    match request.cancel_token.as_ref() {
-                        Some(token) => token.cancelled().await,
-                        None => std::future::pending().await,
-                    }
-                } => return Err(LlmError::NetworkError("Anthropic stream request cancelled".to_string()).into()),
-                response = request_future => response?,
-            };
-
-            let byte_stream = resp.bytes_stream();
+            let cancel_token = request.cancel_token.clone();
+            let stream_request = self.client
+                .post(&self.base_url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-beta", "prompt-caching-2024-07-31")
+                .header("content-type", "application/json")
+                .json(&body);
+            let raw_stream = stream_json_sse(
+                stream_request,
+                self.model.clone(),
+                timeouts,
+                cancel_token,
+            ).await?;
             // Track in-progress tool calls during streaming (index → accumulated args)
             let mut tool_call_args: std::collections::HashMap<usize, (String, String, String)> =
                 std::collections::HashMap::new();
@@ -558,45 +555,26 @@ impl LlmClient for AnthropicClient {
             let mut stream_cache_read_input_tokens: Option<u32> = None;
 
             let stream = async_stream::stream! {
-                let mut byte_stream = std::pin::pin!(byte_stream);
-                let mut decoder = SseDecoder::new();
-                loop {
-                    let chunk_result = tokio::select! {
-                        biased;
-                        _ = async {
-                            match request.cancel_token.as_ref() {
-                                Some(token) => token.cancelled().await,
-                                None => std::future::pending().await,
+                futures::pin_mut!(raw_stream);
+                while let Some(event) = raw_stream.next().await {
+                    let event = match event {
+                        Ok(JsonSseEvent::Done) => return,
+                        Ok(JsonSseEvent::Data(value)) => {
+                            match serde_json::from_value::<AnthropicStreamEvent>(value) {
+                                Ok(event) => event,
+                                Err(error) => {
+                                    yield Err(LlmError::InvalidResponse(format!(
+                                        "invalid Anthropic SSE event: {error}"
+                                    )).into());
+                                    return;
+                                }
                             }
-                        } => {
-                            yield Err(LlmError::NetworkError("Anthropic stream cancelled".to_string()).into());
-                            return;
                         }
-                        next = byte_stream.next() => next,
-                    };
-                    let Some(chunk_result) = chunk_result else {
-                        break;
-                    };
-
-                    let chunk = match chunk_result {
-                        Ok(c) => c,
-                        Err(e) => {
-                            yield Err(LlmError::NetworkError(e.to_string()).into());
+                        Err(error) => {
+                            yield Err(error);
                             return;
                         }
                     };
-
-                    if let Err(error) = decoder.push(&chunk) {
-                        yield Err(error);
-                        return;
-                    }
-
-                    while let Some(event) = decoder.next_event() {
-                        if let Some(data) = parse_sse_data(&event) {
-                            if data == "[DONE]" {
-                                return;
-                            }
-                            if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(&data) {
                                 match event {
                                     AnthropicStreamEvent::MessageStart { message } => {
                                         // Capture initial usage (input_tokens) from message_start
@@ -762,25 +740,6 @@ impl LlmClient for AnthropicClient {
                                     }
                                     AnthropicStreamEvent::Other => {}
                                 }
-                            } else {
-                                yield Err(LlmError::InvalidResponse(
-                                    "invalid Anthropic SSE event".to_string()
-                                ).into());
-                                return;
-                            }
-                        }
-                    }
-                }
-                match decoder.finish() {
-                    Ok(None) => {}
-                    Ok(Some(event)) => {
-                        if parse_sse_data(&event).is_some() {
-                            yield Err(LlmError::InvalidResponse(
-                                "truncated Anthropic SSE event at EOF".to_string()
-                            ).into());
-                        }
-                    }
-                    Err(error) => yield Err(error),
                 }
             };
 
@@ -822,21 +781,12 @@ struct SystemBlock {
     cache_control: Option<CacheControl>,
 }
 
-/// Anthropic system field: either a plain string or array of content blocks
-#[derive(Serialize)]
-#[serde(untagged)]
-#[allow(dead_code)]
-enum AnthropicSystem {
-    Text(String),
-    Blocks(Vec<SystemBlock>),
-}
-
 #[derive(Serialize)]
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<AnthropicSystem>,
+    system: Option<Vec<SystemBlock>>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -1229,7 +1179,6 @@ struct AnthropicResponse {
 }
 
 #[derive(Deserialize, Clone)]
-#[allow(dead_code)]
 struct AnthropicUsage {
     input_tokens: u32,
     output_tokens: u32,

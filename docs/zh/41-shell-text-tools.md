@@ -34,6 +34,36 @@
 - 默认严格模式：不在白名单的命令一律拒绝
 - 沙箱模式下可通过 `sh -c` 执行含元字符的命令
 
+### 确定性后台 Cell Watch
+
+`ShellTool` 以 `background=true` 启动后，消费者可以 retained 并观察 cell，不需要模型驱动的
+轮询 Agent：
+
+```rust,no_run
+use echo_agent::tasks::{
+    CommandCellWatchConfig, CommandCellWatcher,
+};
+use echo_agent::agent::CancellationToken;
+
+# async fn observe(
+#   registry: std::sync::Arc<dyn echo_agent::tools::cell::CommandCellRegistry>
+# ) -> echo_agent::error::Result<()> {
+let watcher = CommandCellWatcher::acquire(
+    registry,
+    "cell-id",
+    CommandCellWatchConfig::default(),
+)?;
+let terminal = watcher
+    .wait_terminal(&CancellationToken::new())
+    .await?;
+assert!(terminal.snapshot.phase.is_terminal());
+# Ok(())
+# }
+```
+
+watcher 持有 retention lease、复用返回的 byte cursor，并且只在 typed terminal 与当前可见 output
+全部 drain 后退出。取消行为通过 `CommandCellWatchCancellation` 显式选择，绝不隐式停止底层命令。
+
 ### 输出格式
 
 ```

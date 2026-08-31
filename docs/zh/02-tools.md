@@ -586,7 +586,7 @@ Tool Call → InterventionStage → ParseValidate → PlanMode → PreToolUseHoo
 ### 配置管线
 
 ```rust
-use echo_agent::agent::react::run::pipeline::ToolExecutionPipeline;
+use echo_agent::agent::ToolExecutionPipeline;
 use echo_agent::prelude::*;
 
 let pipeline = ToolExecutionPipeline::default();

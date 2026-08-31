@@ -197,13 +197,6 @@ let agent = ReactAgentBuilder::new()
     .build()?;
 ```
 
-Or via `AgentRunner`:
-
-```rust
-let runner = AgentRunner::new(agent)
-    .with_run_store(store);
-```
-
 ### Run Lifecycle
 
 ```

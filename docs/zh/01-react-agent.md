@@ -105,6 +105,11 @@ allowlist 和 plan mode 只读工具面，并在该 invocation 生命周期内�
 `ReactAgent::set_disabled_tools` 现在只设置后续 run 的 agent 默认值，不会改变已经创建的
 snapshot。
 
+需要在多个 pooled Agent 之间共享带 revision 的策略时，使用 framework
+`ToolControlService`。它只负责显式 disabled-tool 集合和单调 mutation revision；将
+`ToolControlSnapshot::disabled_option()` 应用到各 Agent 或 invocation 即可。产品代码可以
+额外做注册检查和 effective visibility 投影，但不应再创建第二个策略 authority。
+
 ### Run 预算
 
 `RunBudgetPolicy` 提供默认关闭的收束控制，不改变既有 `max_iterations` 硬停止语义。

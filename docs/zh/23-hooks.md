@@ -12,7 +12,7 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 
 ## Skills Hooks
 
-主 Hook 系统。通过 YAML 配置（`application configuration` 或 SKILL.md frontmatter），由 `HookRegistry` 统一分发执行。
+主 Hook 系统。通过宿主 application 或 Plugin 的 YAML 配置，由 `HookRegistry` 统一分发执行。
 
 ### Hook 事件
 
@@ -117,13 +117,16 @@ Task/Subagent 的取消与超时由对应终态事件的结构化 status 表达�
 
 | `HookSource` | 含义 | 注册入口 |
 |---|---|---|
-| `Skill(name)` | 来自文件型 skill 的 hooks | `HookRegistry::register` |
+| `Skill(name)` | 来自程序化 Skill descriptor 的 hooks | `HookRegistry::register` |
 | `UserConfig` | 来自用户配置（application configuration 内嵌 + hooks.yaml 文件） | `HookRegistry::register_user_hooks` |
 | `Plugin(name)` | 来自已安装插件的 hooks | `HookRegistry::register_plugin_hooks` |
 
 执行优先级：`UserConfig` < `Plugin` < `Skill`（见 `HookRegistry::run_hooks` 的 source 排序）。
 
-### YAML 配置
+### 配置
+
+官方 agentskills.io Skill 文件格式不包含 per-skill Hook 字段或 sidecar。
+Hooks 由用户应用配置或 Plugin Hook component 提供，配置结构如下（YAML）：
 
 ```yaml
 hooks:
@@ -218,8 +221,8 @@ shell 源码，因此安装路径包含空格或 shell 特殊字符时仍可正�
 以上是规范 wire 字段名，`modified_input`、`message` 和 `permission_mode` 不是别名。
 `PreToolUse` 或 `PermissionRequest` 可以返回 `permission_mode_override`。该值只作用于
 当前工具调用，由主执行 Pipeline 传入权限服务，不会修改会话级权限模式，也不会污染
-并发调用。规范值为 `default`、`plan`、`auto`、`acceptEdits`、
-`bypassPermissions`、`bubble`、`dontAsk` 和 `strict`。
+并发调用。规范值为 `default`、`plan`、`auto-edit`、`full-auto`、`auto`、
+`bubble`、`dont-ask` 和 `strict`；framework 解析时也接受已文档化的旧别名。
 
 ### 来源、热更新与 Dry Run
 
@@ -363,4 +366,4 @@ let agent = ReactAgentBuilder::new()
     .build()?;
 ```
 
-Skills Hooks 通过 YAML 配置，从 `application configuration` 或 SKILL.md 文件自动加载。
+Skill 文件不携带 Hooks；Skills Hooks 通过宿主 application 或 Plugin Hook component 的 YAML 配置加载。

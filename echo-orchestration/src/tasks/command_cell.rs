@@ -9,8 +9,8 @@
 //! # Why not reuse `BackgroundTask::wait`?
 //!
 //! `BackgroundTask`'s result cell is `take()`n once — a single consumer gets
-//! the outcome. Cells must support **multiple waiters** (main agent + awaiter
-//! subagent) that can each re-read the same terminal state, so a cell keeps
+//! the outcome. Cells must support **multiple waiters** (main agent + retained
+//! watcher) that can each re-read the same terminal state, so a cell keeps
 //! its own repeatedly-readable state (`RwLock<CellState>` + tail-retained
 //! output buffer + `Notify::notify_waiters` fan-out).
 
@@ -51,6 +51,169 @@ const MAX_DELTA_BYTES: usize = 16 * 1024;
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 /// Maximum cleanup grace after explicit cancellation/shutdown.
 const CANCEL_DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+/// Cancellation behavior for a deterministic command-cell watch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandCellWatchCancellation {
+    /// Return [`CommandCellError::Cancelled`] as soon as cancellation wins.
+    Return,
+    /// Record cancellation but keep short-polling until the cell publishes its
+    /// real terminal state and all observable output is drained.
+    DrainToTerminal { yield_ms: u64 },
+}
+
+/// Policy for [`CommandCellWatcher`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandCellWatchConfig {
+    pub yield_ms: u64,
+    pub excerpt_chars: usize,
+    pub cancellation: CommandCellWatchCancellation,
+}
+
+impl Default for CommandCellWatchConfig {
+    fn default() -> Self {
+        Self {
+            yield_ms: 30_000,
+            excerpt_chars: 1_000,
+            cancellation: CommandCellWatchCancellation::Return,
+        }
+    }
+}
+
+/// Terminal cell truth produced by a deterministic watch.
+#[derive(Debug, Clone)]
+pub struct CommandCellTerminalObservation {
+    pub snapshot: CommandCellSnapshot,
+    pub output_excerpt: String,
+    pub next_cursor: u64,
+    pub output_elided: bool,
+    pub cancellation_observed: bool,
+}
+
+/// Retained, deterministic observer for one command cell.
+///
+/// The watcher owns a framework observation lease for its complete lifetime
+/// and treats the registry's typed snapshot and cursor as the only terminal
+/// authority. No model invocation participates in this lifecycle.
+pub struct CommandCellWatcher {
+    registry: Arc<dyn CommandCellRegistry>,
+    cell_id: String,
+    config: CommandCellWatchConfig,
+    _observation: CommandCellObservationLease,
+}
+
+impl std::fmt::Debug for CommandCellWatcher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CommandCellWatcher")
+            .field("cell_id", &self.cell_id)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommandCellWatcher {
+    /// Acquire a retained watch before reading any application projection.
+    pub fn acquire(
+        registry: Arc<dyn CommandCellRegistry>,
+        cell_id: impl Into<String>,
+        config: CommandCellWatchConfig,
+    ) -> std::result::Result<Self, CommandCellError> {
+        let cell_id = cell_id.into();
+        if cell_id.trim().is_empty() {
+            return Err(CommandCellError::Validation {
+                message: "command-cell watcher requires a non-empty cell_id".to_string(),
+            });
+        }
+        if config.yield_ms == 0
+            || matches!(
+                config.cancellation,
+                CommandCellWatchCancellation::DrainToTerminal { yield_ms: 0 }
+            )
+        {
+            return Err(CommandCellError::Validation {
+                message: "command-cell watcher yield budgets must be positive".to_string(),
+            });
+        }
+        let observation = registry.observe(&cell_id)?;
+        Ok(Self {
+            registry,
+            cell_id,
+            config,
+            _observation: observation,
+        })
+    }
+
+    pub fn cell_id(&self) -> &str {
+        &self.cell_id
+    }
+
+    /// Wait until the cell is terminal and every available byte has been
+    /// drained through the registry cursor.
+    pub async fn wait_terminal(
+        self,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<CommandCellTerminalObservation, CommandCellError> {
+        let mut cursor = 0_u64;
+        let mut excerpt = String::new();
+        let mut output_elided = false;
+        let mut cancellation_observed = false;
+        loop {
+            let yield_ms = match (cancellation_observed, self.config.cancellation) {
+                (true, CommandCellWatchCancellation::DrainToTerminal { yield_ms }) => yield_ms,
+                _ => self.config.yield_ms,
+            };
+            let delta = if cancellation_observed {
+                self.registry.wait(&self.cell_id, cursor, yield_ms).await?
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        match self.config.cancellation {
+                            CommandCellWatchCancellation::Return => {
+                                return Err(CommandCellError::Cancelled);
+                            }
+                            CommandCellWatchCancellation::DrainToTerminal { .. } => {
+                                cancellation_observed = true;
+                                continue;
+                            }
+                        }
+                    }
+                    delta = self.registry.wait(&self.cell_id, cursor, yield_ms) => delta?,
+                }
+            };
+            append_excerpt_tail(&mut excerpt, &delta.new_output, self.config.excerpt_chars);
+            output_elided |= delta.output_elided;
+            cursor = delta.next_cursor;
+            if !delta.snapshot.phase.is_terminal() || cursor < delta.snapshot.total_output_bytes {
+                continue;
+            }
+            return Ok(CommandCellTerminalObservation {
+                snapshot: delta.snapshot,
+                output_excerpt: excerpt,
+                next_cursor: cursor,
+                output_elided,
+                cancellation_observed,
+            });
+        }
+    }
+}
+
+fn append_excerpt_tail(target: &mut String, chunk: &str, max_chars: usize) {
+    if max_chars == 0 {
+        target.clear();
+        return;
+    }
+    target.push_str(chunk);
+    let count = target.chars().count();
+    if count <= max_chars {
+        return;
+    }
+    *target = target
+        .chars()
+        .skip(count.saturating_sub(max_chars))
+        .collect();
+}
 
 // ── Config ──────────────────────────────────────────────────────────
 

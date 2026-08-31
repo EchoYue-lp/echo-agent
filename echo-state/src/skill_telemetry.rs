@@ -4,7 +4,7 @@
 //! telemetry data under the `["agent", "skill_telemetry"]` namespace.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -161,14 +161,27 @@ pub struct FailurePattern {
 ///
 /// Stores aggregated telemetry under `["agent", "skill_telemetry"]` namespace,
 /// keyed by skill name.
+#[derive(Clone)]
 pub struct SkillTelemetryStore {
     store: Arc<dyn Store>,
+    write_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+static TELEMETRY_WRITE_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+
+fn telemetry_write_lock() -> Arc<tokio::sync::Mutex<()>> {
+    TELEMETRY_WRITE_LOCK
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 impl SkillTelemetryStore {
     /// Create a new telemetry store backed by the given `Store`.
     pub fn new(store: Arc<dyn Store>) -> Self {
-        Self { store }
+        Self {
+            store,
+            write_lock: telemetry_write_lock(),
+        }
     }
 
     /// Record a skill execution, updating aggregated telemetry.
@@ -176,6 +189,7 @@ impl SkillTelemetryStore {
         &self,
         record: &SkillExecutionRecord,
     ) -> echo_core::error::Result<()> {
+        let _guard = self.write_lock.lock().await;
         let mut telemetry = self
             .get_telemetry(&record.skill_name)
             .await?

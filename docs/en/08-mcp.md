@@ -268,6 +268,13 @@ async fn main() -> echo_agent::error::Result<()> {
 }
 ```
 
+When a configuration source can change while an Agent stays alive, use
+`ReactAgent::reconcile_mcp_entry`. It accepts a typed `McpServerEntry` (or
+`None` to remove a server) and delegates replacement/unchanged detection to
+the framework `McpManager`. A failed replacement leaves the last-known-good
+connection in place; applications only coordinate their own file and scope
+policy around this call.
+
 ### Method 2: Manage Connections via McpManager
 
 ```rust

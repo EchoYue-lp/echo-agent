@@ -247,7 +247,6 @@ impl ChannelPlugin for FeishuChannel {
             http: self.http.clone(),
             api_domain: self.config.api_domain.clone(),
             token_manager: token_manager.clone(),
-            running_cards: self.running_cards.clone(),
         });
 
         // 4. 根据模式启动不同的消息接收服务
@@ -413,8 +412,6 @@ struct FeishuMessageHandler {
     http: reqwest::Client,
     api_domain: String,
     token_manager: Arc<TokenManager>,
-    #[allow(dead_code)]
-    running_cards: Arc<dashmap::DashMap<String, (String, std::time::Instant)>>,
 }
 
 #[async_trait]

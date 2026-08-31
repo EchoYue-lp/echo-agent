@@ -581,7 +581,7 @@ async fn main() -> echo_agent::error::Result<()> {
 }
 ```
 
-Pre-built skills: `code_review`, `data_analyst`, `project-stats`, `python-linter`, `web_researcher`.
+Pre-built skills: `code-review`, `data-analyst`, `project-stats`, `python-linter`, `web-researcher`.
 
 ### 11. MCP Protocol — Connect any Model Context Protocol server
 

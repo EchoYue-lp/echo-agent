@@ -112,7 +112,7 @@ The remaining components are discovered from fixed root locations:
 
 ## Framework and application boundary
 
-The reusable framework owns manifest parsing, Skills, MCP, plugin scopes/lifecycle, Hooks, Subagent definitions, and LSP adapter output. embedding application discovers and converts only its product-specific `monitors.yaml`, `themes/`, and `output-styles/` files. The application adapter does not duplicate dependency ordering, component ownership, or reload semantics.
+The reusable framework owns manifest parsing, Skills, MCP, plugin scopes/lifecycle, Hooks, Subagent definitions, and LSP adapter output. An embedding application discovers and converts only its product-specific `monitors.yaml`, `themes/`, and `output-styles/` files. The application integration does not duplicate dependency ordering, component ownership, or reload semantics.
 
 ## Discovery and lifecycle
 
@@ -151,6 +151,9 @@ registry.enable(&id)?;
 ```
 
 Use `PluginRegistry::validate_plugin_dir` before installation when a validation report is required.
+`PluginScope` implements `FromStr`, including the documented short forms (`u`,
+`p`, and `l`), so callers can parse configuration and command input with the
+standard `scope.parse()` API.
 
 ## Design references
 

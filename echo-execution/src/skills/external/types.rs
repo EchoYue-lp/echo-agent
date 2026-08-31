@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -7,21 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use echo_core::sandbox::IsolationLevel;
 
-// -- Sandbox policy for skills --
+// -- Sandbox policy for programmatic skill descriptors --
 
-/// Per-skill sandbox isolation policy declared in SKILL.md frontmatter.
-///
-/// When a skill declares a sandbox policy, the framework enforces the specified
-/// isolation level on script execution within that skill's context.
-///
-/// ```yaml
-/// sandbox:
-///   isolation: container
-///   network: false
-///   timeout: 300
-///   allowed_paths: [/tmp/analysis]
-///   denied_paths: [/etc, ~/.ssh]
-/// ```
+/// Per-skill sandbox isolation policy for programmatically registered
+/// descriptors. The official `SKILL.md` file format has no sandbox field;
+/// hosts that need this policy attach it through the runtime API.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SkillSandboxPolicy {
     /// Required isolation level. `None` means no enforcement (default behavior).
@@ -337,6 +327,81 @@ pub fn tool_matcher(matcher: &str, tool_name: &str) -> bool {
     tool_name.starts_with(matcher) && tool_name.as_bytes().get(matcher.len()).copied() == Some(b'(')
 }
 
+/// One parsed `SKILL.md` document before runtime resource discovery.
+///
+/// The descriptor is the catalog projection of frontmatter, while
+/// `instructions` is the Markdown body after the closing delimiter.
+#[derive(Debug, Clone)]
+pub struct SkillDocument {
+    descriptor: SkillDescriptor,
+    instructions: String,
+    source: String,
+}
+
+impl SkillDocument {
+    pub(crate) fn new(descriptor: SkillDescriptor, instructions: String, source: String) -> Self {
+        Self {
+            descriptor,
+            instructions,
+            source,
+        }
+    }
+
+    pub fn descriptor(&self) -> &SkillDescriptor {
+        &self.descriptor
+    }
+
+    pub fn instructions(&self) -> &str {
+        &self.instructions
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn into_descriptor(self) -> SkillDescriptor {
+        self.descriptor
+    }
+
+    /// Attach runtime provenance without changing parsed frontmatter facts.
+    pub fn set_registration_source(&mut self, source: impl Into<String>) {
+        self.descriptor.source = Some(source.into());
+    }
+
+    /// Render this parsed document with a new standard `allowed-tools` value.
+    /// Evolution and host tooling use this canonical writer instead of a
+    /// second YAML parser or legacy-field normalizer.
+    pub fn render_with_allowed_tools(
+        &self,
+        allowed_tools: &[String],
+    ) -> std::result::Result<String, String> {
+        #[derive(Serialize)]
+        struct OfficialFrontmatter {
+            name: String,
+            description: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            license: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            compatibility: Option<String>,
+            #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+            metadata: BTreeMap<String, String>,
+            #[serde(rename = "allowed-tools", skip_serializing_if = "Option::is_none")]
+            allowed_tools: Option<String>,
+        }
+
+        let frontmatter = OfficialFrontmatter {
+            name: self.descriptor.name.clone(),
+            description: self.descriptor.description.clone(),
+            license: self.descriptor.license.clone(),
+            compatibility: self.descriptor.compatibility.clone(),
+            metadata: self.descriptor.metadata.clone().into_iter().collect(),
+            allowed_tools: (!allowed_tools.is_empty()).then(|| allowed_tools.join(" ")),
+        };
+        let yaml = serde_yaml_ng::to_string(&frontmatter).map_err(|error| error.to_string())?;
+        Ok(format!("---\n{yaml}---\n{}", self.instructions))
+    }
+}
+
 // -- Tier 2: SkillContent (full instructions, loaded on activation) --
 
 /// Full skill content returned when a skill is activated (Tier 2).
@@ -440,97 +505,45 @@ impl std::fmt::Display for SkillResourceKind {
 
 /// Raw YAML frontmatter as deserialized from a `SKILL.md` file.
 ///
-/// Supports both the agentskills.io standard fields and legacy echo-agent
-/// extensions (`version`, `author`, `tags`, `instructions`, `resources`).
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// Only the official agentskills.io fields are accepted (`deny_unknown_fields`)
+/// and `metadata` maps string keys to string values, matching the spec's
+/// string-to-string contract. echo-agent uses no private frontmatter
+/// extensions: routing is description-driven and per-skill hooks are not part
+/// of the file format.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawFrontmatter {
     pub name: String,
     pub description: String,
 
-    #[serde(default)]
+    #[serde(default = "default_optional_string")]
     pub license: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_optional_string")]
     pub compatibility: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_optional_metadata")]
     pub metadata: Option<HashMap<String, String>>,
-    #[serde(default, alias = "allowed-tools")]
-    pub allowed_tools: Option<AllowedToolsValue>,
-
-    /// Preferred shell: "bash" (default) or "powershell"
-    #[serde(default)]
-    pub shell: Option<String>,
-
-    /// Conditional activation path patterns (glob syntax)
-    #[serde(default)]
-    pub paths: Option<Vec<String>>,
-
-    /// Explicit trigger keywords/phrases for skill routing
-    #[serde(default)]
-    pub triggers: Option<Vec<String>>,
-
-    /// Hooks for intercepting agent lifecycle events
-    #[serde(default)]
-    pub hooks: Option<crate::skills::hooks::HooksDefinition>,
-
-    /// Per-skill sandbox isolation policy
-    #[serde(default)]
-    pub sandbox: Option<SkillSandboxPolicy>,
-
-    /// Skill dependencies (auto-activated before this skill)
-    #[serde(default)]
-    pub depends_on: Option<Vec<String>>,
-
-    // Legacy echo-agent extensions (auto-detected, emit deprecation warning)
-    #[serde(default)]
-    pub version: Option<String>,
-    #[serde(default)]
-    pub author: Option<String>,
-    #[serde(default)]
-    pub tags: Option<Vec<String>>,
-    #[serde(default)]
-    pub instructions: Option<String>,
-    #[serde(default)]
-    pub resources: Option<Vec<LegacyResourceRef>>,
+    /// Official format: one space-separated string. YAML sequences and the
+    /// legacy underscore spelling are rejected by serde instead of being
+    /// silently normalized.
+    #[serde(default = "default_optional_string", rename = "allowed-tools")]
+    pub allowed_tools: Option<String>,
 }
 
-/// `allowed-tools` can be either a space-delimited string or a list.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(untagged)]
-pub(crate) enum AllowedToolsValue {
-    String(String),
-    List(Vec<String>),
+fn default_optional_string() -> Option<String> {
+    None
 }
 
-impl AllowedToolsValue {
-    pub fn into_vec(self) -> Vec<String> {
-        match self {
-            Self::String(s) => s.split_whitespace().map(|s| s.to_string()).collect(),
-            Self::List(v) => v,
-        }
-    }
+fn default_optional_metadata() -> Option<HashMap<String, String>> {
+    None
 }
 
 impl RawFrontmatter {
-    /// Convert to a `SkillDescriptor`, folding legacy fields into `metadata`.
+    /// Convert validated frontmatter into catalog metadata.
+    ///
+    /// The runtime extension fields on [`SkillDescriptor`] (`triggers`,
+    /// `paths`, …) have no file-based source in the standard format; they
+    /// remain available only to programmatic descriptors.
     pub fn into_descriptor(self, location: PathBuf) -> SkillDescriptor {
-        let mut metadata = self.metadata.unwrap_or_default();
-
-        if let Some(version) = &self.version {
-            metadata
-                .entry("version".to_string())
-                .or_insert_with(|| version.clone());
-        }
-        if let Some(author) = &self.author {
-            metadata
-                .entry("author".to_string())
-                .or_insert_with(|| author.clone());
-        }
-        if let Some(tags) = &self.tags {
-            metadata
-                .entry("tags".to_string())
-                .or_insert_with(|| tags.join(", "));
-        }
-
         SkillDescriptor {
             source: None,
             name: self.name,
@@ -538,35 +551,21 @@ impl RawFrontmatter {
             location,
             license: self.license,
             compatibility: self.compatibility,
-            metadata,
-            allowed_tools: self.allowed_tools.map(|v| v.into_vec()).unwrap_or_default(),
-            shell: self.shell,
-            paths: self.paths.unwrap_or_default(),
-            triggers: self.triggers.unwrap_or_default(),
-            hooks: self.hooks,
-            sandbox: self.sandbox,
-            depends_on: self.depends_on.unwrap_or_default(),
+            metadata: self.metadata.unwrap_or_default(),
+            allowed_tools: self
+                .allowed_tools
+                .map(|value| value.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default(),
+            shell: None,
+            paths: Vec::new(),
+            triggers: Vec::new(),
+            // Per-skill hooks have no file-based source in the official format.
+            hooks: None,
+            sandbox: None,
+            depends_on: Vec::new(),
         }
     }
-
-    /// Whether this frontmatter uses legacy echo-agent extensions.
-    pub fn is_legacy_format(&self) -> bool {
-        self.instructions.is_some() || self.resources.is_some()
-    }
 }
-
-/// Legacy resource reference from the old echo-agent SKILL.md format.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct LegacyResourceRef {
-    pub name: String,
-    pub path: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub load_on_startup: Option<bool>,
-}
-
-// -- Backward compatibility aliases --
 
 // -- Tests --
 
@@ -708,72 +707,119 @@ mod tests {
             description: "Does things".into(),
             license: Some("MIT".into()),
             compatibility: None,
-            metadata: None,
-            allowed_tools: Some(AllowedToolsValue::String("Bash(git:*) Read".into())),
-            shell: Some("bash".into()),
-            paths: Some(vec!["*.py".into()]),
-            triggers: None,
-            hooks: None,
-            sandbox: None,
-            depends_on: None,
-            version: Some("1.0.0".into()),
-            author: Some("team".into()),
-            tags: Some(vec!["code".into(), "review".into()]),
-            instructions: None,
-            resources: None,
+            metadata: Some(HashMap::from([
+                ("version".to_string(), "1.0.0".to_string()),
+                ("author".to_string(), "team".to_string()),
+                ("tags".to_string(), "code, review".to_string()),
+            ])),
+            allowed_tools: Some("Bash(git:*) Read".into()),
         };
 
         let desc = raw.into_descriptor(PathBuf::from("/skills/my-skill/SKILL.md"));
         assert_eq!(desc.name, "my-skill");
         assert_eq!(desc.license, Some("MIT".into()));
         assert_eq!(desc.allowed_tools, vec!["Bash(git:*)", "Read"]);
-        assert_eq!(desc.shell, Some("bash".into()));
-        assert_eq!(desc.paths, vec!["*.py"]);
-        assert_eq!(desc.metadata.get("version").unwrap(), "1.0.0");
-        assert_eq!(desc.metadata.get("author").unwrap(), "team");
-        assert_eq!(desc.metadata.get("tags").unwrap(), "code, review");
+        assert_eq!(
+            desc.metadata.get("version").map(String::as_str),
+            Some("1.0.0")
+        );
+        assert_eq!(
+            desc.metadata.get("author").map(String::as_str),
+            Some("team")
+        );
+        assert_eq!(
+            desc.metadata.get("tags").map(String::as_str),
+            Some("code, review")
+        );
     }
 
     #[test]
-    fn test_raw_frontmatter_legacy_detection() {
-        let standard = RawFrontmatter {
-            name: "s".into(),
-            description: "d".into(),
-            license: None,
-            compatibility: None,
-            metadata: None,
-            allowed_tools: None,
-            shell: None,
-            paths: None,
-            triggers: None,
-            hooks: None,
-            sandbox: None,
-            depends_on: None,
-            version: None,
-            author: None,
-            tags: None,
-            instructions: None,
-            resources: None,
-        };
-        assert!(!standard.is_legacy_format());
-
-        let legacy = RawFrontmatter {
-            instructions: Some("do stuff".into()),
-            ..standard
-        };
-        assert!(legacy.is_legacy_format());
+    fn test_standard_metadata_keeps_extension_fields_empty() -> std::result::Result<(), String> {
+        let content = r#"---
+name: routed-skill
+description: Standard layout; routing is description-driven.
+metadata:
+  category: automation
+  sample-count: "7"
+allowed-tools: shell read_file apply_patch
+---
+Body"#;
+        let document = SkillDocument::parse(content).map_err(|error| error.to_string())?;
+        let desc = document.descriptor();
+        assert_eq!(
+            desc.metadata.get("category").map(String::as_str),
+            Some("automation")
+        );
+        assert_eq!(
+            desc.metadata.get("sample-count").map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(
+            desc.allowed_tools,
+            vec!["shell", "read_file", "apply_patch"]
+        );
+        assert!(desc.triggers.is_empty());
+        assert!(desc.paths.is_empty());
+        assert!(desc.depends_on.is_empty());
+        assert!(desc.shell.is_none());
+        assert!(desc.sandbox.is_none());
+        assert!(desc.hooks.is_none());
+        Ok::<(), String>(())
     }
 
     #[test]
-    fn test_allowed_tools_value_string() {
-        let v = AllowedToolsValue::String("Bash(git:*) Read Write".into());
-        assert_eq!(v.into_vec(), vec!["Bash(git:*)", "Read", "Write"]);
+    fn test_legacy_top_level_extension_fields_are_rejected() {
+        // Legacy pre-standardization files declared echo-agent semantics at
+        // the frontmatter top level; parsing must fail closed so catalog
+        // tooling surfaces the unmigrated file instead of silently dropping
+        // routing/sandbox intent.
+        for legacy_field in [
+            "triggers:\n  - 周报\n",
+            "shell: bash\n",
+            "paths:\n  - \"*.pdf\"\n",
+            "sandbox:\n  isolation: process\n",
+            "depends_on:\n  - web-search\n",
+        ] {
+            let content =
+                format!("---\nname: legacy\ndescription: Legacy layout.\n{legacy_field}---\nBody");
+            assert!(
+                SkillDocument::parse(&content).is_err(),
+                "legacy top-level field must be rejected: {legacy_field}"
+            );
+        }
     }
 
     #[test]
-    fn test_allowed_tools_value_list() {
-        let v = AllowedToolsValue::List(vec!["Read".into(), "Write".into()]);
-        assert_eq!(v.into_vec(), vec!["Read", "Write"]);
+    fn test_frontmatter_hooks_are_rejected() {
+        // Per-skill hooks are not part of the official file format; a
+        // frontmatter hooks block is an unknown official field and must fail.
+        let content = "---\nname: hooked\ndescription: Hooked.\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: echo done\n---\nBody";
+        assert!(SkillDocument::parse(content).is_err());
+    }
+
+    #[test]
+    fn test_non_scalar_metadata_is_rejected() {
+        // The spec maps metadata string keys to string values; nested maps
+        // (including any vendor namespace) fail parsing instead of being
+        // silently reshaped.
+        for nested in [
+            "metadata:\n  echo-agent:\n    triggers: [周报]\n",
+            "metadata:\n  vendor:\n    nested: true\n",
+        ] {
+            let content = format!("---\nname: nested\ndescription: Nested.\n{nested}---\nBody");
+            assert!(
+                SkillDocument::parse(&content).is_err(),
+                "non-scalar metadata must be rejected: {nested}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_allowed_tools_must_be_string() {
+        let content = "---\nname: list-tools\ndescription: Invalid list form.\nallowed-tools: [Read, Write]\n---\nBody";
+        assert!(SkillDocument::parse(content).is_err());
+        let content = "---\nname: underscore-tools\ndescription: Invalid alias form.\nallowed_tools: Read Write\n---\nBody";
+        assert!(SkillDocument::parse(content).is_err());
     }
 
     fn make_desc_with_paths(paths: Vec<&str>) -> SkillDescriptor {

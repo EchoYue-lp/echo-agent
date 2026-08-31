@@ -7,8 +7,7 @@
 //! | Progressive disclosure | 3-tier: catalog → activate → resources/scripts |
 //! | Inline shell execution | `!`cmd`` and ` ```! cmd ``` ` in SKILL.md |
 //! | Variable substitution | `${SKILL_DIR}`, `${SESSION_ID}`, `${ARGUMENTS}` |
-//! | Hooks | PreToolUse/PostToolUse interception |
-//! | Conditional activation | `paths` frontmatter for file-triggered skills |
+//! | Hooks | Host/plugin Hook configuration is separate from the Skill file |
 //! | `allowed-tools` | Declare allowed tools per skill; runtime-enforced for built-in skill tools |
 //!
 //! # Run
@@ -76,7 +75,7 @@ async fn demo_1_discovery() -> echo_agent::error::Result<()> {
     }
 
     let mut loader = SkillLoader::new();
-    let descriptors = loader.discover_from_dir(skills_dir).await?;
+    let descriptors = loader.discover_directory(skills_dir).await?;
     if descriptors.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo08 验收失败：未发现任何外部技能".to_string(),
@@ -151,7 +150,7 @@ async fn demo_2_catalog() -> echo_agent::error::Result<()> {
     println!("Part 2: Skill Catalog (injected into system prompt)\n");
 
     let mut loader = SkillLoader::new();
-    let descriptors = loader.discover_from_dir(demo_skills_dir()).await?;
+    let descriptors = loader.discover_directory(demo_skills_dir()).await?;
 
     let mut registry = SkillRegistry::new();
     for desc in descriptors {
@@ -190,7 +189,7 @@ async fn demo_3_activation() -> echo_agent::error::Result<()> {
     println!("Part 3: Skill Activation (Tier 2 — full instructions)\n");
 
     let mut loader = SkillLoader::new();
-    let descriptors = loader.discover_from_dir(demo_skills_dir()).await?;
+    let descriptors = loader.discover_directory(demo_skills_dir()).await?;
 
     if descriptors.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
@@ -280,7 +279,7 @@ async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
         .unwrap_or_else(|_| ".".to_string());
 
     let mut loader = SkillLoader::new();
-    let descriptors = loader.discover_from_dir(demo_skills_dir()).await?;
+    let descriptors = loader.discover_directory(demo_skills_dir()).await?;
     let mut registry = SkillRegistry::new();
     for desc in descriptors {
         registry.register_descriptor(desc);
@@ -762,31 +761,26 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
     }
     println!();
 
-    // 6e: Conditional activation & allowed-tools
-    println!("  6e. Conditional Activation & Allowed Tools");
-    println!("  ──────────────────────────────────────────");
+    // 6e: Standard description metadata & allowed-tools
+    println!("  6e. Standard Description Metadata & Allowed Tools");
+    println!("  ───────────────────────────────────────────────");
     {
         let mut loader = SkillLoader::new();
-        let descriptors = loader.discover_from_dir(demo_skills_dir()).await?;
+        let descriptors = loader.discover_directory(demo_skills_dir()).await?;
         let constrained_count = descriptors
             .iter()
-            .filter(|desc| !desc.paths.is_empty() || !desc.allowed_tools.is_empty())
+            .filter(|desc| !desc.allowed_tools.is_empty())
             .count();
         if constrained_count == 0 {
             return Err(echo_agent::error::ReactError::Other(
-                "demo08 验收失败：未发现带 paths/allowed-tools 约束的技能".to_string(),
+                "demo08 验收失败：未发现带 allowed-tools 约束的标准技能".to_string(),
             ));
         }
 
         for desc in &descriptors {
-            if !desc.paths.is_empty() || !desc.allowed_tools.is_empty() {
+            if !desc.allowed_tools.is_empty() {
                 println!("    Skill '{}' has constraints:", desc.name);
-                if !desc.paths.is_empty() {
-                    println!("      Activates for: {:?}", desc.paths);
-                }
-                if !desc.allowed_tools.is_empty() {
-                    println!("      Allowed tools: {:?}", desc.allowed_tools);
-                }
+                println!("      Allowed tools: {:?}", desc.allowed_tools);
             }
         }
 
@@ -800,45 +794,30 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
             vec!["python-linter".to_string()],
         );
 
-        let denied = tool
+        let activated = tool
             .execute(HashMap::from([(
                 "name".to_string(),
                 serde_json::json!("python-linter"),
             )]))
             .await?;
-        if denied.success
-            || !denied
-                .error
-                .as_deref()
-                .unwrap_or("")
-                .contains("context_path")
-        {
-            return Err(echo_agent::error::ReactError::Other(
-                "demo08 验收失败：conditional activation 未要求 context_path".to_string(),
-            ));
-        }
-        println!("      Missing context_path → blocked ✓");
-
-        let allowed = tool
-            .execute(HashMap::from([
-                ("name".to_string(), serde_json::json!("python-linter")),
-                ("context_path".to_string(), serde_json::json!("demo.py")),
-            ]))
-            .await?;
-        if !allowed.success {
+        if !activated.success {
             return Err(echo_agent::error::ReactError::Other(format!(
-                "demo08 验收失败：conditional activation 匹配路径后仍未放行: {}",
-                allowed.error.unwrap_or_default()
+                "demo08 验收失败：标准 description-driven Skill 无法激活: {}",
+                activated.error.unwrap_or_default()
             )));
         }
-        println!("      Matching context_path=demo.py → activated ✓");
+        println!("      Description-driven activation without private context_path → activated ✓");
 
         let temp_root =
             std::env::temp_dir().join(format!("echo-demo08-locked-skill-{}", std::process::id()));
         let locked_dir = temp_root.join("locked-skill");
         tokio::fs::create_dir_all(locked_dir.join("references")).await?;
         tokio::fs::create_dir_all(locked_dir.join("scripts")).await?;
-        tokio::fs::write(locked_dir.join("SKILL.md"), "Locked skill body").await?;
+        tokio::fs::write(
+            locked_dir.join("SKILL.md"),
+            "---\nname: locked-skill\ndescription: Demo skill with a narrow allowed-tools whitelist.\nallowed-tools: read_skill_resource\n---\nLocked skill body",
+        )
+        .await?;
         tokio::fs::write(locked_dir.join("references/guide.md"), "hello").await?;
         tokio::fs::write(locked_dir.join("scripts/test.py"), "print('hi')\n").await?;
 
@@ -905,7 +884,7 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
     println!("  ────────────────────────────────────");
     {
         let mut loader = SkillLoader::new();
-        let descriptors = loader.discover_from_dir(demo_skills_dir()).await?;
+        let descriptors = loader.discover_directory(demo_skills_dir()).await?;
 
         let mut registry = SkillRegistry::new();
         for desc in descriptors {
@@ -945,10 +924,10 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(59));
     println!("Part 7: XiaoHongShu Image Generator Skill\n");
 
-    let skill_dir = std::path::Path::new("skills/redbook-image-generator-1.0.0");
+    let skill_dir = std::path::Path::new("skills/xiaohongshu-image-generator");
     if !skill_dir.exists() {
         return Err(echo_agent::error::ReactError::Other(
-            "demo08 验收失败：缺少 redbook-image-generator-1.0.0 技能目录".to_string(),
+            "demo08 验收失败：缺少 xiaohongshu-image-generator 技能目录".to_string(),
         ));
     }
 
@@ -957,7 +936,7 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
     println!("  ──────────────────────────────────");
     {
         let mut loader = SkillLoader::new();
-        let descriptors = loader.discover_from_dir(demo_skills_dir()).await?;
+        let descriptors = loader.discover_directory(demo_skills_dir()).await?;
 
         let xhs = descriptors
             .iter()
@@ -1012,7 +991,7 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
     println!("  ─────────────────────────");
     {
         let mut loader = SkillLoader::new();
-        let descriptors = loader.discover_from_dir(demo_skills_dir()).await?;
+        let descriptors = loader.discover_directory(demo_skills_dir()).await?;
         let mut registry = SkillRegistry::new();
         for desc in descriptors {
             registry.register_descriptor(desc);

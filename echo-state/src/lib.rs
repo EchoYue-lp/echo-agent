@@ -22,6 +22,7 @@
 
 pub mod audit;
 pub mod compression;
+pub mod delivery;
 pub mod journal;
 pub mod memory;
 pub mod profiles;

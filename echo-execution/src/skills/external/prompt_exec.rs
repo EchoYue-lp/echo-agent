@@ -69,7 +69,7 @@ pub struct PromptContext {
     pub session_id: String,
     /// User-provided arguments (positional).
     pub arguments: Vec<String>,
-    /// Preferred shell from frontmatter ("bash" or "powershell").
+    /// Preferred shell supplied by a programmatic descriptor or host policy.
     pub shell: Option<String>,
     /// Per-command timeout.
     pub timeout: Duration,

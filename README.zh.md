@@ -443,7 +443,7 @@ orchestrator.register("writer", writer_agent);
 agent.load_skill("web_research").await?;  // 加载 SKILL.md + 注册工具
 ```
 
-预置技能：`code_review`、`data_analyst`、`project-stats`、`python-linter`、`web_researcher`。
+预置技能：`code-review`、`data-analyst`、`project-stats`、`python-linter`、`web-researcher`。
 
 ### 11. MCP 协议 — 连接任意 Model Context Protocol 服务器
 

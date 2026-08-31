@@ -197,13 +197,6 @@ let agent = ReactAgentBuilder::new()
     .build()?;
 ```
 
-或通过 `AgentRunner`：
-
-```rust
-let runner = AgentRunner::new(agent)
-    .with_run_store(store);
-```
-
 ### 运行生命周期
 
 ```

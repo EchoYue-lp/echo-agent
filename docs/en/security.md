@@ -101,6 +101,19 @@ RuleMatcher::Permission { permission: ToolPermission::Execute } // by permission
 RuleMatcher::All                                        // match all
 ```
 
+For command-line or UI inputs, parse the framework types directly instead of
+introducing an application-side rule DTO. `RuleMatcher`, `RuleBehavior`, and
+`RuleSource` implement `FromStr` and validate their wire spellings:
+
+```rust
+use std::str::FromStr;
+use echo_agent::tools::permission::{RuleBehavior, RuleMatcher, RuleSource};
+
+let matcher = RuleMatcher::from_str("tool:read_file")?;
+let behavior = RuleBehavior::from_str("allow")?;
+let source = RuleSource::from_str("session")?;
+```
+
 ### Source Priority (high → low)
 
 | Priority | Source | Description |
@@ -116,7 +129,7 @@ RuleMatcher::All                                        // match all
 ### RuleRegistry — deny-first evaluation
 
 ```rust
-use echo_agent::tools::permission::*;
+use echo_agent::prelude::*;
 
 let mut registry = RuleRegistry::new();
 

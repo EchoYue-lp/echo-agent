@@ -210,30 +210,53 @@ delivery remain in the application adapter.
 
 ---
 
-## Stream Timeout Mechanism (Planned)
+## LLM Timeouts
 
-> **Note:** The API below is planned but not yet implemented in the current version. Stream timeouts are currently controlled via the LLM client's request timeout.
+`LlmTimeouts` is the single provider-neutral timeout contract for complete and
+streaming requests. `LlmConfig` owns the client default, while `ChatRequest`
+may override the same value for one call:
 
-The SSE client plans to include three-level timeout protection:
+```rust
+use echo_agent::prelude::*;
+use std::time::Duration;
 
-| Timeout Type | Planned Value | Purpose |
-|-------------|---------|---------|
-| **first_chunk** | 30s | Maximum time to wait for the first chunk |
-| **idle** | 60s | Maximum idle time between chunks |
-| **overall** | 300s | Total stream timeout |
+let timeouts = LlmTimeouts::default()
+    .with_request_timeout(Duration::from_secs(90))
+    .with_first_chunk_timeout(Duration::from_secs(20))
+    .with_idle_timeout(Duration::from_secs(45))
+    .without_overall_timeout();
 
-Currently, LLM request timeouts can be controlled via `AgentConfig`'s `request_timeout`.
+let config = LlmConfig::for_provider(
+    "compatible",
+    "https://api.example.com/v1",
+    "token",
+    "model",
+    LlmApiProtocol::ChatCompletions,
+)?
+.with_timeouts(timeouts);
 
-### Stream Loop Architecture
-
-v0.2.1 splits the monolithic `stream_loop.rs` into a modular subdirectory:
-
+let request = ChatRequest::new(vec![Message::user("Hello".to_string())])
+    .with_timeouts(timeouts.with_first_chunk_timeout(Duration::from_secs(10)));
 ```
-src/agent/react/run/stream_loop/
-├── mod.rs           # Entry point and main orchestration
-├── llm_stream.rs    # LLM streaming request and SSE parsing
-└── processor.rs     # Event processing and dispatch
-```
+
+| Boundary | Default | Scope |
+| --- | ---: | --- |
+| `request` | 120s | Complete non-streaming request and response body |
+| `first_chunk` | 30s | Request start through the first response bytes |
+| `idle` | 60s | Maximum gap between streaming byte chunks |
+| `overall` | disabled | Complete stream, including request startup |
+
+The matching `without_*_timeout()` method disables a boundary; serialized null
+or zero milliseconds also deserialize as disabled. Chat Completions, Responses,
+and Anthropic Messages use the same SSE
+transport for request startup, cancellation, UTF-8-safe decoding, first/idle/
+overall timeouts, and truncated-event rejection. Provider adapters only
+translate semantic JSON events into `ChatChunk` values.
+
+This separation is intentional: a healthy long stream can exceed the
+non-streaming request timeout, while a stalled stream still fails at its first
+chunk or idle boundary. Timeout failures remain typed LLM network errors and
+flow through the existing retry policy.
 
 ### Tool Output Spill and Truncation
 

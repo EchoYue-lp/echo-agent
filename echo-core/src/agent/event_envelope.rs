@@ -324,7 +324,7 @@ pub fn envelope_event_stream_after<'a>(
                 Err(error) => AgentEvent::Error {
                     source: "agent_stream".to_string(),
                     message: error.to_string(),
-                    failure: crate::error::AgentFailure::from_react_error(&error),
+                    failure: crate::error::AgentFailure::from(&error),
                 },
             };
 

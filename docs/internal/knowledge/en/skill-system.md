@@ -83,18 +83,18 @@ Defined via `SKILL.md` files, supporting Progressive Disclosure.
 
 ```
 skills/
-├── code_review/
+├── code-review/
 │   ├── SKILL.md          # Skill definition (required)
 │   └── references/
 │       ├── checklist.md  # Reference documents
 │       └── style_guide.md
 │
-├── data_analyst/
+├── data-analyst/
 │   ├── SKILL.md
 │   └── references/
 │       └── statistical_methods.md
 │
-└── web_researcher/
+└── web-researcher/
     ├── SKILL.md
     └── references/
         ├── research_template.md
@@ -105,10 +105,12 @@ skills/
 
 ```markdown
 ---
-name: code_review
+name: code-review
 description: Comprehensive code review capability
-version: 1.0.0
-author: echo-agent
+metadata:
+  version: "1.0.0"
+  author: echo-agent
+  tags: "code, review"
 ---
 
 # Code Review Skill
@@ -127,8 +129,8 @@ You are an expert code reviewer. When reviewing code, consider:
 
 ## References
 
-- [Review Checklist](../../../../echo-agent-learning/examples/demo_skills/code_review/references/checklist.md)
-- [Style Guide](../../../../echo-agent-learning/examples/demo_skills/code_review/references/style_guide.md)
+- [Review Checklist](../../../../echo-agent-learning/examples/demo_skills/code-review/references/checklist.md)
+- [Style Guide](../../../../echo-agent-learning/examples/demo_skills/code-review/references/style_guide.md)
 ```
 
 ---
@@ -275,21 +277,8 @@ pub enum HookAction {
 }
 ```
 
-**Example: Code Review Skill Hook**
-
-```yaml
-# skills/code_review/SKILL.md
----
-name: code_review
-hooks:
-  - tool: "review_file"
-    event: before_call
-    action: validate_file_exists
-  - tool: "suggest_fix"
-    event: after_call
-    action: format_as_diff
----
-```
+Skill files use only the official fields. Hooks are loaded from host
+application configuration or plugin Hook components.
 
 ---
 
@@ -364,8 +353,8 @@ echo-agent's Skill system is aligned with the [agentskills.io](https://agentskil
 
 ### 1. Skill Naming
 
-- Use lowercase letters and underscores: `code_review`, `data_analyst`
-- Names should reflect the domain: `web_researcher` rather than `research`
+- Use lowercase letters, numbers, and hyphens: `code-review`, `data-analyst`
+- Names should reflect the domain: `web-researcher` rather than `research`
 - Avoid conflicts with built-in Skills
 
 ### 2. Prompt Injection

@@ -26,6 +26,37 @@ pub struct Task {
 coding 类型、Subagent 选择、文件、工具、checks、review 和 UI 投影都由应用层
 typed extension 持有。
 
+应用拥有具体 extension schema 时，直接使用 typed extension helper。framework 仍将其
+保存为 JSON，但序列化错误和 task identity 会由同一个公开 API 统一处理：
+
+```rust,no_run
+use echo_agent::tasks::TaskSpec;
+use serde::{Deserialize, Serialize};
+use std::error::Error;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ApplicationTaskData {
+    role: String,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let spec = TaskSpec {
+        id: "inspect".into(),
+        title: "检查仓库".into(),
+        description: "读取相关文件".into(),
+        depends_on: Vec::new(),
+        max_retries: 1,
+        extension: serde_json::Value::Null,
+    }
+    .with_extension(ApplicationTaskData { role: "explorer".into() })?;
+    let _data: ApplicationTaskData = spec.extension_as()?;
+    Ok(())
+}
+```
+
+`TaskDraft` 与 `TaskSpecPatch` 也提供相同 helper。`extension_as` 对 patch 返回
+`Option<T>`，调用方可以区分“未提供 extension”和“明确提供了 extension”。
+
 共享生命周期包含 `Pending`、`Running`、`Blocked`、`Retrying`、`Paused`、
 `Completed`、`Failed`、`TimedOut`、`Skipped` 和 `Cancelled`，所有迁移由
 `TaskStatus::transition_to` 校验。

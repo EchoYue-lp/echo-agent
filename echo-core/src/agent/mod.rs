@@ -32,6 +32,28 @@ use std::future::Future;
 use std::pin::Pin;
 pub use tokio_util::sync::CancellationToken;
 
+/// Product-neutral usage facts for one finite Agent execution.
+///
+/// Provider-specific counters remain on their native responses. This value is
+/// the stable result surface shared by primary Agent turns and delegated
+/// Subagent executions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionUsage {
+    /// Total wall-clock duration in milliseconds.
+    pub duration_ms: Option<u64>,
+    /// Total input plus output tokens when the provider reported usage.
+    pub tokens_used: Option<u64>,
+    /// Number of ReAct iterations when the execution path reports it.
+    pub iterations: Option<u64>,
+}
+
+impl ExecutionUsage {
+    /// Return the duration in milliseconds, defaulting to zero when absent.
+    pub fn duration_millis(&self) -> u64 {
+        self.duration_ms.unwrap_or(0)
+    }
+}
+
 /// Typed failure returned when a caller tries to steer an active agent turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentSteerError {
@@ -99,6 +121,29 @@ pub enum AgentSteerTurnOutcome {
     /// The turn owner was dropped or aborted before it could publish a typed
     /// terminal. This is terminal, but must not be interpreted as success.
     Dropped,
+}
+
+impl AgentSteerTurnOutcome {
+    /// Stable lowercase wire identifier for this terminal outcome.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+            Self::Dropped => "dropped",
+        }
+    }
+
+    /// Parse a stable lowercase wire identifier.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "completed" => Some(Self::Completed),
+            "cancelled" => Some(Self::Cancelled),
+            "failed" => Some(Self::Failed),
+            "dropped" => Some(Self::Dropped),
+            _ => None,
+        }
+    }
 }
 
 /// Producer hook for a generic initial-input lifecycle.
@@ -253,6 +298,22 @@ impl AgentSteerReceipt {
 #[cfg(test)]
 mod steer_receipt_tests {
     use super::*;
+
+    #[test]
+    fn turn_outcome_wire_names_round_trip() {
+        for outcome in [
+            AgentSteerTurnOutcome::Completed,
+            AgentSteerTurnOutcome::Cancelled,
+            AgentSteerTurnOutcome::Failed,
+            AgentSteerTurnOutcome::Dropped,
+        ] {
+            assert_eq!(
+                AgentSteerTurnOutcome::parse(outcome.as_str()),
+                Some(outcome)
+            );
+        }
+        assert_eq!(AgentSteerTurnOutcome::parse("unknown"), None);
+    }
 
     #[tokio::test]
     async fn closed_sender_terminal_is_shared_across_receipt_clones() {
@@ -638,7 +699,7 @@ pub enum AgentPhase {
 impl AgentEvent {
     /// Build a terminal event while preserving the typed framework failure.
     pub fn from_error(source: impl Into<String>, error: &ReactError) -> Self {
-        let failure = crate::error::AgentFailure::from_react_error(error);
+        let failure = crate::error::AgentFailure::from(error);
         Self::Error {
             source: source.into(),
             message: failure.message.clone(),
@@ -814,6 +875,31 @@ pub enum StepType {
 ///
 /// The workflow layer already enforces this serialization when driving
 /// agents through plan-execute and multi-agent topologies.
+/// Shareable agent-wide tool visibility policy.
+///
+/// The policy is read when an invocation snapshot is created. Sharing it with
+/// lazily built Subagents keeps their registered capability surface aligned
+/// without coupling the framework to any product-specific tool-control store.
+#[derive(Debug, Clone, Default)]
+pub struct ToolVisibilityPolicy {
+    disabled: std::sync::Arc<std::sync::RwLock<Option<std::collections::HashSet<String>>>>,
+}
+
+impl ToolVisibilityPolicy {
+    pub fn set_disabled(&self, names: Option<std::collections::HashSet<String>>) {
+        if let Ok(mut guard) = self.disabled.write() {
+            *guard = names.filter(|names| !names.is_empty());
+        }
+    }
+
+    pub fn disabled_names(&self) -> std::collections::HashSet<String> {
+        self.disabled
+            .read()
+            .map(|guard| guard.clone().unwrap_or_default())
+            .unwrap_or_default()
+    }
+}
+
 pub trait Agent: Send + Sync {
     /// Human-readable agent name used in logs, events, and orchestration.
     fn name(&self) -> &str;
@@ -830,6 +916,23 @@ pub trait Agent: Send + Sync {
     /// Tool definitions serialized into LLM requests.
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
         vec![]
+    }
+
+    /// Registered tools hidden from the model by the agent-wide capability
+    /// policy. Invocation-specific exclusions remain in
+    /// [`AgentInvocationContext::disabled_tools`].
+    fn disabled_tool_names(&self) -> std::collections::HashSet<String> {
+        self.tool_visibility_policy().disabled_names()
+    }
+
+    /// Agent-wide visibility policy used for future invocation snapshots.
+    fn tool_visibility_policy(&self) -> ToolVisibilityPolicy {
+        ToolVisibilityPolicy::default()
+    }
+
+    /// Effective working directory configured for subsequent invocations.
+    fn working_dir(&self) -> Option<std::path::PathBuf> {
+        None
     }
 
     /// Human-readable skill identifiers available to this agent.

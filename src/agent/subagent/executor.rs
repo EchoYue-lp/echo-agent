@@ -9,7 +9,6 @@ use echo_core::error::AgentTerminalKind;
 use echo_core::llm::types::Message;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -23,8 +22,8 @@ use super::control::{
 use super::events::SubagentEvent;
 use super::hooks::{SubagentHookContext, SubagentHookRegistry};
 use super::prompt::{
-    CompiledSubagentInvocation, ContextTransferPolicy, SubagentPromptCompiler, SubagentPromptInput,
-    with_compiled_task,
+    CompiledSubagentInvocation, ContextTransferPolicy, SubagentInvocation, SubagentPromptCompiler,
+    SubagentTaskContext, ToolCapabilitySnapshot,
 };
 use super::registry::SubagentRegistry;
 use super::types::{
@@ -64,6 +63,8 @@ pub struct DispatchRequest {
     pub message: Option<Message>,
     /// Opaque structured payload consumed only by an injected product compiler.
     pub prompt_payload: Option<serde_json::Value>,
+    /// Typed task facts consumed by every prompt compiler.
+    pub prompt_context: Option<SubagentTaskContext>,
     /// Explicit task constraints / boundaries from the dispatch caller (e.g.
     /// the `agent_tool` `constraints` parameter). Rendered by the invocation
     /// compiler independently of `parent_context`, so fresh-context dispatches
@@ -88,6 +89,7 @@ impl std::fmt::Debug for DispatchRequest {
                 &self.runtime_context.as_ref().map(|c| &c.run_id),
             )
             .field("has_prompt_payload", &self.prompt_payload.is_some())
+            .field("has_prompt_context", &self.prompt_context.is_some())
             .finish()
     }
 }
@@ -101,23 +103,6 @@ impl DispatchRequest {
             delegate_depth: depth.min(u8::MAX as u32) as u8,
             max_delegate_depth: 3,
         }
-    }
-}
-
-/// Append dispatch-time working-dir context to a compiled task input.
-///
-/// `compile_invocation` runs before worktree/workspace creation (the isolation
-/// path is chosen at dispatch time), so the actual working directory is not
-/// available at compile time. The executor appends it after isolation is
-/// established, using the same `[workspace]` shape as planned invocations.
-/// Only appended when isolation actually changed the cwd — otherwise the
-/// subagent works in the main directory the parent context already covers.
-fn append_working_dir_context(task_input: &mut String, working_dir: Option<&Path>) {
-    if let Some(dir) = working_dir {
-        task_input.push_str(&format!(
-            "\n\n[workspace]\n- root: {}\n[/workspace]",
-            dir.display()
-        ));
     }
 }
 
@@ -136,6 +121,24 @@ fn invocation_disabled_tools(
             .filter(|tool| !allowed.contains(tool.as_str()))
             .collect(),
     )
+}
+
+fn effective_capabilities(
+    agent: &dyn Agent,
+    allowed_tools: Option<&[String]>,
+) -> ToolCapabilitySnapshot {
+    let definitions = agent.tool_definitions();
+    let mut disabled = agent.disabled_tool_names();
+    if let Some(allowed) = allowed_tools.filter(|tools| !tools.is_empty()) {
+        let allowed = allowed.iter().map(String::as_str).collect::<HashSet<_>>();
+        disabled.extend(
+            definitions
+                .iter()
+                .map(|definition| definition.function.name.clone())
+                .filter(|name| !allowed.contains(name.as_str())),
+        );
+    }
+    ToolCapabilitySnapshot::from_definitions(&definitions, &disabled)
 }
 
 /// Map framework errors to the runtime-owned subagent terminal status.
@@ -163,6 +166,7 @@ mod typed_error_mapping_tests {
 
 fn hook_stop_status(status: SubagentStatus) -> echo_core::hooks::SubagentStopStatus {
     match status {
+        SubagentStatus::Running => echo_core::hooks::SubagentStopStatus::Failed,
         SubagentStatus::Completed => echo_core::hooks::SubagentStopStatus::Completed,
         SubagentStatus::Failed => echo_core::hooks::SubagentStopStatus::Failed,
         SubagentStatus::Cancelled => echo_core::hooks::SubagentStopStatus::Cancelled,
@@ -207,6 +211,7 @@ pub fn merge_observed_evidence(
         outcome.artifacts.push(artifact);
     }
     super::types::normalize_outcome(outcome);
+    outcome.refresh_derived_views();
 }
 
 // ── Teammate Handle ───────────────────────────────────────────────────────────
@@ -645,7 +650,7 @@ impl SubagentExecutor {
                             .emit(SubagentEvent::DispatchCancelled {
                                 parent: req_parent_agent.clone(),
                                 agent: req_agent_name.clone(),
-                                result: sub_result.outcome.clone(),
+                                outcome: sub_result.outcome.clone(),
                                 execution_id: event_execution_id.clone(),
                                 run_id: event_run_id.clone(),
                             });
@@ -659,7 +664,7 @@ impl SubagentExecutor {
                                 tokens_used: sub_result.tokens_used.map(|t| t as u64),
                                 iterations: Some(sub_result.iterations as u64),
                                 output: sub_result.output.clone(),
-                                result: sub_result.outcome.clone(),
+                                outcome: sub_result.outcome.clone(),
                                 execution_id: event_execution_id.clone(),
                                 run_id: event_run_id.clone(),
                             });
@@ -734,7 +739,7 @@ impl SubagentExecutor {
                             .emit(SubagentEvent::DispatchCancelled {
                                 parent: req_parent_agent.clone(),
                                 agent: req_agent_name.clone(),
-                                result: terminal_result,
+                                outcome: terminal_result,
                                 execution_id: event_execution_id.clone(),
                                 run_id: event_run_id.clone(),
                             });
@@ -756,6 +761,8 @@ impl SubagentExecutor {
                                     let rt_ctx = req.runtime_context.clone();
                                     let retry_msg = req.message.clone();
                                     let prompt_payload = req.prompt_payload.clone();
+                                    let prompt_context = req.prompt_context.clone();
+                                    let parent_context = req.parent_context.clone();
                                     let constraints = req.constraints.clone();
                                     req = DispatchRequest {
                                         agent_name: alternative_agent,
@@ -763,11 +770,12 @@ impl SubagentExecutor {
                                         mode_override: Some(hook_ctx.execution_mode.clone()),
                                         cancel: parent_cancel.child_token(),
                                         parent_agent: hook_ctx.parent_agent.clone(),
-                                        parent_context: None,
+                                        parent_context,
                                         delegation_policy: child_policy,
                                         runtime_context: rt_ctx,
                                         message: retry_msg,
                                         prompt_payload,
+                                        prompt_context,
                                         constraints,
                                         background: false,
                                     };
@@ -792,6 +800,8 @@ impl SubagentExecutor {
                                     let rt_ctx = req.runtime_context.clone();
                                     let retry_msg = req.message.clone();
                                     let prompt_payload = req.prompt_payload.clone();
+                                    let prompt_context = req.prompt_context.clone();
+                                    let parent_context = req.parent_context.clone();
                                     let constraints = req.constraints.clone();
                                     req = DispatchRequest {
                                         agent_name: hook_ctx.subagent_name.clone(),
@@ -799,11 +809,12 @@ impl SubagentExecutor {
                                         mode_override: Some(hook_ctx.execution_mode.clone()),
                                         cancel: parent_cancel.child_token(),
                                         parent_agent: hook_ctx.parent_agent.clone(),
-                                        parent_context: None,
+                                        parent_context,
                                         delegation_policy,
                                         runtime_context: rt_ctx,
                                         message: retry_msg,
                                         prompt_payload,
+                                        prompt_context,
                                         constraints,
                                         background: false,
                                     };
@@ -827,7 +838,7 @@ impl SubagentExecutor {
                             agent: req_agent_name.clone(),
                             error: error_str.clone(),
                             status,
-                            result: terminal_result,
+                            outcome: terminal_result,
                             execution_id: event_execution_id.clone(),
                             run_id: event_run_id.clone(),
                         });
@@ -1043,12 +1054,11 @@ impl SubagentExecutor {
             &req,
             ExecutionMode::Teammate,
             registered.definition.inherit_history,
+            agent_arc.as_ref(),
         );
-        let task = compiled.task_input;
         let agent_name = req.agent_name.clone();
         let parent_agent = req.parent_agent.clone();
         let registry = self.registry.clone();
-        let message = req.message.clone();
         let timeout_secs = if registered.definition.timeout_secs > 0 {
             registered.definition.timeout_secs
         } else {
@@ -1068,7 +1078,7 @@ impl SubagentExecutor {
             .and_then(|ctx| ctx.run_id.clone());
         let invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
-            history: (!compiled.history.is_empty()).then_some(compiled.history),
+            working_dir: agent_arc.working_dir(),
             ..AgentInvocationContext::default()
         };
 
@@ -1093,8 +1103,7 @@ impl SubagentExecutor {
                     r = Self::execute_agent_streaming(
                         registry,
                         agent_arc.clone(),
-                        &task,
-                        message.clone(),
+                        compiled.clone(),
                         child_token.clone(),
                         invocation.clone(),
                         &parent_agent,
@@ -1116,8 +1125,7 @@ impl SubagentExecutor {
                     r = Self::execute_agent_streaming(
                         registry,
                         agent_arc.clone(),
-                        &task,
-                        message.clone(),
+                        compiled.clone(),
                         child_token.clone(),
                         invocation.clone(),
                         &parent_agent,
@@ -1156,11 +1164,10 @@ impl SubagentExecutor {
                 req.agent_name, req.delegation_policy.max_delegate_depth
             ))
         })?;
-        let compiled = self.compile_invocation(
-            req,
-            ExecutionMode::Team,
-            registered.definition.inherit_history,
-        );
+        // Team is a graph coordinator rather than a model invocation. Keep its
+        // objective raw; every concrete member dispatch below compiles exactly
+        // once with the member's actual tools, workspace, and inherited context.
+        let team_objective = req.task.clone();
         let run_id = req
             .runtime_context
             .as_ref()
@@ -1168,10 +1175,26 @@ impl SubagentExecutor {
             .unwrap_or_else(|| format!("team-{}", uuid::Uuid::new_v4().as_simple()));
         let parent_agent = req.agent_name.clone();
         let team_runtime = req.runtime_context.clone();
+        let team_prompt_payload = req.prompt_payload.clone();
+        let team_prompt_context = req.prompt_context.clone();
+        let team_constraints = req.constraints.clone();
+        let team_message = req.message.clone();
+        let inherited_history = req
+            .parent_context
+            .clone()
+            .filter(|context| !context.messages.is_empty() || context.parent_goal.is_some());
         let spawned = self.clone_for_spawn();
         let dispatch: super::team::TeamDispatchFn = Arc::new(move |agent_name, task, cancel| {
             let executor = spawned.clone_for_spawn();
             let parent_agent = parent_agent.clone();
+            let parent_context = inherited_history.clone();
+            let prompt_payload = team_prompt_payload.clone();
+            let message = team_message.clone();
+            let mut prompt_context = team_prompt_context.clone();
+            if let Some(context) = prompt_context.as_mut() {
+                context.task_title = Some(task.clone());
+            }
+            let constraints = team_constraints.clone();
             let runtime_context = team_runtime.clone().map(|mut context| {
                 context.execution_id =
                     Some(format!("team-member-{}", uuid::Uuid::new_v4().as_simple()));
@@ -1199,12 +1222,13 @@ impl SubagentExecutor {
                         mode_override: None,
                         cancel,
                         parent_agent,
-                        parent_context: None,
+                        parent_context,
                         delegation_policy,
                         runtime_context,
-                        message: None,
-                        prompt_payload: None,
-                        constraints: Vec::new(),
+                        message,
+                        prompt_payload,
+                        prompt_context,
+                        constraints,
                         background: false,
                     })
                     .await
@@ -1214,7 +1238,7 @@ impl SubagentExecutor {
         let start = Instant::now();
         let result = super::team::execute_team_with_runtime_dispatch(
             &spec,
-            &compiled.task_input,
+            &team_objective,
             &run_id,
             req.cancel.child_token(),
             dispatch,
@@ -1237,7 +1261,7 @@ impl SubagentExecutor {
             was_truncated: false,
             mode: ExecutionMode::Team,
             isolation_observed: ObservedIsolation::new("subagent"),
-            usage: result.usage,
+            llm_usage: result.usage,
         }
         .with_structured(
             req.runtime_context
@@ -1254,28 +1278,57 @@ impl SubagentExecutor {
         req: &DispatchRequest,
         mode: ExecutionMode,
         inherit_history: Option<usize>,
+        agent: &dyn Agent,
     ) -> CompiledSubagentInvocation {
-        let transfer_policy = if mode == ExecutionMode::Fork
-            && req
-                .parent_context
-                .as_ref()
-                .is_some_and(|context| !context.messages.is_empty())
+        let transfer_policy = if matches!(
+            mode,
+            ExecutionMode::Fork | ExecutionMode::Teammate | ExecutionMode::Team
+        ) && req
+            .parent_context
+            .as_ref()
+            .is_some_and(|context| !context.messages.is_empty())
         {
             ContextTransferPolicy::InheritStructured
         } else {
             ContextTransferPolicy::Fresh
         };
+        let mut context = req.prompt_context.clone().unwrap_or_default();
+        if context.user_goal.is_none() {
+            context.user_goal = req
+                .parent_context
+                .as_ref()
+                .and_then(|parent| parent.parent_goal.clone());
+        }
+        if context.workspace.is_none() {
+            context.workspace = agent.working_dir();
+        }
+        if context.constraints.is_empty() {
+            context.constraints = req.constraints.clone();
+        }
+        let allowed_tools = req
+            .parent_context
+            .as_ref()
+            .and_then(|parent| parent.allowed_tools.as_deref())
+            .filter(|allowed| !allowed.is_empty());
+        let capability_override =
+            allowed_tools.map(|allowed| effective_capabilities(agent, Some(allowed)));
         self.config
             .prompt_compiler
-            .compile_invocation(&SubagentPromptInput {
+            .compile_invocation(&SubagentInvocation {
                 agent_name: &req.agent_name,
                 task: &req.task,
                 mode,
                 transfer_policy,
-                parent_context: req.parent_context.as_ref(),
-                inherit_history,
+                history: req
+                    .parent_context
+                    .as_ref()
+                    .map(|context| context.messages.as_slice())
+                    .unwrap_or_default(),
+                history_limit: inherit_history,
+                current_message: req.message.as_ref(),
+                context: &context,
+                capability_override: capability_override.as_ref(),
                 payload: req.prompt_payload.as_ref(),
-                constraints: &req.constraints,
             })
     }
 
@@ -1283,10 +1336,9 @@ impl SubagentExecutor {
     async fn execute_agent_streaming(
         registry: Arc<SubagentRegistry>,
         agent: Arc<dyn Agent>,
-        task: &str,
-        message: Option<Message>,
+        compiled: CompiledSubagentInvocation,
         cancel: CancellationToken,
-        invocation: AgentInvocationContext,
+        mut invocation: AgentInvocationContext,
         parent: &str,
         subagent: &str,
         mode: ExecutionMode,
@@ -1306,22 +1358,15 @@ impl SubagentExecutor {
                 .and_then(|runtime| runtime.turn_id.clone().or_else(|| runtime.run_id.clone()))
                 .unwrap_or_else(|| binding.identity().execution_id.clone())
         });
-        // Multimodal path: when a Message is supplied, run it so the subagent
-        // sees images/files. Falls back to the text task otherwise.
+        let mut messages = compiled.messages;
+        let current_message = messages.pop().ok_or_else(|| {
+            ReactError::Other("Subagent prompt compiler returned no invocation message".to_string())
+        })?;
+        invocation.history = (!messages.is_empty()).then_some(messages);
         let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
-        let raw_stream = if let Some(msg) = message {
-            agent
-                .execute_stream_message_with_invocation_context(
-                    with_compiled_task(msg, task),
-                    cancel,
-                    invocation,
-                )
-                .await?
-        } else {
-            agent
-                .execute_stream_with_invocation_context(task, cancel, invocation)
-                .await?
-        };
+        let raw_stream = agent
+            .execute_stream_message_with_invocation_context(current_message, cancel, invocation)
+            .await?;
         let _steering_lease = if let Some(binding) = control {
             let turn_id = control_turn_id
                 .ok_or_else(|| ReactError::Other("Subagent control turn id missing".to_string()))?;
@@ -1544,7 +1589,7 @@ impl SubagentExecutor {
             was_truncated: false,
             mode,
             isolation_observed: ObservedIsolation::default(),
-            usage,
+            llm_usage: usage,
         }
         .with_structured(execution_id.as_deref(), artifact_base_dir.as_deref());
         merge_observed_evidence(&mut result.outcome, observed_evidence, observed_artifacts);
@@ -1585,7 +1630,12 @@ impl SubagentExecutor {
             Some(r) => r.definition.inherit_history,
             None => None,
         };
-        let compiled = self.compile_invocation(req, ExecutionMode::Sync, inherit_history);
+        let compiled = self.compile_invocation(
+            req,
+            ExecutionMode::Sync,
+            inherit_history,
+            agent_arc.as_ref(),
+        );
         let execution_cancel = req.cancel.child_token();
         let event_execution_id = req
             .runtime_context
@@ -1597,7 +1647,7 @@ impl SubagentExecutor {
             .and_then(|ctx| ctx.run_id.clone());
         let invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
-            history: (!compiled.history.is_empty()).then_some(compiled.history.clone()),
+            working_dir: agent_arc.working_dir(),
             ..AgentInvocationContext::default()
         };
 
@@ -1612,8 +1662,7 @@ impl SubagentExecutor {
                     Self::execute_agent_streaming(
                         self.registry.clone(),
                         agent_arc.clone(),
-                        &compiled.task_input,
-                        req.message.clone(),
+                        compiled.clone(),
                         execution_cancel.clone(),
                         invocation.clone(),
                         &req.parent_agent,
@@ -1639,8 +1688,7 @@ impl SubagentExecutor {
             Self::execute_agent_streaming(
                 self.registry.clone(),
                 agent_arc,
-                &compiled.task_input,
-                req.message.clone(),
+                compiled,
                 execution_cancel,
                 invocation,
                 &req.parent_agent,
@@ -1722,13 +1770,13 @@ impl SubagentExecutor {
         let cancel = req.cancel.clone();
         let registry = self.registry.clone();
         let message = req.message.clone();
-        let compiled = self.compile_invocation(
-            req,
-            ExecutionMode::Fork,
-            registered.definition.inherit_history,
-        );
-        let enhanced_task = compiled.task_input;
-        let invocation_history = compiled.history;
+        let prompt_compiler = self.config.prompt_compiler.clone();
+        let prompt_task = req.task.clone();
+        let prompt_parent_context = req.parent_context.clone();
+        let prompt_payload = req.prompt_payload.clone();
+        let prompt_context = req.prompt_context.clone();
+        let prompt_constraints = req.constraints.clone();
+        let prompt_inherit_history = registered.definition.inherit_history;
         // 跨 spawn 安全的值传递: 把外部 run context 带进 spawn 块。
         // Carry run context as an invocation value. Factory-backed Fork roles
         // receive a fresh agent instance; legacy pre-built roles still use the
@@ -1797,7 +1845,6 @@ impl SubagentExecutor {
 
         let result = tokio::spawn(async move {
             let _permit = permit;
-            let mut enhanced_task = enhanced_task;
             let start = Instant::now();
 
             // Check cancellation
@@ -1833,20 +1880,64 @@ impl SubagentExecutor {
                 .as_ref()
                 .map(|handle| handle.observed.clone())
                 .unwrap_or_else(|| ObservedIsolation::new("context"));
+            let mut context = prompt_context.unwrap_or_default();
+            if context.user_goal.is_none() {
+                context.user_goal = prompt_parent_context
+                    .as_ref()
+                    .and_then(|parent| parent.parent_goal.clone());
+            }
+            if context.workspace.is_none() {
+                context.workspace = isolation_handle
+                    .as_ref()
+                    .map(|handle| handle.path.clone())
+                    .or_else(|| agent_arc.working_dir());
+            }
+            if context.constraints.is_empty() {
+                context.constraints = prompt_constraints;
+            }
+            let capability_override = invocation_allowed_tools
+                .as_deref()
+                .map(|allowed| effective_capabilities(agent_arc.as_ref(), Some(allowed)));
+            let compiled = prompt_compiler.compile_invocation(&SubagentInvocation {
+                agent_name: &agent_name,
+                task: &prompt_task,
+                mode: ExecutionMode::Fork,
+                transfer_policy: if prompt_parent_context
+                    .as_ref()
+                    .is_some_and(|context| !context.messages.is_empty())
+                {
+                    ContextTransferPolicy::InheritStructured
+                } else {
+                    ContextTransferPolicy::Fresh
+                },
+                history: prompt_parent_context
+                    .as_ref()
+                    .map(|context| context.messages.as_slice())
+                    .unwrap_or_default(),
+                history_limit: prompt_inherit_history,
+                current_message: message.as_ref(),
+                context: &context,
+                capability_override: capability_override.as_ref(),
+                payload: prompt_payload.as_ref(),
+            });
             let disabled_tools = invocation_disabled_tools(
                 agent_arc.tool_names(),
                 invocation_allowed_tools.as_deref(),
             );
+            let effective_working_dir = isolation_handle
+                .as_ref()
+                .map(|handle| handle.path.clone())
+                .or_else(|| agent_arc.working_dir());
             let invocation = AgentInvocationContext {
                 runtime: runtime_context.clone(),
                 runtime_state_id: None,
                 transcript_generation_id: None,
-                working_dir: isolation_handle.as_ref().map(|handle| handle.path.clone()),
+                working_dir: effective_working_dir,
                 cancel: None,
                 disabled_tools,
                 visible_tools: None,
                 run_budget: None,
-                history: (!invocation_history.is_empty()).then_some(invocation_history.clone()),
+                history: None,
                 resource_guards: Vec::new(),
                 input_lifecycle: None,
             };
@@ -1859,11 +1950,6 @@ impl SubagentExecutor {
                     execution_id: event_execution_id.clone(),
                     run_id: event_run_id.clone(),
                 });
-            // The compiled task input cannot know the isolated working dir
-            // (created just above, at dispatch time), so append it here with
-            // the same `[workspace]` shape planned invocations use.
-            append_working_dir_context(&mut enhanced_task, invocation.working_dir.as_deref());
-
             let mut result = if let Some(deadline) = deadline {
                 tokio::select! {
                     biased;
@@ -1875,8 +1961,7 @@ impl SubagentExecutor {
                         Self::execute_agent_streaming(
                             registry,
                             agent_arc.clone(),
-                            &enhanced_task,
-                            message.clone(),
+                            compiled.clone(),
                             execution_cancel.clone(),
                             invocation.clone(),
                             &parent_agent,
@@ -1909,8 +1994,7 @@ impl SubagentExecutor {
                     r = Self::execute_agent_streaming(
                         registry,
                         agent_arc.clone(),
-                        &enhanced_task,
-                        message.clone(),
+                        compiled.clone(),
                         execution_cancel.clone(),
                         invocation.clone(),
                         &parent_agent,
@@ -1977,22 +2061,6 @@ mod tests {
     use echo_core::tools::{InvocationResourceGuard, ToolResult, ToolResultKind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[test]
-    fn append_working_dir_context_appends_workspace_section_only_when_isolated() {
-        let mut input = String::from("task text");
-        append_working_dir_context(&mut input, None);
-        assert_eq!(
-            input, "task text",
-            "no isolation must not touch the task input"
-        );
-
-        append_working_dir_context(&mut input, Some(Path::new("/tmp/eko-work-42")));
-        assert!(
-            input.contains("\n\n[workspace]\n- root: /tmp/eko-work-42\n[/workspace]"),
-            "isolated working dir must be appended with the [workspace] shape, got: {input}"
-        );
-    }
-
     struct PrefixPromptCompiler;
 
     impl SubagentPromptCompiler for PrefixPromptCompiler {
@@ -2006,13 +2074,9 @@ mod tests {
             }
         }
 
-        fn compile_invocation(
-            &self,
-            input: &SubagentPromptInput<'_>,
-        ) -> CompiledSubagentInvocation {
+        fn compile_invocation(&self, input: &SubagentInvocation<'_>) -> CompiledSubagentInvocation {
             CompiledSubagentInvocation {
-                task_input: format!("compiled:{}", input.task),
-                history: Vec::new(),
+                messages: vec![Message::user(format!("compiled:{}", input.task))],
                 diagnostics: PromptDiagnostics::default(),
             }
         }
@@ -2231,6 +2295,7 @@ mod tests {
                 }),
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -2301,6 +2366,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -2471,6 +2537,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -2512,6 +2579,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -2562,6 +2630,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -2592,6 +2661,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -2675,6 +2745,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -2714,6 +2785,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -2744,6 +2816,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -2801,6 +2874,7 @@ mod tests {
             }),
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -2853,6 +2927,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -2883,6 +2958,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -2929,6 +3005,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: vec!["Preserve the caller boundary".to_string()],
                 background: false,
             })
@@ -2946,8 +3023,8 @@ mod tests {
         assert_eq!(terminal_events.len(), 1);
         assert!(matches!(
             terminal_events.first().map(AsRef::as_ref),
-            Some(SubagentEvent::DispatchCompleted { result, .. })
-                if result.status == SubagentStatus::Completed
+            Some(SubagentEvent::DispatchCompleted { outcome, .. })
+                if outcome.status == SubagentStatus::Completed
         ));
         Ok(())
     }
@@ -2974,6 +3051,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -3029,6 +3107,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -3043,8 +3122,8 @@ mod tests {
         assert!(matches!(
             terminal_events.as_slice(),
             [event]
-                if matches!(event.as_ref(), SubagentEvent::DispatchCancelled { result, .. }
-                    if result.status == SubagentStatus::Cancelled)
+                if matches!(event.as_ref(), SubagentEvent::DispatchCancelled { outcome, .. }
+                    if outcome.status == SubagentStatus::Cancelled)
         ));
         Ok(())
     }
@@ -3079,6 +3158,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -3094,9 +3174,9 @@ mod tests {
                     event.as_ref(),
                     SubagentEvent::DispatchFailed {
                         status: SubagentStatus::TimedOut,
-                        result,
+                        outcome,
                         ..
-                    } if result.status == SubagentStatus::TimedOut
+                    } if outcome.status == SubagentStatus::TimedOut
                 )
         ));
         Ok(())
@@ -3122,6 +3202,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3170,6 +3251,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3214,6 +3296,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -3271,6 +3354,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3315,6 +3399,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -3353,6 +3438,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3393,6 +3479,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -3444,6 +3531,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3488,6 +3576,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -3532,6 +3621,7 @@ mod tests {
                 runtime_context: None,
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -3636,6 +3726,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3690,6 +3781,7 @@ mod tests {
                 }),
                 message: None,
                 prompt_payload: None,
+                prompt_context: None,
                 constraints: Vec::new(),
                 background: false,
             })
@@ -3735,6 +3827,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3809,6 +3902,7 @@ mod tests {
             }),
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3881,6 +3975,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3922,6 +4017,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -3965,6 +4061,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -4052,6 +4149,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -4099,6 +4197,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };
@@ -4148,6 +4247,7 @@ mod tests {
             runtime_context: None,
             message: None,
             prompt_payload: None,
+            prompt_context: None,
             constraints: Vec::new(),
             background: false,
         };

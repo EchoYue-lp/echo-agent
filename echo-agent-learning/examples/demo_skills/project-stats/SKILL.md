@@ -1,21 +1,11 @@
 ---
 name: project-stats
-description: >-
-  Analyze project structure, count lines of code by language, find TODOs/FIXMEs,
-  and generate project health summaries. Use when asked about codebase size,
-  composition, technical debt, or project overview.
+description: Analyze project structure, count lines of code by language, find TODOs/FIXMEs, and generate project health summaries. Use when asked about codebase size, composition, technical debt, or project overview.
 license: MIT
-shell: bash
 metadata:
   author: echo-agent
-  version: "2.0.0"
-  tags: "code, analysis, statistics, project"
-hooks:
-  PostToolUse:
-    - matcher: "run_skill_script"
-      hooks:
-        - type: prompt
-          prompt: "After running a stats script, summarize the JSON output as human-readable text."
+  version: 2.0.0
+  tags: code, analysis, statistics, project
 ---
 
 ## Project Statistics

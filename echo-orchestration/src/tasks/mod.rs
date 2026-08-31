@@ -24,6 +24,8 @@ pub use background_task::{
 };
 pub use command_cell::{
     BackgroundCommandManager, BackgroundCommandManagerConfig, CommandCellReservation,
+    CommandCellTerminalObservation, CommandCellWatchCancellation, CommandCellWatchConfig,
+    CommandCellWatcher,
 };
 pub use events::{
     AsyncTaskEventListener, LoggingListener, TaskEvent, TaskEventBus, TaskEventListener,

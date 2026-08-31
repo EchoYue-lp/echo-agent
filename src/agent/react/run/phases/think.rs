@@ -434,6 +434,7 @@ pub(crate) async fn create_llm_stream(
                         response_format: None,
                         thinking: snap.thinking.clone(),
                         cancel_token: snap.cancel_token.clone(),
+                        timeouts: None,
                         user_id: snap.config.cache_user_id.clone(),
                         cache_hints: Some(echo_core::llm::cache::CacheHints {
                             breakpoints: vec![],

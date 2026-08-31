@@ -55,7 +55,7 @@ impl std::fmt::Display for ToolPermission {
 /// - DontAsk: silently reject tools not matching an allow rule (no user prompt)
 /// - StrictConfirm: ask before write/execute/network/sensitive operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
     /// Default mode: require user confirmation for dangerous operations
     #[default]
@@ -64,8 +64,21 @@ pub enum PermissionMode {
     /// User-facing planning/task routing should use interaction mode instead.
     Plan,
     /// Automatically accept file edit operations
+    #[serde(
+        rename = "auto-edit",
+        alias = "accept-edits",
+        alias = "autoedit",
+        alias = "acceptedits"
+    )]
     AcceptEdits,
     /// Bypass all permission checks (use with caution)
+    #[serde(
+        rename = "full-auto",
+        alias = "fullauto",
+        alias = "bypass",
+        alias = "bypass-permissions",
+        alias = "bypasspermissions"
+    )]
     BypassPermissions,
     /// AI classifier auto-decides (requires Classifier implementation)
     Auto,
@@ -75,13 +88,32 @@ pub enum PermissionMode {
     ///
     /// An intermediate mode between Default and BypassPermissions,
     /// suitable for CI/CD and other unattended execution scenarios.
+    #[serde(rename = "dont-ask", alias = "dontask")]
     DontAsk,
     /// Strict interactive mode: reads are allowed, mutating or external operations ask.
-    #[serde(rename = "strict")]
+    #[serde(
+        rename = "strict",
+        alias = "strict-confirm",
+        alias = "strict-confirmation"
+    )]
     StrictConfirm,
 }
 
 impl PermissionMode {
+    /// Stable kebab-case identifier used by configuration and UI transports.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Plan => "plan",
+            Self::AcceptEdits => "auto-edit",
+            Self::BypassPermissions => "full-auto",
+            Self::Auto => "auto",
+            Self::Bubble => "bubble",
+            Self::DontAsk => "dont-ask",
+            Self::StrictConfirm => "strict",
+        }
+    }
+
     /// 检查当前模式是否允许写入操作
     pub fn allows_write(&self) -> bool {
         match self {
@@ -116,15 +148,28 @@ impl PermissionMode {
 
 impl std::fmt::Display for PermissionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PermissionMode::Default => write!(f, "default"),
-            PermissionMode::Plan => write!(f, "plan"),
-            PermissionMode::AcceptEdits => write!(f, "acceptEdits"),
-            PermissionMode::BypassPermissions => write!(f, "bypassPermissions"),
-            PermissionMode::Auto => write!(f, "auto"),
-            PermissionMode::Bubble => write!(f, "bubble"),
-            PermissionMode::DontAsk => write!(f, "dontAsk"),
-            PermissionMode::StrictConfirm => write!(f, "strict"),
+        f.write_str(self.id())
+    }
+}
+
+impl std::str::FromStr for PermissionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "default" | "ask" => Ok(Self::Default),
+            "plan" => Ok(Self::Plan),
+            "auto-edit" | "autoedit" | "accept-edits" | "acceptedits" => Ok(Self::AcceptEdits),
+            "full-auto" | "fullauto" | "bypass" | "bypass-permissions" | "bypasspermissions" => {
+                Ok(Self::BypassPermissions)
+            }
+            "auto" => Ok(Self::Auto),
+            "bubble" => Ok(Self::Bubble),
+            "dont-ask" | "dontask" => Ok(Self::DontAsk),
+            "strict" | "strict-confirm" | "strict-confirmation" => Ok(Self::StrictConfirm),
+            other => Err(format!(
+                "invalid permission mode '{other}'; expected default, plan, auto-edit, full-auto, auto, bubble, dont-ask, or strict"
+            )),
         }
     }
 }
@@ -200,6 +245,23 @@ pub enum RuleSource {
     Session = 6,
 }
 
+impl std::str::FromStr for RuleSource {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "default" => Ok(Self::Default),
+            "localSettings" | "local_settings" => Ok(Self::LocalSettings),
+            "projectSettings" | "project_settings" => Ok(Self::ProjectSettings),
+            "userSettings" | "user_settings" | "manual" => Ok(Self::UserSettings),
+            "managed" => Ok(Self::Managed),
+            "cliArg" | "cli_arg" => Ok(Self::CliArg),
+            "session" => Ok(Self::Session),
+            _ => Err(format!("unknown permission rule source: {value}")),
+        }
+    }
+}
+
 impl std::fmt::Display for RuleSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -228,6 +290,47 @@ pub enum RuleMatcher {
     Permission { permission: ToolPermission },
     /// Match all tools
     All,
+}
+
+impl std::str::FromStr for RuleMatcher {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value == "*" || value == "all" {
+            return Ok(Self::All);
+        }
+        if let Some(name) = value.strip_prefix("tool:") {
+            if name.is_empty() {
+                return Err("tool permission matcher requires a name".to_string());
+            }
+            return Ok(Self::Tool {
+                name: name.to_string(),
+            });
+        }
+        if let Some(pattern) = value.strip_prefix("pattern:") {
+            if pattern.is_empty() {
+                return Err("pattern permission matcher cannot be empty".to_string());
+            }
+            return Ok(Self::Pattern {
+                pattern: pattern.to_string(),
+            });
+        }
+        let flag = value
+            .strip_prefix("perm:")
+            .or_else(|| value.strip_prefix("permission:"));
+        if let Some(flag) = flag {
+            let permission = match flag {
+                "read" => ToolPermission::Read,
+                "write" => ToolPermission::Write,
+                "network" => ToolPermission::Network,
+                "execute" => ToolPermission::Execute,
+                "sensitive" => ToolPermission::Sensitive,
+                _ => return Err(format!("unknown permission matcher: {flag}")),
+            };
+            return Ok(Self::Permission { permission });
+        }
+        Err(format!("unsupported permission matcher: {value}"))
+    }
 }
 
 impl RuleMatcher {
@@ -314,6 +417,23 @@ pub enum RuleBehavior {
     Deny { reason: String },
     /// Require user confirmation
     Ask { suggestions: Vec<String> },
+}
+
+impl std::str::FromStr for RuleBehavior {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "allow" => Ok(Self::Allow),
+            "deny" => Ok(Self::Deny {
+                reason: "denied by rule".to_string(),
+            }),
+            "ask" => Ok(Self::Ask {
+                suggestions: vec!["allow".to_string(), "deny".to_string()],
+            }),
+            _ => Err(format!("unknown permission rule behavior: {value}")),
+        }
+    }
 }
 
 impl RuleBehavior {
@@ -644,6 +764,25 @@ mod tests {
     }
 
     #[test]
+    fn permission_mode_ids_and_aliases_are_framework_owned() {
+        let cases = [
+            ("default", PermissionMode::Default),
+            ("ask", PermissionMode::Default),
+            ("auto-edit", PermissionMode::AcceptEdits),
+            ("acceptEdits", PermissionMode::AcceptEdits),
+            ("full-auto", PermissionMode::BypassPermissions),
+            ("bypassPermissions", PermissionMode::BypassPermissions),
+            ("dont-ask", PermissionMode::DontAsk),
+            ("dontAsk", PermissionMode::DontAsk),
+            ("strict", PermissionMode::StrictConfirm),
+        ];
+        for (wire, expected) in cases {
+            assert_eq!(wire.parse::<PermissionMode>(), Ok(expected));
+            assert_eq!(expected.id(), expected.to_string());
+        }
+    }
+
+    #[test]
     fn test_rule_source_ordering() {
         assert!(RuleSource::Session > RuleSource::CliArg);
         assert!(RuleSource::CliArg > RuleSource::UserSettings);
@@ -924,5 +1063,23 @@ mod tests {
             )
             .await;
         assert!(matches!(decision, PermissionDecision::Allow));
+    }
+
+    #[test]
+    fn rule_wire_values_parse_into_framework_types() {
+        assert_eq!(
+            "tool:read_file".parse::<RuleMatcher>(),
+            Ok(RuleMatcher::Tool {
+                name: "read_file".to_string()
+            })
+        );
+        assert_eq!(
+            "deny".parse::<RuleBehavior>(),
+            Ok(RuleBehavior::Deny {
+                reason: "denied by rule".to_string(),
+            })
+        );
+        assert_eq!("session".parse::<RuleSource>(), Ok(RuleSource::Session));
+        assert!("tool:".parse::<RuleMatcher>().is_err());
     }
 }

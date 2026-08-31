@@ -25,8 +25,9 @@ use std::sync::Arc;
 /// [`Intent::Fallback`].
 ///
 /// **The classifier contains zero hardcoded keywords.**  All triggers
-/// are supplied by the product layer — typically auto-loaded from
-/// `SKILL.md` frontmatter `triggers:` fields.
+/// are supplied by the product layer — e.g. derived from skill
+/// `description` text, since the standard `SKILL.md` format has no
+/// trigger field.
 ///
 /// # Example
 ///
@@ -34,7 +35,8 @@ use std::sync::Arc;
 /// use echo_agent::intent::{KeywordClassifier, Intent};
 ///
 /// let mut classifier = KeywordClassifier::default();
-/// // Product layer registers skill triggers (e.g. from SKILL.md frontmatter)
+/// // Product layer registers explicit triggers for programmatic descriptors.
+/// // Standard SKILL.md files have no trigger frontmatter field.
 /// classifier.add_skill_keywords("coding", &["写代码", "编程", "debug", "refactor"]);
 /// classifier.add_skill_keywords("paper-search", &["论文", "文献", "arxiv"]);
 /// // Product layer registers direct-answer keywords
@@ -68,8 +70,9 @@ impl KeywordClassifier {
 
     /// Register keywords that trigger a skill activation.
     ///
-    /// Typically called by the product layer with triggers loaded
-    /// from `SKILL.md` frontmatter.
+    /// Typically called by the product layer for programmatic descriptors.
+    /// Standard `SKILL.md` files have no trigger frontmatter field; callers
+    /// may derive terms from descriptions when a keyword fast path is desired.
     pub fn add_skill_keywords(&mut self, skill_name: &str, trigger_words: &[&str]) {
         for word in trigger_words {
             let owners = self.skill_keywords.entry(word.to_lowercase()).or_default();
@@ -622,8 +625,8 @@ mod tests {
         assert!(matches!(intent, Intent::DirectAnswer { .. }));
     }
 
-    /// RFC 3.1.4: Integration test — all 11 built-in skills' trigger words
-    /// route correctly through the KeywordClassifier.
+    /// RFC 3.1.4: Integration test for programmatic skill trigger words
+    /// through the KeywordClassifier.
     ///
     /// For each skill, at least 2 representative trigger queries are tested.
     /// Negative cases (DirectAnswer, Fallback) are also verified.
@@ -631,7 +634,8 @@ mod tests {
     fn test_11_skill_trigger_routing() {
         let mut classifier = KeywordClassifier::default();
 
-        // Register all 11 skills with their trigger words (from SKILL.md frontmatter)
+        // Programmatic descriptors may still register explicit trigger words;
+        // standard SKILL.md files are routed by their descriptions instead.
         classifier.add_skill_keywords(
             "coding",
             &[
