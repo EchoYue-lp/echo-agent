@@ -64,7 +64,8 @@ pub fn critique_output_schema() -> serde_json::Value {
                 "description": "List of specific improvement suggestions"
             }
         },
-        "required": ["score", "passed", "feedback"]
+        "required": ["score", "passed", "feedback", "suggestions"],
+        "additionalProperties": false
     })
 }
 
@@ -94,5 +95,10 @@ mod tests {
         assert!(schema.is_object());
         assert!(schema["properties"]["score"].is_object());
         assert!(schema["properties"]["passed"].is_object());
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["score", "passed", "feedback", "suggestions"])
+        );
     }
 }

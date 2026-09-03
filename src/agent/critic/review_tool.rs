@@ -28,7 +28,7 @@ use std::sync::Arc;
 ///
 /// // Agent 在 ReAct 循环中可以调用：
 /// // review(task="写一个排序算法", output="我的排序代码...")
-/// // 返回：{"score": 8.5, "passed": true, "feedback": "..."}
+/// // 返回：{"score": 8.5, "passed": true, "feedback": "...", "suggestions": []}
 /// ```
 pub struct ReviewTool {
     critic: Arc<dyn Critic>,
