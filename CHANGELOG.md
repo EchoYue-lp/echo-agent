@@ -22,7 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the merged `allowed-tools` string. Added `validate_skill_markdown` /
   `validate_skill_dir` (in-process `skills-ref validate` equivalent) and
   `ReactAgent::reload_skills_from_dir` (canonicalized reload boundary that
-  replaces same-name registrations atomically).
+  replaces same-name registrations atomically). Direct
+  `ReactAgent::activate_skill` calls now return an explicit error for Skills
+  that are not registered, including application-disabled Skills, instead of
+  silently reporting success.
 
 ### Added
 

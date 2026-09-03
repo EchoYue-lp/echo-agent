@@ -293,7 +293,7 @@ deduplicated and one acyclic activation order is picked.
 
 Both activation entry points use the same wrapped skill content and the same protected context-projection authority.
 
-The LLM can call `activate_skill`; application code and `IntentRouter` can call `ReactAgent::activate_skill`. `ActivateContent::to_prompt_block` wraps the activated content in this XML envelope:
+The LLM can call `activate_skill`; application code and `IntentRouter` can call `ReactAgent::activate_skill`. Direct activation returns an error when the Skill is not registered, including when an application policy filtered out a disabled Skill, so user-facing callers never report a silent success. `ActivateContent::to_prompt_block` wraps the activated content in this XML envelope:
 
 ```
 <skill_content name="paper-search">

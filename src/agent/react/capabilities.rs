@@ -1292,7 +1292,12 @@ impl ReactAgent {
     /// context cannot diverge.
     pub async fn activate_skill(&self, skill_name: &str) -> Result<()> {
         if !self.tools.skill_registry.is_installed(skill_name) {
-            return Ok(());
+            // 报错而非静默返回:用户命令路径(TUI /skill、GUI 激活按钮)需要
+            // 区分"激活成功"与"skill 根本不在注册表里(未发现或被禁用)"。
+            // 容忍失败的调用方(如 workspace 路由)自行忽略该错误即可。
+            return Err(crate::error::ReactError::Other(format!(
+                "skill '{skill_name}' is not installed (not discovered, disabled, or removed)"
+            )));
         }
 
         let projection_marker = format!("echo-agent:skill:{skill_name}");

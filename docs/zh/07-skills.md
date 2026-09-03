@@ -271,7 +271,7 @@ descriptor 声明 `depends_on`（程序化字段——标准 frontmatter 没有�
 
 两种激活入口使用同一份 wrapped skill 内容，也使用同一个受保护上下文投影权威。
 
-LLM 可以调用 `activate_skill` 工具；应用代码和 `IntentRouter` 可以调用 `ReactAgent::activate_skill`。`ActivateContent::to_prompt_block` 会把激活内容包裹为以下 XML 信封：
+LLM 可以调用 `activate_skill` 工具；应用代码和 `IntentRouter` 可以调用 `ReactAgent::activate_skill`。直接激活未注册的 Skill 时会返回错误；应用策略过滤掉的 disabled Skill 也属于未注册，因此用户入口不会把失败静默报告成成功。`ActivateContent::to_prompt_block` 会把激活内容包裹为以下 XML 信封：
 
 ```
 <skill_content name="paper-search">

@@ -3091,3 +3091,18 @@ async fn external_context_epoch_never_exposes_mixed_fields() -> Result<(), Strin
     agent.clear_external_context();
     Ok(())
 }
+
+#[tokio::test]
+async fn activate_skill_of_unknown_skill_returns_error() -> Result<(), String> {
+    let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
+    let err = agent
+        .activate_skill("no-such-skill")
+        .await
+        .err()
+        .ok_or_else(|| "unknown skill returned silent success".to_string())?;
+    assert!(
+        err.to_string().contains("not installed"),
+        "unexpected error message: {err}"
+    );
+    Ok(())
+}
