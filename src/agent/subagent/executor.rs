@@ -339,16 +339,135 @@ pub struct SubagentExecutor {
     control_registry: Arc<SubagentControlRegistry>,
 }
 
+/// Framework-default uplink sink.
+///
+/// Behavior per target:
+/// - `Parent`: when the sender's lineage carries `parent_execution_id` and
+///   that attempt is live in the shared control registry, the message steers
+///   the parent's active turn (queue-only; the parent drains it at its next
+///   model boundary). Otherwise the message is still accepted and surfaced as
+///   [`SubagentEvent::UplinkReceived`] for host-side listeners.
+/// - `Sibling`: delivered queue-only via the shared control registry; a
+///   non-active sibling reports `sibling_not_active` so the model can retry
+///   or escalate instead of assuming delivery.
+pub fn default_uplink_sink(registry: Arc<SubagentRegistry>) -> echo_core::tools::SubagentUplinkFn {
+    use echo_core::tools::{SubagentUplinkMessage, SubagentUplinkReceipt, SubagentUplinkTarget};
+    Arc::new(move |message: SubagentUplinkMessage| {
+        let registry = Arc::clone(&registry);
+        Box::pin(async move {
+            let from = &message.from;
+            let agent = from
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let parent = from
+                .parent_agent
+                .clone()
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let (direction, intent_prefix, receipt) = match &message.target {
+                SubagentUplinkTarget::Parent { kind, text } => {
+                    let intent = if *kind == echo_core::tools::SubagentUplinkKind::Escalate {
+                        "[escalate] "
+                    } else {
+                        ""
+                    };
+                    let delivery = match from.parent_execution_id.as_deref() {
+                        Some(execution_id) => {
+                            registry
+                                .control_registry()
+                                .send_message_to_active(execution_id, text.clone())
+                                .await
+                        }
+                        None => Err(SubagentControlError::UnknownExecution {
+                            execution_id: String::new(),
+                        }),
+                    };
+                    let receipt = match delivery {
+                        Ok(receipt) => SubagentUplinkReceipt {
+                            accepted: true,
+                            status: "parent_steered".to_string(),
+                            detail: format!("queued into parent attempt {}", receipt.attempt),
+                        },
+                        Err(error) => SubagentUplinkReceipt {
+                            accepted: true,
+                            status: "event_emitted".to_string(),
+                            detail: format!(
+                                "parent not steerable ({error}); surfaced for host listeners"
+                            ),
+                        },
+                    };
+                    ("parent", intent, receipt)
+                }
+                SubagentUplinkTarget::Sibling { to, text } => {
+                    let receipt = match to {
+                        echo_core::tools::SubagentPeerAddress::ByExecutionId(execution_id) => {
+                            match registry
+                                .control_registry()
+                                .send_message_to_active(execution_id, text.clone())
+                                .await
+                            {
+                                Ok(receipt) => SubagentUplinkReceipt {
+                                    accepted: true,
+                                    status: "delivered_to_sibling".to_string(),
+                                    detail: format!(
+                                        "queued into sibling attempt {}",
+                                        receipt.attempt
+                                    ),
+                                },
+                                Err(error) => SubagentUplinkReceipt {
+                                    accepted: false,
+                                    status: "sibling_not_active".to_string(),
+                                    detail: error.to_string(),
+                                },
+                            }
+                        }
+                        echo_core::tools::SubagentPeerAddress::ByTaskId(task_id) => {
+                            SubagentUplinkReceipt {
+                                accepted: false,
+                                status: "task_addressing_requires_application_sink".to_string(),
+                                detail: format!(
+                                    "task '{task_id}' has no live attempt; an application                                      sink owning attempt scheduling must deliver it"
+                                ),
+                            }
+                        }
+                    };
+                    ("sibling", "", receipt)
+                }
+            };
+            let summary: String = {
+                let text = match &message.target {
+                    SubagentUplinkTarget::Parent { text, .. }
+                    | SubagentUplinkTarget::Sibling { text, .. } => text,
+                };
+                format!(
+                    "{intent_prefix}{}",
+                    text.chars().take(200).collect::<String>()
+                )
+            };
+            registry.event_bus().emit(SubagentEvent::UplinkReceived {
+                parent,
+                agent,
+                direction: direction.to_string(),
+                status: receipt.status.clone(),
+                summary,
+                execution_id: from.execution_id.clone(),
+                run_id: from.run_id.clone(),
+            });
+            receipt
+        })
+    })
+}
+
 impl SubagentExecutor {
     /// Create a new executor backed by the given registry.
     pub fn new(registry: Arc<SubagentRegistry>, config: SubagentExecutorConfig) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_forks));
         Self {
+            control_registry: Arc::clone(registry.control_registry()),
             registry,
             hooks: Arc::new(SubagentHookRegistry::new()),
             config,
             semaphore,
-            control_registry: Arc::new(SubagentControlRegistry::default()),
         }
     }
 
@@ -360,11 +479,11 @@ impl SubagentExecutor {
     ) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_forks));
         Self {
+            control_registry: Arc::clone(registry.control_registry()),
             registry,
             hooks: Arc::new(hooks),
             config,
             semaphore,
-            control_registry: Arc::new(SubagentControlRegistry::default()),
         }
     }
 
@@ -462,6 +581,42 @@ impl SubagentExecutor {
             .await
     }
 
+    /// Stamp identity/lineage basics and install the default uplink sink on a
+    /// dispatch request.
+    ///
+    /// Precedence: caller-stamped lineage fields always win (the `agent_tool`
+    /// path fills the parent path/execution id; application task runtimes fill
+    /// task/attempt/revision); only missing basics are derived here. An
+    /// application-provided uplink sink is never replaced — the framework
+    /// default (event bus + shared control-registry delivery) is a fallback,
+    /// not an override.
+    fn enrich_dispatch_context(&self, req: &mut DispatchRequest) {
+        let Some(context) = req.runtime_context.as_mut() else {
+            return;
+        };
+        let lineage = context
+            .subagent_lineage
+            .get_or_insert_with(Default::default);
+        if lineage.agent_name.is_none() {
+            lineage.agent_name = Some(req.agent_name.clone());
+        }
+        if lineage.parent_agent.is_none() {
+            lineage.parent_agent = Some(req.parent_agent.clone());
+        }
+        if lineage.agent_path.is_none() {
+            lineage.agent_path = Some(format!("root/{}", req.agent_name));
+        }
+        if lineage.execution_id.is_none() {
+            lineage.execution_id = context.execution_id.clone();
+        }
+        if lineage.run_id.is_none() {
+            lineage.run_id = context.run_id.clone();
+        }
+        if context.uplink.is_none() {
+            context.uplink = Some(default_uplink_sink(Arc::clone(&self.registry)));
+        }
+    }
+
     async fn dispatch_inner(
         &self,
         mut req: DispatchRequest,
@@ -483,6 +638,12 @@ impl SubagentExecutor {
                 req.mode_override.clone().unwrap_or(ExecutionMode::Fork),
             ));
         }
+
+        // Stamp identity/lineage and guarantee an uplink channel before any
+        // mode routing. Callers that already stamped a richer lineage (the
+        // `agent_tool` dispatch path, application task runtimes) keep theirs;
+        // an application-provided uplink sink is never replaced.
+        self.enrich_dispatch_context(&mut req);
 
         loop {
             // Guard against infinite delegation chains
@@ -891,6 +1052,8 @@ impl SubagentExecutor {
                     trace_sink: None,
                     delegation_policy: None,
                     resource_guards: Vec::new(),
+                    subagent_lineage: None,
+                    uplink: None,
                 });
         if let Some(existing) = context.execution_id.as_deref()
             && existing != identity.execution_id.as_str()
@@ -905,6 +1068,15 @@ impl SubagentExecutor {
         context.execution_id = Some(identity.execution_id.clone());
         if context.turn_id.is_none() && context.run_id.is_none() {
             context.turn_id = Some(identity.execution_id.clone());
+        }
+        let lineage = context
+            .subagent_lineage
+            .get_or_insert_with(Default::default);
+        lineage.execution_id = Some(identity.execution_id.clone());
+        lineage.task_id = Some(identity.task_id.clone());
+        lineage.attempt = Some(identity.attempt);
+        if lineage.run_id.is_none() {
+            lineage.run_id = context.run_id.clone();
         }
         Ok(())
     }
@@ -940,6 +1112,8 @@ impl SubagentExecutor {
                 trace_sink: None,
                 delegation_policy: None,
                 resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
             });
         if ctx
             .execution_id
@@ -1364,9 +1538,27 @@ impl SubagentExecutor {
         })?;
         invocation.history = (!messages.is_empty()).then_some(messages);
         let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
-        let raw_stream = agent
-            .execute_stream_message_with_invocation_context(current_message, cancel, invocation)
-            .await?;
+        // Route by content: text-only invocations use the text streaming path
+        // (agents that implement only `execute_stream` stay dispatch-
+        // compatible); genuinely multimodal input requires the message
+        // override. This mirrors the documented `DispatchRequest.message`
+        // contract instead of assuming every agent implements both paths.
+        let raw_stream = match current_message.content.as_text_ref() {
+            Some(task) => {
+                agent
+                    .execute_stream_with_invocation_context(task, cancel, invocation)
+                    .await?
+            }
+            None => {
+                agent
+                    .execute_stream_message_with_invocation_context(
+                        current_message,
+                        cancel,
+                        invocation,
+                    )
+                    .await?
+            }
+        };
         let _steering_lease = if let Some(binding) = control {
             let turn_id = control_turn_id
                 .ok_or_else(|| ReactError::Other("Subagent control turn id missing".to_string()))?;
@@ -2061,6 +2253,305 @@ mod tests {
     use echo_core::tools::{InvocationResourceGuard, ToolResult, ToolResultKind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Agent that blocks its stream until released and records steer input —
+    /// used to exercise the default uplink sink against a live attempt.
+    struct SteerableBlockingAgent {
+        release: Arc<tokio::sync::Notify>,
+        steered: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SteerableBlockingAgent {
+        fn blocking_stream<'a>(
+            release: Arc<tokio::sync::Notify>,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            // Resolve the stream-creation future immediately: the control
+            // plane attaches (and live steer becomes possible) only after the
+            // stream exists, so the release wait must live inside the first
+            // stream poll rather than in this future.
+            Box::pin(async move {
+                Ok(Box::pin(futures::stream::once(async move {
+                    release.notified().await;
+                    Ok(AgentEvent::FinalAnswer("released".to_string()))
+                }))
+                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+    }
+
+    impl Agent for SteerableBlockingAgent {
+        fn name(&self) -> &str {
+            "steerable-blocking"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            Self::blocking_stream(self.release.clone())
+        }
+
+        fn execute_stream_message_with_cancel<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            Self::blocking_stream(self.release.clone())
+        }
+
+        fn steer_input(
+            &self,
+            _expected_turn_id: Option<&str>,
+            message: Message,
+        ) -> std::result::Result<String, echo_core::agent::AgentSteerError> {
+            let text = message
+                .content
+                .as_text()
+                .filter(|text| !text.trim().is_empty())
+                .ok_or(echo_core::agent::AgentSteerError::EmptyInput)?
+                .to_string();
+            self.steered
+                .lock()
+                .map_err(|_| echo_core::agent::AgentSteerError::StateUnavailable)?
+                .push(text.clone());
+            Ok("turn".to_string())
+        }
+
+        fn steer_input_tracked(
+            &self,
+            expected_turn_id: Option<&str>,
+            message: Message,
+        ) -> std::result::Result<
+            echo_core::agent::AgentSteerReceipt,
+            echo_core::agent::AgentSteerError,
+        > {
+            let turn_id = self.steer_input(expected_turn_id, message)?;
+            let (_tx, rx) = tokio::sync::watch::channel(echo_core::agent::AgentSteerState::Drained);
+            Ok(echo_core::agent::AgentSteerReceipt::new(
+                uuid::Uuid::new_v4().to_string(),
+                turn_id,
+                rx,
+            ))
+        }
+    }
+
+    #[test]
+    fn enrich_dispatch_context_fills_missing_lineage_and_keeps_caller_values() {
+        let registry = Arc::new(SubagentRegistry::new());
+        let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+
+        // Missing lineage → basics derived from the request.
+        let mut req = DispatchRequest {
+            agent_name: "explorer".to_string(),
+            task: "probe".to_string(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "primary".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: Some(echo_core::tools::ExternalRunContext {
+                run_id: Some("run-1".to_string()),
+                execution_id: Some("exec-1".to_string()),
+                ..Default::default()
+            }),
+            message: None,
+            prompt_payload: None,
+            prompt_context: None,
+            constraints: Vec::new(),
+            background: false,
+        };
+        executor.enrich_dispatch_context(&mut req);
+        let lineage = req
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.subagent_lineage.clone())
+            .unwrap_or_default();
+        assert_eq!(lineage.agent_name.as_deref(), Some("explorer"));
+        assert_eq!(lineage.parent_agent.as_deref(), Some("primary"));
+        assert_eq!(lineage.agent_path.as_deref(), Some("root/explorer"));
+        assert_eq!(lineage.execution_id.as_deref(), Some("exec-1"));
+        assert_eq!(lineage.run_id.as_deref(), Some("run-1"));
+        assert!(
+            req.runtime_context
+                .as_ref()
+                .is_some_and(|c| c.uplink.is_some())
+        );
+
+        // Caller-stamped lineage and application uplink are preserved.
+        let mut stamped = req.clone();
+        let app_sink: echo_core::tools::SubagentUplinkFn = Arc::new(|_message| {
+            Box::pin(async {
+                echo_core::tools::SubagentUplinkReceipt {
+                    accepted: true,
+                    status: "app".to_string(),
+                    detail: String::new(),
+                }
+            })
+        });
+        if let Some(context) = stamped.runtime_context.as_mut() {
+            context.subagent_lineage = Some(echo_core::tools::SubagentLineage {
+                agent_path: Some("root/implementer/sub-probe".to_string()),
+                parent_execution_id: Some("parent-exec".to_string()),
+                ..Default::default()
+            });
+            context.uplink = Some(app_sink.clone());
+        }
+        executor.enrich_dispatch_context(&mut stamped);
+        let (preserved, kept_sink) = stamped
+            .runtime_context
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .subagent_lineage
+                    .clone()
+                    .map(|lineage| (lineage, context.uplink.clone()))
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            preserved.agent_path.as_deref(),
+            Some("root/implementer/sub-probe")
+        );
+        assert_eq!(
+            preserved.parent_execution_id.as_deref(),
+            Some("parent-exec")
+        );
+        assert!(kept_sink.is_some_and(|sink| Arc::ptr_eq(&sink, &app_sink)));
+    }
+
+    #[tokio::test]
+    async fn default_uplink_sink_delivers_to_active_attempt_and_reports_missing() {
+        let (registry, executor) = make_executor().await;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let steered = Arc::new(Mutex::new(Vec::new()));
+        registry
+            .register(
+                SubagentDefinition::new("target", "Uplink target"),
+                Box::new(SteerableBlockingAgent {
+                    release: release.clone(),
+                    steered: steered.clone(),
+                }),
+            )
+            .await;
+
+        let identity = SubagentAttemptIdentity::new("task-9", "exec-9", 1).expect("valid identity");
+        let dispatch = tokio::spawn(async move {
+            executor
+                .dispatch_attempt(
+                    DispatchRequest {
+                        agent_name: "target".to_string(),
+                        task: "block until released".to_string(),
+                        mode_override: Some(ExecutionMode::Sync),
+                        cancel: CancellationToken::new(),
+                        parent_agent: "primary".to_string(),
+                        parent_context: None,
+                        delegation_policy: DispatchRequest::policy_from_depth(0),
+                        runtime_context: None,
+                        message: None,
+                        prompt_payload: None,
+                        prompt_context: None,
+                        constraints: Vec::new(),
+                        background: false,
+                    },
+                    identity,
+                )
+                .await
+        });
+
+        // Wait for the attempt to become addressable in the shared plane.
+        let mut became_active = false;
+        for _ in 0..100 {
+            if registry
+                .control_registry()
+                .active_snapshot(16)
+                .iter()
+                .any(|summary| summary.execution_id == "exec-9")
+            {
+                became_active = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(became_active, "attempt never became active");
+
+        let sink = default_uplink_sink(Arc::clone(&registry));
+        let sender_lineage = echo_core::tools::SubagentLineage {
+            agent_name: Some("sender".to_string()),
+            execution_id: Some("exec-sender".to_string()),
+            parent_execution_id: Some("exec-9".to_string()),
+            ..Default::default()
+        };
+
+        // Parent direction: the parent attempt is live → steered queue-only.
+        let parent_receipt = sink(echo_core::tools::SubagentUplinkMessage {
+            from: sender_lineage.clone(),
+            target: echo_core::tools::SubagentUplinkTarget::Parent {
+                kind: echo_core::tools::SubagentUplinkKind::Escalate,
+                text: "plan assumption is wrong?".to_string(),
+            },
+        })
+        .await;
+        assert!(parent_receipt.accepted);
+        assert_eq!(parent_receipt.status, "parent_steered");
+
+        // Sibling direction: live attempt → delivered; unknown → reported.
+        let sibling_receipt = sink(echo_core::tools::SubagentUplinkMessage {
+            from: sender_lineage,
+            target: echo_core::tools::SubagentUplinkTarget::Sibling {
+                to: echo_core::tools::SubagentPeerAddress::ByExecutionId("exec-9".to_string()),
+                text: "dependency output is ready".to_string(),
+            },
+        })
+        .await;
+        assert!(sibling_receipt.accepted);
+        assert_eq!(sibling_receipt.status, "delivered_to_sibling");
+
+        let missing_receipt =
+            default_uplink_sink(Arc::clone(&registry))(echo_core::tools::SubagentUplinkMessage {
+                from: echo_core::tools::SubagentLineage::default(),
+                target: echo_core::tools::SubagentUplinkTarget::Sibling {
+                    to: echo_core::tools::SubagentPeerAddress::ByExecutionId(
+                        "exec-missing".to_string(),
+                    ),
+                    text: "anyone?".to_string(),
+                },
+            })
+            .await;
+        assert!(!missing_receipt.accepted);
+        assert_eq!(missing_receipt.status, "sibling_not_active");
+
+        release.notify_one();
+        let settled = dispatch
+            .await
+            .expect("dispatch join")
+            .expect("dispatch result");
+        assert_eq!(settled.outcome.status, SubagentStatus::Completed);
+        let steered_now = steered
+            .lock()
+            .map(|messages| messages.clone())
+            .unwrap_or_default();
+        assert_eq!(steered_now.len(), 2);
+    }
+
     struct PrefixPromptCompiler;
 
     impl SubagentPromptCompiler for PrefixPromptCompiler {
@@ -2292,6 +2783,8 @@ mod tests {
                     resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
                         Arc::clone(&drops),
                     ))],
+                    subagent_lineage: None,
+                    uplink: None,
                 }),
                 message: None,
                 prompt_payload: None,
@@ -2871,6 +3364,8 @@ mod tests {
                 trace_sink: None,
                 delegation_policy: None,
                 resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
             }),
             message: None,
             prompt_payload: None,
@@ -3778,6 +4273,8 @@ mod tests {
                     trace_sink: None,
                     delegation_policy: None,
                     resource_guards: Vec::new(),
+                    subagent_lineage: None,
+                    uplink: None,
                 }),
                 message: None,
                 prompt_payload: None,
@@ -3899,6 +4396,8 @@ mod tests {
                 trace_sink: None,
                 delegation_policy: None,
                 resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
             }),
             message: None,
             prompt_payload: None,

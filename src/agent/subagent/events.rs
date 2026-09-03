@@ -26,6 +26,26 @@ pub enum SubagentEvent {
         /// Name of the subagent that was unregistered.
         name: String,
     },
+    /// A running Subagent sent a parent/sibling message through the default
+    /// uplink sink. Emitted for observability; the delivery disposition is
+    /// carried in `status` (e.g. `parent_steered`, `event_emitted`,
+    /// `delivered_to_sibling`).
+    UplinkReceived {
+        /// Name of the dispatching parent agent.
+        parent: String,
+        /// Name of the sending Subagent.
+        agent: String,
+        /// `parent` or `sibling`.
+        direction: String,
+        /// Delivery disposition reported to the sender.
+        status: String,
+        /// Bounded message preview (first 200 chars).
+        summary: String,
+        /// Sending attempt's execution id.
+        execution_id: Option<String>,
+        /// Sending attempt's run id.
+        run_id: Option<String>,
+    },
     /// Dispatch started.
     DispatchStarted {
         /// Name of the parent agent that initiated the dispatch.

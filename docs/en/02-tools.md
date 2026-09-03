@@ -4,8 +4,6 @@
 
 Tools are the only mechanism through which an Agent interacts with the external world. The LLM learns about a tool's capabilities via JSON Schema, decides when to call it and with what parameters, and the framework handles the actual execution and returns the result back to the LLM.
 
----
-
 ## Problem It Solves
 
 LLMs are pure text models — they cannot:
@@ -237,6 +235,30 @@ impl Tool for LongRunningTool {
     }
 }
 ```
+
+---
+
+## Subagent identity and uplink channel
+
+When a tool runs inside a **dispatched Subagent**, `ToolContext` additionally
+carries:
+
+- `subagent_lineage: Option<SubagentLineage>` — an identity snapshot of the
+  attempt (own role name/execution_id/run_id, parent agent, parent
+  execution_id, `root/<child>/...` tree path, task_id/attempt/plan_revision).
+  `None` for primary agent invocations. The framework stamps it at dispatch;
+  caller-stamped lineage fields (e.g. from `agent_tool`) take precedence.
+- `uplink: Option<SubagentUplinkFn>` — the uplink channel installed by the
+  dispatcher. The built-in `subagent_message` tool (opt in via
+  `register_subagent_message_tools()`) sends `report`/`escalate` to the
+  parent or queue-only notes to sibling attempts; delivery never blocks the
+  sender and returns a `SubagentUplinkReceipt`. The default sink delivers
+  through the shared control plane and emits
+  `SubagentEvent::UplinkReceived`; applications may install their own sink
+  to own routing (journal, pause policy, ...). See ADR 0027 and
+  `echo-agent-learning/examples/demo50_subagent_communication.rs`.
+
+---
 
 ---
 

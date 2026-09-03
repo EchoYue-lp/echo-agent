@@ -1287,7 +1287,114 @@ pub trait ScriptExecutionProfileResolver: Send + Sync {
     ) -> BoxFuture<'a, Result<Option<Arc<ScriptExecutionProfile>>>>;
 }
 
-#[derive(Clone)]
+/// Identity and lineage of one dispatched Subagent attempt.
+///
+/// Value-carried through [`ExternalRunContext`] so tools executing inside a
+/// Subagent know who they are, who dispatched them, and where they sit in the
+/// dispatch tree — without holding agent handles. All fields are `Option`;
+/// a context with `subagent_lineage: None` belongs to a primary agent.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct SubagentLineage {
+    /// Role name of this Subagent (own identity).
+    pub agent_name: Option<String>,
+    /// Own execution id for this attempt (self-contained addressing).
+    pub execution_id: Option<String>,
+    /// Own application run id, when dispatched inside a formal run.
+    pub run_id: Option<String>,
+    /// Name of the dispatching parent agent.
+    pub parent_agent: Option<String>,
+    /// Execution id of the parent's current attempt, when the parent is
+    /// itself a dispatched Subagent. Lets the default uplink steer the
+    /// parent's active turn instead of only emitting an event.
+    pub parent_execution_id: Option<String>,
+    /// Canonical dispatch-tree path (`root/<child>/<grandchild>`). Stable
+    /// across attempts of one logical tree; assigned at dispatch time.
+    pub agent_path: Option<String>,
+    /// Task-graph task id this attempt executes, when dispatched by a
+    /// revisioned task runtime.
+    pub task_id: Option<String>,
+    /// Attempt number within the task (1-based).
+    pub attempt: Option<u32>,
+    /// Revision of the task-graph plan this attempt belongs to.
+    pub plan_revision: Option<u64>,
+}
+
+/// Where one uplink message is heading.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubagentUplinkTarget {
+    /// The dispatching parent (an agent, or an application run driver).
+    Parent {
+        /// Intent: informational report vs blocking clarification request.
+        kind: SubagentUplinkKind,
+        /// Message body (already bounded by the calling tool).
+        text: String,
+    },
+    /// A sibling in the same dispatch graph. Delivery is queue-only: the
+    /// message steers the sibling's active turn at its next model boundary
+    /// and never starts a new one.
+    Sibling {
+        to: SubagentPeerAddress,
+        text: String,
+    },
+}
+
+/// How a sibling peer is addressed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubagentPeerAddress {
+    /// A currently active attempt — deliverable by the shared control plane
+    /// (live steer).
+    ByExecutionId(String),
+    /// A task in the same graph that has no live attempt yet. The framework
+    /// default sink cannot resolve the next attempt number, so delivery
+    /// requires an application sink that owns attempt scheduling (e.g.
+    /// queue-for-next-attempt).
+    ByTaskId(String),
+}
+
+/// Intent of a parent-directed uplink message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubagentUplinkKind {
+    /// Non-blocking informational report; the sending attempt keeps running.
+    Report,
+    /// Blocking request for clarification. The sender does NOT wait — the
+    /// host decides (pause the run, answer via guidance, or ignore) while
+    /// the attempt continues with its best-effort work.
+    Escalate,
+}
+
+/// One message from a running Subagent toward its parent or a sibling.
+#[derive(Clone, Debug)]
+pub struct SubagentUplinkMessage {
+    /// Sender identity captured from the dispatching runtime context.
+    pub from: SubagentLineage,
+    /// Where the message goes and what it says.
+    pub target: SubagentUplinkTarget,
+}
+
+/// Bounded acknowledgment for one uplink message. Infallible by design:
+/// delivery problems are reported through `accepted`/`status` so calling
+/// tools can turn them into model-visible results instead of errors.
+#[derive(Clone, Debug)]
+pub struct SubagentUplinkReceipt {
+    pub accepted: bool,
+    /// Machine-readable disposition, e.g. `event_emitted`, `parent_steered`,
+    /// `delivered_to_sibling`, `no_parent`, `sibling_not_active`, `rejected`.
+    pub status: String,
+    pub detail: String,
+}
+
+/// Uplink channel installed by the dispatcher into a Subagent's
+/// [`ExternalRunContext`]. Mirrors the `TraceSinkFn` injection pattern: the
+/// framework provides a default sink (event bus + control-registry steer) and
+/// applications may install their own (journal, pause policy, surface
+/// notification) before dispatch.
+pub type SubagentUplinkFn = std::sync::Arc<
+    dyn Fn(SubagentUplinkMessage) -> futures::future::BoxFuture<'static, SubagentUplinkReceipt>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone, Default)]
 pub struct ExternalRunContext {
     /// 当前会话标识，跨主 agent/subagent 保持稳定。
     pub conversation_id: Option<String>,
@@ -1316,6 +1423,13 @@ pub struct ExternalRunContext {
     pub delegation_policy: Option<NestedDelegationPolicy>,
     /// Opaque resources retained across main Agent, subagent, and tool spawns.
     pub resource_guards: Vec<InvocationResourceGuard>,
+    /// Identity/lineage of the dispatched Subagent attempt this context
+    /// belongs to. `None` for primary agent invocations.
+    pub subagent_lineage: Option<SubagentLineage>,
+    /// Uplink channel for Subagent→parent / Subagent→sibling messaging,
+    /// installed by the dispatcher. `None` means no uplink is wired; message
+    /// tools must report unavailable instead of silently dropping.
+    pub uplink: Option<SubagentUplinkFn>,
 }
 
 impl std::fmt::Debug for ExternalRunContext {
@@ -1335,6 +1449,8 @@ impl std::fmt::Debug for ExternalRunContext {
             .field("delegation_policy", &self.delegation_policy)
             .field("resource_guard_count", &self.resource_guards.len())
             .field("resource_guards", &self.resource_guards)
+            .field("subagent_lineage", &self.subagent_lineage)
+            .field("uplink", &self.uplink.as_ref().map(|_| "<uplink>"))
             .finish()
     }
 }
@@ -1389,6 +1505,12 @@ pub struct ToolContext {
     /// Opaque invocation resources. Tools may clone and retain these guards
     /// when work crosses an internal spawn or blocking boundary.
     pub resource_guards: Vec<InvocationResourceGuard>,
+    /// Identity/lineage of the Subagent attempt invoking this tool.
+    /// `None` when a primary agent invokes the tool.
+    pub subagent_lineage: Option<SubagentLineage>,
+    /// Uplink channel for Subagent→parent / Subagent→sibling messaging.
+    /// `None` when the invocation has no uplink wired.
+    pub uplink: Option<SubagentUplinkFn>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -1425,6 +1547,8 @@ impl std::fmt::Debug for ToolContext {
             .field("delegation_policy", &self.delegation_policy)
             .field("resource_guard_count", &self.resource_guards.len())
             .field("resource_guards", &self.resource_guards)
+            .field("subagent_lineage", &self.subagent_lineage)
+            .field("uplink", &self.uplink.as_ref().map(|_| "<uplink>"))
             .finish()
     }
 }
@@ -1703,6 +1827,8 @@ mod tool_context_tests {
             trace_sink: None,
             delegation_policy: None,
             resource_guards: Vec::new(),
+            subagent_lineage: None,
+            uplink: None,
             // No cache_user_id field — if it still exists, this fails to compile.
         };
     }
@@ -1725,6 +1851,8 @@ mod tool_context_tests {
             delegation_policy: None,
             active_message: None,
             resource_guards: Vec::new(),
+            subagent_lineage: None,
+            uplink: None,
             // No cache_user_id field — if it still exists, this fails to compile.
         };
     }

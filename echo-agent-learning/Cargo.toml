@@ -68,6 +68,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
 [[example]]
+name = "demo50_subagent_communication"
+required-features = ["subagent"]
+[[example]]
 name = "demo03_approval"
 required-features = ["human-loop"]
 [[example]]

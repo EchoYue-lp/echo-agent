@@ -450,9 +450,22 @@ struct ControlState {
     settled_order: VecDeque<String>,
 }
 
+/// Bounded, read-only summary of one active attempt, for in-tree discovery
+/// tools such as `subagent_list`.
+#[derive(Clone, Debug)]
+pub struct ActiveAttemptSummary {
+    pub execution_id: String,
+    pub task_id: String,
+    pub attempt: u32,
+    pub phase: SubagentControlPhase,
+}
+
 /// Process-scoped execution control. Durable state remains consumer-owned.
+///
+/// Shared per `SubagentRegistry` so an `execution_id` is addressable across
+/// every executor built on that registry (see `SubagentRegistry::control_registry`).
 #[derive(Default)]
-pub(crate) struct SubagentControlRegistry {
+pub struct SubagentControlRegistry {
     state: Mutex<ControlState>,
 }
 
@@ -605,6 +618,56 @@ impl SubagentControlRegistry {
                 continue;
             }
         }
+    }
+
+    /// Deliver a queue-only message to whichever attempt is currently active
+    /// under `execution_id`, resolving the attempt number internally.
+    ///
+    /// Used by the default uplink (parent steer) and `subagent_message`
+    /// (sibling steer), where the caller knows the target execution id but
+    /// not its attempt number. Attempts the same receipt contract as
+    /// [`Self::send_message_tracked`].
+    pub(crate) async fn send_message_to_active(
+        &self,
+        execution_id: &str,
+        instruction: impl Into<String>,
+    ) -> Result<SubagentMessageReceipt, SubagentControlError> {
+        let attempt = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| SubagentControlError::StateUnavailable)?;
+            let active = state.active.get(execution_id).ok_or_else(|| {
+                SubagentControlError::UnknownExecution {
+                    execution_id: execution_id.to_string(),
+                }
+            })?;
+            active.identity.attempt
+        };
+        self.send_message_tracked(execution_id, attempt, instruction)
+            .await
+    }
+
+    /// Snapshot of currently active attempts, bounded by `limit` (clamped to
+    /// at most 64 entries; sorted by execution id for stable output).
+    pub fn active_snapshot(&self, limit: usize) -> Vec<ActiveAttemptSummary> {
+        let limit = limit.min(64);
+        let Ok(state) = self.state.lock() else {
+            return Vec::new();
+        };
+        let mut summaries: Vec<ActiveAttemptSummary> = state
+            .active
+            .values()
+            .map(|active| ActiveAttemptSummary {
+                execution_id: active.identity.execution_id.clone(),
+                task_id: active.identity.task_id.clone(),
+                attempt: active.identity.attempt,
+                phase: active.phase,
+            })
+            .collect();
+        summaries.sort_by(|left, right| left.execution_id.cmp(&right.execution_id));
+        summaries.truncate(limit);
+        summaries
     }
 
     pub(crate) async fn interrupt(

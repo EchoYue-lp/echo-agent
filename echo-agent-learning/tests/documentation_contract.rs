@@ -117,7 +117,7 @@ fn example_manifest_lists_every_demo_once() -> Result<(), Box<dyn std::error::Er
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let readme = std::fs::read_to_string(root.join("examples/README.md"))?;
     let sources = demo_sources()?;
-    assert_eq!(sources.len(), 43 + 21, "unexpected demo source count");
+    assert_eq!(sources.len(), 43 + 22, "unexpected demo source count");
     for name in sources.keys() {
         let listed = readme
             .lines()

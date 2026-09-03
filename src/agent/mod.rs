@@ -36,7 +36,7 @@
 pub use echo_core::agent::builder::AgentBuilder as AgentBuilderTrait;
 pub use echo_core::agent::{
     AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentEvent, AgentInputLifecycle,
-    AgentInvocationContext, AgentSteerPhase, AgentSteerReceipt, AgentSteerState,
+    AgentInvocationContext, AgentSteerError, AgentSteerPhase, AgentSteerReceipt, AgentSteerState,
     AgentSteerTurnOutcome, CancellationToken, EventEnvelope, EventIdentity, ExecutionUsage,
     InterventionCallback, InterventionResult, StepType, ToolInvocation, ToolInvocationRewrite,
     ToolVisibilityPolicy, envelope_event_stream, envelope_event_stream_after,

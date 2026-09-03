@@ -65,6 +65,13 @@ pub struct AgentConfig {
     /// Default: `false` (product layers should opt in explicitly only if they
     /// want the LLM-driven dispatch escape hatch).
     pub(crate) register_agent_dispatch_tool: bool,
+    /// Register `subagent_message` + `subagent_list` so a dispatched Subagent
+    /// can report/escalate to its parent and address sibling attempts.
+    /// Decoupled from `register_agent_dispatch_tool` (delegation) because
+    /// uplink messaging is useful for every dispatched Subagent, including
+    /// roles that cannot delegate. Default: `false` (product layers opt in).
+    #[cfg(feature = "subagent")]
+    pub(crate) register_subagent_message_tools: bool,
     /// Context token limit; auto-triggers compression when exceeded (`usize::MAX` means no limit)
     pub(crate) token_limit: usize,
     pub(crate) token_limit_explicit: bool,
@@ -180,6 +187,8 @@ impl AgentConfig {
                 crate::agent::subagent::DefaultSubagentPromptCompiler,
             ),
             register_agent_dispatch_tool: false,
+            #[cfg(feature = "subagent")]
+            register_subagent_message_tools: false,
             token_limit: DEFAULT_TOKEN_LIMIT,
             token_limit_explicit: false,
             stream_buffer_size: 256,
@@ -365,6 +374,14 @@ impl AgentConfig {
     /// framework's `delegate_to_agent*` methods still work (used by TaskRuntime).
     pub fn register_agent_dispatch_tool(mut self, enabled: bool) -> Self {
         self.register_agent_dispatch_tool = enabled;
+        self
+    }
+
+    /// Register the in-tree Subagent communication tools
+    /// (`subagent_message` + `subagent_list`).
+    #[cfg(feature = "subagent")]
+    pub fn register_subagent_message_tools(mut self, enabled: bool) -> Self {
+        self.register_subagent_message_tools = enabled;
         self
     }
 

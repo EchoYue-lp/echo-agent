@@ -22,14 +22,14 @@ pub mod usage;
 pub use builder::SubagentBuilder;
 pub use context::{ContextInheritance, SubagentContext};
 pub use control::{
-    SubagentAttemptIdentity, SubagentCommandIdentity, SubagentCommandPhase, SubagentControlError,
-    SubagentControlPhase, SubagentGuidanceQueueReceipt, SubagentInterruptOutcome,
-    SubagentMessageReceipt,
+    ActiveAttemptSummary, SubagentAttemptIdentity, SubagentCommandIdentity, SubagentCommandPhase,
+    SubagentControlError, SubagentControlPhase, SubagentGuidanceQueueReceipt,
+    SubagentInterruptOutcome, SubagentMessageReceipt,
 };
 pub use events::{SubagentEvent, SubagentEventBus};
 pub use executor::{
     BackgroundSubagentHandle, DispatchRequest, SubagentExecutor, SubagentExecutorConfig,
-    TeammateHandle, merge_observed_evidence, subagent_status_from_error,
+    TeammateHandle, default_uplink_sink, merge_observed_evidence, subagent_status_from_error,
 };
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
 pub use isolation::{

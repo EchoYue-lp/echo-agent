@@ -33,6 +33,8 @@ fn external_context_with_guards(
         trace_sink: None,
         delegation_policy: None,
         resource_guards,
+        subagent_lineage: None,
+        uplink: None,
     }
 }
 
@@ -3000,6 +3002,8 @@ async fn external_context_epoch_never_exposes_mixed_fields() -> Result<(), Strin
             delegate_depth: 1,
             max_delegate_depth: 3,
         }),
+        subagent_lineage: None,
+        uplink: None,
         resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(1_u64)],
     };
     agent.set_external_context(&a_context);
@@ -3024,6 +3028,8 @@ async fn external_context_epoch_never_exposes_mixed_fields() -> Result<(), Strin
         resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
             "guard-b".to_string(),
         )],
+        subagent_lineage: None,
+        uplink: None,
     };
     let setting = {
         let agent = Arc::clone(&agent);

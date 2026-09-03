@@ -336,6 +336,8 @@ mod tests {
             resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
                 QueuedGuardDrop(drops),
             )],
+            subagent_lineage: None,
+            uplink: None,
         }
     }
 

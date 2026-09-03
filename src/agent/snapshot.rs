@@ -648,6 +648,12 @@ pub struct AgentRunSnapshot {
     pub external_cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     pub external_trace_sink: Option<echo_core::tools::TraceSinkFn>,
     pub external_delegation_policy: Option<echo_core::tools::NestedDelegationPolicy>,
+    /// Identity/lineage of the dispatched Subagent attempt this snapshot runs.
+    /// `None` for primary agent invocations. Copied into every ToolContext.
+    pub subagent_lineage: Option<echo_core::tools::SubagentLineage>,
+    /// Uplink channel for Subagent→parent / Subagent→sibling messaging,
+    /// installed by the dispatcher into the invocation's runtime context.
+    pub external_uplink: Option<echo_core::tools::SubagentUplinkFn>,
     /// Opaque ownership tokens retained for this invocation and its tools.
     pub resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
     /// Permission service (human-in-the-loop).
@@ -812,6 +818,16 @@ impl AgentRunSnapshot {
                 runtime.and_then(|context| context.delegation_policy)
             } else {
                 legacy.and_then(|context| context.delegation_policy)
+            },
+            subagent_lineage: if invocation.is_some() {
+                runtime.and_then(|context| context.subagent_lineage.clone())
+            } else {
+                None
+            },
+            external_uplink: if invocation.is_some() {
+                runtime.and_then(|context| context.uplink.clone())
+            } else {
+                None
             },
             resource_guards: if let Some(context) = invocation {
                 let mut guards = runtime
@@ -2006,6 +2022,8 @@ mod transcript_filter_tests {
                 trace_sink: None,
                 delegation_policy: None,
                 resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
             }),
             ..Default::default()
         };
@@ -2052,6 +2070,8 @@ mod transcript_filter_tests {
                 trace_sink: None,
                 delegation_policy: None,
                 resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
             }),
             ..Default::default()
         };
@@ -2098,6 +2118,8 @@ mod transcript_filter_tests {
                 trace_sink: None,
                 delegation_policy: None,
                 resource_guards: Vec::new(),
+                subagent_lineage: None,
+                uplink: None,
             }),
             ..Default::default()
         };
@@ -2330,6 +2352,8 @@ mod transcript_filter_tests {
                 resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
                     "runtime-guard".to_string(),
                 )],
+                subagent_lineage: None,
+                uplink: None,
             }),
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-atomic")),
             cancel: None,

@@ -55,6 +55,7 @@ The current runnable demos are:
 - `demo46_data_analyst.rs`
 - `demo47_enterprise.rs`
 - `demo48_personal_assistant.rs`
+- `demo50_subagent_communication.rs`
 - `demo49_research_agent.rs`
 - `demo56_plugin_system.rs`
 - `demo58_git_worktree.rs`

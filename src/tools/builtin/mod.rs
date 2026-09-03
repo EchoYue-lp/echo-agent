@@ -10,5 +10,7 @@ pub(crate) mod cell_tools;
 #[cfg(feature = "human-loop")]
 pub(crate) mod human_in_loop;
 pub(crate) mod memory;
+#[cfg(feature = "subagent")]
+pub(crate) mod subagent_message;
 /// Think tool for reasoning and reflection.
 pub mod think;

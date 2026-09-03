@@ -37,6 +37,8 @@ pub struct ReactAgentBuilder {
     enable_human_in_loop: bool,
     enable_subagent: bool,
     register_agent_dispatch_tool: bool,
+    #[cfg(feature = "subagent")]
+    register_subagent_message_tools: bool,
     /// Optional application-owned isolation provider for Fork dispatches.
     #[cfg(feature = "subagent")]
     subagent_isolation_provider:
@@ -119,6 +121,8 @@ impl ReactAgentBuilder {
             enable_human_in_loop: false,
             enable_subagent: false,
             register_agent_dispatch_tool: false,
+            #[cfg(feature = "subagent")]
+            register_subagent_message_tools: false,
             #[cfg(feature = "subagent")]
             subagent_isolation_provider: None,
             #[cfg(feature = "subagent")]
@@ -360,6 +364,14 @@ impl ReactAgentBuilder {
     /// dispatch via `delegate_to_agent*` still works.
     pub fn register_agent_dispatch_tool(mut self) -> Self {
         self.register_agent_dispatch_tool = true;
+        self
+    }
+
+    /// Register the in-tree Subagent communication tools
+    /// (`subagent_message` + `subagent_list`) on the built agent.
+    #[cfg(feature = "subagent")]
+    pub fn register_subagent_message_tools(mut self) -> Self {
+        self.register_subagent_message_tools = true;
         self
     }
 
@@ -810,6 +822,10 @@ impl ReactAgentBuilder {
             .run_budget(self.run_budget)
             .max_tokens(self.max_tokens)
             .temperature(self.temperature);
+        #[cfg(feature = "subagent")]
+        {
+            config.register_subagent_message_tools = self.register_subagent_message_tools;
+        }
         if let Some(cells) = self.command_cells.clone() {
             config = config.command_cells(cells);
         }

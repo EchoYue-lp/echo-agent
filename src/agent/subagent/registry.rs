@@ -98,6 +98,15 @@ pub struct SubagentRegistry {
     instantiating_done: Arc<Notify>,
     /// Event bus for lifecycle events.
     event_bus: SubagentEventBus,
+    /// Shared process-level execution control for dispatched attempts.
+    ///
+    /// One registry owns exactly one control plane so an `execution_id` is
+    /// addressable across every `SubagentExecutor` built on this registry —
+    /// without this, each executor would keep a private control registry and
+    /// sibling attempts dispatched by different executors could not see each
+    /// other (Subagent↔Subagent messaging and the default uplink both rely
+    /// on this unified lookup).
+    control: Arc<super::control::SubagentControlRegistry>,
 }
 
 impl SubagentRegistry {
@@ -110,6 +119,7 @@ impl SubagentRegistry {
             instantiating: Arc::new(RwLock::new(HashSet::new())),
             instantiating_done: Arc::new(Notify::new()),
             event_bus: SubagentEventBus::new(),
+            control: Arc::new(super::control::SubagentControlRegistry::default()),
         }
     }
 
@@ -122,7 +132,13 @@ impl SubagentRegistry {
             instantiating: Arc::new(RwLock::new(HashSet::new())),
             instantiating_done: Arc::new(Notify::new()),
             event_bus,
+            control: Arc::new(super::control::SubagentControlRegistry::default()),
         }
+    }
+
+    /// Shared execution-control plane for all executors on this registry.
+    pub fn control_registry(&self) -> &Arc<super::control::SubagentControlRegistry> {
+        &self.control
     }
 
     fn publish_catalog(&self, state: &RegistryState) {
@@ -552,6 +568,7 @@ impl Clone for SubagentRegistry {
             instantiating: self.instantiating.clone(),
             instantiating_done: self.instantiating_done.clone(),
             event_bus: self.event_bus.clone(),
+            control: self.control.clone(),
         }
     }
 }

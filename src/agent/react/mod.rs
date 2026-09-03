@@ -144,6 +144,8 @@ impl LegacyExternalContextSnapshot {
             trace_sink: self.trace_sink.clone(),
             delegation_policy: self.delegation_policy,
             resource_guards: self.resource_guards.clone(),
+            subagent_lineage: None,
+            uplink: None,
         })
     }
 }
@@ -584,6 +586,23 @@ impl ReactAgent {
             )
             .with_parent_context(factory);
             tool_manager.register(Box::new(dispatch_tool));
+        }
+
+        // ── In-tree Subagent communication tools (message + list) ──
+        // Registered independently of `register_agent_dispatch_tool`:
+        // uplink messaging serves every dispatched Subagent, including roles
+        // without delegation rights. The tools read identity and the uplink
+        // channel from ToolContext and are inert on primary agents.
+        #[cfg(feature = "subagent")]
+        if config.register_subagent_message_tools {
+            tool_manager.register(Box::new(
+                crate::tools::builtin::subagent_message::SubagentMessageTool::new(),
+            ));
+            tool_manager.register(Box::new(
+                crate::tools::builtin::subagent_message::SubagentListTool::new(
+                    subagent_registry.clone(),
+                ),
+            ));
         }
 
         let model_name = config.model_name.clone();

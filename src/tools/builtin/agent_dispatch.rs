@@ -143,6 +143,10 @@ impl AgentDispatchTool {
             trace_sink: c.trace_sink.clone(),
             delegation_policy: c.delegation_policy,
             resource_guards: c.resource_guards.clone(),
+            // The child's lineage is stamped below from the invoking
+            // context's own lineage — the parent's value must not leak.
+            subagent_lineage: None,
+            uplink: None,
         })
     }
 
@@ -171,8 +175,12 @@ impl AgentDispatchTool {
         let parent_agent = self.parent_agent.clone();
         let cancel_handle = self.cancel.clone();
         let factory = self.parent_context_factory.clone();
-        let runtime_context = Self::runtime_context_from_tool_ctx(ctx);
+        let mut runtime_context = Self::runtime_context_from_tool_ctx(ctx);
         let active_message = ctx.and_then(|context| context.active_message.clone());
+        // Owned parent lineage values for stamping the child's identity
+        // inside the async block (the ctx reference must not be captured).
+        let parent_lineage = ctx.and_then(|context| context.subagent_lineage.clone());
+        let parent_execution_id = ctx.and_then(|context| context.execution_id.clone());
         let invocation_cancel = ctx.and_then(|context| context.cancel.clone());
         let delegation_policy = match Self::delegation_policy_from_context(ctx) {
             Ok(policy) => policy,
@@ -184,6 +192,30 @@ impl AgentDispatchTool {
                 .get("agent_name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("agent_name".to_string()))?;
+
+            // Stamp the child's lineage from the invoking context: the parent
+            // path chains (`root/<parent>/<child>`), and the parent's own
+            // execution id lets the default uplink steer the parent when the
+            // child escalates. The parent's uplink is deliberately NOT
+            // inherited — the executor installs a fresh default sink bound to
+            // this child.
+            if let Some(context) = runtime_context.as_mut() {
+                let parent_path = parent_lineage
+                    .as_ref()
+                    .and_then(|lineage| lineage.agent_path.clone())
+                    .unwrap_or_else(|| "root".to_string());
+                context.subagent_lineage = Some(echo_core::tools::SubagentLineage {
+                    agent_name: Some(agent_name.to_string()),
+                    execution_id: context.execution_id.clone(),
+                    run_id: context.run_id.clone(),
+                    parent_agent: Some(parent_agent.clone()),
+                    parent_execution_id: parent_execution_id.clone(),
+                    agent_path: Some(format!("{parent_path}/{agent_name}")),
+                    task_id: None,
+                    attempt: None,
+                    plan_revision: None,
+                });
+            }
 
             let task = parameters
                 .get("task")

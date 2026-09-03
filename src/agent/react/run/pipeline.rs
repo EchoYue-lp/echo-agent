@@ -559,6 +559,8 @@ impl PipelineStage for ExecuteStage {
             trace_sink: snapshot.external_trace_sink.clone(),
             delegation_policy: snapshot.external_delegation_policy,
             resource_guards: snapshot.resource_guards.clone(),
+            subagent_lineage: snapshot.subagent_lineage.clone(),
+            uplink: snapshot.external_uplink.clone(),
         };
         let execution_result = if snapshot
             .tools
