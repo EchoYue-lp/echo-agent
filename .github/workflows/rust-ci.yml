@@ -7,8 +7,19 @@ on:
       - master
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The exhaustive all-feature gate runs once on the task branch before merge.
+# CI keeps the signals that a local macOS run cannot replace: Linux compilation
+# and tests, Windows compatibility, and dependency policy. Test groups remain
+# split because a single workspace test job exceeds the hosted runner's memory.
 jobs:
-  verify:
+  linux-quality:
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: "1"
@@ -22,16 +33,47 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: "false"
-      - name: Run the repository verification gate
-        run: ./scripts/verify.sh
+      - name: Check Linux formatting, lints, and featureless build
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo check --workspace --lib --no-default-features --locked
 
-  platform-check:
-    name: platform check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  linux-test:
+    name: linux test (${{ matrix.group }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-latest]
+        include:
+          - group: framework
+            packages: -p echo_agent
+          - group: tools
+            packages: -p echo_tools
+          - group: learning
+            packages: -p echo-agent-learning
+          - group: foundations
+            packages: >-
+              -p echo_core -p echo_execution -p echo_integration -p echo_macros
+              -p echo_orchestration -p echo_state
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install low-memory linker
+        run: sudo apt-get install --no-install-recommends -y lld
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+      - name: Test default feature surface
+        run: cargo test ${{ matrix.packages }} --lib --tests --locked
+
+  windows-check:
+    runs-on: windows-latest
     env:
       CARGO_BUILD_JOBS: "1"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -41,10 +83,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: "false"
-      - name: Compile framework libraries for the host platform
+      - name: Compile framework libraries for Windows
         run: cargo check --workspace --lib --all-features --locked
       - name: Exercise Windows atomic file replacement
-        if: runner.os == 'Windows'
         run: cargo test -p echo_core --lib --all-features --locked utils::fs::tests
 
   dependency-policy:

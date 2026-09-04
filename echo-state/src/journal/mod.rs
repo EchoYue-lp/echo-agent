@@ -1576,16 +1576,25 @@ where
 
     /// Append a non-empty batch, fold committed records in order, and compound
     /// at most one checkpoint at the batch boundary.
+    ///
+    /// Concurrent callers are serialized across append and fold as one
+    /// transaction, so committed sequences cannot be reordered.
     pub fn apply_batch(
         &self,
         batch: PreparedJournalBatch<R::Event>,
     ) -> std::result::Result<ApplyBatchReceipt, CheckpointedApplyError<R::Event>> {
         let expected = batch.clone();
+        // Append and fold must be one transaction on the projection lock.
+        // Dropping the lock between them lets a thread holding a later
+        // sequence fold first and fail with a bogus projection gap, violating
+        // the single-owner invariant documented on this module. Lock order is
+        // always projection -> journal, matching `recover`.
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let appended = self
             .journal
             .append_batch(batch)
             .map_err(CheckpointedApplyError::Journal)?;
-        self.apply_committed(&expected, appended)
+        self.fold_committed_locked(&mut inner, &expected, appended)
     }
 
     /// Fold a batch receipt that was committed by an external physical
@@ -1598,6 +1607,15 @@ where
         appended: JournalBatchAppendReceipt<R::Event>,
     ) -> std::result::Result<ApplyBatchReceipt, CheckpointedApplyError<R::Event>> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        self.fold_committed_locked(&mut inner, expected, appended)
+    }
+
+    fn fold_committed_locked(
+        &self,
+        inner: &mut ReducerInner<R>,
+        expected: &PreparedJournalBatch<R::Event>,
+        appended: JournalBatchAppendReceipt<R::Event>,
+    ) -> std::result::Result<ApplyBatchReceipt, CheckpointedApplyError<R::Event>> {
         let batch_id = appended.batch_id().to_string();
         let receipt_matches = expected.matches_receipt(&appended).map_err(|error| {
             CheckpointedApplyError::CommittedInvariant {
@@ -2530,7 +2548,9 @@ mod tests {
             }));
         }
         for handle in handles {
-            assert!(handle.join().is_ok_and(|result| result.is_ok()));
+            let joined = handle.join();
+            let ok = matches!(&joined, Ok(Ok(_)));
+            assert!(ok, "worker failed: {joined:?}");
         }
 
         let journal_events = journal

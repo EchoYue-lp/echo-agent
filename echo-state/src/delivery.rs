@@ -1082,7 +1082,7 @@ where
 ///     score: f64,
 /// }
 ///
-/// # fn main() -> Result<()> {
+/// # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 /// type Event = DeliveryEvent<Route, Payload>;
 /// type Journal = MemoryEventJournal<Event>;
 /// type Projection = DeliveryLedgerProjection<Route, Payload>;
