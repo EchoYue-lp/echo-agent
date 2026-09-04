@@ -240,6 +240,9 @@ dispatch start or an upstream parent event.
 The broadcast and replay windows are bounded. A lagging receiver observes
 Tokio's `Lagged` result, then calls `replay_after` for a known stream or
 `replay_for_execution` for an exact attempt whose start envelope was missed.
+Process-level consumers that may have missed an entire short attempt first call
+`retained_stream_ids`, then replay each retained stream from their own cursor
+(or zero for an unseen stream).
 `SubagentEventReplay::gap` explicitly reports when the retained suffix is not
 contiguous. High-volume thinking/token deltas may be absent after a gap, while
 retained lifecycle/tool boundaries and `terminal` allow state and final output

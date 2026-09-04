@@ -1039,6 +1039,26 @@ impl SubagentEventBus {
         Some(self.replay_after(&stream_id, after_sequence))
     }
 
+    /// Enumerate every stream that still has a retained event, boundary, or
+    /// terminal. A process-level consumer uses this after broadcast lag to
+    /// recover short attempts it had not observed before the lag signal.
+    pub fn retained_stream_ids(&self) -> Vec<StreamId> {
+        let replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stream_ids = replay
+            .history
+            .iter()
+            .chain(replay.boundaries.iter())
+            .chain(replay.terminals.iter())
+            .map(|event| event.stream_id.clone())
+            .collect::<Vec<_>>();
+        stream_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        stream_ids.dedup();
+        stream_ids
+    }
+
     fn active_latest_for_stream(&self, stream_id: &StreamId) -> Option<u64> {
         let mut streams = self
             .active_streams
@@ -1924,6 +1944,40 @@ mod tests {
             name: "test".to_string(),
         });
         assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn retained_stream_ids_include_distinct_unobserved_attempts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bus = SubagentEventBus::with_capacity(4);
+        for (stream_id, execution_id) in [
+            ("retained-stream-b", "retained-execution-b"),
+            ("retained-stream-a", "retained-execution-a"),
+        ] {
+            let publisher = publisher_for(&bus, stream_id, execution_id)?;
+            publisher.emit(SubagentEvent::DispatchStarted {
+                parent: "root".to_string(),
+                agent: "explorer".to_string(),
+                mode: ExecutionMode::Fork,
+                task: "inspect".to_string(),
+                execution_id: Some(execution_id.to_string()),
+                run_id: Some("run-1".to_string()),
+                conversation_id: Some("conversation-1".to_string()),
+                message_id: Some("message-1".to_string()),
+                background: true,
+            })?;
+        }
+        assert_eq!(
+            bus.retained_stream_ids()
+                .into_iter()
+                .map(|stream_id| stream_id.as_str().to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "retained-stream-a".to_string(),
+                "retained-stream-b".to_string(),
+            ]
+        );
+        Ok(())
     }
 
     #[test]

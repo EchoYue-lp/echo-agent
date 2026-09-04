@@ -265,9 +265,11 @@ async fn main() {
         eprintln!("execution envelope 未到达");
         return;
     };
+    let retained_streams = registry.event_bus().retained_stream_ids();
     let replay = registry.event_bus().replay_after(&stream_id, 0);
     println!(
-        "   replay={} gap={:?} terminal={} last_sequence={last_sequence}",
+        "   retained_streams={} replay={} gap={:?} terminal={} last_sequence={last_sequence}",
+        retained_streams.len(),
         replay.events.len(),
         replay.gap,
         replay.terminal.is_some()

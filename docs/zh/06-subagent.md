@@ -221,6 +221,8 @@ parent event。
 
 broadcast 和 replay 窗口都是有界的。receiver 落后时先收到 Tokio `Lagged`，再按已知 stream
 调用 `replay_after`，或按错过 start envelope 的 exact execution 调用 `replay_for_execution`。
+可能漏掉整条短 attempt 的进程级 consumer 先调用 `retained_stream_ids`，再从自己的 cursor
+逐条 replay；未观察过的 retained stream 从零开始。
 `SubagentEventReplay::gap` 会明确报告保留后缀不连续；高频 thinking/token
 delta 可能在 gap 后缺失，但保留的 lifecycle/tool 边界与 `terminal` 可用于恢复状态和最终输出。
 该能力是进程内恢复窗口，不是永久存储；应用仍负责自己的 durable projection。
