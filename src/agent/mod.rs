@@ -60,10 +60,6 @@ pub mod subagent;
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
-pub use crate::agent::admission::{
-    KeyedExecutionAdmission, KeyedExecutionAdmissionError, KeyedExecutionLease,
-    KeyedExecutionRetirement,
-};
 pub use crate::agent::handle::AgentHandle;
 pub use crate::agent::react::builder::ReactAgentBuilder;
 pub use crate::agent::react::run::pipeline::ToolExecutionPipeline;
@@ -75,6 +71,10 @@ pub use crate::agent::react::{
 pub use crate::agent::snapshot::AgentRunSnapshot;
 pub use crate::agent::steer::TurnSteerError;
 pub use config::AgentConfig;
+pub use echo_core::agent::{
+    ExecutionAdmission, KeyedExecutionAdmission, KeyedExecutionAdmissionError, KeyedExecutionLease,
+    KeyedExecutionRetirement,
+};
 
 /// Agent factory types — re-exported from echo-core with facade-level overrides.
 ///

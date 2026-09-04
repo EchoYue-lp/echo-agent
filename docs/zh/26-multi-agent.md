@@ -128,6 +128,10 @@ metadata key，且不得改写依赖、成员或执行语义。
 
 ## 设计参考
 
+Framework 可注入 `echo_core::agent::ExecutionAdmission`，让 RuntimeTaskService 与
+SubagentExecutor 共享跨入口容量；未注入时保留 per-runtime wave width 与 Fork fallback。
+委派深度继续由唯一的 `NestedDelegationPolicy` 控制，EKO 的容量和默认策略由应用 adapter 提供。
+
 这里参考了两类成熟实现：
 
 - [OpenAI Agents SDK 多 Agent 编排](https://openai.github.io/openai-agents-python/multi_agent/)

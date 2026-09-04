@@ -4,7 +4,10 @@
 //! execution strategy based on the definition's [`ExecutionMode`].
 
 use crate::error::{AgentError, ReactError, Result};
-use echo_core::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationToken};
+use echo_core::agent::{
+    Agent, AgentEvent, AgentInvocationContext, CancellationToken, ExecutionAdmission,
+    KeyedExecutionLease,
+};
 use echo_core::error::AgentTerminalKind;
 use echo_core::llm::types::Message;
 use futures::StreamExt;
@@ -313,6 +316,9 @@ pub struct SubagentExecutorConfig {
     pub isolation_provider: Option<super::isolation::SharedIsolationProvider>,
     /// Compiler shared by direct `agent_tool` and programmatic delegation.
     pub prompt_compiler: Arc<dyn SubagentPromptCompiler>,
+    /// Optional shared process admission. When absent, Fork uses its local
+    /// `max_concurrent_forks` semaphore for standalone compatibility.
+    pub shared_admission: Option<Arc<ExecutionAdmission>>,
 }
 
 impl Default for SubagentExecutorConfig {
@@ -324,6 +330,7 @@ impl Default for SubagentExecutorConfig {
             unified_hook_executor: None,
             isolation_provider: None,
             prompt_compiler: Arc::new(super::prompt::DefaultSubagentPromptCompiler),
+            shared_admission: None,
         }
     }
 }
@@ -1029,6 +1036,7 @@ impl SubagentExecutor {
                 unified_hook_executor: self.config.unified_hook_executor.clone(),
                 isolation_provider: self.config.isolation_provider.clone(),
                 prompt_compiler: self.config.prompt_compiler.clone(),
+                shared_admission: self.config.shared_admission.clone(),
             },
             semaphore: self.semaphore.clone(),
             control_registry: self.control_registry.clone(),
@@ -1912,7 +1920,25 @@ impl SubagentExecutor {
         };
         let deadline = (timeout_secs > 0)
             .then(|| tokio::time::Instant::now() + Duration::from_secs(timeout_secs));
-        let permit = tokio::select! {
+        enum ForkAdmission {
+            Local(tokio::sync::OwnedSemaphorePermit),
+            Shared(KeyedExecutionLease),
+        }
+        let permit = if let Some(admission) = &self.config.shared_admission {
+            let admission_key = req
+                .runtime_context
+                .as_ref()
+                .and_then(|context| context.execution_id.as_deref())
+                .map(str::to_string)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().as_simple().to_string());
+            admission
+                .issue(format!("subagent:{admission_key}"))
+                .map(ForkAdmission::Shared)
+                .map_err(|error| {
+                    ReactError::Other(format!("shared execution admission rejected Fork: {error}"))
+                })?
+        } else {
+            tokio::select! {
             biased;
             _ = req.cancel.cancelled() => {
                 return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
@@ -1932,7 +1958,9 @@ impl SubagentExecutor {
                 )))));
             }
             permit = self.semaphore.clone().acquire_owned() => permit
+                .map(ForkAdmission::Local)
                 .map_err(|error| ReactError::Other(format!("Semaphore error: {error}")))?,
+            }
         };
 
         let agent_arc = tokio::select! {
@@ -2037,6 +2065,14 @@ impl SubagentExecutor {
 
         let result = tokio::spawn(async move {
             let _permit = permit;
+            match &_permit {
+                ForkAdmission::Local(permit) => {
+                    let _ = permit;
+                }
+                ForkAdmission::Shared(lease) => {
+                    let _ = lease;
+                }
+            }
             let start = Instant::now();
 
             // Check cancellation

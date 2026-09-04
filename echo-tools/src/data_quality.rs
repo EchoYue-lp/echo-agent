@@ -250,8 +250,8 @@ fn detect_iqr_outliers(values: &[f64], k: f64, col_name: &str) -> serde_json::Va
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    let q1 = crate::statistics::quantile(&sorted, 0.25).unwrap_or_default();
-    let q3 = crate::statistics::quantile(&sorted, 0.75).unwrap_or(q1);
+    let q1 = percentile(&sorted, 0.25);
+    let q3 = percentile(&sorted, 0.75);
     let iqr = q3 - q1;
     let lower = q1 - k * iqr;
     let upper = q3 + k * iqr;
@@ -271,6 +271,18 @@ fn detect_iqr_outliers(values: &[f64], k: f64, col_name: &str) -> serde_json::Va
         "outlier_count": outliers.len(), "outlier_pct": (pct * 100.0).round() / 100.0,
         "outlier_samples": outliers.iter().take(10).cloned().collect::<Vec<f64>>(),
     })
+}
+
+fn percentile(values: &[f64], probability: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let position = probability.clamp(0.0, 1.0) * (values.len().saturating_sub(1) as f64);
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    let lower_value = values.get(lower).copied().unwrap_or_default();
+    let upper_value = values.get(upper).copied().unwrap_or(lower_value);
+    lower_value + (upper_value - lower_value) * (position - lower as f64)
 }
 
 fn detect_zscore_outliers(values: &[f64], threshold: f64, col_name: &str) -> serde_json::Value {

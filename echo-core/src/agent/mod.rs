@@ -1,5 +1,6 @@
 //! Agent core trait, events, and callback interfaces
 
+pub mod admission;
 pub mod builder;
 mod critic;
 mod event_envelope;
@@ -8,6 +9,10 @@ pub mod intervention;
 pub mod prompt_template;
 mod types;
 
+pub use admission::{
+    ExecutionAdmission, KeyedExecutionAdmission, KeyedExecutionAdmissionError, KeyedExecutionLease,
+    KeyedExecutionRetirement,
+};
 pub use factory::{AgentFactory, AgentFactoryConfig};
 pub use intervention::{CallbackBridge, InterventionCallback, InterventionResult};
 pub use prompt_template::PromptTemplateManager;
