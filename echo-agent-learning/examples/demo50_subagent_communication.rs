@@ -266,10 +266,12 @@ async fn main() {
         return;
     };
     let retained_streams = registry.event_bus().retained_stream_ids();
+    let active_streams = registry.event_bus().active_stream_ids();
     let replay = registry.event_bus().replay_after(&stream_id, 0);
     println!(
-        "   retained_streams={} replay={} gap={:?} terminal={} last_sequence={last_sequence}",
+        "   retained_streams={} active_streams={} replay={} gap={:?} terminal={} last_sequence={last_sequence}",
         retained_streams.len(),
+        active_streams.len(),
         replay.events.len(),
         replay.gap,
         replay.terminal.is_some()

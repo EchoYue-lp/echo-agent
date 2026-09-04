@@ -364,6 +364,9 @@ pub struct SubagentEventReplay {
 struct SubagentPublisherState {
     sequence: u64,
     dispatch_started: Option<EventId>,
+    /// Immutable routing anchor retained for the lifetime of an active
+    /// publisher even when the bounded replay window evicts this stream.
+    dispatch_anchor: Option<Arc<SubagentEventEnvelope>>,
     tool_started: HashMap<String, EventId>,
     terminal_emitted: bool,
 }
@@ -537,7 +540,7 @@ impl SubagentEventPublisher {
                 .clone()
                 .or_else(|| self.inner.transport_identity.parent_event_id.clone()),
         };
-        let envelope = EventEnvelope::new(
+        let envelope = Arc::new(EventEnvelope::new(
             &self.inner.transport_identity,
             sequence,
             parent_event_id,
@@ -545,11 +548,12 @@ impl SubagentEventPublisher {
                 invocation: invocation_identity,
                 event: event.clone(),
             },
-        )?;
+        )?);
         state.sequence = sequence;
         match &event {
             SubagentEvent::DispatchStarted { .. } if state.dispatch_started.is_none() => {
                 state.dispatch_started = Some(envelope.event_id.clone());
+                state.dispatch_anchor = Some(Arc::clone(&envelope));
             }
             SubagentEvent::DispatchToolStarted { call_id, .. } => {
                 state
@@ -566,7 +570,6 @@ impl SubagentEventPublisher {
         }
         drop(state);
 
-        let envelope = Arc::new(envelope);
         self.inner.bus.emit_envelope(Arc::clone(&envelope));
         if is_terminal_event(&event) {
             self.inner.bus.retire_publisher(self);
@@ -1057,6 +1060,41 @@ impl SubagentEventBus {
         stream_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         stream_ids.dedup();
         stream_ids
+    }
+
+    /// Enumerate active dispatch-attempt streams, including streams whose
+    /// complete replay suffix has already been evicted by other producers.
+    pub fn active_stream_ids(&self) -> Vec<StreamId> {
+        let mut streams = self
+            .active_streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        streams.retain(|_, candidate| candidate.strong_count() > 0);
+        let mut stream_ids = streams.keys().cloned().collect::<Vec<_>>();
+        stream_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        stream_ids
+    }
+
+    /// Return the immutable dispatch-start envelope for an active stream.
+    /// Consumers use this only as a routing identity when replay reports a
+    /// fully evicted gap; it must not be mistaken for a newly replayed event.
+    pub fn active_stream_anchor(&self, stream_id: &StreamId) -> Option<Arc<SubagentEventEnvelope>> {
+        let mut streams = self
+            .active_streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let publisher = streams.get(stream_id).and_then(Weak::upgrade);
+        if publisher.is_none() {
+            streams.remove(stream_id);
+        }
+        publisher.and_then(|publisher| {
+            publisher
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .dispatch_anchor
+                .clone()
+        })
     }
 
     fn active_latest_for_stream(&self, stream_id: &StreamId) -> Option<u64> {
@@ -1976,6 +2014,33 @@ mod tests {
                 "retained-stream-a".to_string(),
                 "retained-stream-b".to_string(),
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_stream_identity_survives_complete_replay_eviction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bus = SubagentEventBus::with_capacity(1);
+        let active = publisher_for(&bus, "active-stream", "active-execution")?;
+        active.emit(started_event_for("active-execution"))?;
+        let noisy = publisher_for(&bus, "noisy-stream", "noisy-execution")?;
+        noisy.emit(started_event_for("noisy-execution"))?;
+
+        let active_ids = bus
+            .active_stream_ids()
+            .into_iter()
+            .map(|stream_id| stream_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert!(active_ids.contains(&"active-stream".to_string()));
+        let anchor = bus
+            .active_stream_anchor(active.stream_id())
+            .ok_or_else(|| std::io::Error::other("active stream anchor was not retained"))?;
+        assert_eq!(anchor.sequence, 1);
+        assert_eq!(anchor.stream_id.as_str(), "active-stream");
+        assert_eq!(
+            anchor.execution_id.as_ref().map(|value| value.as_str()),
+            Some("active-execution")
         );
         Ok(())
     }
