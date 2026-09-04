@@ -2264,7 +2264,8 @@ fn replace_tool_when_not_exists() {
 async fn invocation_history_is_inserted_before_current_input() -> Result<(), String> {
     use crate::agent::react::run::types::StreamMode;
 
-    let config = AgentConfig::new("test-model", "history-order", "system prompt");
+    let config =
+        AgentConfig::new("test-model", "history-order", "system prompt").auto_project_rules(false);
     let agent = ReactAgent::new(config);
     let history = vec![
         Message::user("inherited user".to_string()),

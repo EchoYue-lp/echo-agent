@@ -21,7 +21,7 @@ pub use critic::{CompositeCritic, CompositeStrategy, Critic, StaticCritic, Thres
 pub use event_envelope::{
     AGENT_EVENT_SCHEMA_VERSION, ConversationId, EventEnvelope, EventId, EventIdentity, ExecutionId,
     MessageId, RunId, StreamId, TurnId, envelope_event_stream, envelope_event_stream_after,
-    validate_event_trajectory,
+    validate_envelope_trajectory, validate_event_trajectory,
 };
 pub use types::{Critique, CritiqueOutput, critique_output_schema};
 

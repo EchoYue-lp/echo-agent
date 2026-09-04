@@ -158,13 +158,14 @@ pub mod prelude {
     pub use crate::agent::{
         AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle,
         AgentRunSnapshot, AgentSteerPhase, AgentSteerReceipt, AgentSteerState,
-        AgentSteerTurnOutcome, CancellationToken, EventEnvelope, EventIdentity, ExecutionAdmission,
-        ExecutionUsage, InterventionCallback, InterventionResult, KeyedExecutionAdmission,
-        KeyedExecutionAdmissionError, KeyedExecutionLease, KeyedExecutionRetirement,
-        PreparedAgentModelDeactivation, PreparedAgentModelGeneration, PreparedCriticUpdate,
-        PreparedTokenLimit, ReactAgent, ReactAgentBuilder, StepType, StructuredAgent,
-        ToolExecutionPipeline, ToolInvocation, ToolInvocationRewrite, envelope_event_stream,
-        envelope_event_stream_after, validate_event_trajectory,
+        AgentSteerTurnOutcome, CancellationToken, EventEnvelope, EventId, EventIdentity,
+        ExecutionAdmission, ExecutionUsage, InterventionCallback, InterventionResult,
+        KeyedExecutionAdmission, KeyedExecutionAdmissionError, KeyedExecutionLease,
+        KeyedExecutionRetirement, PreparedAgentModelDeactivation, PreparedAgentModelGeneration,
+        PreparedCriticUpdate, PreparedTokenLimit, ReactAgent, ReactAgentBuilder, StepType,
+        StreamId, StructuredAgent, ToolExecutionPipeline, ToolInvocation, ToolInvocationRewrite,
+        envelope_event_stream, envelope_event_stream_after, validate_envelope_trajectory,
+        validate_event_trajectory,
     };
     // Durable delivery
     pub use crate::state::delivery::{
@@ -178,12 +179,14 @@ pub mod prelude {
     pub use crate::agent::subagent::{
         BackgroundSubagentHandle, DispatchRequest, SubagentArtifact, SubagentAttemptIdentity,
         SubagentBuilder, SubagentCommandIdentity, SubagentCommandPhase, SubagentControlError,
-        SubagentControlPhase, SubagentEvent, SubagentEventBus, SubagentEvidence,
-        SubagentEvidenceSource, SubagentExecutor, SubagentExecutorConfig,
-        SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageReceipt,
-        SubagentOutcome, SubagentResult, SubagentStatus, SubagentTouchedFiles,
-        SubagentVerification, SubagentVerificationStatus, TeamAgent, TeamAgentBuilder, TeamConfig,
-        TeamExecutionResult, TeamMember, TeamRole, TeamRuntime, TeamSpec, TeamStrategy,
+        SubagentControlPhase, SubagentEvent, SubagentEventBus, SubagentEventEnvelope,
+        SubagentEventGap, SubagentEventPayload, SubagentEventPublisher, SubagentEventReplay,
+        SubagentEvidence, SubagentEvidenceSource, SubagentExecutor, SubagentExecutorConfig,
+        SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentInvocationIdentity,
+        SubagentMessageReceipt, SubagentOutcome, SubagentResult, SubagentStatus,
+        SubagentTouchedFiles, SubagentVerification, SubagentVerificationStatus, TeamAgent,
+        TeamAgentBuilder, TeamConfig, TeamExecutionResult, TeamMember, TeamRole, TeamRuntime,
+        TeamSpec, TeamStrategy,
     };
     // Prompt Template
     pub use crate::budget::TokenBudgetConfig;

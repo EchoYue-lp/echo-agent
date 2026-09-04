@@ -219,3 +219,29 @@ terminal payload.
 and finite primary-Agent turns. Both result surfaces expose it directly with
 `result.usage()` or `turn_receipt.usage()`. Applications do not need a
 source-named adapter, conversion trait, or parallel execution-usage DTO.
+
+## Versioned Execution Events
+
+`SubagentEventBus::subscribe_envelopes` is the authoritative execution-event
+transport. Each outer dispatch attempt owns one `SubagentEventPublisher`; start,
+isolation, displayable thinking/token deltas, usage, tool activity, and terminal
+events share one `stream_id` and monotonic `sequence`. Internal hook retries do
+not restart that sequence. `SubagentEventPayload::invocation` carries task,
+attempt, plan revision, agent path, and parent-execution correlation without
+parsing an execution-id string.
+
+The existing `subscribe` method remains a raw compatibility view derived from
+envelopes. Manual raw emission accepts registry events only and rejects execution
+variants, so it cannot become a second execution authority. New consumers that
+need ordering or recovery should use envelopes. Tool terminal envelopes
+point to their matching tool-start event; other execution events point to the
+dispatch start or an upstream parent event.
+
+The broadcast and replay windows are bounded. A lagging receiver observes
+Tokio's `Lagged` result, then calls `replay_after` for a known stream or
+`replay_for_execution` for an exact attempt whose start envelope was missed.
+`SubagentEventReplay::gap` explicitly reports when the retained suffix is not
+contiguous. High-volume thinking/token deltas may be absent after a gap, while
+retained lifecycle/tool boundaries and `terminal` allow state and final output
+to be reconciled. This is an in-process recovery window, not permanent storage;
+applications remain responsible for their own durable projections.
