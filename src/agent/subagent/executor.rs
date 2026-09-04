@@ -344,6 +344,7 @@ pub struct SubagentExecutor {
     config: SubagentExecutorConfig,
     semaphore: Arc<Semaphore>,
     control_registry: Arc<SubagentControlRegistry>,
+    shared_admission: Arc<tokio::sync::RwLock<Option<Arc<ExecutionAdmission>>>>,
 }
 
 /// Framework-default uplink sink.
@@ -469,12 +470,14 @@ impl SubagentExecutor {
     /// Create a new executor backed by the given registry.
     pub fn new(registry: Arc<SubagentRegistry>, config: SubagentExecutorConfig) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_forks));
+        let shared_admission = config.shared_admission.clone();
         Self {
             control_registry: Arc::clone(registry.control_registry()),
             registry,
             hooks: Arc::new(SubagentHookRegistry::new()),
             config,
             semaphore,
+            shared_admission: Arc::new(tokio::sync::RwLock::new(shared_admission)),
         }
     }
 
@@ -485,12 +488,14 @@ impl SubagentExecutor {
         hooks: SubagentHookRegistry,
     ) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_forks));
+        let shared_admission = config.shared_admission.clone();
         Self {
             control_registry: Arc::clone(registry.control_registry()),
             registry,
             hooks: Arc::new(hooks),
             config,
             semaphore,
+            shared_admission: Arc::new(tokio::sync::RwLock::new(shared_admission)),
         }
     }
 
@@ -502,6 +507,11 @@ impl SubagentExecutor {
     /// Shared registry handle (for callers that need definition lookups).
     pub fn registry(&self) -> &Arc<SubagentRegistry> {
         &self.registry
+    }
+
+    /// Inject an application-owned process admission for direct dispatches.
+    pub async fn set_shared_admission(&self, admission: Arc<ExecutionAdmission>) {
+        *self.shared_admission.write().await = Some(admission);
     }
 
     /// Main dispatch entry point.
@@ -1040,6 +1050,7 @@ impl SubagentExecutor {
             },
             semaphore: self.semaphore.clone(),
             control_registry: self.control_registry.clone(),
+            shared_admission: self.shared_admission.clone(),
         }
     }
 
@@ -1924,7 +1935,8 @@ impl SubagentExecutor {
             Local(tokio::sync::OwnedSemaphorePermit),
             Shared(KeyedExecutionLease),
         }
-        let permit = if let Some(admission) = &self.config.shared_admission {
+        let shared_admission = self.shared_admission.read().await.clone();
+        let permit = if let Some(admission) = shared_admission {
             let admission_key = req
                 .runtime_context
                 .as_ref()

@@ -159,7 +159,7 @@ pub mod prelude {
         AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle,
         AgentRunSnapshot, AgentSteerPhase, AgentSteerReceipt, AgentSteerState,
         AgentSteerTurnOutcome, CancellationToken, EventEnvelope, EventIdentity, ExecutionUsage,
-        InterventionCallback, InterventionResult, KeyedExecutionAdmission,
+        ExecutionAdmission, InterventionCallback, InterventionResult, KeyedExecutionAdmission,
         KeyedExecutionAdmissionError, KeyedExecutionLease, KeyedExecutionRetirement,
         PreparedAgentModelDeactivation, PreparedAgentModelGeneration, PreparedCriticUpdate,
         PreparedTokenLimit, ReactAgent, ReactAgentBuilder, StepType, StructuredAgent,
