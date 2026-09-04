@@ -402,6 +402,24 @@ impl ExecutionAdmission {
         }
     }
 
+    /// Wait until one lease can be issued. Cancellation and timeout remain
+    /// caller-owned through `select!` around this future.
+    pub async fn issue_wait(
+        &self,
+        key: impl Into<String>,
+    ) -> Result<KeyedExecutionLease, KeyedExecutionAdmissionError> {
+        let key = key.into();
+        loop {
+            match self.issue(key.clone()) {
+                Ok(lease) => return Ok(lease),
+                Err(KeyedExecutionAdmissionError::ProcessCapacity) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Number of active leases across all keys.
     pub fn active_count(&self) -> usize {
         self.keyed.active_count()

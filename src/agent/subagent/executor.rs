@@ -1944,7 +1944,8 @@ impl SubagentExecutor {
                 .map(str::to_string)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().as_simple().to_string());
             admission
-                .issue(format!("subagent:{admission_key}"))
+                .issue_wait(format!("subagent:{admission_key}"))
+                .await
                 .map(ForkAdmission::Shared)
                 .map_err(|error| {
                     ReactError::Other(format!("shared execution admission rejected Fork: {error}"))

@@ -541,7 +541,10 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 };
                 join_set.spawn(async move {
                     let dispatch = if let Some(admission) = shared_admission {
-                        match admission.issue(format!("runtime:{dispatch_run_id}:{claim_id}")) {
+                        match admission
+                            .issue_wait(format!("runtime:{dispatch_run_id}:{claim_id}"))
+                            .await
+                        {
                             Ok(lease) => {
                                 let context = TaskSubagentContext::new(dispatch_run_id)
                                     .with_cancel(task_cancel)
