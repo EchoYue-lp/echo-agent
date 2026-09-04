@@ -1943,13 +1943,29 @@ impl SubagentExecutor {
                 .and_then(|context| context.execution_id.as_deref())
                 .map(str::to_string)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().as_simple().to_string());
-            admission
-                .issue_wait(format!("subagent:{admission_key}"))
-                .await
-                .map(ForkAdmission::Shared)
-                .map_err(|error| {
-                    ReactError::Other(format!("shared execution admission rejected Fork: {error}"))
-                })?
+            tokio::select! {
+                biased;
+                _ = req.cancel.cancelled() => {
+                    return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                        "Fork subagent '{}' cancelled while waiting for shared capacity",
+                        req.agent_name
+                    )))));
+                }
+                _ = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    return Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
+                        "Fork subagent '{}' timed out after {}s while waiting for shared capacity",
+                        req.agent_name, timeout_secs
+                    )))));
+                }
+                permit = admission.issue_wait(format!("subagent:{admission_key}")) => permit
+                    .map(ForkAdmission::Shared)
+                    .map_err(|error| ReactError::Other(format!("shared execution admission rejected Fork: {error}")))?,
+            }
         } else {
             tokio::select! {
             biased;

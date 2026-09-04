@@ -541,10 +541,14 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 };
                 join_set.spawn(async move {
                     let dispatch = if let Some(admission) = shared_admission {
-                        match admission
-                            .issue_wait(format!("runtime:{dispatch_run_id}:{claim_id}"))
-                            .await
-                        {
+                        let lease = tokio::select! {
+                            _ = task_cancel.cancelled() => {
+                                Err(ReactError::Agent(Box::new(echo_core::error::AgentError::Cancelled("cancelled while waiting for shared execution admission".to_string()))))
+                            }
+                            lease = admission.issue_wait(format!("runtime:{dispatch_run_id}:{claim_id}")) => lease
+                                .map_err(|error| ReactError::Other(format!("shared execution admission rejected task: {error}"))),
+                        };
+                        match lease {
                             Ok(lease) => {
                                 let context = TaskSubagentContext::new(dispatch_run_id)
                                     .with_cancel(task_cancel)
@@ -554,9 +558,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                                 drop(lease);
                                 result
                             }
-                            Err(error) => Err(ReactError::Other(format!(
-                                "shared execution admission rejected task: {error}"
-                            ))),
+                            Err(error) => Err(error),
                         }
                     } else {
                         match semaphore.acquire_owned().await {
