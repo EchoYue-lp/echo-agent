@@ -89,7 +89,7 @@ pub struct EventIdentity {
 /// refer to `EventEnvelope` without a type argument. Other framework event
 /// families reuse the same identity, ordering, hashing, and timestamp rules by
 /// supplying their own serializable payload.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope<T = AgentEvent> {
     pub schema_version: u16,
     pub event_id: EventId,

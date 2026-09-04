@@ -521,7 +521,7 @@ impl std::fmt::Debug for AgentInvocationContext {
 /// Events produced during Agent execution
 ///
 /// Cover each phase of the Agent lifecycle for progress bars, logs, UI updates, etc.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 // Boxing ToolStream would break the public event contract for every consumer.
