@@ -55,6 +55,11 @@ concerns.
 
 ## One authority
 
+`ExecutionAdmission` is the composition entry point and carries no EKO quota.
+`max_concurrent_subagents` remains standalone per-runtime width, while
+`max_concurrent_forks` remains the executor fallback when no shared admission
+is injected.
+
 The framework and application must share one meaning for a generic lifecycle or
 receipt. If a proposed adapter needs its own DAG traversal, status reducer,
 retry policy, or durable input lifecycle, the boundary is wrong. Reuse or extend

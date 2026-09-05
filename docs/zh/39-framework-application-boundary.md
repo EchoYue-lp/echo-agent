@@ -47,6 +47,10 @@ review/worktree 行为和各 surface projection 继续属于应用层。
 
 ## 单一权威
 
+`ExecutionAdmission` 是 `KeyedExecutionAdmission` 的组合入口，不携带 EKO 配额。
+`max_concurrent_subagents` 仍是 standalone per-runtime width，
+`max_concurrent_forks` 仍是无 shared admission 时的 fallback。
+
 Framework 和应用必须对通用生命周期或 receipt 共享同一种语义。如果某个 adapter
 需要自己的 DAG 遍历、status reducer、retry policy 或 durable input lifecycle，说明边界
 不正确。应复用或扩展已有 framework authority；如果无法在不耦合产品的前提下形成更小的

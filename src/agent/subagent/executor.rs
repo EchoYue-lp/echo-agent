@@ -4,7 +4,10 @@
 //! execution strategy based on the definition's [`ExecutionMode`].
 
 use crate::error::{AgentError, ReactError, Result};
-use echo_core::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationToken};
+use echo_core::agent::{
+    Agent, AgentEvent, AgentInvocationContext, CancellationToken, EventIdentity,
+    ExecutionAdmission, KeyedExecutionLease,
+};
 use echo_core::error::AgentTerminalKind;
 use echo_core::llm::types::Message;
 use futures::StreamExt;
@@ -19,7 +22,7 @@ use super::control::{
     SubagentAttemptBinding, SubagentAttemptIdentity, SubagentControlError, SubagentControlRegistry,
     SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageReceipt,
 };
-use super::events::SubagentEvent;
+use super::events::{SubagentEvent, SubagentEventPublisher, SubagentInvocationIdentity};
 use super::hooks::{SubagentHookContext, SubagentHookRegistry};
 use super::prompt::{
     CompiledSubagentInvocation, ContextTransferPolicy, SubagentInvocation, SubagentPromptCompiler,
@@ -313,6 +316,9 @@ pub struct SubagentExecutorConfig {
     pub isolation_provider: Option<super::isolation::SharedIsolationProvider>,
     /// Compiler shared by direct `agent_tool` and programmatic delegation.
     pub prompt_compiler: Arc<dyn SubagentPromptCompiler>,
+    /// Optional shared process admission. When absent, Fork uses its local
+    /// `max_concurrent_forks` semaphore for standalone compatibility.
+    pub shared_admission: Option<Arc<ExecutionAdmission>>,
 }
 
 impl Default for SubagentExecutorConfig {
@@ -324,6 +330,7 @@ impl Default for SubagentExecutorConfig {
             unified_hook_executor: None,
             isolation_provider: None,
             prompt_compiler: Arc::new(super::prompt::DefaultSubagentPromptCompiler),
+            shared_admission: None,
         }
     }
 }
@@ -337,6 +344,7 @@ pub struct SubagentExecutor {
     config: SubagentExecutorConfig,
     semaphore: Arc<Semaphore>,
     control_registry: Arc<SubagentControlRegistry>,
+    shared_admission: Arc<tokio::sync::RwLock<Option<Arc<ExecutionAdmission>>>>,
 }
 
 /// Framework-default uplink sink.
@@ -364,7 +372,7 @@ pub fn default_uplink_sink(registry: Arc<SubagentRegistry>) -> echo_core::tools:
                 .parent_agent
                 .clone()
                 .unwrap_or_else(|| "<unknown>".to_string());
-            let (direction, intent_prefix, receipt) = match &message.target {
+            let (direction, intent_prefix, mut receipt) = match &message.target {
                 SubagentUplinkTarget::Parent { kind, text } => {
                     let intent = if *kind == echo_core::tools::SubagentUplinkKind::Escalate {
                         "[escalate] "
@@ -444,7 +452,7 @@ pub fn default_uplink_sink(registry: Arc<SubagentRegistry>) -> echo_core::tools:
                     text.chars().take(200).collect::<String>()
                 )
             };
-            registry.event_bus().emit(SubagentEvent::UplinkReceived {
+            let uplink_event = SubagentEvent::UplinkReceived {
                 parent,
                 agent,
                 direction: direction.to_string(),
@@ -452,7 +460,30 @@ pub fn default_uplink_sink(registry: Arc<SubagentRegistry>) -> echo_core::tools:
                 summary,
                 execution_id: from.execution_id.clone(),
                 run_id: from.run_id.clone(),
-            });
+            };
+            let published = from
+                .execution_id
+                .as_deref()
+                .and_then(|execution_id| registry.event_bus().publisher_for_execution(execution_id))
+                .is_some_and(|publisher| match publisher.emit(uplink_event) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        warn!(%error, "failed to publish Subagent uplink envelope");
+                        false
+                    }
+                });
+            if !published {
+                warn!(
+                    execution_id = from.execution_id.as_deref().unwrap_or("<none>"),
+                    "Subagent uplink has no active event publisher"
+                );
+                if receipt.status == "event_emitted" {
+                    receipt.accepted = false;
+                    receipt.status = "event_unavailable".to_string();
+                    receipt.detail =
+                        "parent not steerable and no active event publisher exists".to_string();
+                }
+            }
             receipt
         })
     })
@@ -462,12 +493,14 @@ impl SubagentExecutor {
     /// Create a new executor backed by the given registry.
     pub fn new(registry: Arc<SubagentRegistry>, config: SubagentExecutorConfig) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_forks));
+        let shared_admission = config.shared_admission.clone();
         Self {
             control_registry: Arc::clone(registry.control_registry()),
             registry,
             hooks: Arc::new(SubagentHookRegistry::new()),
             config,
             semaphore,
+            shared_admission: Arc::new(tokio::sync::RwLock::new(shared_admission)),
         }
     }
 
@@ -478,12 +511,14 @@ impl SubagentExecutor {
         hooks: SubagentHookRegistry,
     ) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_forks));
+        let shared_admission = config.shared_admission.clone();
         Self {
             control_registry: Arc::clone(registry.control_registry()),
             registry,
             hooks: Arc::new(hooks),
             config,
             semaphore,
+            shared_admission: Arc::new(tokio::sync::RwLock::new(shared_admission)),
         }
     }
 
@@ -495,6 +530,11 @@ impl SubagentExecutor {
     /// Shared registry handle (for callers that need definition lookups).
     pub fn registry(&self) -> &Arc<SubagentRegistry> {
         &self.registry
+    }
+
+    /// Inject an application-owned process admission for direct dispatches.
+    pub async fn set_shared_admission(&self, admission: Arc<ExecutionAdmission>) {
+        *self.shared_admission.write().await = Some(admission);
     }
 
     /// Main dispatch entry point.
@@ -617,6 +657,111 @@ impl SubagentExecutor {
         }
     }
 
+    fn event_publisher(&self, req: &DispatchRequest) -> Result<SubagentEventPublisher> {
+        let runtime = req.runtime_context.as_ref();
+        let transport_identity = EventIdentity::from_runtime_context(runtime)?;
+        let invocation_identity = Self::event_invocation_identity(req, &transport_identity)?;
+        self.registry
+            .event_bus()
+            .publisher(transport_identity, invocation_identity)
+    }
+
+    fn event_invocation_identity(
+        req: &DispatchRequest,
+        transport_identity: &EventIdentity,
+    ) -> Result<SubagentInvocationIdentity> {
+        let runtime = req.runtime_context.as_ref();
+        SubagentInvocationIdentity::from_lineage(
+            req.parent_agent.clone(),
+            req.agent_name.clone(),
+            transport_identity,
+            runtime.and_then(|context| context.subagent_lineage.as_ref()),
+        )
+    }
+
+    fn retarget_dispatch_context(req: &mut DispatchRequest) {
+        let Some(context) = req.runtime_context.as_mut() else {
+            return;
+        };
+        let lineage = context
+            .subagent_lineage
+            .get_or_insert_with(Default::default);
+        lineage.agent_name = Some(req.agent_name.clone());
+        lineage.parent_agent = Some(req.parent_agent.clone());
+        lineage.agent_path = Some(
+            lineage
+                .agent_path
+                .as_deref()
+                .and_then(|path| path.rsplit_once('/').map(|(parent, _)| parent))
+                .map(|parent| format!("{parent}/{}", req.agent_name))
+                .unwrap_or_else(|| format!("root/{}", req.agent_name)),
+        );
+    }
+
+    fn emit_pre_execution_failure(
+        publisher: &SubagentEventPublisher,
+        req: &DispatchRequest,
+        error: &ReactError,
+    ) -> Result<()> {
+        let status = subagent_status_from_error(error);
+        let detail = error.to_string();
+        let outcome = SubagentOutcome::terminal(status, detail.clone(), vec![detail.clone()]);
+        let runtime = req.runtime_context.as_ref();
+        if status == SubagentStatus::Cancelled {
+            publisher.emit(SubagentEvent::DispatchCancelled {
+                parent: req.parent_agent.clone(),
+                agent: req.agent_name.clone(),
+                outcome,
+                execution_id: runtime.and_then(|context| context.execution_id.clone()),
+                run_id: runtime.and_then(|context| context.run_id.clone()),
+            })?;
+        } else {
+            publisher.emit(SubagentEvent::DispatchFailed {
+                parent: req.parent_agent.clone(),
+                agent: req.agent_name.clone(),
+                error: detail,
+                status,
+                outcome,
+                execution_id: runtime.and_then(|context| context.execution_id.clone()),
+                run_id: runtime.and_then(|context| context.run_id.clone()),
+            })?;
+        }
+        Ok(())
+    }
+
+    fn team_member_runtime_context(
+        mut context: echo_core::tools::ExternalRunContext,
+        parent_agent: &str,
+        agent_name: &str,
+        parent_event_id: Option<&str>,
+    ) -> echo_core::tools::ExternalRunContext {
+        let parent_execution_id = context.execution_id.clone();
+        let parent_path = context
+            .subagent_lineage
+            .as_ref()
+            .and_then(|lineage| lineage.agent_path.clone())
+            .unwrap_or_else(|| format!("root/{parent_agent}"));
+        let execution_id = format!("team-member-{}", uuid::Uuid::new_v4().as_simple());
+        context.execution_id = Some(execution_id.clone());
+        context.isolation_id = context
+            .run_id
+            .as_ref()
+            .map(|run_id| format!("{run_id}:{agent_name}"));
+        context.subagent_lineage = Some(echo_core::tools::SubagentLineage {
+            agent_name: Some(agent_name.to_string()),
+            execution_id: Some(execution_id),
+            run_id: context.run_id.clone(),
+            parent_agent: Some(parent_agent.to_string()),
+            parent_execution_id,
+            parent_event_id: parent_event_id.map(str::to_string),
+            agent_path: Some(format!("{parent_path}/{agent_name}")),
+            task_id: None,
+            attempt: None,
+            plan_revision: None,
+        });
+        context
+    }
+
     async fn dispatch_inner(
         &self,
         mut req: DispatchRequest,
@@ -628,46 +773,84 @@ impl SubagentExecutor {
         // instead of creating independent tokens (P1 — CancellationToken propagation).
         let parent_cancel = req.cancel.clone();
 
-        // 入口取消检查:若 dispatch 前 token 已取消,立即返回,不进入执行 loop。
-        // (与 dispatch_teammate:704 的 "Cancelled before execution" 语义一致;
-        //  test_dispatch_cancelled 验证此行为。)
+        // Stamp identity and create the single attempt-scoped ordering
+        // authority before any accepted dispatch can settle or fail setup.
+        self.enrich_dispatch_context(&mut req);
+        let event_publisher = self.event_publisher(&req)?;
+        let initial_registration = self.registry.get(&req.agent_name).await;
+        let initial_mode = req
+            .mode_override
+            .clone()
+            .or_else(|| {
+                initial_registration
+                    .as_ref()
+                    .map(|registered| registered.definition.execution_mode.clone())
+            })
+            .unwrap_or(ExecutionMode::Sync);
+        let runtime = req.runtime_context.as_ref();
+        event_publisher.emit(SubagentEvent::DispatchStarted {
+            parent: req.parent_agent.clone(),
+            agent: req.agent_name.clone(),
+            mode: initial_mode.clone(),
+            task: req.task.clone(),
+            execution_id: runtime.and_then(|context| context.execution_id.clone()),
+            run_id: runtime.and_then(|context| context.run_id.clone()),
+            conversation_id: runtime.and_then(|context| context.conversation_id.clone()),
+            message_id: runtime.and_then(|context| context.message_id.clone()),
+            background: req.background,
+        })?;
+
         if parent_cancel.is_cancelled() {
-            return Ok(SubagentResult::cancelled(
+            let result = SubagentResult::cancelled(
                 req.agent_name.clone(),
                 "Cancelled before execution",
-                req.mode_override.clone().unwrap_or(ExecutionMode::Fork),
-            ));
+                initial_mode,
+            );
+            event_publisher.emit(SubagentEvent::DispatchCancelled {
+                parent: req.parent_agent.clone(),
+                agent: req.agent_name.clone(),
+                outcome: result.outcome.clone(),
+                execution_id: runtime.and_then(|context| context.execution_id.clone()),
+                run_id: runtime.and_then(|context| context.run_id.clone()),
+            })?;
+            return Ok(result);
         }
 
-        // Stamp identity/lineage and guarantee an uplink channel before any
-        // mode routing. Callers that already stamped a richer lineage (the
-        // `agent_tool` dispatch path, application task runtimes) keep theirs;
-        // an application-provided uplink sink is never replaced.
-        self.enrich_dispatch_context(&mut req);
+        if req.delegation_policy.delegate_depth > req.delegation_policy.max_delegate_depth {
+            let error = ReactError::Other(format!(
+                "Delegation depth exceeded (max {}): agent '{}'",
+                req.delegation_policy.max_delegate_depth, req.agent_name
+            ));
+            Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
+            return Err(error);
+        }
+        if initial_registration.is_none() {
+            let error = ReactError::Other(format!("Subagent '{}' not found", req.agent_name));
+            Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
+            return Err(error);
+        }
 
         loop {
-            // Guard against infinite delegation chains
-            if req.delegation_policy.delegate_depth > req.delegation_policy.max_delegate_depth {
-                return Err(ReactError::Other(format!(
-                    "Delegation depth exceeded (max {}): agent '{}'",
-                    req.delegation_policy.max_delegate_depth, req.agent_name
-                )));
-            }
-
             // Guard against excessive retries
             if retry_count > max_retries {
-                return Err(ReactError::Agent(Box::new(
-                    AgentError::ContextLimitExceeded(format!(
-                        "Max retry count exceeded ({}): agent '{}'",
-                        max_retries, req.agent_name
-                    )),
-                )));
+                let error = ReactError::Agent(Box::new(AgentError::ContextLimitExceeded(format!(
+                    "Max retry count exceeded ({}): agent '{}'",
+                    max_retries, req.agent_name
+                ))));
+                Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
+                return Err(error);
             }
 
             // Look up definition
-            let registered = self.registry.get(&req.agent_name).await.ok_or_else(|| {
-                ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
-            })?;
+            let registered = match self.registry.get(&req.agent_name).await {
+                Some(registered) => registered,
+                None => {
+                    let error =
+                        ReactError::Other(format!("Subagent '{}' not found", req.agent_name));
+                    Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
+                    return Err(error);
+                }
+            };
 
             let mode = req
                 .mode_override
@@ -690,14 +873,6 @@ impl SubagentExecutor {
                 .runtime_context
                 .as_ref()
                 .and_then(|ctx| ctx.run_id.clone());
-            let event_conversation_id = req
-                .runtime_context
-                .as_ref()
-                .and_then(|ctx| ctx.conversation_id.clone());
-            let event_message_id = req
-                .runtime_context
-                .as_ref()
-                .and_then(|ctx| ctx.message_id.clone());
             let has_trace_sink = req
                 .runtime_context
                 .as_ref()
@@ -729,21 +904,6 @@ impl SubagentExecutor {
                 attempt: 1 + retry_count,
             };
 
-            // Emit event and call before_dispatch hook
-            self.registry
-                .event_bus()
-                .emit(SubagentEvent::DispatchStarted {
-                    parent: req.parent_agent.clone(),
-                    agent: req.agent_name.clone(),
-                    mode: mode.clone(),
-                    task: req.task.clone(),
-                    execution_id: event_execution_id.clone(),
-                    run_id: event_run_id.clone(),
-                    conversation_id: event_conversation_id.clone(),
-                    message_id: event_message_id.clone(),
-                    background: req.background,
-                });
-
             if self.config.enable_hooks {
                 self.hooks.before_dispatch(&hook_ctx).await;
             }
@@ -773,19 +933,30 @@ impl SubagentExecutor {
             // Dispatch based on mode
             let start = Instant::now();
             let result = match mode {
-                ExecutionMode::Sync => self.dispatch_sync(&req, control.clone()).await,
-                ExecutionMode::Fork => self.dispatch_fork(&req, control.clone()).await,
+                ExecutionMode::Sync => {
+                    self.dispatch_sync(&req, control.clone(), event_publisher.clone())
+                        .await
+                }
+                ExecutionMode::Fork => {
+                    self.dispatch_fork(&req, control.clone(), event_publisher.clone())
+                        .await
+                }
                 ExecutionMode::Teammate => {
                     // Teammate mode: spawn independently, then await result
                     match self
-                        .dispatch_teammate_with_control(req.clone(), control.clone())
+                        .dispatch_teammate_with_control(
+                            req.clone(),
+                            control.clone(),
+                            event_publisher.clone(),
+                            false,
+                        )
                         .await
                     {
                         Ok(handle) => handle.join().await,
                         Err(e) => Err(e),
                     }
                 }
-                ExecutionMode::Team => self.dispatch_team(&req).await,
+                ExecutionMode::Team => self.dispatch_team(&req, event_publisher.clone()).await,
             };
 
             let duration = start.elapsed();
@@ -806,29 +977,25 @@ impl SubagentExecutor {
                     );
 
                     if sub_result.outcome.status == SubagentStatus::Cancelled {
-                        self.registry
-                            .event_bus()
-                            .emit(SubagentEvent::DispatchCancelled {
-                                parent: req_parent_agent.clone(),
-                                agent: req_agent_name.clone(),
-                                outcome: sub_result.outcome.clone(),
-                                execution_id: event_execution_id.clone(),
-                                run_id: event_run_id.clone(),
-                            });
+                        event_publisher.emit(SubagentEvent::DispatchCancelled {
+                            parent: req_parent_agent.clone(),
+                            agent: req_agent_name.clone(),
+                            outcome: sub_result.outcome.clone(),
+                            execution_id: event_execution_id.clone(),
+                            run_id: event_run_id.clone(),
+                        })?;
                     } else {
-                        self.registry
-                            .event_bus()
-                            .emit(SubagentEvent::DispatchCompleted {
-                                parent: req_parent_agent.clone(),
-                                agent: req_agent_name.clone(),
-                                duration_ms: duration.as_millis() as u64,
-                                tokens_used: sub_result.tokens_used.map(|t| t as u64),
-                                iterations: Some(sub_result.iterations as u64),
-                                output: sub_result.output.clone(),
-                                outcome: sub_result.outcome.clone(),
-                                execution_id: event_execution_id.clone(),
-                                run_id: event_run_id.clone(),
-                            });
+                        event_publisher.emit(SubagentEvent::DispatchCompleted {
+                            parent: req_parent_agent.clone(),
+                            agent: req_agent_name.clone(),
+                            duration_ms: duration.as_millis() as u64,
+                            tokens_used: sub_result.tokens_used.map(|t| t as u64),
+                            iterations: Some(sub_result.iterations as u64),
+                            output: sub_result.output.clone(),
+                            outcome: sub_result.outcome.clone(),
+                            execution_id: event_execution_id.clone(),
+                            run_id: event_run_id.clone(),
+                        })?;
                     }
 
                     if self.config.enable_hooks {
@@ -895,15 +1062,13 @@ impl SubagentExecutor {
                     }
 
                     if status == SubagentStatus::Cancelled {
-                        self.registry
-                            .event_bus()
-                            .emit(SubagentEvent::DispatchCancelled {
-                                parent: req_parent_agent.clone(),
-                                agent: req_agent_name.clone(),
-                                outcome: terminal_result,
-                                execution_id: event_execution_id.clone(),
-                                run_id: event_run_id.clone(),
-                            });
+                        event_publisher.emit(SubagentEvent::DispatchCancelled {
+                            parent: req_parent_agent.clone(),
+                            agent: req_agent_name.clone(),
+                            outcome: terminal_result,
+                            execution_id: event_execution_id.clone(),
+                            run_id: event_run_id.clone(),
+                        })?;
                         return Err(e);
                     }
 
@@ -940,6 +1105,14 @@ impl SubagentExecutor {
                                         constraints,
                                         background: false,
                                     };
+                                    Self::retarget_dispatch_context(&mut req);
+                                    event_publisher.retarget_from_lineage(
+                                        req.parent_agent.clone(),
+                                        req.agent_name.clone(),
+                                        req.runtime_context
+                                            .as_ref()
+                                            .and_then(|context| context.subagent_lineage.as_ref()),
+                                    )?;
                                     // This attempt is recoverable, so it is not a terminal event.
                                     continue;
                                 }
@@ -992,17 +1165,15 @@ impl SubagentExecutor {
                         }
                     }
 
-                    self.registry
-                        .event_bus()
-                        .emit(SubagentEvent::DispatchFailed {
-                            parent: req_parent_agent.clone(),
-                            agent: req_agent_name.clone(),
-                            error: error_str.clone(),
-                            status,
-                            outcome: terminal_result,
-                            execution_id: event_execution_id.clone(),
-                            run_id: event_run_id.clone(),
-                        });
+                    event_publisher.emit(SubagentEvent::DispatchFailed {
+                        parent: req_parent_agent.clone(),
+                        agent: req_agent_name.clone(),
+                        error: error_str.clone(),
+                        status,
+                        outcome: terminal_result,
+                        execution_id: event_execution_id.clone(),
+                        run_id: event_run_id.clone(),
+                    })?;
 
                     return Err(e);
                 }
@@ -1029,9 +1200,11 @@ impl SubagentExecutor {
                 unified_hook_executor: self.config.unified_hook_executor.clone(),
                 isolation_provider: self.config.isolation_provider.clone(),
                 prompt_compiler: self.config.prompt_compiler.clone(),
+                shared_admission: self.config.shared_admission.clone(),
             },
             semaphore: self.semaphore.clone(),
             control_registry: self.control_registry.clone(),
+            shared_admission: self.shared_admission.clone(),
         }
     }
 
@@ -1206,14 +1379,39 @@ impl SubagentExecutor {
     }
 
     /// Dispatch a teammate, returning a handle for async polling.
-    pub async fn dispatch_teammate(&self, req: DispatchRequest) -> Result<TeammateHandle> {
-        self.dispatch_teammate_with_control(req, None).await
+    pub async fn dispatch_teammate(&self, mut req: DispatchRequest) -> Result<TeammateHandle> {
+        self.enrich_dispatch_context(&mut req);
+        let event_publisher = self.event_publisher(&req)?;
+        let runtime = req.runtime_context.as_ref();
+        event_publisher.emit(SubagentEvent::DispatchStarted {
+            parent: req.parent_agent.clone(),
+            agent: req.agent_name.clone(),
+            mode: ExecutionMode::Teammate,
+            task: req.task.clone(),
+            execution_id: runtime.and_then(|context| context.execution_id.clone()),
+            run_id: runtime.and_then(|context| context.run_id.clone()),
+            conversation_id: runtime.and_then(|context| context.conversation_id.clone()),
+            message_id: runtime.and_then(|context| context.message_id.clone()),
+            background: req.background,
+        })?;
+        match self
+            .dispatch_teammate_with_control(req.clone(), None, event_publisher.clone(), true)
+            .await
+        {
+            Ok(handle) => Ok(handle),
+            Err(error) => {
+                Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
+                Err(error)
+            }
+        }
     }
 
     async fn dispatch_teammate_with_control(
         &self,
         req: DispatchRequest,
         control: Option<SubagentAttemptBinding>,
+        event_publisher: SubagentEventPublisher,
+        settle_in_handle: bool,
     ) -> Result<TeammateHandle> {
         let registered =
             self.registry.get(&req.agent_name).await.ok_or_else(|| {
@@ -1232,7 +1430,6 @@ impl SubagentExecutor {
         );
         let agent_name = req.agent_name.clone();
         let parent_agent = req.parent_agent.clone();
-        let registry = self.registry.clone();
         let timeout_secs = if registered.definition.timeout_secs > 0 {
             registered.definition.timeout_secs
         } else {
@@ -1260,7 +1457,7 @@ impl SubagentExecutor {
             let _permit = child_token.clone();
             let start = Instant::now();
 
-            if timeout_secs > 0 {
+            let result = if timeout_secs > 0 {
                 // Race between timeout, cancellation, and execution
                 tokio::select! {
                     biased; // Check cancellation first
@@ -1275,7 +1472,6 @@ impl SubagentExecutor {
                         )))))
                     }
                     r = Self::execute_agent_streaming(
-                        registry,
                         agent_arc.clone(),
                         compiled.clone(),
                         child_token.clone(),
@@ -1287,6 +1483,7 @@ impl SubagentExecutor {
                         event_execution_id.clone(),
                         event_run_id.clone(),
                         control.clone(),
+                        event_publisher.clone(),
                     ) => r,
                 }
             } else {
@@ -1297,7 +1494,6 @@ impl SubagentExecutor {
                         Err(ReactError::Agent(Box::new(AgentError::Interrupted)))
                     }
                     r = Self::execute_agent_streaming(
-                        registry,
                         agent_arc.clone(),
                         compiled.clone(),
                         child_token.clone(),
@@ -1309,9 +1505,64 @@ impl SubagentExecutor {
                         event_execution_id.clone(),
                         event_run_id.clone(),
                         control.clone(),
+                        event_publisher.clone(),
                     ) => r,
                 }
+            };
+            if settle_in_handle {
+                match &result {
+                    Ok(value) if value.outcome.status == SubagentStatus::Cancelled => {
+                        event_publisher.emit(SubagentEvent::DispatchCancelled {
+                            parent: parent_agent.clone(),
+                            agent: agent_name.clone(),
+                            outcome: value.outcome.clone(),
+                            execution_id: event_execution_id.clone(),
+                            run_id: event_run_id.clone(),
+                        })?;
+                    }
+                    Ok(value) => {
+                        event_publisher.emit(SubagentEvent::DispatchCompleted {
+                            parent: parent_agent.clone(),
+                            agent: agent_name.clone(),
+                            duration_ms: value.duration.as_millis() as u64,
+                            tokens_used: value.tokens_used.map(|tokens| tokens as u64),
+                            iterations: Some(value.iterations as u64),
+                            output: value.output.clone(),
+                            outcome: value.outcome.clone(),
+                            execution_id: event_execution_id.clone(),
+                            run_id: event_run_id.clone(),
+                        })?;
+                    }
+                    Err(error) => {
+                        let status = subagent_status_from_error(error);
+                        let outcome = SubagentOutcome::terminal(
+                            status,
+                            error.to_string(),
+                            vec![error.to_string()],
+                        );
+                        if status == SubagentStatus::Cancelled {
+                            event_publisher.emit(SubagentEvent::DispatchCancelled {
+                                parent: parent_agent.clone(),
+                                agent: agent_name.clone(),
+                                outcome,
+                                execution_id: event_execution_id.clone(),
+                                run_id: event_run_id.clone(),
+                            })?;
+                        } else {
+                            event_publisher.emit(SubagentEvent::DispatchFailed {
+                                parent: parent_agent.clone(),
+                                agent: agent_name.clone(),
+                                error: error.to_string(),
+                                status,
+                                outcome,
+                                execution_id: event_execution_id.clone(),
+                                run_id: event_run_id.clone(),
+                            })?;
+                        }
+                    }
+                }
             }
+            result
         });
 
         Ok(TeammateHandle {
@@ -1324,7 +1575,11 @@ impl SubagentExecutor {
 
     /// Compile Team intent to one revisioned graph and execute it through the
     /// canonical `RuntimeTaskService`.
-    async fn dispatch_team(&self, req: &DispatchRequest) -> Result<SubagentResult> {
+    async fn dispatch_team(
+        &self,
+        req: &DispatchRequest,
+        event_publisher: SubagentEventPublisher,
+    ) -> Result<SubagentResult> {
         let registered =
             self.registry.get(&req.agent_name).await.ok_or_else(|| {
                 ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
@@ -1353,6 +1608,9 @@ impl SubagentExecutor {
         let team_prompt_context = req.prompt_context.clone();
         let team_constraints = req.constraints.clone();
         let team_message = req.message.clone();
+        let team_parent_event_id = event_publisher
+            .dispatch_started_event_id()
+            .map(|event_id| event_id.as_str().to_string());
         let inherited_history = req
             .parent_context
             .clone()
@@ -1369,14 +1627,13 @@ impl SubagentExecutor {
                 context.task_title = Some(task.clone());
             }
             let constraints = team_constraints.clone();
-            let runtime_context = team_runtime.clone().map(|mut context| {
-                context.execution_id =
-                    Some(format!("team-member-{}", uuid::Uuid::new_v4().as_simple()));
-                context.isolation_id = context
-                    .run_id
-                    .as_ref()
-                    .map(|run_id| format!("{run_id}:{agent_name}"));
-                context
+            let runtime_context = team_runtime.clone().map(|context| {
+                Self::team_member_runtime_context(
+                    context,
+                    &parent_agent,
+                    &agent_name,
+                    team_parent_event_id.as_deref(),
+                )
             });
             Box::pin(async move {
                 let member = executor
@@ -1508,7 +1765,6 @@ impl SubagentExecutor {
 
     #[allow(clippy::too_many_arguments)]
     async fn execute_agent_streaming(
-        registry: Arc<SubagentRegistry>,
         agent: Arc<dyn Agent>,
         compiled: CompiledSubagentInvocation,
         cancel: CancellationToken,
@@ -1520,6 +1776,7 @@ impl SubagentExecutor {
         execution_id: Option<String>,
         run_id: Option<String>,
         control: Option<SubagentAttemptBinding>,
+        event_publisher: SubagentEventPublisher,
     ) -> Result<SubagentResult> {
         let artifact_base_dir = invocation
             .working_dir
@@ -1585,38 +1842,32 @@ impl SubagentExecutor {
             match event {
                 AgentEvent::Token(content) => {
                     if in_thinking {
-                        registry
-                            .event_bus()
-                            .emit(SubagentEvent::DispatchThinkingDelta {
-                                parent: parent.to_string(),
-                                agent: subagent.to_string(),
-                                content,
-                                execution_id: execution_id.clone(),
-                                run_id: run_id.clone(),
-                            });
+                        event_publisher.emit(SubagentEvent::DispatchThinkingDelta {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            content,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
+                        })?;
                     } else {
                         output.push_str(&content);
-                        registry
-                            .event_bus()
-                            .emit(SubagentEvent::DispatchTokenDelta {
-                                parent: parent.to_string(),
-                                agent: subagent.to_string(),
-                                content,
-                                execution_id: execution_id.clone(),
-                                run_id: run_id.clone(),
-                            });
+                        event_publisher.emit(SubagentEvent::DispatchTokenDelta {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            content,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
+                        })?;
                     }
                 }
                 AgentEvent::ThinkStart => {
                     in_thinking = true;
-                    registry
-                        .event_bus()
-                        .emit(SubagentEvent::DispatchThinkingStarted {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        });
+                    event_publisher.emit(SubagentEvent::DispatchThinkingStarted {
+                        parent: parent.to_string(),
+                        agent: subagent.to_string(),
+                        execution_id: execution_id.clone(),
+                        run_id: run_id.clone(),
+                    })?;
                 }
                 AgentEvent::ThinkEnd {
                     prompt_tokens: pt,
@@ -1625,16 +1876,14 @@ impl SubagentExecutor {
                     in_thinking = false;
                     prompt_tokens = prompt_tokens.saturating_add(pt);
                     completion_tokens = completion_tokens.saturating_add(ct);
-                    registry
-                        .event_bus()
-                        .emit(SubagentEvent::DispatchThinkingEnded {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            prompt_tokens: pt,
-                            completion_tokens: ct,
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        });
+                    event_publisher.emit(SubagentEvent::DispatchThinkingEnded {
+                        parent: parent.to_string(),
+                        agent: subagent.to_string(),
+                        prompt_tokens: pt,
+                        completion_tokens: ct,
+                        execution_id: execution_id.clone(),
+                        run_id: run_id.clone(),
+                    })?;
                 }
                 AgentEvent::LlmUsage {
                     model,
@@ -1646,7 +1895,7 @@ impl SubagentExecutor {
                     usage_reported,
                 } => {
                     usage_stats.record(&model, pt, ct, tt, cpt, ccpt, usage_reported);
-                    registry.event_bus().emit(SubagentEvent::DispatchLlmUsage {
+                    event_publisher.emit(SubagentEvent::DispatchLlmUsage {
                         parent: parent.to_string(),
                         agent: subagent.to_string(),
                         model: model.clone(),
@@ -1658,7 +1907,7 @@ impl SubagentExecutor {
                         usage_reported,
                         execution_id: execution_id.clone(),
                         run_id: run_id.clone(),
-                    });
+                    })?;
                 }
                 AgentEvent::ToolCall {
                     call_id,
@@ -1668,16 +1917,14 @@ impl SubagentExecutor {
                         call_id.clone(),
                         (invocation.name.clone(), invocation.args.clone()),
                     );
-                    registry
-                        .event_bus()
-                        .emit(SubagentEvent::DispatchToolStarted {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            call_id,
-                            invocation,
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        });
+                    event_publisher.emit(SubagentEvent::DispatchToolStarted {
+                        parent: parent.to_string(),
+                        agent: subagent.to_string(),
+                        call_id,
+                        invocation,
+                        execution_id: execution_id.clone(),
+                        run_id: run_id.clone(),
+                    })?;
                 }
                 AgentEvent::ToolResult {
                     call_id,
@@ -1714,17 +1961,15 @@ impl SubagentExecutor {
                             available: true,
                         });
                     }
-                    registry
-                        .event_bus()
-                        .emit(SubagentEvent::DispatchToolCompleted {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            call_id,
-                            name,
-                            result,
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        });
+                    event_publisher.emit(SubagentEvent::DispatchToolCompleted {
+                        parent: parent.to_string(),
+                        agent: subagent.to_string(),
+                        call_id,
+                        name,
+                        result,
+                        execution_id: execution_id.clone(),
+                        run_id: run_id.clone(),
+                    })?;
                 }
                 AgentEvent::FinalAnswer(answer) if !answer.is_empty() => {
                     output = answer;
@@ -1806,6 +2051,7 @@ impl SubagentExecutor {
         &self,
         req: &DispatchRequest,
         control: Option<SubagentAttemptBinding>,
+        event_publisher: SubagentEventPublisher,
     ) -> Result<SubagentResult> {
         let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
 
@@ -1852,7 +2098,6 @@ impl SubagentExecutor {
                 r = tokio::time::timeout(
                     Duration::from_secs(timeout_secs),
                     Self::execute_agent_streaming(
-                        self.registry.clone(),
                         agent_arc.clone(),
                         compiled.clone(),
                         execution_cancel.clone(),
@@ -1864,6 +2109,7 @@ impl SubagentExecutor {
                         event_execution_id.clone(),
                         event_run_id.clone(),
                         control.clone(),
+                        event_publisher.clone(),
                     )
                 ) => match r {
                     Ok(r) => r,
@@ -1878,7 +2124,6 @@ impl SubagentExecutor {
             }
         } else {
             Self::execute_agent_streaming(
-                self.registry.clone(),
                 agent_arc,
                 compiled,
                 execution_cancel,
@@ -1890,6 +2135,7 @@ impl SubagentExecutor {
                 event_execution_id,
                 event_run_id,
                 control,
+                event_publisher,
             )
             .await
         }
@@ -1900,6 +2146,7 @@ impl SubagentExecutor {
         &self,
         req: &DispatchRequest,
         control: Option<SubagentAttemptBinding>,
+        event_publisher: SubagentEventPublisher,
     ) -> Result<SubagentResult> {
         let registered =
             self.registry.get(&req.agent_name).await.ok_or_else(|| {
@@ -1912,7 +2159,43 @@ impl SubagentExecutor {
         };
         let deadline = (timeout_secs > 0)
             .then(|| tokio::time::Instant::now() + Duration::from_secs(timeout_secs));
-        let permit = tokio::select! {
+        enum ForkAdmission {
+            Local(tokio::sync::OwnedSemaphorePermit),
+            Shared(KeyedExecutionLease),
+        }
+        let shared_admission = self.shared_admission.read().await.clone();
+        let permit = if let Some(admission) = shared_admission {
+            let admission_key = req
+                .runtime_context
+                .as_ref()
+                .and_then(|context| context.execution_id.as_deref())
+                .map(str::to_string)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().as_simple().to_string());
+            tokio::select! {
+                biased;
+                _ = req.cancel.cancelled() => {
+                    return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                        "Fork subagent '{}' cancelled while waiting for shared capacity",
+                        req.agent_name
+                    )))));
+                }
+                _ = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    return Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
+                        "Fork subagent '{}' timed out after {}s while waiting for shared capacity",
+                        req.agent_name, timeout_secs
+                    )))));
+                }
+                permit = admission.issue_wait(format!("subagent:{admission_key}")) => permit
+                    .map(ForkAdmission::Shared)
+                    .map_err(|error| ReactError::Other(format!("shared execution admission rejected Fork: {error}")))?,
+            }
+        } else {
+            tokio::select! {
             biased;
             _ = req.cancel.cancelled() => {
                 return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
@@ -1932,7 +2215,9 @@ impl SubagentExecutor {
                 )))));
             }
             permit = self.semaphore.clone().acquire_owned() => permit
+                .map(ForkAdmission::Local)
                 .map_err(|error| ReactError::Other(format!("Semaphore error: {error}")))?,
+            }
         };
 
         let agent_arc = tokio::select! {
@@ -1960,7 +2245,6 @@ impl SubagentExecutor {
         let agent_name = req.agent_name.clone();
         let parent_agent = req.parent_agent.clone();
         let cancel = req.cancel.clone();
-        let registry = self.registry.clone();
         let message = req.message.clone();
         let prompt_compiler = self.config.prompt_compiler.clone();
         let prompt_task = req.task.clone();
@@ -2037,6 +2321,14 @@ impl SubagentExecutor {
 
         let result = tokio::spawn(async move {
             let _permit = permit;
+            match &_permit {
+                ForkAdmission::Local(permit) => {
+                    let _ = permit;
+                }
+                ForkAdmission::Shared(lease) => {
+                    let _ = lease;
+                }
+            }
             let start = Instant::now();
 
             // Check cancellation
@@ -2133,15 +2425,13 @@ impl SubagentExecutor {
                 resource_guards: Vec::new(),
                 input_lifecycle: None,
             };
-            registry
-                .event_bus()
-                .emit(SubagentEvent::DispatchIsolationObserved {
-                    parent: parent_agent.clone(),
-                    agent: agent_name.clone(),
-                    isolation: isolation_observed.clone(),
-                    execution_id: event_execution_id.clone(),
-                    run_id: event_run_id.clone(),
-                });
+            event_publisher.emit(SubagentEvent::DispatchIsolationObserved {
+                parent: parent_agent.clone(),
+                agent: agent_name.clone(),
+                isolation: isolation_observed.clone(),
+                execution_id: event_execution_id.clone(),
+                run_id: event_run_id.clone(),
+            })?;
             let mut result = if let Some(deadline) = deadline {
                 tokio::select! {
                     biased;
@@ -2151,7 +2441,6 @@ impl SubagentExecutor {
                     r = tokio::time::timeout_at(
                         deadline,
                         Self::execute_agent_streaming(
-                            registry,
                             agent_arc.clone(),
                             compiled.clone(),
                             execution_cancel.clone(),
@@ -2163,6 +2452,7 @@ impl SubagentExecutor {
                             event_execution_id.clone(),
                             event_run_id.clone(),
                             control.clone(),
+                            event_publisher.clone(),
                         )
                     ) => {
                         match r {
@@ -2184,7 +2474,6 @@ impl SubagentExecutor {
                         AgentError::Cancelled(format!("Fork subagent '{}' cancelled", agent_name))
                     ))),
                     r = Self::execute_agent_streaming(
-                        registry,
                         agent_arc.clone(),
                         compiled.clone(),
                         execution_cancel.clone(),
@@ -2196,6 +2485,7 @@ impl SubagentExecutor {
                         event_execution_id.clone(),
                         event_run_id.clone(),
                         control.clone(),
+                        event_publisher.clone(),
                     ) => r,
                 }
             };
@@ -2438,9 +2728,53 @@ mod tests {
         assert!(kept_sink.is_some_and(|sink| Arc::ptr_eq(&sink, &app_sink)));
     }
 
+    #[test]
+    fn team_member_runtime_rebuilds_exact_child_lineage() {
+        let parent = echo_core::tools::ExternalRunContext {
+            run_id: Some("run-team".to_string()),
+            execution_id: Some("team-execution".to_string()),
+            subagent_lineage: Some(echo_core::tools::SubagentLineage {
+                agent_path: Some("root/manager".to_string()),
+                task_id: Some("manager-task".to_string()),
+                attempt: Some(4),
+                plan_revision: Some(9),
+                ..echo_core::tools::SubagentLineage::default()
+            }),
+            ..echo_core::tools::ExternalRunContext::default()
+        };
+        let child = SubagentExecutor::team_member_runtime_context(
+            parent,
+            "manager",
+            "researcher",
+            Some("evt_team_started"),
+        );
+        let lineage = child.subagent_lineage.unwrap_or_default();
+        assert_eq!(lineage.agent_name.as_deref(), Some("researcher"));
+        assert_eq!(lineage.parent_agent.as_deref(), Some("manager"));
+        assert_eq!(
+            lineage.parent_execution_id.as_deref(),
+            Some("team-execution")
+        );
+        assert_eq!(lineage.parent_event_id.as_deref(), Some("evt_team_started"));
+        assert_eq!(
+            lineage.agent_path.as_deref(),
+            Some("root/manager/researcher")
+        );
+        assert!(lineage.task_id.is_none());
+        assert!(lineage.attempt.is_none());
+        assert!(lineage.plan_revision.is_none());
+        assert!(
+            child
+                .execution_id
+                .as_deref()
+                .is_some_and(|execution_id| execution_id.starts_with("team-member-"))
+        );
+    }
+
     #[tokio::test]
-    async fn default_uplink_sink_delivers_to_active_attempt_and_reports_missing() {
+    async fn default_uplink_sink_delivers_to_active_attempt_and_reports_missing() -> Result<()> {
         let (registry, executor) = make_executor().await;
+        let mut envelopes = registry.event_bus().subscribe_envelopes();
         let release = Arc::new(tokio::sync::Notify::new());
         let steered = Arc::new(Mutex::new(Vec::new()));
         registry
@@ -2453,7 +2787,8 @@ mod tests {
             )
             .await;
 
-        let identity = SubagentAttemptIdentity::new("task-9", "exec-9", 1).expect("valid identity");
+        let identity = SubagentAttemptIdentity::new("task-9", "exec-9", 1)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
         let dispatch = tokio::spawn(async move {
             executor
                 .dispatch_attempt(
@@ -2495,8 +2830,9 @@ mod tests {
 
         let sink = default_uplink_sink(Arc::clone(&registry));
         let sender_lineage = echo_core::tools::SubagentLineage {
-            agent_name: Some("sender".to_string()),
-            execution_id: Some("exec-sender".to_string()),
+            agent_name: Some("target".to_string()),
+            execution_id: Some("exec-9".to_string()),
+            parent_agent: Some("primary".to_string()),
             parent_execution_id: Some("exec-9".to_string()),
             ..Default::default()
         };
@@ -2542,14 +2878,38 @@ mod tests {
         release.notify_one();
         let settled = dispatch
             .await
-            .expect("dispatch join")
-            .expect("dispatch result");
+            .map_err(|error| ReactError::Other(error.to_string()))??;
         assert_eq!(settled.outcome.status, SubagentStatus::Completed);
         let steered_now = steered
             .lock()
             .map(|messages| messages.clone())
             .unwrap_or_default();
         assert_eq!(steered_now.len(), 2);
+        let mut observed = Vec::new();
+        for _ in 0..4 {
+            observed.push(
+                envelopes
+                    .recv()
+                    .await
+                    .map_err(|error| ReactError::Other(error.to_string()))?,
+            );
+        }
+        assert_eq!(
+            observed
+                .iter()
+                .map(|envelope| envelope.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(matches!(
+            observed.get(1).map(|envelope| &envelope.payload.event),
+            Some(SubagentEvent::UplinkReceived { .. })
+        ));
+        assert!(matches!(
+            observed.get(2).map(|envelope| &envelope.payload.event),
+            Some(SubagentEvent::UplinkReceived { .. })
+        ));
+        Ok(())
     }
 
     struct PrefixPromptCompiler;
@@ -3345,6 +3705,7 @@ mod tests {
             super::super::types::SubagentDefinition::new("identity", "Identity subagent");
         registry.register(definition, Box::new(agent)).await;
         let mut events = registry.event_bus().subscribe();
+        let mut envelopes = registry.event_bus().subscribe_envelopes();
         let request = DispatchRequest {
             agent_name: "identity".to_string(),
             task: "preserve identity".to_string(),
@@ -3364,7 +3725,12 @@ mod tests {
                 trace_sink: None,
                 delegation_policy: None,
                 resource_guards: Vec::new(),
-                subagent_lineage: None,
+                subagent_lineage: Some(echo_core::tools::SubagentLineage {
+                    task_id: Some("task-identity".to_string()),
+                    attempt: Some(3),
+                    plan_revision: Some(7),
+                    ..echo_core::tools::SubagentLineage::default()
+                }),
                 uplink: None,
             }),
             message: None,
@@ -3392,6 +3758,38 @@ mod tests {
             }
             other => return Err(format!("expected DispatchStarted, got {other:?}")),
         }
+        let started_envelope = envelopes.recv().await.map_err(|error| error.to_string())?;
+        assert_eq!(started_envelope.sequence, 1);
+        assert_eq!(
+            started_envelope
+                .conversation_id
+                .as_ref()
+                .map(|value| value.as_str()),
+            Some("conversation-identity")
+        );
+        assert_eq!(
+            started_envelope
+                .message_id
+                .as_ref()
+                .map(|value| value.as_str()),
+            Some("message-identity")
+        );
+        assert_eq!(
+            started_envelope.payload.invocation.task_id.as_deref(),
+            Some("task-identity")
+        );
+        assert_eq!(started_envelope.payload.invocation.attempt, Some(3));
+        assert_eq!(started_envelope.payload.invocation.plan_revision, Some(7));
+        let terminal = envelopes.recv().await.map_err(|error| error.to_string())?;
+        assert_eq!(terminal.sequence, 2);
+        assert_eq!(
+            terminal.parent_event_id,
+            Some(started_envelope.event_id.clone())
+        );
+        assert!(matches!(
+            terminal.payload.event,
+            SubagentEvent::DispatchCompleted { .. }
+        ));
         Ok(())
     }
 
@@ -3408,8 +3806,9 @@ mod tests {
     // use them.
 
     #[tokio::test]
-    async fn test_dispatch_not_found() {
-        let (_registry, executor) = make_executor().await;
+    async fn test_dispatch_not_found() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let mut envelopes = registry.event_bus().subscribe_envelopes();
 
         let req = DispatchRequest {
             agent_name: "missing".into(),
@@ -3427,17 +3826,36 @@ mod tests {
             background: false,
         };
 
-        let err = executor.dispatch(req).await.unwrap_err();
+        let err =
+            executor.dispatch(req).await.err().ok_or_else(|| {
+                ReactError::Other("missing Subagent unexpectedly ran".to_string())
+            })?;
         assert!(err.to_string().contains("not found"));
+        let started = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let terminal = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(started.sequence, 1);
+        assert_eq!(terminal.sequence, 2);
+        assert!(matches!(
+            terminal.payload.event,
+            SubagentEvent::DispatchFailed { .. }
+        ));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_dispatch_cancelled() {
+    async fn test_dispatch_cancelled() -> Result<()> {
         let (registry, executor) = make_executor().await;
 
         let agent = MockAgent::new("c").with_response("ok");
         let def = super::super::types::SubagentDefinition::new("c", "C");
         registry.register(def, Box::new(agent)).await;
+        let mut envelopes = registry.event_bus().subscribe_envelopes();
 
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -3458,9 +3876,74 @@ mod tests {
             background: false,
         };
 
-        let result = executor.dispatch(req).await.unwrap();
+        let result = executor.dispatch(req).await?;
         assert!(result.output.contains("Cancelled"));
         assert_eq!(result.outcome.status, SubagentStatus::Cancelled);
+        let started = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let terminal = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(started.sequence, 1);
+        assert_eq!(terminal.sequence, 2);
+        assert!(matches!(
+            terminal.payload.event,
+            SubagentEvent::DispatchCancelled { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_delegation_depth_emits_one_failed_lifecycle() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                SubagentDefinition::new("depth", "Depth guard"),
+                Box::new(MockAgent::new("depth").with_response("must not run")),
+            )
+            .await;
+        let mut envelopes = registry.event_bus().subscribe_envelopes();
+        let error = executor
+            .dispatch(DispatchRequest {
+                agent_name: "depth".to_string(),
+                task: "reject".to_string(),
+                mode_override: Some(ExecutionMode::Sync),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: NestedDelegationPolicy {
+                    can_spawn_subagents: true,
+                    delegate_depth: 2,
+                    max_delegate_depth: 1,
+                },
+                runtime_context: None,
+                message: None,
+                prompt_payload: None,
+                prompt_context: None,
+                constraints: Vec::new(),
+                background: false,
+            })
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("invalid depth unexpectedly ran".to_string()))?;
+        assert!(error.to_string().contains("Delegation depth exceeded"));
+        let started = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let terminal = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!((started.sequence, terminal.sequence), (1, 2));
+        assert!(matches!(
+            terminal.payload.event,
+            SubagentEvent::DispatchFailed { .. }
+        ));
+        Ok(())
     }
 
     #[tokio::test]
@@ -3487,6 +3970,7 @@ mod tests {
             )
             .await;
         let mut events = registry.event_bus().subscribe();
+        let mut envelopes = registry.event_bus().subscribe_envelopes();
 
         let result = executor
             .dispatch(DispatchRequest {
@@ -3520,6 +4004,22 @@ mod tests {
             terminal_events.first().map(AsRef::as_ref),
             Some(SubagentEvent::DispatchCompleted { outcome, .. })
                 if outcome.status == SubagentStatus::Completed
+        ));
+        let mut sequences = Vec::new();
+        let mut agents = Vec::new();
+        for _ in 0..2 {
+            let envelope = envelopes
+                .recv()
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            sequences.push(envelope.sequence);
+            agents.push(envelope.payload.invocation.agent_name.clone());
+        }
+        assert_eq!(sequences, vec![1, 2]);
+        assert_eq!(agents, vec!["primary", "recovery"]);
+        assert!(matches!(
+            envelopes.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
         Ok(())
     }
@@ -3734,6 +4234,7 @@ mod tests {
             })
         }));
         assert!(registry.register_factory_sync(definition, factory));
+        let mut envelopes = registry.event_bus().subscribe_envelopes();
 
         let request = || DispatchRequest {
             agent_name: "explorer".to_string(),
@@ -3760,6 +4261,23 @@ mod tests {
         assert_ne!(first.output, second.output);
         assert_ne!(first.output, "cached");
         assert_ne!(second.output, "cached");
+        let mut sequences_by_stream = HashMap::<String, Vec<u64>>::new();
+        for _ in 0..4 {
+            let envelope = envelopes
+                .recv()
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            sequences_by_stream
+                .entry(envelope.stream_id.as_str().to_string())
+                .or_default()
+                .push(envelope.sequence);
+        }
+        assert_eq!(sequences_by_stream.len(), 2);
+        assert!(
+            sequences_by_stream
+                .values()
+                .all(|sequences| sequences.as_slice() == [1, 2])
+        );
         Ok(())
     }
 
@@ -3914,13 +4432,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_teammate_dispatch() {
+    async fn test_teammate_dispatch() -> Result<()> {
         let (registry, executor) = make_executor().await;
 
         let agent = MockAgent::new("tm").with_response("team result");
         let mut def = super::super::types::SubagentDefinition::new("tm", "Teammate");
         def.execution_mode = ExecutionMode::Teammate;
         registry.register(def, Box::new(agent)).await;
+        let mut envelopes = registry.event_bus().subscribe_envelopes();
 
         let req = DispatchRequest {
             agent_name: "tm".into(),
@@ -3938,11 +4457,66 @@ mod tests {
             background: false,
         };
 
-        let handle = executor.dispatch_teammate(req).await.unwrap();
+        let handle = executor.dispatch_teammate(req).await?;
         assert_eq!(handle.agent_name, "tm");
 
-        let result = handle.join().await.unwrap();
+        let result = handle.join().await?;
         assert_eq!(result.output, "team result");
+        let started = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let terminal = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(started.sequence, 1);
+        assert_eq!(terminal.sequence, 2);
+        assert!(matches!(
+            terminal.payload.event,
+            SubagentEvent::DispatchCompleted { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn teammate_setup_failure_emits_started_and_failed() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let mut envelopes = registry.event_bus().subscribe_envelopes();
+        let error = executor
+            .dispatch_teammate(DispatchRequest {
+                agent_name: "missing-teammate".to_string(),
+                task: "fail setup".to_string(),
+                mode_override: Some(ExecutionMode::Teammate),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                prompt_payload: None,
+                prompt_context: None,
+                constraints: Vec::new(),
+                background: false,
+            })
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("missing teammate unexpectedly ran".to_string()))?;
+        assert!(error.to_string().contains("not found"));
+        let started = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let failed = envelopes
+            .recv()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!((started.sequence, failed.sequence), (1, 2));
+        assert!(matches!(
+            failed.payload.event,
+            SubagentEvent::DispatchFailed { .. }
+        ));
+        Ok(())
     }
 
     #[tokio::test]

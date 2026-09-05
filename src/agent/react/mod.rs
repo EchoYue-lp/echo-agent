@@ -1587,6 +1587,18 @@ impl ReactAgent {
         &self.tools.subagent_executor
     }
 
+    /// Share an application-owned process admission with direct dispatches.
+    #[cfg(feature = "subagent")]
+    pub async fn set_subagent_admission(
+        &self,
+        admission: std::sync::Arc<echo_core::agent::ExecutionAdmission>,
+    ) {
+        self.tools
+            .subagent_executor
+            .set_shared_admission(admission)
+            .await;
+    }
+
     /// Replace the hook registry with a shared instance (for AgentPool).
     pub fn set_hook_registry(
         &mut self,

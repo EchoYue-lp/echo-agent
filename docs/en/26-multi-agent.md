@@ -143,6 +143,12 @@ and may not rewrite dependency, member, or execution semantics.
 
 ## Design References
 
+Framework callers may inject `echo_core::agent::ExecutionAdmission` so
+`RuntimeTaskService` and `SubagentExecutor` share cross-entry capacity. Without
+it, per-runtime wave width and the standalone Fork fallback remain available.
+Delegation depth continues to use the single `NestedDelegationPolicy`; EKO
+provides product capacity and defaults through its application adapter.
+
 This split follows two mature orchestration patterns:
 
 - [OpenAI Agents SDK multi-agent orchestration](https://openai.github.io/openai-agents-python/multi_agent/)
