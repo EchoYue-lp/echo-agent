@@ -1,0 +1,99 @@
+# echo-agent SDK (Contract stage)
+
+This is the single external entry point for the echo-agent multilingual SDK
+program. The SDK's goal is full **functional and semantic parity** between
+the Rust framework's public facade and TypeScript, Python and Java — without
+rewriting the agent framework in any of those languages.
+
+> **Current status: Contract.** The protocol contracts, parity manifest and
+> drift gates described below exist and are enforced in CI. There is **no**
+> ACP agent adapter, SDK Host binary, language SDK, or ACP conformance
+> suite in this repository yet. See [Status ladder](#status-ladder) for what
+> each status means and what is and is not claimed today.
+
+## What the SDK program is
+
+- **Source-first delivery.** The repository ships source only. Developers
+  compile everything (Host, SDK, tests) from the same Git revision. No
+  precompiled binaries, npm packages, wheels or JARs are published, and the
+  build never downloads prebuilt project artifacts.
+- **ACP-first wire.** The stable [Agent Client Protocol
+  v1](https://agentclientprotocol.com/protocol/overview) is the only base
+  client↔agent protocol. This project never forks or re-declares the
+  official JSON-RPC envelope, `initialize`, Session, Prompt, ContentBlock,
+  updates or stop reasons — they come from the official
+  [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol)
+  ecosystem artifacts pinned in
+  [`contracts/sdk/acp-baseline.json`](../../contracts/sdk/acp-baseline.json).
+- **Two profiles, one authority.** A standard ACP v1 client can use the
+  Host's standard profile without knowing anything about echo-agent. The
+  full echo-agent SDK profile negotiates `_echo_agent/*` extension methods
+  (via the official `_meta` capability mechanism) to cover the complete
+  public facade losslessly. Both profiles project the same Rust execution
+  and state authority — the wire never becomes a second framework.
+
+Details of the two profiles, the extension namespace and the error/lossless
+scalar rules live in [protocol.md](protocol.md).
+
+## Contract artifacts
+
+| Artifact | Purpose |
+|---|---|
+| `contracts/sdk/acp-baseline.json` | Pinned official ACP wire version (1), crate and schema artifact versions; tests assert the lockfile matches. |
+| `contracts/sdk/toolchain.json` | The exact nightly toolchain used for rustdoc-JSON inventory generation. Contributors only; normal builds never need it. |
+| `contracts/sdk/public-api.txt` | Deterministic snapshot of the root `echo_agent` facade per feature profile (default, `full`, and every leaf feature). |
+| `contracts/sdk/parity-manifest.json` | Every public facade item classified by semantic class, ACP relationship and per-language mapping status. |
+| `contracts/sdk/schema/echo-agent-extension-v1.schema.json` | Generated JSON Schema of the `_echo_agent/*` extension DTOs and method catalog. |
+| `contracts/sdk/fixtures/extension/v1/` | Golden fixtures: valid samples must round-trip losslessly, invalid samples must be rejected deterministically. |
+
+The generating code lives in the workspace member crate
+[`echo-sdk-protocol`](../../echo-sdk-protocol/) (`publish = false`). All
+artifacts are machine-generated; regeneration is deterministic and
+byte-stable:
+
+```bash
+# regenerate after an intentional facade or contract change
+cargo run -p echo-sdk-protocol --bin export_schema -- --update
+
+# read-only drift check (also run by scripts/verify.sh and CI)
+./scripts/check-sdk-contracts.sh
+```
+
+## Status ladder
+
+The SDK program distinguishes the following statuses; each implies the
+previous ones.
+
+| Status | Meaning | Reached |
+|---|---|---|
+| **Design** | The design document is agreed | ✅ |
+| **Contract** | Protocol contracts, schema, parity manifest exist and pass drift gates | ✅ (you are here) |
+| **ACP conformant** | A standard ACP v1 client passes the supported profile against a real Host | ❌ not started |
+| **Runnable** | A real Host plus at least one language's full SDK extension path executes end-to-end | ❌ not started |
+| **Parity complete** | TypeScript, Python and Java all pass the full facade/all-features parity suite | ❌ not started |
+| **Published** | Registry/binary publication — **explicitly out of scope**; this design ships source only | never (by design) |
+
+Only *Parity complete* justifies claiming "all public Rust capabilities are
+available from the SDK". Until then, language coverage rows in the parity
+manifest honestly read `not_implemented`.
+
+## For contributors
+
+- The inventory toolchain is pinned in
+  [`toolchain.json`](../../contracts/sdk/toolchain.json); install it with
+  `rustup toolchain install <toolchain>` if you intend to regenerate
+  contracts. Nothing in a normal build installs it for you.
+- Any new public facade item automatically appears in the inventory; the
+  parity manifest check then **blocks CI** until the item is classified and
+  the manifest regenerated. This is intentional: parity is a contract, not
+  an aspiration.
+- Extension versioning, digest and compatibility rules: see
+  [protocol.md](protocol.md#versioning-and-compatibility).
+
+## Related reading
+
+- Design document: `docs/supreme/specs/2026-09-04-source-first-multilanguage-sdk-runtime/design.md`
+  (repository-internal, the authoritative design source)
+- ADR 0028: `docs/adr/0028-source-first-multilanguage-sdk-runtime.md`
+- Official ACP documentation: <https://agentclientprotocol.com/>
+- Official Rust SDK: <https://github.com/agentclientprotocol/rust-sdk>

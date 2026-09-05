@@ -420,8 +420,12 @@ impl ReactAgent {
         let canonical = crate::compression::CanonicalContext {
             system_prompt: Some(sp_for_canonical),
             project_rules: {
+                // Mirrors the system-prompt injection gate above: canonical
+                // context only carries workspace rules when the agent opted
+                // in, so `auto_project_rules(false)` fully isolates an agent
+                // from checkout-local rule files.
                 #[cfg(feature = "project-rules")]
-                {
+                if config.auto_project_rules {
                     let wd = config
                         .working_dir
                         .lock()
@@ -432,6 +436,8 @@ impl ReactAgent {
                         &wd,
                         config.project_root.as_deref(),
                     )
+                } else {
+                    None
                 }
                 #[cfg(not(feature = "project-rules"))]
                 None

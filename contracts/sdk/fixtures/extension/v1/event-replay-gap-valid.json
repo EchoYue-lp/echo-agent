@@ -1,0 +1,19 @@
+{
+  "name": "event-replay-gap-valid",
+  "kind": "valid",
+  "target": "ReplayResponse",
+  "description": "Replay below the watermark returns bounded events plus a typed gap.",
+  "payload": {
+    "events": [],
+    "next_cursor": {
+      "stream_id": "stream-1",
+      "last_processed_sequence": "4"
+    },
+    "gap": {
+      "from_sequence": "5",
+      "to_sequence": "9",
+      "reason": "retention floor",
+      "snapshot_watermark": "9"
+    }
+  }
+}

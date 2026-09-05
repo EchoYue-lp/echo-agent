@@ -7,7 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SDK contract stage (ACP-first, source-only).** Frozen the multilingual
+  SDK program's contract layer over the official stable ACP v1 baseline:
+  `contracts/sdk/` now pins the official `agent-client-protocol` 2.1.0 /
+  `agent-client-protocol-schema` =1.7.0 artifacts and wire `protocolVersion`
+  1 (draft v2 excluded), carries a deterministic per-feature-profile public
+  facade inventory (`public-api.txt`), a full parity manifest classifying
+  every public item by semantic class, ACP relationship and per-language
+  status (`parity-manifest.json`), the generated
+  `_echo_agent/*` extension JSON Schema with a stable contract digest, and
+  golden fixtures with mandatory lossless round-trips. The new workspace
+  member `echo-sdk-protocol` (`publish = false`) owns the extension DTOs
+  (capability, method catalog, typed errors, lossless scalars, handles,
+  full event/replay views) and the deterministic `export_schema`
+  check/update generator; `scripts/check-sdk-contracts.sh` plus a dedicated
+  CI job block any facade or contract drift. SDK docs live at
+  `docs/sdk/` and honestly declare the Contract stage (no adapter, Host, or
+  language SDK yet). See
+  [docs/sdk/README.md](docs/sdk/README.md) and
+  [ADR 0028](docs/adr/0028-source-first-multilanguage-sdk-runtime.md).
+
 ### Changed
+
+- Upgraded `polars` 0.53 → 0.55 (via `echo-tools`): polars-ops 0.55 vendors
+  the Unicode tables that 0.46–0.53 read from the removed
+  `core::unicode` API, restoring nightly/rustdoc compilability of the
+  `data` feature. Iterator call sites adapted to the owned
+  `ChunkedArray::iter` API, and the shared quantile helper moved into a
+  feature-neutral module so `--no-default-features --features data`
+  compiles without the `statistics` feature.
 
 - File-based skill frontmatter now accepts **official agentskills.io fields
   only**: `name`, `description`, `license`, `compatibility`, `metadata`

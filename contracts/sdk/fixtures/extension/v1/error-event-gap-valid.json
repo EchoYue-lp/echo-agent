@@ -1,0 +1,11 @@
+{
+  "name": "error-event-gap-valid",
+  "kind": "valid",
+  "target": "EchoSdkError",
+  "description": "Gap errors carry the snapshot watermark.",
+  "payload": {
+    "code": "event_gap",
+    "message": "consumer fell below the retention floor",
+    "retryable": "never"
+  }
+}

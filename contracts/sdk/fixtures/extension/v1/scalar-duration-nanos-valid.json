@@ -1,0 +1,9 @@
+{
+  "name": "scalar-duration-nanos-valid",
+  "kind": "valid",
+  "target": "WireDuration",
+  "description": "Nanosecond durations travel as decimal strings.",
+  "payload": {
+    "nanos": "9007199254740993"
+  }
+}

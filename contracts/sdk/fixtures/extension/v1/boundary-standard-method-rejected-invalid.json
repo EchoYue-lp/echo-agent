@@ -1,0 +1,10 @@
+{
+  "name": "boundary-standard-method-rejected-invalid",
+  "kind": "invalid",
+  "target": "MethodCatalog",
+  "description": "Standard ACP method names cannot be re-registered as extension methods.",
+  "payload": {
+    "method": "session/prompt"
+  },
+  "expect_error": "invalid_request"
+}

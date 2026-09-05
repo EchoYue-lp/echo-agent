@@ -252,7 +252,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_compact_records_auto_compression_in_durable_trace() -> Result<()> {
-        let mut config = AgentConfig::new("test-model", "agent", "sys");
+        // Rule injection stays off: a large rules file (AGENTS.md et al.) in
+        // the checkout would inflate the system prompt past this test's tiny
+        // token limit, which sliding-window compaction can never shrink.
+        let mut config = AgentConfig::new("test-model", "agent", "sys").auto_project_rules(false);
         config.token_limit = 4_096;
         config.enable_tool = false;
         let mut agent = ReactAgent::new(config);
@@ -294,8 +297,12 @@ mod tests {
 
         let temp = tempfile::tempdir()?;
         let conversation_store = Arc::new(FileConversationStore::new(temp.path())?);
+        // Rule injection stays off for the same reason as the trace test
+        // above: injected workspace rules would exceed the tiny token limit
+        // and turn the expected Continue outcome into Failed.
         let mut config = AgentConfig::new("test-model", "agent", "sys")
-            .conversation_id("pre-compact-transcript");
+            .conversation_id("pre-compact-transcript")
+            .auto_project_rules(false);
         config.token_limit = 4_096;
         config.enable_tool = false;
         let mut agent = ReactAgent::new(config);

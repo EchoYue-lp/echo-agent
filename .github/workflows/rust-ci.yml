@@ -88,6 +88,32 @@ jobs:
       - name: Exercise Windows atomic file replacement
         run: cargo test -p echo_core --lib --all-features --locked utils::fs::tests
 
+  # Independent SDK contract signal: deterministic regeneration of the facade
+  # inventory, parity manifest, extension schema and fixtures must produce
+  # zero drift. Uses the exact nightly pinned in contracts/sdk/toolchain.json
+  # for rustdoc JSON; contract drift cannot pass through code review alone.
+  sdk-contract:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read pinned rustdoc toolchain
+        id: toolchain
+        run: |
+          toolchain=$(python3 -c "import json;print(json.load(open('contracts/sdk/toolchain.json'))['rustdoc']['toolchain'])")
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.toolchain }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+      - name: Check SDK contract artifacts
+        run: ./scripts/check-sdk-contracts.sh
+
   dependency-policy:
     runs-on: ubuntu-latest
     steps:

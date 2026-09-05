@@ -1,0 +1,129 @@
+# SDK protocol contract
+
+This document describes the wire-level contract of the echo-agent SDK: the
+two profiles, the extension namespace, lossless scalar rules, error taxonomy,
+event/replay semantics and versioning. It is the reference for future Host
+and language-SDK implementers; today it describes the **frozen Contract**
+artifacts, not a running system (see the [status ladder](README.md#status-ladder)).
+
+## Base protocol: official ACP v1
+
+The SDK builds on the stable [ACP v1](https://agentclientprotocol.com/protocol/v1/extensibility)
+wire protocol. Everything standard is owned by the official artifacts pinned
+in [`contracts/sdk/acp-baseline.json`](../../contracts/sdk/acp-baseline.json):
+
+| Layer | Version (pinned) |
+|---|---|
+| ACP wire `protocolVersion` | `1` (latest stable; draft v2 explicitly excluded) |
+| `agent-client-protocol` crate | `2.1.0` |
+| `agent-client-protocol-schema` crate | `=1.7.0` |
+
+The three layers are governed independently: none of them may be inferred
+from another (design §18). Tests assert both the lockfile match and that the
+official crate's `ProtocolVersion::LATEST` is still `V1` — upstream
+promoting the draft would fail the gate loudly.
+
+This repository **never** re-declares JSON-RPC envelopes, `initialize`,
+Session, Prompt, ContentBlock, update or stop-reason types. The generated
+extension schema is validated to contain none of them.
+
+## Two profiles
+
+| | Standard ACP profile | echo-agent SDK profile |
+|---|---|---|
+| Consumer | any ACP v1 client | echo-agent SDK (TS/Python/Java, future) |
+| Methods | standard ACP only | standard + negotiated `_echo_agent/*` |
+| Event view | ACP `session/update` (bounded projection) | full `EventEnvelope` extension stream |
+| Negotiation | plain `initialize` | `initialize` + `_meta` capability check |
+
+A standard client ignores the `_meta` capability and keeps working. An SDK
+client **fails closed** when the extension protocol version, contract
+digest, required capability or feature set does not match — it never
+silently degrades to partial parity (design §10.2).
+
+## Extension namespace
+
+All custom methods live under `_echo_agent/*` (leading underscore per ACP
+extensibility) and every family is declared in the capability object
+published under `initialize._meta.echo_agent`. The frozen catalog (method
+name, direction, capability) is embedded in the generated
+[`echo-agent-extension-v1.schema.json`](../../contracts/sdk/schema/echo-agent-extension-v1.schema.json)
+and enforced by `echo_sdk_protocol::catalog`:
+
+- `_echo_agent/agent/*` — construction, description, close
+- `_echo_agent/session/*` — extension session handles
+- `_echo_agent/run/*` — start/get/wait/cancel/steer
+- `_echo_agent/run/replay` + `_echo_agent/event` + `_echo_agent/gap` —
+  lossless event stream, bounded replay, retention gaps
+- `_echo_agent/task/*` — TaskRun/PlanTask graph operations
+- `_echo_agent/subagent/*` — dispatch/await/control
+- `_echo_agent/extension/*` — host-language extension registration and the
+  reverse invocation bridge (Host → SDK)
+- `_echo_agent/memory|workflow|state/op` — feature surfaces carried verbatim
+  until their typed DTO plans land
+
+The catalog contains **no** standard ACP method and nothing outside the
+namespace; both are machine-checked.
+
+## Identity and handles
+
+JSON-RPC request ids follow the official ACP schema and are never domain
+identity. Framework objects cross the wire as
+[`WireHandle`](../../echo-sdk-protocol/src/handle.rs): a non-empty domain id,
+a generation counter and a typed kind (agent, session, run, task_run,
+plan_task, subagent, extension). A handle whose generation no longer matches
+resolves to a typed `stale_handle`/`closed_handle` error — never a silent
+rebind.
+
+## Lossless scalars
+
+Standard ACP paths are absolute UTF-8 strings and standard numbers must
+survive every client runtime. The extension profile therefore carries the
+facts ACP cannot (design §10.5):
+
+- `WireU64` — decimal-string integers (canonical spelling, `u64::MAX`-safe)
+- `WireDuration` — nanosecond durations
+- `WireTimestamp` — nanoseconds since epoch (RFC 3339 display is optional)
+- `WirePath` — Unix bytes (base64) / Windows UTF-16 units / exact UTF-8
+- `WireBytes` — base64 binary
+- `WireUnknown` — typed view of unknown additive values (old SDKs observe
+  without crashing)
+
+All are covered by golden fixtures with mandatory lossless round-trips.
+
+## Error contract
+
+Standard methods return standard ACP/JSON-RPC errors. `_echo_agent/*`
+methods use the typed envelope in
+[`error.rs`](../../echo-sdk-protocol/src/error.rs): stable `code`
+(closed set), message, `retryable` classification, optional operation and
+handle identity, and bounded details (no raw payloads, no secrets). Codes
+cover capability/version/digest mismatch, invalid input, feature
+unavailability, stale/closed handles, framework errors, extension bridge
+failures (rejected/failed/timeout/disconnected), cancellation, host
+shutdown/exit, event gap/replay unavailability and payload/serialization
+bound violations.
+
+## Events, replay and gaps
+
+The framework `EventEnvelope` is the event authority; the extension
+notification carries every identity fact (schema version, event id, content
+hash, sequence from 1, parent link, timestamp) plus the payload verbatim.
+Replay is cursor-based (`after_sequence`, bounded `max_events`), and falling
+below the retention floor produces a typed `event_gap` with a snapshot
+watermark — events are incremental facts, never a substitute for a snapshot
+(design §11.2). A run has exactly one authoritative terminal; EOF or process
+exit is never success.
+
+## Versioning and compatibility
+
+- Git revision is the source-delivery compatibility boundary.
+- The extension protocol version (currently `1`), the contract digest
+  (sha256 over the canonical schema document) and the official ACP artifact
+  versions move independently.
+- Additive wire fields are forward-compatible; unknown values surface as
+  `WireUnknown` without crashing older SDKs.
+- Removing fields, changing defaults or terminal/cancel semantics, or
+  reusing an error code is a breaking change: in this development-phase
+  repository such a change updates Host, SDKs, fixtures, manifest and docs
+  in the same commit — no legacy fallback is kept.

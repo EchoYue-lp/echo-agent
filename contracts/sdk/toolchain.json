@@ -1,0 +1,7 @@
+{
+  "comment": "Pinned toolchain for deterministic SDK contract generation. cargo-public-api style rustdoc JSON extraction requires nightly; the exact date is pinned so the rustdoc JSON format (and therefore the inventory snapshot) is reproducible. Consumers building the framework itself never need this toolchain; only contributors regenerating contracts do. Install with: rustup toolchain install <toolchain>.",
+  "rustdoc": {
+    "toolchain": "nightly-2026-08-06",
+    "rustdoc_json_format_version": 61
+  }
+}

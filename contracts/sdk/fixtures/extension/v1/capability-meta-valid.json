@@ -1,0 +1,34 @@
+{
+  "name": "capability-meta-valid",
+  "kind": "valid",
+  "target": "EchoAgentCapability",
+  "description": "initialize._meta payload a Host publishes for the extension profile.",
+  "payload": {
+    "extension_protocol_version": 1,
+    "contract_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "features": [
+      "mcp",
+      "subagent"
+    ],
+    "capabilities": [
+      {
+        "capability": "runs",
+        "required": true
+      },
+      {
+        "capability": "event_replay",
+        "required": false
+      }
+    ],
+    "limits": {
+      "max_message_bytes": 1048576,
+      "max_stream_buffer_events": 1024,
+      "max_callback_concurrency": 8,
+      "callback_timeout": {
+        "nanos": "30000000000"
+      },
+      "max_replay_events": 512,
+      "max_structured_output_bytes": 262144
+    }
+  }
+}

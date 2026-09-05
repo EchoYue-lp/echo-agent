@@ -1,0 +1,19 @@
+{
+  "name": "event-envelope-sequence-zero-invalid",
+  "kind": "invalid",
+  "target": "WireEventEnvelope",
+  "description": "Framework sequences start at one; zero is rejected.",
+  "payload": {
+    "schema_version": 4,
+    "event_id": "event-0",
+    "content_hash": "sha256:x",
+    "sequence": "0",
+    "stream_id": "stream-1",
+    "turn_id": "turn-1",
+    "timestamp": {
+      "unix_nanos": "1"
+    },
+    "payload": {}
+  },
+  "expect_error": "invalid_value"
+}

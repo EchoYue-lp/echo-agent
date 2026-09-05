@@ -1098,6 +1098,16 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Code Search | [EN](docs/en/37-code-search.md) | [ZH](docs/zh/37-code-search.md) |
 | Agent Factory & Model Profiles | [EN](docs/en/38-factory-modes.md) | [ZH](docs/zh/38-factory-modes.md) |
 | Security | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
+| Multilingual SDK (Contract stage) | [EN](docs/sdk/README.md) | — |
+
+### SDK corner
+
+The TypeScript/Python/Java SDK program is at the **Contract** stage: the
+ACP v1 baseline, `_echo_agent/*` extension schema, facade parity manifest
+and drift gates are frozen and CI-enforced; the ACP adapter, SDK Host and
+language SDKs are not implemented yet. Start at
+[docs/sdk/README.md](docs/sdk/README.md) — it is the only SDK entry point
+and states exactly what exists today.
 
 ---
 

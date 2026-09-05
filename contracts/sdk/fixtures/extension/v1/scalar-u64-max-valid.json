@@ -1,0 +1,7 @@
+{
+  "name": "scalar-u64-max-valid",
+  "kind": "valid",
+  "target": "WireU64",
+  "description": "u64::MAX round-trips as a decimal string untouched.",
+  "payload": "18446744073709551615"
+}

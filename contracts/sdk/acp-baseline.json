@@ -1,0 +1,18 @@
+{
+  "comment": "Frozen official ACP baseline for the echo-agent SDK contract. The three version layers are governed independently (design §18): the wire protocol version negotiated via initialize.protocolVersion, the official Rust crate versions, and the schema artifact version. Draft/unstable ACP capabilities (including protocol v2) are intentionally excluded; tests assert the lockfile matches this file and that the official crate's latest stable wire version is 1.",
+  "schema_version": 1,
+  "acp_wire_protocol_version": 1,
+  "official_crates": {
+    "agent-client-protocol": "2.1.0",
+    "agent-client-protocol-schema": "1.7.0"
+  },
+  "schema_artifact": {
+    "source": "agent-client-protocol-schema",
+    "version": "1.7.0",
+    "note": "The official schema crate is the only wire authority; this repository never copies or regenerates official ACP schemas."
+  },
+  "excluded_unstable_features": [
+    "unstable_protocol_v2"
+  ],
+  "verified_at": "2026-09-05"
+}

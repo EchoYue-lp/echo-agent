@@ -1,0 +1,19 @@
+[package]
+name = "echo-sdk-protocol"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+description = "Source-only _echo_agent/* extension contract over the stable ACP v1 baseline for the echo-agent SDK"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.143"
+schemars = "0.8"
+sha2 = "0.10"
+# Official ACP artifacts, pinned exactly. The wire protocol version and the
+# crate/schema artifact versions are governed independently in
+# contracts/sdk/acp-baseline.json; tests assert the lockfile matches it.
+agent-client-protocol = "=2.1.0"
+agent-client-protocol-schema = "=1.7.0"

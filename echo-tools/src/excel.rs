@@ -1422,7 +1422,7 @@ impl Tool for ExcelLoadTool {
                         let dtype = df
                             .column(name)
                             .map(|c| c.dtype().clone())
-                            .unwrap_or_default();
+                            .unwrap_or_else(|_| polars::prelude::DataType::Null);
                         format!("{}: {:?}", name, dtype)
                     })
                     .collect();

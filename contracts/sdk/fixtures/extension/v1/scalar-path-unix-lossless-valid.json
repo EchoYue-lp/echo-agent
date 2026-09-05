@@ -1,0 +1,11 @@
+{
+  "name": "scalar-path-unix-lossless-valid",
+  "kind": "valid",
+  "target": "WirePath",
+  "description": "Non-UTF-8 Unix path bytes survive via base64 with display fallback.",
+  "payload": {
+    "encoding": "unix",
+    "bytes_base64": "L3RtcC/DkfCvMPIh",
+    "display": "/tmp/<lossy>"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "scalar-path-windows-valid",
+  "kind": "valid",
+  "target": "WirePath",
+  "description": "Windows UTF-16 unit sequence preserved verbatim.",
+  "payload": {
+    "encoding": "windows",
+    "utf16_base64": "QwA6AFwAXAA="
+  }
+}

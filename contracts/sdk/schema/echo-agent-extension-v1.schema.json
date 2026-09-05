@@ -1,0 +1,4673 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "echo-agent-extension-v1",
+  "type": "object",
+  "extension_protocol_version": 1,
+  "namespace": "_echo_agent",
+  "acp_wire_protocol_version": 1,
+  "description": "echo-agent SDK extension contract over stable ACP v1. Standard ACP types are owned by the official agent-client-protocol-schema artifact and are intentionally absent from this document.",
+  "method_catalog": [
+    {
+      "name": "_echo_agent/agent/create",
+      "direction": "request",
+      "capability": "agent_lifecycle",
+      "summary": "Construct an agent instance from a typed config; framework validates."
+    },
+    {
+      "name": "_echo_agent/agent/describe",
+      "direction": "request",
+      "capability": "agent_lifecycle",
+      "summary": "Capability snapshot and immutable construction facts of an agent."
+    },
+    {
+      "name": "_echo_agent/agent/close",
+      "direction": "request",
+      "capability": "agent_lifecycle",
+      "summary": "Release an agent; in-flight runs settle via framework semantics."
+    },
+    {
+      "name": "_echo_agent/session/create",
+      "direction": "request",
+      "capability": "session_handles",
+      "summary": "Create an extension session handle on an agent."
+    },
+    {
+      "name": "_echo_agent/session/load",
+      "direction": "request",
+      "capability": "session_handles",
+      "summary": "Resume a persisted session by framework identity."
+    },
+    {
+      "name": "_echo_agent/session/close",
+      "direction": "request",
+      "capability": "session_handles",
+      "summary": "Release a session handle; idempotent."
+    },
+    {
+      "name": "_echo_agent/run/start",
+      "direction": "request",
+      "capability": "runs",
+      "summary": "Start a chat/execute run; returns run handle and first event."
+    },
+    {
+      "name": "_echo_agent/run/get",
+      "direction": "request",
+      "capability": "runs",
+      "summary": "Snapshot run status, last sequence and settled terminal/receipt."
+    },
+    {
+      "name": "_echo_agent/run/wait",
+      "direction": "request",
+      "capability": "runs",
+      "summary": "Bounded wait for the single authoritative terminal."
+    },
+    {
+      "name": "_echo_agent/run/cancel",
+      "direction": "request",
+      "capability": "runs",
+      "summary": "Request cancellation; framework CAS decides the unique outcome."
+    },
+    {
+      "name": "_echo_agent/run/steer",
+      "direction": "request",
+      "capability": "runs",
+      "summary": "Mid-flight steering on supporting runs."
+    },
+    {
+      "name": "_echo_agent/run/replay",
+      "direction": "request",
+      "capability": "event_replay",
+      "summary": "Bounded event replay strictly after a cursor; gap-aware."
+    },
+    {
+      "name": "_echo_agent/event",
+      "direction": "host_notification",
+      "capability": "runs",
+      "summary": "Full EventEnvelope notification for accepted framework events."
+    },
+    {
+      "name": "_echo_agent/gap",
+      "direction": "host_notification",
+      "capability": "event_replay",
+      "summary": "Retention-floor breach notice with snapshot watermark."
+    },
+    {
+      "name": "_echo_agent/task/create",
+      "direction": "request",
+      "capability": "task_graph",
+      "summary": "Create a PlanTask in a revisioned TaskRun graph."
+    },
+    {
+      "name": "_echo_agent/task/update",
+      "direction": "request",
+      "capability": "task_graph",
+      "summary": "Patch a task at an expected revision (optimistic concurrency)."
+    },
+    {
+      "name": "_echo_agent/task/list",
+      "direction": "request",
+      "capability": "task_graph",
+      "summary": "List task identity/status/revision summaries of a TaskRun."
+    },
+    {
+      "name": "_echo_agent/task/execute",
+      "direction": "request",
+      "capability": "task_graph",
+      "summary": "Drive one PlanTask through the framework executor."
+    },
+    {
+      "name": "_echo_agent/task/control",
+      "direction": "request",
+      "capability": "task_graph",
+      "summary": "Pause/resume/cancel a task via the framework service."
+    },
+    {
+      "name": "_echo_agent/subagent/dispatch",
+      "direction": "request",
+      "capability": "subagents",
+      "summary": "Dispatch a subagent execution; framework scheduler owns it."
+    },
+    {
+      "name": "_echo_agent/subagent/await",
+      "direction": "request",
+      "capability": "subagents",
+      "summary": "Bounded wait for a subagent result."
+    },
+    {
+      "name": "_echo_agent/subagent/control",
+      "direction": "request",
+      "capability": "subagents",
+      "summary": "Control verbs for a running subagent."
+    },
+    {
+      "name": "_echo_agent/extension/register",
+      "direction": "request",
+      "capability": "extension_bridge",
+      "summary": "Register a host-language implementation of a public trait."
+    },
+    {
+      "name": "_echo_agent/extension/unregister",
+      "direction": "request",
+      "capability": "extension_bridge",
+      "summary": "Release a registered extension; idempotent."
+    },
+    {
+      "name": "_echo_agent/extension/invoke",
+      "direction": "reverse_request",
+      "capability": "extension_bridge",
+      "summary": "Host -> SDK reverse call into a registered implementation."
+    },
+    {
+      "name": "_echo_agent/extension/cancel",
+      "direction": "host_notification",
+      "capability": "extension_bridge",
+      "summary": "Host -> SDK cancellation notice for an in-flight invocation."
+    },
+    {
+      "name": "_echo_agent/structured_output/validate",
+      "direction": "request",
+      "capability": "structured_output",
+      "summary": "Validate a structured-output contract against the facade schema."
+    },
+    {
+      "name": "_echo_agent/memory/op",
+      "direction": "request",
+      "capability": "runs",
+      "summary": "Memory store operations projected verbatim until typed DTOs land."
+    },
+    {
+      "name": "_echo_agent/workflow/op",
+      "direction": "request",
+      "capability": "runs",
+      "summary": "Workflow definition/execution operations."
+    },
+    {
+      "name": "_echo_agent/state/op",
+      "direction": "request",
+      "capability": "runs",
+      "summary": "State/delivery/trace operations over framework stores."
+    }
+  ],
+  "definitions": {
+    "WireU64": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WireU64",
+      "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+      "type": "string"
+    },
+    "WireDuration": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WireDuration",
+      "description": "A duration carried losslessly as nanoseconds.",
+      "type": "object",
+      "required": [
+        "nanos"
+      ],
+      "properties": {
+        "nanos": {
+          "$ref": "#/definitions/WireU64"
+        }
+      },
+      "definitions": {
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "WireTimestamp": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WireTimestamp",
+      "description": "A timestamp carried losslessly as nanoseconds since the Unix epoch, plus the RFC 3339 rendering for display. `rfc3339` is informational only; `unix_nanos` is the authority.",
+      "type": "object",
+      "required": [
+        "unix_nanos"
+      ],
+      "properties": {
+        "rfc3339": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unix_nanos": {
+          "$ref": "#/definitions/WireU64"
+        }
+      },
+      "definitions": {
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "WirePath": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WirePath",
+      "description": "A local filesystem path that standard ACP UTF-8 rules cannot express losslessly (design §10.5). Exactly one physical representation is set; `display` is a human-readable convenience and never the authority.",
+      "oneOf": [
+        {
+          "description": "Absolute Unix path with its original bytes (base64). Preserves non-UTF-8 byte sequences.",
+          "type": "object",
+          "required": [
+            "bytes_base64",
+            "encoding"
+          ],
+          "properties": {
+            "bytes_base64": {
+              "type": "string"
+            },
+            "display": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "encoding": {
+              "type": "string",
+              "enum": [
+                "unix"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Absolute Windows path with original UTF-16 units (base64 of the little-endian unit sequence).",
+          "type": "object",
+          "required": [
+            "encoding",
+            "utf16_base64"
+          ],
+          "properties": {
+            "display": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "encoding": {
+              "type": "string",
+              "enum": [
+                "windows"
+              ]
+            },
+            "utf16_base64": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Path that is exactly representable as an absolute UTF-8 string.",
+          "type": "object",
+          "required": [
+            "encoding",
+            "path"
+          ],
+          "properties": {
+            "encoding": {
+              "type": "string",
+              "enum": [
+                "utf8"
+              ]
+            },
+            "path": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "WireBytes": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WireBytes",
+      "description": "Opaque binary payload, base64-encoded.",
+      "type": "object",
+      "required": [
+        "base64"
+      ],
+      "properties": {
+        "base64": {
+          "type": "string"
+        }
+      }
+    },
+    "WireUnknown": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WireUnknown",
+      "description": "A typed view over an unknown additive extension value (design §18): older SDKs must observe unknown events without crashing, retaining the original type tag and a bounded payload.",
+      "type": "object",
+      "required": [
+        "type_tag"
+      ],
+      "properties": {
+        "payload": true,
+        "type_tag": {
+          "type": "string"
+        }
+      }
+    },
+    "WireHandle": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WireHandle",
+      "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+      "type": "object",
+      "required": [
+        "generation",
+        "id",
+        "kind"
+      ],
+      "properties": {
+        "generation": {
+          "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "id": {
+          "description": "Non-empty domain identity assigned by the framework.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/HandleKind"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "HandleKind": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "HandleKind",
+      "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+      "type": "string",
+      "enum": [
+        "agent",
+        "session",
+        "run",
+        "task_run",
+        "plan_task",
+        "subagent",
+        "extension"
+      ]
+    },
+    "EchoSdkError": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "EchoSdkError",
+      "description": "The typed `_echo_agent/*` error envelope.",
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ExtensionErrorCode"
+        },
+        "details": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ErrorDetails"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "handle": {
+          "description": "Handle the error refers to, when applicable.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "operation": {
+          "description": "Domain operation identity (e.g. `run/start`), independent from any JSON-RPC request id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retryable": {
+          "$ref": "#/definitions/Retryability"
+        }
+      },
+      "definitions": {
+        "DetailField": {
+          "type": "object",
+          "required": [
+            "key",
+            "value"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        },
+        "ErrorDetails": {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "description": "Bounded key/value facts; values are strings, never raw payloads.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/DetailField"
+              }
+            }
+          }
+        },
+        "ExtensionErrorCode": {
+          "description": "Stable extension error codes. Codes are closed: reusing a retired code for a different meaning is a breaking protocol change (design §18).",
+          "oneOf": [
+            {
+              "description": "Peer does not speak a compatible ACP wire protocol version.",
+              "type": "string",
+              "enum": [
+                "acp_protocol_mismatch"
+              ]
+            },
+            {
+              "description": "Peer's `_echo_agent` extension protocol version is incompatible.",
+              "type": "string",
+              "enum": [
+                "extension_version_mismatch"
+              ]
+            },
+            {
+              "description": "Extension contract/source digest mismatch.",
+              "type": "string",
+              "enum": [
+                "extension_digest_mismatch"
+              ]
+            },
+            {
+              "description": "Required extension capability missing or unsupported.",
+              "type": "string",
+              "enum": [
+                "extension_capability_mismatch"
+              ]
+            },
+            {
+              "description": "Malformed request (structure, method usage, ordering).",
+              "type": "string",
+              "enum": [
+                "invalid_request"
+              ]
+            },
+            {
+              "description": "Semantically invalid configuration.",
+              "type": "string",
+              "enum": [
+                "invalid_config"
+              ]
+            },
+            {
+              "description": "Semantically invalid value (scalars, paths, payload shapes).",
+              "type": "string",
+              "enum": [
+                "invalid_value"
+              ]
+            },
+            {
+              "description": "Operation requires a feature the Host was not compiled with.",
+              "type": "string",
+              "enum": [
+                "feature_unavailable"
+              ]
+            },
+            {
+              "description": "Handle generation no longer matches the live object.",
+              "type": "string",
+              "enum": [
+                "stale_handle"
+              ]
+            },
+            {
+              "description": "Handle refers to an object that has been closed/destroyed.",
+              "type": "string",
+              "enum": [
+                "closed_handle"
+              ]
+            },
+            {
+              "description": "Framework returned a typed domain error.",
+              "type": "string",
+              "enum": [
+                "framework_error"
+              ]
+            },
+            {
+              "description": "Registered extension rejected the invocation.",
+              "type": "string",
+              "enum": [
+                "extension_rejected"
+              ]
+            },
+            {
+              "description": "Registered extension failed while executing.",
+              "type": "string",
+              "enum": [
+                "extension_failed"
+              ]
+            },
+            {
+              "description": "Extension invocation exceeded its deadline.",
+              "type": "string",
+              "enum": [
+                "extension_timeout"
+              ]
+            },
+            {
+              "description": "Extension's SDK connection is gone.",
+              "type": "string",
+              "enum": [
+                "extension_disconnected"
+              ]
+            },
+            {
+              "description": "Operation was cancelled; framework terminal state remains authoritative.",
+              "type": "string",
+              "enum": [
+                "cancelled"
+              ]
+            },
+            {
+              "description": "Host is shutting down and refuses new work.",
+              "type": "string",
+              "enum": [
+                "host_shutting_down"
+              ]
+            },
+            {
+              "description": "Host process exited before the operation settled.",
+              "type": "string",
+              "enum": [
+                "host_exited"
+              ]
+            },
+            {
+              "description": "Consumer fell below the retained watermark.",
+              "type": "string",
+              "enum": [
+                "event_gap"
+              ]
+            },
+            {
+              "description": "Replay is unavailable for the requested window.",
+              "type": "string",
+              "enum": [
+                "replay_unavailable"
+              ]
+            },
+            {
+              "description": "Payload exceeds the negotiated bound.",
+              "type": "string",
+              "enum": [
+                "payload_too_large"
+              ]
+            },
+            {
+              "description": "Payload violates the extension serialization contract.",
+              "type": "string",
+              "enum": [
+                "serialization_violation"
+              ]
+            }
+          ]
+        },
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "Retryability": {
+          "description": "Whether an operation may be retried and when (design §10.6). Only the framework's own operation contract decides to actually retry; this field tells language SDKs what is *safe* to retry.",
+          "type": "string",
+          "enum": [
+            "never",
+            "always",
+            "after_delay"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "ExtensionErrorCode": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ExtensionErrorCode",
+      "description": "Stable extension error codes. Codes are closed: reusing a retired code for a different meaning is a breaking protocol change (design §18).",
+      "oneOf": [
+        {
+          "description": "Peer does not speak a compatible ACP wire protocol version.",
+          "type": "string",
+          "enum": [
+            "acp_protocol_mismatch"
+          ]
+        },
+        {
+          "description": "Peer's `_echo_agent` extension protocol version is incompatible.",
+          "type": "string",
+          "enum": [
+            "extension_version_mismatch"
+          ]
+        },
+        {
+          "description": "Extension contract/source digest mismatch.",
+          "type": "string",
+          "enum": [
+            "extension_digest_mismatch"
+          ]
+        },
+        {
+          "description": "Required extension capability missing or unsupported.",
+          "type": "string",
+          "enum": [
+            "extension_capability_mismatch"
+          ]
+        },
+        {
+          "description": "Malformed request (structure, method usage, ordering).",
+          "type": "string",
+          "enum": [
+            "invalid_request"
+          ]
+        },
+        {
+          "description": "Semantically invalid configuration.",
+          "type": "string",
+          "enum": [
+            "invalid_config"
+          ]
+        },
+        {
+          "description": "Semantically invalid value (scalars, paths, payload shapes).",
+          "type": "string",
+          "enum": [
+            "invalid_value"
+          ]
+        },
+        {
+          "description": "Operation requires a feature the Host was not compiled with.",
+          "type": "string",
+          "enum": [
+            "feature_unavailable"
+          ]
+        },
+        {
+          "description": "Handle generation no longer matches the live object.",
+          "type": "string",
+          "enum": [
+            "stale_handle"
+          ]
+        },
+        {
+          "description": "Handle refers to an object that has been closed/destroyed.",
+          "type": "string",
+          "enum": [
+            "closed_handle"
+          ]
+        },
+        {
+          "description": "Framework returned a typed domain error.",
+          "type": "string",
+          "enum": [
+            "framework_error"
+          ]
+        },
+        {
+          "description": "Registered extension rejected the invocation.",
+          "type": "string",
+          "enum": [
+            "extension_rejected"
+          ]
+        },
+        {
+          "description": "Registered extension failed while executing.",
+          "type": "string",
+          "enum": [
+            "extension_failed"
+          ]
+        },
+        {
+          "description": "Extension invocation exceeded its deadline.",
+          "type": "string",
+          "enum": [
+            "extension_timeout"
+          ]
+        },
+        {
+          "description": "Extension's SDK connection is gone.",
+          "type": "string",
+          "enum": [
+            "extension_disconnected"
+          ]
+        },
+        {
+          "description": "Operation was cancelled; framework terminal state remains authoritative.",
+          "type": "string",
+          "enum": [
+            "cancelled"
+          ]
+        },
+        {
+          "description": "Host is shutting down and refuses new work.",
+          "type": "string",
+          "enum": [
+            "host_shutting_down"
+          ]
+        },
+        {
+          "description": "Host process exited before the operation settled.",
+          "type": "string",
+          "enum": [
+            "host_exited"
+          ]
+        },
+        {
+          "description": "Consumer fell below the retained watermark.",
+          "type": "string",
+          "enum": [
+            "event_gap"
+          ]
+        },
+        {
+          "description": "Replay is unavailable for the requested window.",
+          "type": "string",
+          "enum": [
+            "replay_unavailable"
+          ]
+        },
+        {
+          "description": "Payload exceeds the negotiated bound.",
+          "type": "string",
+          "enum": [
+            "payload_too_large"
+          ]
+        },
+        {
+          "description": "Payload violates the extension serialization contract.",
+          "type": "string",
+          "enum": [
+            "serialization_violation"
+          ]
+        }
+      ]
+    },
+    "Retryability": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Retryability",
+      "description": "Whether an operation may be retried and when (design §10.6). Only the framework's own operation contract decides to actually retry; this field tells language SDKs what is *safe* to retry.",
+      "type": "string",
+      "enum": [
+        "never",
+        "always",
+        "after_delay"
+      ]
+    },
+    "ErrorDetails": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ErrorDetails",
+      "type": "object",
+      "properties": {
+        "fields": {
+          "description": "Bounded key/value facts; values are strings, never raw payloads.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/DetailField"
+          }
+        }
+      },
+      "definitions": {
+        "DetailField": {
+          "type": "object",
+          "required": [
+            "key",
+            "value"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "WireEventEnvelope": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WireEventEnvelope",
+      "description": "Lossless wire view of one framework `EventEnvelope`.",
+      "type": "object",
+      "required": [
+        "content_hash",
+        "event_id",
+        "payload",
+        "schema_version",
+        "sequence",
+        "stream_id",
+        "timestamp",
+        "turn_id"
+      ],
+      "properties": {
+        "content_hash": {
+          "description": "Integrity digest of the parent link and payload slot.",
+          "type": "string"
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_id": {
+          "description": "Stable event identity (non-empty).",
+          "type": "string"
+        },
+        "execution_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payload": {
+          "description": "The framework `AgentEvent` serialized verbatim. Unknown additive variants survive as JSON for older SDKs (design §18)."
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "description": "Framework event schema version (currently 4).",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "sequence": {
+          "description": "Monotonic sequence within the stream, starting at 1.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "stream_id": {
+          "description": "Identity facts preserved one-to-one from the framework envelope.",
+          "type": "string"
+        },
+        "timestamp": {
+          "description": "Authoritative timestamp (nanoseconds since Unix epoch).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireTimestamp"
+            }
+          ]
+        },
+        "turn_id": {
+          "type": "string"
+        },
+        "unknown": {
+          "description": "Typed view of a payload the local contract revision does not know.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireUnknown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "definitions": {
+        "WireTimestamp": {
+          "description": "A timestamp carried losslessly as nanoseconds since the Unix epoch, plus the RFC 3339 rendering for display. `rfc3339` is informational only; `unix_nanos` is the authority.",
+          "type": "object",
+          "required": [
+            "unix_nanos"
+          ],
+          "properties": {
+            "rfc3339": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unix_nanos": {
+              "$ref": "#/definitions/WireU64"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        },
+        "WireUnknown": {
+          "description": "A typed view over an unknown additive extension value (design §18): older SDKs must observe unknown events without crashing, retaining the original type tag and a bounded payload.",
+          "type": "object",
+          "required": [
+            "type_tag"
+          ],
+          "properties": {
+            "payload": true,
+            "type_tag": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "EventNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "EventNotification",
+      "description": "`_echo_agent/event` notification body: one accepted framework event, delivered to consumers that negotiated the extension profile.",
+      "type": "object",
+      "required": [
+        "envelope"
+      ],
+      "properties": {
+        "envelope": {
+          "$ref": "#/definitions/WireEventEnvelope"
+        }
+      },
+      "definitions": {
+        "WireEventEnvelope": {
+          "description": "Lossless wire view of one framework `EventEnvelope`.",
+          "type": "object",
+          "required": [
+            "content_hash",
+            "event_id",
+            "payload",
+            "schema_version",
+            "sequence",
+            "stream_id",
+            "timestamp",
+            "turn_id"
+          ],
+          "properties": {
+            "content_hash": {
+              "description": "Integrity digest of the parent link and payload slot.",
+              "type": "string"
+            },
+            "conversation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "event_id": {
+              "description": "Stable event identity (non-empty).",
+              "type": "string"
+            },
+            "execution_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_event_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "payload": {
+              "description": "The framework `AgentEvent` serialized verbatim. Unknown additive variants survive as JSON for older SDKs (design §18)."
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "schema_version": {
+              "description": "Framework event schema version (currently 4).",
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "sequence": {
+              "description": "Monotonic sequence within the stream, starting at 1.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "stream_id": {
+              "description": "Identity facts preserved one-to-one from the framework envelope.",
+              "type": "string"
+            },
+            "timestamp": {
+              "description": "Authoritative timestamp (nanoseconds since Unix epoch).",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireTimestamp"
+                }
+              ]
+            },
+            "turn_id": {
+              "type": "string"
+            },
+            "unknown": {
+              "description": "Typed view of a payload the local contract revision does not know.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WireUnknown"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "WireTimestamp": {
+          "description": "A timestamp carried losslessly as nanoseconds since the Unix epoch, plus the RFC 3339 rendering for display. `rfc3339` is informational only; `unix_nanos` is the authority.",
+          "type": "object",
+          "required": [
+            "unix_nanos"
+          ],
+          "properties": {
+            "rfc3339": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unix_nanos": {
+              "$ref": "#/definitions/WireU64"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        },
+        "WireUnknown": {
+          "description": "A typed view over an unknown additive extension value (design §18): older SDKs must observe unknown events without crashing, retaining the original type tag and a bounded payload.",
+          "type": "object",
+          "required": [
+            "type_tag"
+          ],
+          "properties": {
+            "payload": true,
+            "type_tag": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "EventCursor": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "EventCursor",
+      "description": "Cursor semantics: consumers acknowledge the last sequence they processed; replay resumes strictly after it (design §11.2).",
+      "type": "object",
+      "required": [
+        "last_processed_sequence",
+        "stream_id"
+      ],
+      "properties": {
+        "last_processed_sequence": {
+          "description": "Last sequence the consumer has fully processed.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "stream_id": {
+          "type": "string"
+        }
+      },
+      "definitions": {
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "ReplayRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ReplayRequest",
+      "description": "`_echo_agent/run/replay` request.",
+      "type": "object",
+      "required": [
+        "after_sequence",
+        "stream_id"
+      ],
+      "properties": {
+        "after_sequence": {
+          "description": "Replay starts strictly after this sequence.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_events": {
+          "description": "Upper bound on returned events; the Host enforces its own maximum.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stream_id": {
+          "type": "string"
+        }
+      },
+      "definitions": {
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "ReplayResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ReplayResponse",
+      "description": "`_echo_agent/run/replay` response. `next_cursor` is the position to resume from; `gap` is set when the requested window fell below the retained watermark.",
+      "type": "object",
+      "required": [
+        "events",
+        "next_cursor"
+      ],
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WireEventEnvelope"
+          }
+        },
+        "gap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EventGap"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_cursor": {
+          "$ref": "#/definitions/EventCursor"
+        }
+      },
+      "definitions": {
+        "EventCursor": {
+          "description": "Cursor semantics: consumers acknowledge the last sequence they processed; replay resumes strictly after it (design §11.2).",
+          "type": "object",
+          "required": [
+            "last_processed_sequence",
+            "stream_id"
+          ],
+          "properties": {
+            "last_processed_sequence": {
+              "description": "Last sequence the consumer has fully processed.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "stream_id": {
+              "type": "string"
+            }
+          }
+        },
+        "EventGap": {
+          "description": "A hole in the retained event history. Events are incremental facts (design §11.2): after a gap the consumer must consult the snapshot at `snapshot_watermark` instead of inferring state from partial events.",
+          "type": "object",
+          "required": [
+            "from_sequence",
+            "reason",
+            "snapshot_watermark",
+            "to_sequence"
+          ],
+          "properties": {
+            "from_sequence": {
+              "description": "First missing sequence (inclusive).",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "reason": {
+              "description": "Why the events are no longer available (retention floor, restart, ...).",
+              "type": "string"
+            },
+            "snapshot_watermark": {
+              "description": "Sequence at which a snapshot may be queried to rebuild state.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "to_sequence": {
+              "description": "Last missing sequence (inclusive).",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            }
+          }
+        },
+        "WireEventEnvelope": {
+          "description": "Lossless wire view of one framework `EventEnvelope`.",
+          "type": "object",
+          "required": [
+            "content_hash",
+            "event_id",
+            "payload",
+            "schema_version",
+            "sequence",
+            "stream_id",
+            "timestamp",
+            "turn_id"
+          ],
+          "properties": {
+            "content_hash": {
+              "description": "Integrity digest of the parent link and payload slot.",
+              "type": "string"
+            },
+            "conversation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "event_id": {
+              "description": "Stable event identity (non-empty).",
+              "type": "string"
+            },
+            "execution_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_event_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "payload": {
+              "description": "The framework `AgentEvent` serialized verbatim. Unknown additive variants survive as JSON for older SDKs (design §18)."
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "schema_version": {
+              "description": "Framework event schema version (currently 4).",
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "sequence": {
+              "description": "Monotonic sequence within the stream, starting at 1.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "stream_id": {
+              "description": "Identity facts preserved one-to-one from the framework envelope.",
+              "type": "string"
+            },
+            "timestamp": {
+              "description": "Authoritative timestamp (nanoseconds since Unix epoch).",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireTimestamp"
+                }
+              ]
+            },
+            "turn_id": {
+              "type": "string"
+            },
+            "unknown": {
+              "description": "Typed view of a payload the local contract revision does not know.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WireUnknown"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "WireTimestamp": {
+          "description": "A timestamp carried losslessly as nanoseconds since the Unix epoch, plus the RFC 3339 rendering for display. `rfc3339` is informational only; `unix_nanos` is the authority.",
+          "type": "object",
+          "required": [
+            "unix_nanos"
+          ],
+          "properties": {
+            "rfc3339": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unix_nanos": {
+              "$ref": "#/definitions/WireU64"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        },
+        "WireUnknown": {
+          "description": "A typed view over an unknown additive extension value (design §18): older SDKs must observe unknown events without crashing, retaining the original type tag and a bounded payload.",
+          "type": "object",
+          "required": [
+            "type_tag"
+          ],
+          "properties": {
+            "payload": true,
+            "type_tag": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "EventGap": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "EventGap",
+      "description": "A hole in the retained event history. Events are incremental facts (design §11.2): after a gap the consumer must consult the snapshot at `snapshot_watermark` instead of inferring state from partial events.",
+      "type": "object",
+      "required": [
+        "from_sequence",
+        "reason",
+        "snapshot_watermark",
+        "to_sequence"
+      ],
+      "properties": {
+        "from_sequence": {
+          "description": "First missing sequence (inclusive).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "reason": {
+          "description": "Why the events are no longer available (retention floor, restart, ...).",
+          "type": "string"
+        },
+        "snapshot_watermark": {
+          "description": "Sequence at which a snapshot may be queried to rebuild state.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "to_sequence": {
+          "description": "Last missing sequence (inclusive).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        }
+      },
+      "definitions": {
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "GapNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "GapNotification",
+      "description": "`_echo_agent/gap` notification body: live consumers crossing the retention floor receive this instead of silently dropped events.",
+      "type": "object",
+      "required": [
+        "gap"
+      ],
+      "properties": {
+        "gap": {
+          "$ref": "#/definitions/EventGap"
+        }
+      },
+      "definitions": {
+        "EventGap": {
+          "description": "A hole in the retained event history. Events are incremental facts (design §11.2): after a gap the consumer must consult the snapshot at `snapshot_watermark` instead of inferring state from partial events.",
+          "type": "object",
+          "required": [
+            "from_sequence",
+            "reason",
+            "snapshot_watermark",
+            "to_sequence"
+          ],
+          "properties": {
+            "from_sequence": {
+              "description": "First missing sequence (inclusive).",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "reason": {
+              "description": "Why the events are no longer available (retention floor, restart, ...).",
+              "type": "string"
+            },
+            "snapshot_watermark": {
+              "description": "Sequence at which a snapshot may be queried to rebuild state.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "to_sequence": {
+              "description": "Last missing sequence (inclusive).",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "EchoAgentCapability": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "EchoAgentCapability",
+      "description": "The capability object published under `initialize._meta.echo_agent`.",
+      "type": "object",
+      "required": [
+        "capabilities",
+        "contract_digest",
+        "extension_protocol_version",
+        "features",
+        "limits"
+      ],
+      "properties": {
+        "capabilities": {
+          "description": "Declared extension capabilities with required/optional flag.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CapabilityDeclaration"
+          }
+        },
+        "contract_digest": {
+          "description": "Digest of the extension contract (schema + catalog), computed by the schema export tool and pinned in the contract artifacts.",
+          "type": "string"
+        },
+        "extension_protocol_version": {
+          "description": "`_echo_agent` extension protocol version (governed independently from the ACP wire version and crate versions, design §18).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "features": {
+          "description": "Leaf Cargo features compiled into the Host, sorted. Operations requiring absent features fail with `feature_unavailable`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limits": {
+          "$ref": "#/definitions/EchoLimits"
+        }
+      },
+      "definitions": {
+        "CapabilityDeclaration": {
+          "description": "One declared capability. Required capabilities must be understood by the SDK client for initialization to succeed; optional ones may be ignored.",
+          "type": "object",
+          "required": [
+            "capability",
+            "required"
+          ],
+          "properties": {
+            "capability": {
+              "$ref": "#/definitions/ExtensionCapability"
+            },
+            "required": {
+              "type": "boolean"
+            }
+          }
+        },
+        "EchoLimits": {
+          "description": "Resource bounds the Host enforces (design §10.2/§16). All bounds are inclusive maxima; exceeding them fails with the matching typed extension error instead of unbounded growth.",
+          "type": "object",
+          "required": [
+            "callback_timeout",
+            "max_callback_concurrency",
+            "max_message_bytes",
+            "max_replay_events",
+            "max_stream_buffer_events",
+            "max_structured_output_bytes"
+          ],
+          "properties": {
+            "callback_timeout": {
+              "description": "Default reverse-callback deadline.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireDuration"
+                }
+              ]
+            },
+            "max_callback_concurrency": {
+              "description": "Maximum concurrently executing reverse callbacks.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "max_message_bytes": {
+              "description": "Maximum serialized request/response payload in bytes.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_replay_events": {
+              "description": "Maximum events returned by one replay request.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_stream_buffer_events": {
+              "description": "Maximum events buffered per subscriber before backpressure/gap.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_structured_output_bytes": {
+              "description": "Maximum structured output payload in bytes.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          }
+        },
+        "ExtensionCapability": {
+          "description": "Extension capabilities the Host may expose. Each maps to a family of `_echo_agent/*` methods; the method catalog asserts that every method's required capability is declared here.",
+          "oneOf": [
+            {
+              "description": "`agent/*` construction, description and close.",
+              "type": "string",
+              "enum": [
+                "agent_lifecycle"
+              ]
+            },
+            {
+              "description": "`session/*` extension handles beyond standard ACP sessions.",
+              "type": "string",
+              "enum": [
+                "session_handles"
+              ]
+            },
+            {
+              "description": "`run/*` start, wait, steer, cancel and receipts.",
+              "type": "string",
+              "enum": [
+                "runs"
+              ]
+            },
+            {
+              "description": "`run/replay` bounded event replay and gap reporting.",
+              "type": "string",
+              "enum": [
+                "event_replay"
+              ]
+            },
+            {
+              "description": "`task/*` TaskRun/PlanTask graph operations.",
+              "type": "string",
+              "enum": [
+                "task_graph"
+              ]
+            },
+            {
+              "description": "`subagent/*` dispatch and control.",
+              "type": "string",
+              "enum": [
+                "subagents"
+              ]
+            },
+            {
+              "description": "`extension/*` registration and reverse invocation bridge.",
+              "type": "string",
+              "enum": [
+                "extension_bridge"
+              ]
+            },
+            {
+              "description": "Structured output contracts on runs.",
+              "type": "string",
+              "enum": [
+                "structured_output"
+              ]
+            }
+          ]
+        },
+        "WireDuration": {
+          "description": "A duration carried losslessly as nanoseconds.",
+          "type": "object",
+          "required": [
+            "nanos"
+          ],
+          "properties": {
+            "nanos": {
+              "$ref": "#/definitions/WireU64"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "AgentCreateRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "AgentCreateRequest",
+      "description": "`_echo_agent/agent/create` request. The full construction grammar of the Rust builder is projected as a typed, versioned config value; the Host remains the validation authority.",
+      "type": "object",
+      "required": [
+        "config"
+      ],
+      "properties": {
+        "config": {
+          "description": "Framework agent construction config, verbatim (schema owned by the facade DTOs the adapter plan will map)."
+        },
+        "idempotency_id": {
+          "description": "Client-assigned idempotency identity; independent from JSON-RPC ids.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "AgentCreateResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "AgentCreateResponse",
+      "description": "`_echo_agent/agent/create` response.",
+      "type": "object",
+      "required": [
+        "agent"
+      ],
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "AgentDescribeRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "AgentDescribeRequest",
+      "description": "`_echo_agent/agent/describe` request/response.",
+      "type": "object",
+      "required": [
+        "agent"
+      ],
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "AgentDescribeResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "AgentDescribeResponse",
+      "type": "object",
+      "required": [
+        "snapshot"
+      ],
+      "properties": {
+        "snapshot": {
+          "description": "Immutable construction facts and capability snapshot of the agent."
+        }
+      }
+    },
+    "AgentCloseRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "AgentCloseRequest",
+      "description": "`_echo_agent/agent/close` request. In-flight runs settle per the framework's own cancellation semantics; closing never fabricates terminals.",
+      "type": "object",
+      "required": [
+        "agent"
+      ],
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "AgentCloseResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "AgentCloseResponse",
+      "type": "object",
+      "required": [
+        "released"
+      ],
+      "properties": {
+        "released": {
+          "description": "True when this call released the agent; false when it was already closed (idempotent close).",
+          "type": "boolean"
+        }
+      }
+    },
+    "SessionCreateRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionCreateRequest",
+      "description": "`_echo_agent/session/create` request.",
+      "type": "object",
+      "required": [
+        "agent"
+      ],
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/WireHandle"
+        },
+        "config": {
+          "description": "Session configuration, verbatim."
+        },
+        "idempotency_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "SessionCreateResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionCreateResponse",
+      "type": "object",
+      "required": [
+        "session"
+      ],
+      "properties": {
+        "session": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "SessionLoadRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionLoadRequest",
+      "description": "`_echo_agent/session/load` request: resume a persisted session by framework identity. Only stores that support persistence can serve it.",
+      "type": "object",
+      "required": [
+        "agent",
+        "session_id"
+      ],
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/WireHandle"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "SessionLoadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionLoadResponse",
+      "type": "object",
+      "required": [
+        "session"
+      ],
+      "properties": {
+        "recovered_sequence": {
+          "description": "Sequence watermark the session recovered to, when replayable.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "SessionCloseRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionCloseRequest",
+      "description": "`_echo_agent/session/close` request/response.",
+      "type": "object",
+      "required": [
+        "session"
+      ],
+      "properties": {
+        "session": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "SessionCloseResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionCloseResponse",
+      "type": "object",
+      "required": [
+        "released"
+      ],
+      "properties": {
+        "released": {
+          "type": "boolean"
+        }
+      }
+    },
+    "RunInput": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunInput",
+      "description": "Input of one run: chat prompt parts or execute directive, carried verbatim from the facade request types.",
+      "type": "object",
+      "required": [
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "kind": {
+          "description": "`chat` or `execute`, mirroring the facade's unified turn driver.",
+          "type": "string"
+        },
+        "payload": {
+          "description": "Facade request payload, verbatim (TurnRequest/ChatRequest shape)."
+        }
+      }
+    },
+    "RunStartRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunStartRequest",
+      "description": "`_echo_agent/run/start` request.",
+      "type": "object",
+      "required": [
+        "input",
+        "session"
+      ],
+      "properties": {
+        "idempotency_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input": {
+          "$ref": "#/definitions/RunInput"
+        },
+        "session": {
+          "$ref": "#/definitions/WireHandle"
+        },
+        "structured_output": {
+          "description": "Optional structured-output contract; validated by the framework."
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "RunInput": {
+          "description": "Input of one run: chat prompt parts or execute directive, carried verbatim from the facade request types.",
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "description": "`chat` or `execute`, mirroring the facade's unified turn driver.",
+              "type": "string"
+            },
+            "payload": {
+              "description": "Facade request payload, verbatim (TurnRequest/ChatRequest shape)."
+            }
+          }
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "RunStartResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunStartResponse",
+      "type": "object",
+      "required": [
+        "run"
+      ],
+      "properties": {
+        "first_event": {
+          "description": "First accepted event of the run, if already available.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireEventEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireEventEnvelope": {
+          "description": "Lossless wire view of one framework `EventEnvelope`.",
+          "type": "object",
+          "required": [
+            "content_hash",
+            "event_id",
+            "payload",
+            "schema_version",
+            "sequence",
+            "stream_id",
+            "timestamp",
+            "turn_id"
+          ],
+          "properties": {
+            "content_hash": {
+              "description": "Integrity digest of the parent link and payload slot.",
+              "type": "string"
+            },
+            "conversation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "event_id": {
+              "description": "Stable event identity (non-empty).",
+              "type": "string"
+            },
+            "execution_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_event_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "payload": {
+              "description": "The framework `AgentEvent` serialized verbatim. Unknown additive variants survive as JSON for older SDKs (design §18)."
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "schema_version": {
+              "description": "Framework event schema version (currently 4).",
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "sequence": {
+              "description": "Monotonic sequence within the stream, starting at 1.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "stream_id": {
+              "description": "Identity facts preserved one-to-one from the framework envelope.",
+              "type": "string"
+            },
+            "timestamp": {
+              "description": "Authoritative timestamp (nanoseconds since Unix epoch).",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireTimestamp"
+                }
+              ]
+            },
+            "turn_id": {
+              "type": "string"
+            },
+            "unknown": {
+              "description": "Typed view of a payload the local contract revision does not know.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WireUnknown"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireTimestamp": {
+          "description": "A timestamp carried losslessly as nanoseconds since the Unix epoch, plus the RFC 3339 rendering for display. `rfc3339` is informational only; `unix_nanos` is the authority.",
+          "type": "object",
+          "required": [
+            "unix_nanos"
+          ],
+          "properties": {
+            "rfc3339": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unix_nanos": {
+              "$ref": "#/definitions/WireU64"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        },
+        "WireUnknown": {
+          "description": "A typed view over an unknown additive extension value (design §18): older SDKs must observe unknown events without crashing, retaining the original type tag and a bounded payload.",
+          "type": "object",
+          "required": [
+            "type_tag"
+          ],
+          "properties": {
+            "payload": true,
+            "type_tag": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "RunGetRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunGetRequest",
+      "description": "`_echo_agent/run/get` request/response.",
+      "type": "object",
+      "required": [
+        "run"
+      ],
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "RunGetResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunGetResponse",
+      "description": "Run state snapshot: status, the single authoritative terminal (when settled) and the receipt facts. Never synthesizes a terminal that the framework has not emitted (exactly-one-terminal, design §11.1).",
+      "type": "object",
+      "required": [
+        "last_sequence",
+        "status"
+      ],
+      "properties": {
+        "last_sequence": {
+          "description": "Last sequence the snapshot covers.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "receipt": true,
+        "status": {
+          "type": "string"
+        },
+        "terminal": true
+      },
+      "definitions": {
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "RunWaitRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunWaitRequest",
+      "description": "`_echo_agent/run/wait` request: bounded wait for the terminal.",
+      "type": "object",
+      "required": [
+        "run"
+      ],
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireDuration": {
+          "description": "A duration carried losslessly as nanoseconds.",
+          "type": "object",
+          "required": [
+            "nanos"
+          ],
+          "properties": {
+            "nanos": {
+              "$ref": "#/definitions/WireU64"
+            }
+          }
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "RunWaitResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunWaitResponse",
+      "type": "object",
+      "required": [
+        "settled"
+      ],
+      "properties": {
+        "receipt": true,
+        "settled": {
+          "type": "boolean"
+        },
+        "terminal": true
+      }
+    },
+    "RunCancelRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunCancelRequest",
+      "description": "`_echo_agent/run/cancel` request. Competing with natural completion, the framework's own CAS/terminal semantics decide the unique outcome; the transport never writes a second terminal (design §14.3).",
+      "type": "object",
+      "required": [
+        "run"
+      ],
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "RunCancelResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunCancelResponse",
+      "type": "object",
+      "required": [
+        "cancellation_initiated",
+        "status"
+      ],
+      "properties": {
+        "cancellation_initiated": {
+          "description": "Whether this call initiated cancellation.",
+          "type": "boolean"
+        },
+        "status": {
+          "description": "Status at the time of the call; final state still arrives as events.",
+          "type": "string"
+        }
+      }
+    },
+    "RunSteerRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunSteerRequest",
+      "description": "`_echo_agent/run/steer` request: mid-flight steering for chats that support it.",
+      "type": "object",
+      "required": [
+        "payload",
+        "run"
+      ],
+      "properties": {
+        "payload": true,
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "RunSteerResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "RunSteerResponse",
+      "type": "object",
+      "required": [
+        "accepted"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "TaskCreateRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskCreateRequest",
+      "description": "`_echo_agent/task/create` request.",
+      "type": "object",
+      "required": [
+        "spec",
+        "task_run"
+      ],
+      "properties": {
+        "spec": {
+          "description": "TaskSpec payload, verbatim."
+        },
+        "task_run": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskCreateResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskCreateResponse",
+      "type": "object",
+      "required": [
+        "revision",
+        "task"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "task": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskUpdateRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskUpdateRequest",
+      "description": "`_echo_agent/task/update` request.",
+      "type": "object",
+      "required": [
+        "expected_revision",
+        "patch",
+        "task"
+      ],
+      "properties": {
+        "expected_revision": {
+          "description": "Expected revision for optimistic concurrency; the framework rejects stale writers.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "patch": true,
+        "task": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskUpdateResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskUpdateResponse",
+      "type": "object",
+      "required": [
+        "revision"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "#/definitions/WireU64"
+        }
+      },
+      "definitions": {
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskListRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskListRequest",
+      "description": "`_echo_agent/task/list` request/response.",
+      "type": "object",
+      "required": [
+        "task_run"
+      ],
+      "properties": {
+        "task_run": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskListResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskListResponse",
+      "type": "object",
+      "required": [
+        "tasks"
+      ],
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TaskSummary"
+          }
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "TaskSummary": {
+          "description": "Projection of one task's identity and state; authoritative state remains in the framework store.",
+          "type": "object",
+          "required": [
+            "revision",
+            "status",
+            "task"
+          ],
+          "properties": {
+            "revision": {
+              "$ref": "#/definitions/WireU64"
+            },
+            "status": {
+              "type": "string"
+            },
+            "task": {
+              "$ref": "#/definitions/WireHandle"
+            }
+          }
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskSummary": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskSummary",
+      "description": "Projection of one task's identity and state; authoritative state remains in the framework store.",
+      "type": "object",
+      "required": [
+        "revision",
+        "status",
+        "task"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskExecuteRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskExecuteRequest",
+      "description": "`_echo_agent/task/execute` request: drive one PlanTask through the framework executor (single authority for scheduling/retry/cancel).",
+      "type": "object",
+      "required": [
+        "task"
+      ],
+      "properties": {
+        "idempotency_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskExecuteResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskExecuteResponse",
+      "type": "object",
+      "required": [
+        "run"
+      ],
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskControlRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskControlRequest",
+      "description": "`_echo_agent/task/control` request: pause/resume/cancel routed to the framework service.",
+      "type": "object",
+      "required": [
+        "action",
+        "task"
+      ],
+      "properties": {
+        "action": {
+          "description": "One of the framework control verbs (`pause`, `resume`, `cancel`).",
+          "type": "string"
+        },
+        "task": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskControlResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "TaskControlResponse",
+      "type": "object",
+      "required": [
+        "accepted",
+        "status"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        }
+      }
+    },
+    "SubagentDispatchRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SubagentDispatchRequest",
+      "description": "`_echo_agent/subagent/dispatch` request. DispatchRequest facts travel verbatim; the framework executor remains the only scheduler.",
+      "type": "object",
+      "required": [
+        "request",
+        "session"
+      ],
+      "properties": {
+        "idempotency_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request": true,
+        "session": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "SubagentDispatchResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SubagentDispatchResponse",
+      "type": "object",
+      "required": [
+        "subagent"
+      ],
+      "properties": {
+        "subagent": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "SubagentAwaitRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SubagentAwaitRequest",
+      "description": "`_echo_agent/subagent/await` request/response.",
+      "type": "object",
+      "required": [
+        "subagent"
+      ],
+      "properties": {
+        "subagent": {
+          "$ref": "#/definitions/WireHandle"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireDuration": {
+          "description": "A duration carried losslessly as nanoseconds.",
+          "type": "object",
+          "required": [
+            "nanos"
+          ],
+          "properties": {
+            "nanos": {
+              "$ref": "#/definitions/WireU64"
+            }
+          }
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "SubagentAwaitResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SubagentAwaitResponse",
+      "type": "object",
+      "required": [
+        "settled"
+      ],
+      "properties": {
+        "result": {
+          "description": "SubagentResult payload, verbatim."
+        },
+        "settled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "SubagentControlRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SubagentControlRequest",
+      "description": "`_echo_agent/subagent/control` request/response.",
+      "type": "object",
+      "required": [
+        "action",
+        "subagent"
+      ],
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "subagent": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "SubagentControlResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SubagentControlResponse",
+      "type": "object",
+      "required": [
+        "accepted"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ExtensionRegisterRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ExtensionRegisterRequest",
+      "description": "`_echo_agent/extension/register` request: register a host-language implementation of a public framework trait (Tool, LlmClient, Store, HumanLoopProvider, Hook, AgentFactory, ...).",
+      "type": "object",
+      "required": [
+        "descriptor",
+        "implementation_id",
+        "kind"
+      ],
+      "properties": {
+        "descriptor": {
+          "description": "Descriptor the Host uses for dispatch: for Tools this covers name, description, JSON Schema parameters, revision and modality."
+        },
+        "implementation_id": {
+          "description": "Client-side implementation identity (non-empty).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which extension point is implemented.",
+          "type": "string"
+        },
+        "timeout": {
+          "description": "Declared concurrency/timeout contract.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "definitions": {
+        "WireDuration": {
+          "description": "A duration carried losslessly as nanoseconds.",
+          "type": "object",
+          "required": [
+            "nanos"
+          ],
+          "properties": {
+            "nanos": {
+              "$ref": "#/definitions/WireU64"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "ExtensionRegisterResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ExtensionRegisterResponse",
+      "type": "object",
+      "required": [
+        "extension"
+      ],
+      "properties": {
+        "extension": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "ExtensionUnregisterRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ExtensionUnregisterRequest",
+      "description": "`_echo_agent/extension/unregister` request/response.",
+      "type": "object",
+      "required": [
+        "extension"
+      ],
+      "properties": {
+        "extension": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "ExtensionUnregisterResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ExtensionUnregisterResponse",
+      "type": "object",
+      "required": [
+        "released"
+      ],
+      "properties": {
+        "released": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ExtensionInvokeCall": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ExtensionInvokeCall",
+      "description": "`_echo_agent/extension/invoke` reverse request (Host -> SDK): invoke a registered implementation. The SDK dispatcher runs the host-language code and replies with exactly one of `result`/`stream`/`error`.",
+      "type": "object",
+      "required": [
+        "deadline",
+        "extension",
+        "input",
+        "invocation_id"
+      ],
+      "properties": {
+        "deadline": {
+          "description": "Deadline for this invocation.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireDuration"
+            }
+          ]
+        },
+        "extension": {
+          "$ref": "#/definitions/WireHandle"
+        },
+        "input": {
+          "description": "Typed invocation payload (tool input, chat request, store op, ...)."
+        },
+        "invocation_id": {
+          "description": "Invocation identity; unique per call, used for cancellation.",
+          "type": "string"
+        }
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireDuration": {
+          "description": "A duration carried losslessly as nanoseconds.",
+          "type": "object",
+          "required": [
+            "nanos"
+          ],
+          "properties": {
+            "nanos": {
+              "$ref": "#/definitions/WireU64"
+            }
+          }
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "ExtensionInvokeOutcome": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ExtensionInvokeOutcome",
+      "description": "One callback outcome. Failures use the typed extension errors; there is no implicit fallback to a built-in implementation (design §12.1).",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "Terminal failure of the invocation, typed.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EchoSdkError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": true
+      },
+      "definitions": {
+        "DetailField": {
+          "type": "object",
+          "required": [
+            "key",
+            "value"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        },
+        "EchoSdkError": {
+          "description": "The typed `_echo_agent/*` error envelope.",
+          "type": "object",
+          "required": [
+            "code",
+            "message",
+            "retryable"
+          ],
+          "properties": {
+            "code": {
+              "$ref": "#/definitions/ExtensionErrorCode"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ErrorDetails"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "handle": {
+              "description": "Handle the error refers to, when applicable.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WireHandle"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "operation": {
+              "description": "Domain operation identity (e.g. `run/start`), independent from any JSON-RPC request id.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "retryable": {
+              "$ref": "#/definitions/Retryability"
+            }
+          }
+        },
+        "ErrorDetails": {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "description": "Bounded key/value facts; values are strings, never raw payloads.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/DetailField"
+              }
+            }
+          }
+        },
+        "ExtensionErrorCode": {
+          "description": "Stable extension error codes. Codes are closed: reusing a retired code for a different meaning is a breaking protocol change (design §18).",
+          "oneOf": [
+            {
+              "description": "Peer does not speak a compatible ACP wire protocol version.",
+              "type": "string",
+              "enum": [
+                "acp_protocol_mismatch"
+              ]
+            },
+            {
+              "description": "Peer's `_echo_agent` extension protocol version is incompatible.",
+              "type": "string",
+              "enum": [
+                "extension_version_mismatch"
+              ]
+            },
+            {
+              "description": "Extension contract/source digest mismatch.",
+              "type": "string",
+              "enum": [
+                "extension_digest_mismatch"
+              ]
+            },
+            {
+              "description": "Required extension capability missing or unsupported.",
+              "type": "string",
+              "enum": [
+                "extension_capability_mismatch"
+              ]
+            },
+            {
+              "description": "Malformed request (structure, method usage, ordering).",
+              "type": "string",
+              "enum": [
+                "invalid_request"
+              ]
+            },
+            {
+              "description": "Semantically invalid configuration.",
+              "type": "string",
+              "enum": [
+                "invalid_config"
+              ]
+            },
+            {
+              "description": "Semantically invalid value (scalars, paths, payload shapes).",
+              "type": "string",
+              "enum": [
+                "invalid_value"
+              ]
+            },
+            {
+              "description": "Operation requires a feature the Host was not compiled with.",
+              "type": "string",
+              "enum": [
+                "feature_unavailable"
+              ]
+            },
+            {
+              "description": "Handle generation no longer matches the live object.",
+              "type": "string",
+              "enum": [
+                "stale_handle"
+              ]
+            },
+            {
+              "description": "Handle refers to an object that has been closed/destroyed.",
+              "type": "string",
+              "enum": [
+                "closed_handle"
+              ]
+            },
+            {
+              "description": "Framework returned a typed domain error.",
+              "type": "string",
+              "enum": [
+                "framework_error"
+              ]
+            },
+            {
+              "description": "Registered extension rejected the invocation.",
+              "type": "string",
+              "enum": [
+                "extension_rejected"
+              ]
+            },
+            {
+              "description": "Registered extension failed while executing.",
+              "type": "string",
+              "enum": [
+                "extension_failed"
+              ]
+            },
+            {
+              "description": "Extension invocation exceeded its deadline.",
+              "type": "string",
+              "enum": [
+                "extension_timeout"
+              ]
+            },
+            {
+              "description": "Extension's SDK connection is gone.",
+              "type": "string",
+              "enum": [
+                "extension_disconnected"
+              ]
+            },
+            {
+              "description": "Operation was cancelled; framework terminal state remains authoritative.",
+              "type": "string",
+              "enum": [
+                "cancelled"
+              ]
+            },
+            {
+              "description": "Host is shutting down and refuses new work.",
+              "type": "string",
+              "enum": [
+                "host_shutting_down"
+              ]
+            },
+            {
+              "description": "Host process exited before the operation settled.",
+              "type": "string",
+              "enum": [
+                "host_exited"
+              ]
+            },
+            {
+              "description": "Consumer fell below the retained watermark.",
+              "type": "string",
+              "enum": [
+                "event_gap"
+              ]
+            },
+            {
+              "description": "Replay is unavailable for the requested window.",
+              "type": "string",
+              "enum": [
+                "replay_unavailable"
+              ]
+            },
+            {
+              "description": "Payload exceeds the negotiated bound.",
+              "type": "string",
+              "enum": [
+                "payload_too_large"
+              ]
+            },
+            {
+              "description": "Payload violates the extension serialization contract.",
+              "type": "string",
+              "enum": [
+                "serialization_violation"
+              ]
+            }
+          ]
+        },
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "Retryability": {
+          "description": "Whether an operation may be retried and when (design §10.6). Only the framework's own operation contract decides to actually retry; this field tells language SDKs what is *safe* to retry.",
+          "type": "string",
+          "enum": [
+            "never",
+            "always",
+            "after_delay"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "ExtensionCancelNotice": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ExtensionCancelNotice",
+      "description": "`_echo_agent/extension/cancel` reverse notification (Host -> SDK): the framework cancelled an in-flight invocation; the SDK must stop work but still answer the original call with a `cancelled` error.",
+      "type": "object",
+      "required": [
+        "invocation_id"
+      ],
+      "properties": {
+        "invocation_id": {
+          "type": "string"
+        }
+      }
+    },
+    "FeatureOperationRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "FeatureOperationRequest",
+      "description": "Generic verbatim operation envelope for feature-surface methods whose full DTO mapping lands with the adapter plans: the method family is frozen here, payloads carry the facade value under `opaque` until the typed DTO plan replaces them (no second authority is introduced).",
+      "type": "object",
+      "required": [
+        "op"
+      ],
+      "properties": {
+        "handle": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "op": {
+          "type": "string"
+        },
+        "payload": true
+      },
+      "definitions": {
+        "HandleKind": {
+          "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        "WireHandle": {
+          "description": "Opaque handle to a framework object: non-empty domain id + generation.\n\nIds are strings assigned by the framework authority; the SDK never interprets their content, never exposes memory addresses, and never reuses an id across kinds.",
+          "type": "object",
+          "required": [
+            "generation",
+            "id",
+            "kind"
+          ],
+          "properties": {
+            "generation": {
+              "description": "Monotonic generation of the owning Host; incremented across restarts so pre-restart handles fail as stale instead of rebinding.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireU64"
+                }
+              ]
+            },
+            "id": {
+              "description": "Non-empty domain identity assigned by the framework.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/definitions/HandleKind"
+            }
+          }
+        },
+        "WireU64": {
+          "description": "A `u64`/`usize` carried as a non-empty decimal string. Parses back exactly; leading zeros and non-digit content are rejected by the round-trip used in contract fixtures.",
+          "type": "string"
+        }
+      }
+    },
+    "FeatureOperationResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "FeatureOperationResponse",
+      "type": "object",
+      "properties": {
+        "payload": true
+      }
+    },
+    "WorkingDirectory": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WorkingDirectory",
+      "description": "Working directory declaration a client may pass for run/session methods that accept one; lossless via `WirePath`.",
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/definitions/WirePath"
+        }
+      },
+      "definitions": {
+        "WirePath": {
+          "description": "A local filesystem path that standard ACP UTF-8 rules cannot express losslessly (design §10.5). Exactly one physical representation is set; `display` is a human-readable convenience and never the authority.",
+          "oneOf": [
+            {
+              "description": "Absolute Unix path with its original bytes (base64). Preserves non-UTF-8 byte sequences.",
+              "type": "object",
+              "required": [
+                "bytes_base64",
+                "encoding"
+              ],
+              "properties": {
+                "bytes_base64": {
+                  "type": "string"
+                },
+                "display": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "encoding": {
+                  "type": "string",
+                  "enum": [
+                    "unix"
+                  ]
+                }
+              }
+            },
+            {
+              "description": "Absolute Windows path with original UTF-16 units (base64 of the little-endian unit sequence).",
+              "type": "object",
+              "required": [
+                "encoding",
+                "utf16_base64"
+              ],
+              "properties": {
+                "display": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "encoding": {
+                  "type": "string",
+                  "enum": [
+                    "windows"
+                  ]
+                },
+                "utf16_base64": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "description": "Path that is exactly representable as an absolute UTF-8 string.",
+              "type": "object",
+              "required": [
+                "encoding",
+                "path"
+              ],
+              "properties": {
+                "encoding": {
+                  "type": "string",
+                  "enum": [
+                    "utf8"
+                  ]
+                },
+                "path": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

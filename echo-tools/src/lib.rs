@@ -48,6 +48,8 @@ pub mod data;
 #[cfg(feature = "data")]
 #[cfg_attr(docsrs, doc(cfg(feature = "data")))]
 pub mod data_quality;
+// Feature-neutral shared quantile (see module docs); not part of the public
+// facade contract.
 #[cfg(feature = "database")]
 #[cfg_attr(docsrs, doc(cfg(feature = "database")))]
 pub mod database;
@@ -71,6 +73,7 @@ pub mod media;
 #[cfg(feature = "media")]
 #[cfg_attr(docsrs, doc(cfg(feature = "media")))]
 pub mod pdf;
+mod quantile;
 #[cfg(feature = "rag")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rag")))]
 pub mod rag;

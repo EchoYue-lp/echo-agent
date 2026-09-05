@@ -1,0 +1,12 @@
+{
+  "name": "handle-empty-id-invalid",
+  "kind": "invalid",
+  "target": "WireHandle",
+  "description": "Empty domain identities are rejected (never borrowed request ids).",
+  "payload": {
+    "id": "",
+    "generation": "1",
+    "kind": "agent"
+  },
+  "expect_error": "invalid_value"
+}
