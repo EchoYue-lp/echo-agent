@@ -3,8 +3,8 @@
 This document describes the wire-level contract of the echo-agent SDK: the
 two profiles, the extension namespace, lossless scalar rules, error taxonomy,
 event/replay semantics and versioning. The stable initialize/new/prompt/update/
-cancel subset now has a transport-neutral Rust Agent adapter; the extension
-profile, source-built SDK Host and language SDKs remain later deliveries (see
+cancel subset now has a transport-neutral Rust Agent adapter and a real
+source-built stdio Host; the extension profile and language SDKs remain later deliveries (see
 the [status ladder](README.md#status-ladder)).
 
 ## Base protocol: official ACP v1
@@ -53,6 +53,23 @@ field preserved. Text-only Agents fail a ResourceLink Prompt explicitly rather
 than receiving an ambiguous private text marker. Other content types fail
 before Agent execution. See
 [acp-agent-adapter.md](acp-agent-adapter.md) for construction and limitations.
+
+## Source-built standard Host
+
+The non-published `echo-sdk-host` crate builds the `echo-agent-sdk-host`
+executable. It loads only the path supplied by `--config`, validates the
+bounded schema-v1 document and model client before opening stdio, constructs a
+new `ReactAgent` for each Session, and connects the adapter to the official
+`Stdio` transport. It does not parse JSON-RPC or own another Session, Turn,
+event, cancellation, or terminal state machine.
+
+While serving ACP, stdout contains protocol frames only. Diagnostics use
+stderr and are bounded. Closing stdin closes the official transport and enters
+the adapter's bounded Session cleanup. ACP `session/new` MCP declarations are
+accepted only for stdio servers with absolute UTF-8 command paths, and each MCP
+process starts in that Session's cwd; remote MCP and additional directories are
+rejected before Session creation. See
+[acp-standard-host.md](acp-standard-host.md) for the exact config and commands.
 
 ## Two profiles
 

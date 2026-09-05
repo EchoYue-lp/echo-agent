@@ -9,6 +9,7 @@ members = [
     "echo-state",
     "echo-orchestration",
     "echo-sdk-protocol",
+    "echo-sdk-host",
 ]
 default-members = [
     ".",
@@ -21,6 +22,7 @@ default-members = [
     "echo-state",
     "echo-orchestration",
     "echo-sdk-protocol",
+    "echo-sdk-host",
 ]
 resolver = "3"
 

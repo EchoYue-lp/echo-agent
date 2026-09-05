@@ -1100,17 +1100,18 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Code Search | [EN](docs/en/37-code-search.md) | [ZH](docs/zh/37-code-search.md) |
 | Agent Factory & Model Profiles | [EN](docs/en/38-factory-modes.md) | [ZH](docs/zh/38-factory-modes.md) |
 | Security | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
-| Multilingual SDK (Contract + ACP adapter) | [EN](docs/sdk/README.md) | — |
+| Multilingual SDK (ACP Host available) | [EN](docs/sdk/README.md) | — |
 
 ### SDK corner
 
-The TypeScript/Python/Java SDK program remains at the **Contract** stage. The
-ACP v1 baseline, `_echo_agent/*` extension schema, facade parity manifest
-and drift gates are frozen and CI-enforced. A transport-neutral stable ACP v1
-Agent adapter is now available behind `features = ["acp"]`; the configurable
-SDK Host and language SDKs are not implemented yet. Start at
-[docs/sdk/README.md](docs/sdk/README.md) — it is the only SDK entry point
-and states exactly what exists today.
+The source-built `echo-agent-sdk-host` now passes the supported standard ACP v1
+profile through the official Client and stdio runtime. It uses the root
+`AcpAgentAdapter`, creates one framework Agent per Session, and accepts an
+explicit product-neutral JSON configuration. Build it with
+`cargo build -p echo-sdk-host --bin echo-agent-sdk-host --locked`; no binary or
+language runtime is bundled. The TypeScript/Python/Java extension clients are
+not implemented yet, so **Runnable** and full facade parity are not claimed.
+Start at [docs/sdk/README.md](docs/sdk/README.md), the only SDK entry point.
 
 ---
 

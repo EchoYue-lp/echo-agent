@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Source-built standard ACP v1 Host.** Added the non-published
+  `echo-sdk-host` workspace crate and `echo-agent-sdk-host` executable. It
+  loads one explicit, bounded schema-v1 JSON configuration, constructs a new
+  framework Agent per ACP Session over a shared model client, translates only
+  declared stdio MCP servers, and connects the existing `AcpAgentAdapter` to
+  the official ACP stdio transport. Real subprocess tests use the official
+  Client to cover initialize/new/prompt/update/cancel, clean stdin EOF,
+  JSON-RPC-only stdout, bounded configuration failure, and credential
+  redaction. The repository still ships source only; language SDKs and the
+  `_echo_agent/*` runtime profile remain later deliveries.
+
 - **Stable ACP v1 Agent adapter.** The root `echo_agent` facade now exposes a
   source-built, transport-neutral ACP Agent behind the optional `acp` feature.
   It composes the official Rust SDK with `AgentTurnDriver`, gives each ACP
@@ -19,8 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content parts until the provider boundary, preserving field identity without
   embedding a private marker in user text.
   The current adapter supports the stable initialize/new/prompt/update/cancel
-  baseline and truthfully leaves `_echo_agent/*`, the configurable SDK Host,
-  and language SDKs for their later delivery stages.
+  baseline and is used by the source-built standard Host. `_echo_agent/*` and
+  the language SDKs remain later delivery stages.
 
 - **SDK contract stage (ACP-first, source-only).** Frozen the multilingual
   SDK program's contract layer over the official stable ACP v1 baseline:

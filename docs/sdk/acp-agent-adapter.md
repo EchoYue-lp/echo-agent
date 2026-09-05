@@ -3,8 +3,8 @@
 The root `echo_agent` crate provides a transport-neutral ACP Agent adapter under
 the optional `acp` feature. It is a framework integration point: applications
 supply one independent framework Agent per ACP Session and choose an official
-ACP transport. The configurable `echo-agent-sdk-host` executable is a later
-delivery.
+ACP transport. The source-built [`echo-agent-sdk-host`](acp-standard-host.md)
+provides the product-neutral default factory and official stdio composition.
 
 ## Enable the adapter
 
@@ -73,7 +73,8 @@ and attempts Agent closes concurrently within the configured global timeout.
 
 ## Boundaries
 
-- The adapter is transport-neutral and does not install or spawn a Host binary.
+- The adapter is transport-neutral and does not install or spawn a Host binary;
+  the separate non-published Host crate composes it with official stdio.
 - Each Session owns a new Agent. The adapter does not maintain a second
   transcript, task graph, retry policy or terminal state.
 - Text and ResourceLink are the current Prompt surface. ResourceLink becomes a
@@ -89,7 +90,7 @@ and attempts Agent closes concurrently within the configured global timeout.
 - `_echo_agent/*` contracts are frozen but their runtime handlers are not part
   of this adapter increment, so initialize does not publish the echo-agent
   extension capability yet.
-- ACP conformance and full multilingual SDK parity remain separate gates. This
-  adapter has typed in-process protocol coverage; the project will claim ACP
-  conformance only after the real source-built Host passes the standard Client
-  suite.
+- ACP conformance and full multilingual SDK parity remain separate gates. The
+  adapter has typed in-process coverage and the source-built Host passes its
+  supported standard profile through the official Client; no language
+  extension path or full facade parity is implied.
