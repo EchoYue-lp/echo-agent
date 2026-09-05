@@ -10,11 +10,12 @@ description = "Learning lessons, runnable examples, and public-facade contracts 
 [features]
 default = []
 full = [
-    "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent",
+    "acp", "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent",
     "web", "media", "data", "sqlite", "channels", "git", "database", "rag",
     "chart", "content-guard", "project-rules", "shell", "files", "research",
     "eval", "improve", "statistics", "testing",
 ]
+acp = ["echo_agent/acp", "dep:agent-client-protocol"]
 a2a = ["echo_agent/a2a"]
 mcp = ["echo_agent/mcp"]
 lsp = ["echo_agent/lsp"]
@@ -43,6 +44,7 @@ testing = ["echo_agent/testing"]
 
 [dependencies]
 echo_agent = { version = "0.2.0", path = "..", default-features = false }
+agent-client-protocol = { version = "=2.1.0", optional = true }
 async-stream = "0.3"
 async-trait = "0.1"
 base64 = "0.22"
@@ -70,6 +72,9 @@ uuid = { version = "1", features = ["v4"] }
 [[example]]
 name = "demo50_subagent_communication"
 required-features = ["subagent"]
+[[example]]
+name = "demo72_acp_agent_adapter"
+required-features = ["acp"]
 [[example]]
 name = "demo03_approval"
 required-features = ["human-loop"]

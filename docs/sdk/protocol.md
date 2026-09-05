@@ -2,9 +2,10 @@
 
 This document describes the wire-level contract of the echo-agent SDK: the
 two profiles, the extension namespace, lossless scalar rules, error taxonomy,
-event/replay semantics and versioning. It is the reference for future Host
-and language-SDK implementers; today it describes the **frozen Contract**
-artifacts, not a running system (see the [status ladder](README.md#status-ladder)).
+event/replay semantics and versioning. The stable initialize/new/prompt/update/
+cancel subset now has a transport-neutral Rust Agent adapter; the extension
+profile, source-built SDK Host and language SDKs remain later deliveries (see
+the [status ladder](README.md#status-ladder)).
 
 ## Base protocol: official ACP v1
 
@@ -27,6 +28,32 @@ This repository **never** re-declares JSON-RPC envelopes, `initialize`,
 Session, Prompt, ContentBlock, update or stop-reason types. The generated
 extension schema is validated to contain none of them.
 
+## Implemented standard Agent adapter
+
+The root `acp` feature exposes `echo_agent::acp::AcpAgentAdapter`. It implements
+the official Rust SDK's Agent-side `ConnectTo<Client>` boundary and can attach
+to any official transport. Its handlers currently implement stable v1
+`initialize`, `session/new`, `session/prompt`, `session/update` and
+`session/cancel`; the official runtime also supplies request-level
+`$/cancel_request` dispatch.
+
+Each `session/new` calls an `AcpSessionFactory` with the exact cwd, additional
+directories, MCP declarations, request metadata and initialized Client
+capabilities. The returned framework Agent exclusively owns that Session's
+conversation history. The adapter then drives every Prompt through
+`AgentTurnDriver` and turns accepted `EventEnvelope` values into bounded ACP
+message/thought/tool updates. Both cancellation routes cancel the same
+framework token, and only `TurnReceipt` decides the final stop reason or error.
+
+The adapter advertises only the stable baseline it implements. It does not yet
+advertise `_meta.echo_agent`, `session/load`, optional lifecycle/config methods,
+or rich Prompt content. Text and ResourceLink are accepted; ResourceLink maps
+to the provider-neutral structured `LinkedResource` content part with every ACP
+field preserved. Text-only Agents fail a ResourceLink Prompt explicitly rather
+than receiving an ambiguous private text marker. Other content types fail
+before Agent execution. See
+[acp-agent-adapter.md](acp-agent-adapter.md) for construction and limitations.
+
 ## Two profiles
 
 | | Standard ACP profile | echo-agent SDK profile |
@@ -36,8 +63,8 @@ extension schema is validated to contain none of them.
 | Event view | ACP `session/update` (bounded projection) | full `EventEnvelope` extension stream |
 | Negotiation | plain `initialize` | `initialize` + `_meta` capability check |
 
-A standard client ignores the `_meta` capability and keeps working. An SDK
-client **fails closed** when the extension protocol version, contract
+A future standard client ignores the `_meta` capability and keeps working. An
+SDK client **fails closed** when the extension protocol version, contract
 digest, required capability or feature set does not match — it never
 silently degrades to partial parity (design §10.2).
 

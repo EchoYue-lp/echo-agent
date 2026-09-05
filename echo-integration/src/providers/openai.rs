@@ -62,6 +62,9 @@ fn normalize_messages(messages: Vec<Message>) -> Vec<Message> {
 fn normalize_content_part(part: ContentPart) -> ContentPart {
     match part {
         ContentPart::Text { .. } | ContentPart::ImageUrl { .. } => part,
+        ContentPart::ResourceLink { resource } => ContentPart::Text {
+            text: resource.model_text(),
+        },
         ContentPart::File { name, content } => {
             // Same dispatch as the Anthropic provider: text-class files are
             // decoded and inlined so the model can read them; everything else
@@ -391,6 +394,37 @@ mod tests {
             return Err("expected text placeholder".to_string());
         };
         assert!(text.contains("archive.zip"));
+        Ok(())
+    }
+
+    #[test]
+    fn linked_resource_becomes_text_only_at_provider_boundary() -> std::result::Result<(), String> {
+        let resource = echo_core::llm::types::LinkedResource {
+            annotations: None,
+            description: Some("source context".to_string()),
+            mime_type: Some("text/rust".to_string()),
+            name: "lib.rs".to_string(),
+            size: None,
+            title: None,
+            uri: "file:///workspace/src/lib.rs".to_string(),
+            meta: None,
+        };
+        let msg = multimodal_msg(vec![ContentPart::ResourceLink {
+            resource: Box::new(resource),
+        }]);
+        let out = normalize_messages(vec![msg]);
+        let part = out
+            .first()
+            .and_then(|message| match &message.content {
+                MessageContent::Parts(parts) => parts.first(),
+                MessageContent::Text(_) | MessageContent::Empty => None,
+            })
+            .ok_or_else(|| "expected one message part".to_string())?;
+        let ContentPart::Text { text } = part else {
+            return Err("expected provider text fallback".to_string());
+        };
+        assert!(text.contains("file:///workspace/src/lib.rs"));
+        assert!(text.contains("source context"));
         Ok(())
     }
 

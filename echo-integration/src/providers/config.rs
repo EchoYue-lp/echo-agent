@@ -200,6 +200,7 @@ pub(crate) fn validate_model_input_modalities(
         let modality = match part {
             ContentPart::ImageUrl { .. } => Some(ModelInputModality::Image),
             ContentPart::File { name, .. } => file_input_modality(name),
+            ContentPart::ResourceLink { .. } => None,
             ContentPart::Text { .. } => None,
         };
         if let Some(modality) = modality.filter(|value| !input_modalities.contains(value)) {

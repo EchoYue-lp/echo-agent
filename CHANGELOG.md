@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Stable ACP v1 Agent adapter.** The root `echo_agent` facade now exposes a
+  source-built, transport-neutral ACP Agent behind the optional `acp` feature.
+  It composes the official Rust SDK with `AgentTurnDriver`, gives each ACP
+  Session an independent framework Agent, projects accepted framework events
+  into standard `session/update` notifications, and routes both
+  `session/cancel` and `$/cancel_request` into the same cancellation token.
+  ACP ResourceLink inputs remain typed as provider-neutral `LinkedResource`
+  content parts until the provider boundary, preserving field identity without
+  embedding a private marker in user text.
+  The current adapter supports the stable initialize/new/prompt/update/cancel
+  baseline and truthfully leaves `_echo_agent/*`, the configurable SDK Host,
+  and language SDKs for their later delivery stages.
+
 - **SDK contract stage (ACP-first, source-only).** Frozen the multilingual
   SDK program's contract layer over the official stable ACP v1 baseline:
   `contracts/sdk/` now pins the official `agent-client-protocol` 2.1.0 /

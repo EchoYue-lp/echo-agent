@@ -147,6 +147,7 @@ fn message_for_summary(message: &Message) -> String {
                     echo_core::utils::hash::fnv1a_64(content.as_bytes()),
                     content.chars().count()
                 ),
+                ContentPart::ResourceLink { resource } => resource.model_text(),
             })
             .collect::<Vec<_>>()
             .join("\n"),

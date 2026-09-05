@@ -151,6 +151,39 @@ rendering, product persistence, and product permission policy belong in
 `echo-agent-cli`. EKO may consume the framework ACP adapter but must not parse
 ACP independently or create a second Session/Run authority.
 
+## Implemented Adapter Contract
+
+The first framework increment implements a transport-neutral stable v1 Agent
+adapter behind the root `acp` feature. It composes the official
+`agent-client-protocol` builder and typed messages rather than implementing a
+JSON-RPC parser. Each `session/new` invokes an `AcpSessionFactory` and stores a
+distinct framework Agent; the registry stores only protocol addressing and the
+active turn cancellation token. Conversation history remains inside the Agent.
+
+The root feature depends only on the published official ACP runtime. The
+source-only, non-published `echo-sdk-protocol` workspace crate remains the
+extension contract authority for the later Host and language SDKs; making it a
+root optional dependency would prevent the framework feature from remaining an
+independently consumable Cargo package before extension handlers exist.
+
+`session/prompt` leaves the official serial dispatch loop before awaiting the
+Agent. The spawned connection task uses `AgentTurnDriver`, an `EventSink`
+projection and `TurnReceipt`; this keeps `session/cancel` and
+`$/cancel_request` dispatchable while a turn is running. Both routes converge
+on the same framework token, and turn identity guards prevent late cleanup from
+clearing a later turn.
+
+Text-only prompts keep the broadly compatible text Agent path. ACP ResourceLink
+prompts enter the structured Message path as provider-neutral `LinkedResource`
+parts, so framework Agents can inspect every field and plain user text cannot
+impersonate resource metadata. Providers without a native linked-resource block
+render a deterministic text fallback only at their own wire boundary.
+
+This increment advertises only the stable initialize/new/prompt/update/cancel
+baseline. `_meta.echo_agent`, optional Session methods, the configurable stdio
+Host and language SDKs remain unavailable until their delivery outcomes make
+the corresponding handlers real.
+
 ## Consequences
 
 - Any standard ACP Client can invoke the supported echo-agent coding Agent

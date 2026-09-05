@@ -191,6 +191,10 @@ impl AnthropicClient {
                                     source: data_url_to_image_source(&image_url.url),
                                     cache_control: None,
                                 },
+                                ContentPart::ResourceLink { resource } => ContentBlock::Text {
+                                    text: resource.model_text(),
+                                    cache_control: None,
+                                },
                                 // File attachments: dispatch by inferred media type.
                                 //   - application/pdf → document content block (the only
                                 //     type Anthropic accepts as base64 document source)
