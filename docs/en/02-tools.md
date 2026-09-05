@@ -245,7 +245,7 @@ carries:
 
 - `subagent_lineage: Option<SubagentLineage>` — an identity snapshot of the
   attempt (own role name/execution_id/run_id, parent agent, parent
-  execution_id, `root/<child>/...` tree path, task_id/attempt/plan_revision).
+  execution/event id, `root/<child>/...` tree path, task_id/attempt/plan_revision).
   `None` for primary agent invocations. The framework stamps it at dispatch;
   caller-stamped lineage fields (e.g. from `agent_tool`) take precedence.
 - `uplink: Option<SubagentUplinkFn>` — the uplink channel installed by the
@@ -253,8 +253,8 @@ carries:
   `register_subagent_message_tools()`) sends `report`/`escalate` to the
   parent or queue-only notes to sibling attempts; delivery never blocks the
   sender and returns a `SubagentUplinkReceipt`. The default sink delivers
-  through the shared control plane and emits
-  `SubagentEvent::UplinkReceived`; applications may install their own sink
+  through the shared control plane and emits an enveloped
+  `SubagentEvent::UplinkReceived` on the sender's active publisher; applications may install their own sink
   to own routing (journal, pause policy, ...). See ADR 0027 and
   `echo-agent-learning/examples/demo50_subagent_communication.rs`.
 

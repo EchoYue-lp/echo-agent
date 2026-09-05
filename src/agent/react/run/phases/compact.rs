@@ -61,9 +61,13 @@ pub(crate) async fn run_compact(
     let prepare_result = try_send_or!(
         tx,
         {
-            let tool_tokens = serde_json::to_string(&snap.tools.tools_for_llm())
-                .map(|schema| snap.calibrated_tokenizer.count_tokens(&schema))
-                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+            let tool_tokens = if snap.config.enable_tool {
+                serde_json::to_string(&snap.tools.tools_for_llm())
+                    .map(|schema| snap.calibrated_tokenizer.count_tokens(&schema))
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
+            } else {
+                0
+            };
             let mut context = context.lock().await;
             context.apply_projection_scope("pre-model", &projections);
             context
@@ -255,6 +259,7 @@ mod tests {
         let mut config = AgentConfig::new("test-model", "agent", "sys");
         config.token_limit = 4_096;
         config.enable_tool = false;
+        config.auto_project_rules = false;
         let mut agent = ReactAgent::new(config);
         agent.set_compressor(SlidingWindowCompressor::new(1)).await;
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
@@ -270,13 +275,15 @@ mod tests {
             context.push(Message::assistant("second message ".repeat(500)));
         }
         let snap = AgentRunSnapshot::from_agent(&agent);
-        let (tx, _rx) = mpsc::channel::<Result<AgentEvent>>(8);
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
 
         let outcome = run_compact(&snap, &agent.memory.context, &tx, 0).await?;
-        assert!(
-            matches!(outcome, CompactOutcome::Continue(_)),
-            "unexpected compact outcome: {outcome:?}"
-        );
+        if !matches!(outcome, CompactOutcome::Continue(_)) {
+            return Err(crate::error::ReactError::Other(format!(
+                "unexpected compact outcome: {outcome:?}; event={:?}",
+                rx.try_recv().ok()
+            )));
+        }
         let run = store
             .load(&trace_run_id)
             .await?
@@ -298,6 +305,7 @@ mod tests {
             .conversation_id("pre-compact-transcript");
         config.token_limit = 4_096;
         config.enable_tool = false;
+        config.auto_project_rules = false;
         let mut agent = ReactAgent::new(config);
         agent.set_conversation_store(conversation_store.clone());
         agent.set_compressor(SlidingWindowCompressor::new(1)).await;

@@ -181,6 +181,7 @@ impl AgentDispatchTool {
         // inside the async block (the ctx reference must not be captured).
         let parent_lineage = ctx.and_then(|context| context.subagent_lineage.clone());
         let parent_execution_id = ctx.and_then(|context| context.execution_id.clone());
+        let parent_call_id = ctx.and_then(|context| context.call_id.clone());
         let invocation_cancel = ctx.and_then(|context| context.cancel.clone());
         let delegation_policy = match Self::delegation_policy_from_context(ctx) {
             Ok(policy) => policy,
@@ -204,12 +205,23 @@ impl AgentDispatchTool {
                     .as_ref()
                     .and_then(|lineage| lineage.agent_path.clone())
                     .unwrap_or_else(|| "root".to_string());
+                let parent_event_id = parent_execution_id
+                    .as_deref()
+                    .zip(parent_call_id.as_deref())
+                    .and_then(|(execution_id, call_id)| {
+                        executor
+                            .registry()
+                            .event_bus()
+                            .parent_event_id_for_tool(execution_id, call_id)
+                    })
+                    .map(|event_id| event_id.as_str().to_string());
                 context.subagent_lineage = Some(echo_core::tools::SubagentLineage {
                     agent_name: Some(agent_name.to_string()),
                     execution_id: context.execution_id.clone(),
                     run_id: context.run_id.clone(),
                     parent_agent: Some(parent_agent.clone()),
                     parent_execution_id: parent_execution_id.clone(),
+                    parent_event_id,
                     agent_path: Some(format!("{parent_path}/{agent_name}")),
                     task_id: None,
                     attempt: None,

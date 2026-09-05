@@ -1307,6 +1307,9 @@ pub struct SubagentLineage {
     /// itself a dispatched Subagent. Lets the default uplink steer the
     /// parent's active turn instead of only emitting an event.
     pub parent_execution_id: Option<String>,
+    /// Stable framework event id of the parent tool-start event that created
+    /// this child dispatch, when the parent is itself envelope-observed.
+    pub parent_event_id: Option<String>,
     /// Canonical dispatch-tree path (`root/<child>/<grandchild>`). Stable
     /// across attempts of one logical tree; assigned at dispatch time.
     pub agent_path: Option<String>,

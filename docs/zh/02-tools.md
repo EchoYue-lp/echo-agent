@@ -243,7 +243,7 @@ impl Tool for LongRunningTool {
 当工具运行在**被派发的 Subagent** 内部时,`ToolContext` 额外携带两样东西:
 
 - `subagent_lineage: Option<SubagentLineage>` — 本次 attempt 的身份快照
-  (自己的角色名/execution_id/run_id、父 agent、父 execution_id、
+  (自己的角色名/execution_id/run_id、父 agent、父 execution/event id、
   `root/<child>/...` 树路径、task_id/attempt/plan_revision)。主 Agent 调用
   时为 `None`。框架在 dispatch 时自动盖章;调用方(如 `agent_tool`)预先
   填写的亲缘字段优先。
@@ -251,7 +251,8 @@ impl Tool for LongRunningTool {
   `subagent_message` 工具(需 `register_subagent_message_tools()`)可向父
   agent 发送 `report`/`escalate` 或向兄弟 attempt 发送 queue-only 消息;
   交付不阻塞发送方,回执是 `SubagentUplinkReceipt`。默认 sink 经共享控制面
-  投递并发 `SubagentEvent::UplinkReceived`;应用可安装自定义 sink 接管路由
+  投递,并通过发送者的活动 publisher 发出 enveloped `SubagentEvent::UplinkReceived`;
+  应用可安装自定义 sink 接管路由
   (journal、暂停策略等)。详见 ADR 0027 与
   `echo-agent-learning/examples/demo50_subagent_communication.rs`。
 

@@ -205,3 +205,26 @@ result；只有真正的产品 wire 字段才应留在应用层。
 `ExecutionUsage` 是 delegated Subagent 与有限 primary-Agent turn 共用的 canonical durable
 usage 值。两类结果都直接提供 `result.usage()` 或 `turn_receipt.usage()`。应用不需要
 source-named adapter、转换 trait，也不需要再定义平行的 execution-usage DTO。
+
+## 版本化执行事件
+
+`SubagentEventBus::subscribe_envelopes` 是执行事件的权威传输。每个外层 dispatch attempt
+只有一个 `SubagentEventPublisher`；started、isolation、可展示的 thinking/token delta、usage、
+tool 与 terminal 共享同一个 `stream_id` 和单调 `sequence`。内部 hook retry 不会重置序号。
+`SubagentEventPayload::invocation` 无损携带 task、attempt、plan revision、agent path 和
+parent execution 关联，不需要解析 execution-id 字符串。
+
+既有 `subscribe` 方法继续作为从 envelope 派生的 raw 兼容视图；手工 raw emit 只接受 registry
+事件并拒绝 execution variant，因此不会形成第二个执行权威。需要顺序或恢复语义的新消费者应使用 envelope。
+tool terminal envelope 指向对应 tool-start event；其它执行事件指向 dispatch start 或上游
+parent event。
+
+broadcast 和 replay 窗口都是有界的。receiver 落后时先收到 Tokio `Lagged`，再按已知 stream
+调用 `replay_after`，或按错过 start envelope 的 exact execution 调用 `replay_for_execution`。
+可能漏掉整条短 attempt 的进程级 consumer 先调用 `retained_stream_ids` 与
+`active_stream_ids`，再从自己的 cursor 对并集逐条 replay；未观察过的 stream 从零开始。
+若某条活跃 stream 的完整 replay 后缀已被挤出，`active_stream_anchor` 仍保留其不可变的
+dispatch 身份，使 consumer 能以准确地址持久化 gap。
+`SubagentEventReplay::gap` 会明确报告保留后缀不连续；高频 thinking/token
+delta 可能在 gap 后缺失，但保留的 lifecycle/tool 边界与 `terminal` 可用于恢复状态和最终输出。
+该能力是进程内恢复窗口，不是永久存储；应用仍负责自己的 durable projection。

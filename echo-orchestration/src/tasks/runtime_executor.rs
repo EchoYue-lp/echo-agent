@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use echo_core::agent::ExecutionAdmission;
 use echo_core::error::{ReactError, Result};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -251,6 +252,8 @@ pub struct RuntimeTaskServiceConfig {
     /// terminal writes before remaining non-cooperative dispatches are aborted.
     pub cancellation_grace_period: Duration,
     pub delegation_policy: NestedDelegationPolicy,
+    /// Optional process-wide admission shared with subagent dispatchers.
+    pub shared_admission: Option<Arc<ExecutionAdmission>>,
 }
 
 impl Default for RuntimeTaskServiceConfig {
@@ -264,6 +267,7 @@ impl Default for RuntimeTaskServiceConfig {
                 delegate_depth: 0,
                 max_delegate_depth: 2,
             },
+            shared_admission: None,
         }
     }
 }
@@ -511,6 +515,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 }
                 let controller = self.controller.clone();
                 let semaphore = subagent_semaphore.clone();
+                let shared_admission = self.config.shared_admission.clone();
                 let task_cancel = cancel.clone();
                 let claim = match self
                     .controller
@@ -535,19 +540,41 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     _ => Vec::new(),
                 };
                 join_set.spawn(async move {
-                    let dispatch = match semaphore.acquire_owned().await {
-                        Ok(permit) => {
-                            let context = TaskSubagentContext::new(dispatch_run_id)
-                                .with_cancel(task_cancel)
-                                .with_delegation_policy(delegation_policy)
-                                .with_waived_dependencies(waived_dependency_ids);
-                            let result = controller.dispatch_task(context, claim, task).await;
-                            drop(permit);
-                            result
+                    let dispatch = if let Some(admission) = shared_admission {
+                        let lease = tokio::select! {
+                            _ = task_cancel.cancelled() => {
+                                Err(ReactError::Agent(Box::new(echo_core::error::AgentError::Cancelled("cancelled while waiting for shared execution admission".to_string()))))
+                            }
+                            lease = admission.issue_wait(format!("runtime:{dispatch_run_id}:{claim_id}")) => lease
+                                .map_err(|error| ReactError::Other(format!("shared execution admission rejected task: {error}"))),
+                        };
+                        match lease {
+                            Ok(lease) => {
+                                let context = TaskSubagentContext::new(dispatch_run_id)
+                                    .with_cancel(task_cancel)
+                                    .with_delegation_policy(delegation_policy)
+                                    .with_waived_dependencies(waived_dependency_ids);
+                                let result = controller.dispatch_task(context, claim, task).await;
+                                drop(lease);
+                                result
+                            }
+                            Err(error) => Err(error),
                         }
-                        Err(error) => Err(ReactError::Other(format!(
-                            "Subagent semaphore closed: {error}"
-                        ))),
+                    } else {
+                        match semaphore.acquire_owned().await {
+                            Ok(permit) => {
+                                let context = TaskSubagentContext::new(dispatch_run_id)
+                                    .with_cancel(task_cancel)
+                                    .with_delegation_policy(delegation_policy)
+                                    .with_waived_dependencies(waived_dependency_ids);
+                                let result = controller.dispatch_task(context, claim, task).await;
+                                drop(permit);
+                                result
+                            }
+                            Err(error) => Err(ReactError::Other(format!(
+                                "Subagent semaphore closed: {error}"
+                            ))),
+                        }
                     };
                     (claim_id, dispatch)
                 });

@@ -7,7 +7,7 @@
 //! | 身份/亲缘(lineage) | `dispatch_attempt` 派发时自动盖章(execution_id/task_id/attempt) |
 //! | 共享控制面 | 一个 `SubagentRegistry` 一个控制面,execution_id 跨执行器可寻址 |
 //! | 上行通道 | `default_uplink_sink`:Parent 方向 steer 父 / Sibling 方向 queue-only |
-//! | 事件可观测 | `SubagentEventBus` 收到 `UplinkReceived` 事件 |
+//! | 事件可观测 | raw bus 收到 `UplinkReceived`; envelope bus 提供执行顺序与恢复 |
 //!
 //! ## 运行方式
 //!
@@ -123,6 +123,7 @@ async fn main() {
         .await;
 
     let mut events = registry.event_bus().subscribe();
+    let mut execution_events = registry.event_bus().subscribe_envelopes();
 
     // 1) 以精确身份派发(subagent 阻塞,直到 release)
     let identity =
@@ -181,8 +182,9 @@ async fn main() {
     let sink = default_uplink_sink(Arc::clone(&registry));
     let sibling = sink(SubagentUplinkMessage {
         from: echo_agent::tools::SubagentLineage {
-            agent_name: Some("sibling-sender".to_string()),
-            execution_id: Some("run-1:task-a:1:attempt:1:claim-y".to_string()),
+            agent_name: Some("subagent".to_string()),
+            execution_id: Some(execution_id.clone()),
+            parent_agent: Some("primary".to_string()),
             ..Default::default()
         },
         target: SubagentUplinkTarget::Sibling {
@@ -199,7 +201,9 @@ async fn main() {
     // 3) 上行父方向:escalate(subagent 把发送者视为父,steer 父的活动 turn)
     let escalate = sink(SubagentUplinkMessage {
         from: echo_agent::tools::SubagentLineage {
-            agent_name: Some("child".to_string()),
+            agent_name: Some("subagent".to_string()),
+            execution_id: Some(execution_id.clone()),
+            parent_agent: Some("primary".to_string()),
             parent_execution_id: Some(execution_id.clone()),
             ..Default::default()
         },
@@ -244,6 +248,33 @@ async fn main() {
         "5) subagent 结算: status={:?}, steer 收到 {} 条消息",
         result.outcome.status,
         steered.lock().map(|m| m.len()).unwrap_or(0)
+    );
+
+    // 6) execution envelope 是身份、顺序和恢复的权威；raw bus 只用于兼容。
+    let mut stream_id = None;
+    let mut last_sequence = 0;
+    while let Ok(envelope) = execution_events.try_recv() {
+        println!(
+            "6) envelope: sequence={} event_id={}",
+            envelope.sequence, envelope.event_id
+        );
+        last_sequence = envelope.sequence;
+        stream_id = Some(envelope.stream_id.clone());
+    }
+    let Some(stream_id) = stream_id else {
+        eprintln!("execution envelope 未到达");
+        return;
+    };
+    let retained_streams = registry.event_bus().retained_stream_ids();
+    let active_streams = registry.event_bus().active_stream_ids();
+    let replay = registry.event_bus().replay_after(&stream_id, 0);
+    println!(
+        "   retained_streams={} active_streams={} replay={} gap={:?} terminal={} last_sequence={last_sequence}",
+        retained_streams.len(),
+        active_streams.len(),
+        replay.events.len(),
+        replay.gap,
+        replay.terminal.is_some()
     );
 
     println!("\n=== demo50 完成 ===");

@@ -83,9 +83,14 @@ pub struct EventIdentity {
     pub parent_event_id: Option<EventId>,
 }
 
-/// Versioned transport contract around an [`AgentEvent`] payload.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EventEnvelope {
+/// Versioned transport contract around an event payload.
+///
+/// `AgentEvent` remains the default payload so existing users can continue to
+/// refer to `EventEnvelope` without a type argument. Other framework event
+/// families reuse the same identity, ordering, hashing, and timestamp rules by
+/// supplying their own serializable payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEnvelope<T = AgentEvent> {
     pub schema_version: u16,
     pub event_id: EventId,
     /// Integrity digest for the parent link and payload occupying this logical slot.
@@ -100,16 +105,19 @@ pub struct EventEnvelope {
     pub execution_id: Option<ExecutionId>,
     pub parent_event_id: Option<EventId>,
     pub timestamp: DateTime<Utc>,
-    pub payload: AgentEvent,
+    pub payload: T,
 }
 
-impl EventEnvelope {
+impl<T> EventEnvelope<T>
+where
+    T: Serialize,
+{
     /// Construct one event when a caller must report failure before a stream exists.
     pub fn new(
         identity: &EventIdentity,
         sequence: u64,
         parent_event_id: Option<EventId>,
-        payload: AgentEvent,
+        payload: T,
     ) -> Result<Self> {
         identity.validate()?;
         if sequence == 0 {
@@ -137,7 +145,10 @@ impl EventEnvelope {
     }
 }
 
-fn event_content_hash(parent_event_id: Option<&EventId>, payload: &AgentEvent) -> Result<String> {
+fn event_content_hash<T>(parent_event_id: Option<&EventId>, payload: &T) -> Result<String>
+where
+    T: Serialize,
+{
     let mut hasher = Sha256::new();
     match parent_event_id {
         Some(value) => {
@@ -147,7 +158,7 @@ fn event_content_hash(parent_event_id: Option<&EventId>, payload: &AgentEvent) -
         None => hasher.update([0]),
     }
     let encoded = crate::utils::canonical_json::canonical_json_bytes(payload).map_err(|error| {
-        crate::error::ReactError::Other(format!("failed to encode Agent event payload: {error}"))
+        crate::error::ReactError::Other(format!("failed to encode event payload: {error}"))
     })?;
     hasher.update(encoded);
     Ok(format!("sha256:{:x}", hasher.finalize()))
@@ -262,7 +273,16 @@ impl EventIdentity {
 
     /// Derive transport identity from one value-scoped agent invocation.
     pub fn from_invocation(invocation: &super::AgentInvocationContext) -> Result<Self> {
-        let runtime = invocation.runtime.as_ref();
+        Self::from_runtime_context(invocation.runtime.as_ref())
+    }
+
+    /// Derive transport identity directly from an external runtime context.
+    ///
+    /// Dispatch coordinators use this before the child Agent invocation exists
+    /// so start, inner-stream, and terminal events share one stream identity.
+    pub fn from_runtime_context(
+        runtime: Option<&crate::tools::ExternalRunContext>,
+    ) -> Result<Self> {
         let run_id = runtime.and_then(|value| value.run_id.clone());
         let execution_id = runtime.and_then(|value| value.execution_id.clone());
         let turn_id = runtime
@@ -283,7 +303,11 @@ impl EventIdentity {
                 .map(MessageId::new)
                 .transpose()?,
             execution_id: execution_id.map(ExecutionId::new).transpose()?,
-            parent_event_id: None,
+            parent_event_id: runtime
+                .and_then(|value| value.subagent_lineage.as_ref())
+                .and_then(|value| value.parent_event_id.clone())
+                .map(EventId::new)
+                .transpose()?,
         })
     }
 }
@@ -393,16 +417,18 @@ pub fn envelope_event_stream_after<'a>(
     Box::pin(wrapped)
 }
 
-/// Validate a captured envelope trajectory without re-running a model.
-pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
+/// Validate payload-neutral envelope identity, ordering, hash, and parent-link
+/// invariants without interpreting event-family-specific terminal semantics.
+pub fn validate_envelope_trajectory<T>(events: &[EventEnvelope<T>]) -> Vec<String>
+where
+    T: Serialize,
+{
     let mut violations = Vec::new();
     let Some(first) = events.first() else {
         return vec!["trajectory is empty".to_string()];
     };
     let mut seen_ids = std::collections::HashSet::<EventId>::new();
     let mut seen_event_ids = std::collections::HashSet::<EventId>::new();
-    let mut tool_calls = HashMap::<String, EventId>::new();
-    let mut terminal_count = 0_usize;
 
     for (index, event) in events.iter().enumerate() {
         let expected_sequence = u64::try_from(index)
@@ -467,7 +493,22 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
                 parent_id, event.sequence
             ));
         }
+        seen_ids.insert(event.event_id.clone());
+    }
 
+    violations
+}
+
+/// Validate a captured Agent event trajectory without re-running a model.
+pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
+    let mut violations = validate_envelope_trajectory(events);
+    if events.is_empty() {
+        return violations;
+    }
+    let mut tool_calls = HashMap::<String, EventId>::new();
+    let mut terminal_count = 0_usize;
+
+    for (index, event) in events.iter().enumerate() {
         match &event.payload {
             AgentEvent::ToolCall { call_id, .. }
                 if tool_calls
@@ -504,7 +545,6 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
                 ));
             }
         }
-        seen_ids.insert(event.event_id.clone());
     }
 
     if terminal_count != 1 {
@@ -524,6 +564,11 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
 mod tests {
     use super::*;
     use futures::stream;
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct TestPayload {
+        label: String,
+    }
 
     fn identity() -> EventIdentity {
         EventIdentity {
@@ -858,6 +903,53 @@ mod tests {
         blank.turn_id = TurnId(String::new());
         assert!(EventEnvelope::new(&blank, 1, None, AgentEvent::Cancelled).is_err());
         assert!(EventEnvelope::new(&identity(), 0, None, AgentEvent::Cancelled).is_err());
+    }
+
+    #[test]
+    fn generic_envelope_reuses_identity_hash_and_sequence_validation() -> Result<()> {
+        let first = EventEnvelope::new(
+            &identity(),
+            4,
+            None,
+            TestPayload {
+                label: "开始".to_string(),
+            },
+        )?;
+        let second = EventEnvelope::new(
+            &identity(),
+            5,
+            Some(first.event_id.clone()),
+            TestPayload {
+                label: "完成".to_string(),
+            },
+        )?;
+        let encoded = serde_json::to_vec(&vec![first, second])
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        let decoded: Vec<EventEnvelope<TestPayload>> = serde_json::from_slice(&encoded)
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+
+        assert!(validate_envelope_trajectory(&decoded).is_empty());
+        assert_eq!(decoded.get(1).map(|event| event.sequence), Some(5));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_identity_preserves_nested_parent_event() -> Result<()> {
+        let runtime = crate::tools::ExternalRunContext {
+            turn_id: Some("child-turn".to_string()),
+            execution_id: Some("child-execution".to_string()),
+            subagent_lineage: Some(crate::tools::SubagentLineage {
+                parent_event_id: Some("evt_parent_tool".to_string()),
+                ..crate::tools::SubagentLineage::default()
+            }),
+            ..crate::tools::ExternalRunContext::default()
+        };
+        let identity = EventIdentity::from_runtime_context(Some(&runtime))?;
+        assert_eq!(
+            identity.parent_event_id.as_ref().map(EventId::as_str),
+            Some("evt_parent_tool")
+        );
+        Ok(())
     }
 
     #[test]

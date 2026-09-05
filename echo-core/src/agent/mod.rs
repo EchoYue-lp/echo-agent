@@ -1,5 +1,6 @@
 //! Agent core trait, events, and callback interfaces
 
+pub mod admission;
 pub mod builder;
 mod critic;
 mod event_envelope;
@@ -8,6 +9,10 @@ pub mod intervention;
 pub mod prompt_template;
 mod types;
 
+pub use admission::{
+    ExecutionAdmission, KeyedExecutionAdmission, KeyedExecutionAdmissionError, KeyedExecutionLease,
+    KeyedExecutionRetirement,
+};
 pub use factory::{AgentFactory, AgentFactoryConfig};
 pub use intervention::{CallbackBridge, InterventionCallback, InterventionResult};
 pub use prompt_template::PromptTemplateManager;
@@ -16,7 +21,7 @@ pub use critic::{CompositeCritic, CompositeStrategy, Critic, StaticCritic, Thres
 pub use event_envelope::{
     AGENT_EVENT_SCHEMA_VERSION, ConversationId, EventEnvelope, EventId, EventIdentity, ExecutionId,
     MessageId, RunId, StreamId, TurnId, envelope_event_stream, envelope_event_stream_after,
-    validate_event_trajectory,
+    validate_envelope_trajectory, validate_event_trajectory,
 };
 pub use types::{Critique, CritiqueOutput, critique_output_schema};
 
@@ -516,7 +521,7 @@ impl std::fmt::Debug for AgentInvocationContext {
 /// Events produced during Agent execution
 ///
 /// Cover each phase of the Agent lifecycle for progress bars, logs, UI updates, etc.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 // Boxing ToolStream would break the public event contract for every consumer.
