@@ -1316,6 +1316,7 @@ dependencies = [
 name = "echo-agent-learning"
 version = "0.1.0"
 dependencies = [
+ "agent-client-protocol",
  "async-stream",
  "async-trait",
  "base64",
@@ -1363,6 +1364,7 @@ dependencies = [
 name = "echo_agent"
 version = "0.2.0"
 dependencies = [
+ "agent-client-protocol",
  "async-stream",
  "async-trait",
  "axum",

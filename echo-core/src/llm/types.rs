@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 
 // ── Multimodal Content ────────────────────────────────────────────────────────
 
-/// A single component of message content (multimodal)
+/// A provider-neutral component of structured message content.
 ///
-/// Corresponds to OpenAI Vision / Anthropic multimodal API content parts format.
+/// Provider adapters translate variants that their wire API does not support
+/// natively while the framework keeps the typed value in conversation state.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
@@ -27,6 +28,11 @@ pub enum ContentPart {
         name: String,
         /// File content (Base64 encoded)
         content: String,
+    },
+    /// A typed link to a resource that the Agent may inspect.
+    ResourceLink {
+        /// Lossless provider-neutral resource metadata.
+        resource: Box<LinkedResource>,
     },
 }
 
@@ -59,6 +65,43 @@ pub struct ImageUrl {
     /// Optional detail level: `"auto"` | `"low"` | `"high"`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+/// Provider-neutral linked resource carried in a structured user message.
+///
+/// Protocol adapters keep this typed until the provider boundary. Providers
+/// that do not have a native resource-link block render it as deterministic
+/// text while framework Agents can inspect every field without parsing a
+/// private marker embedded in user text.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct LinkedResource {
+    /// Optional display and audience annotations supplied by the protocol.
+    pub annotations: Option<serde_json::Value>,
+    /// Optional human-readable details.
+    pub description: Option<String>,
+    /// Optional MIME type for the linked content.
+    pub mime_type: Option<String>,
+    /// Human-readable resource name.
+    pub name: String,
+    /// Optional resource size in bytes.
+    pub size: Option<i64>,
+    /// Optional display title.
+    pub title: Option<String>,
+    /// Resource URI preserved exactly from the adapter input.
+    pub uri: String,
+    /// Optional protocol extension metadata.
+    pub meta: Option<serde_json::Value>,
+}
+
+impl LinkedResource {
+    /// Render a deterministic provider fallback without changing the typed
+    /// framework message stored in Session history.
+    #[doc(hidden)]
+    pub fn model_text(&self) -> String {
+        let encoded = serde_json::to_string(self)
+            .unwrap_or_else(|_| "{\"resource_link\":\"serialization_failed\"}".to_string());
+        format!("[Linked resource]\n{encoded}")
+    }
 }
 
 /// Message content: compatible with both plain text and multimodal parts forms.
@@ -120,10 +163,11 @@ impl MessageContent {
                 }
             }
             MessageContent::Parts(parts) => {
-                let texts: Vec<&str> = parts
+                let texts: Vec<String> = parts
                     .iter()
                     .filter_map(|p| match p {
-                        ContentPart::Text { text } => Some(text.as_str()),
+                        ContentPart::Text { text } => Some(text.clone()),
+                        ContentPart::ResourceLink { resource } => Some(resource.model_text()),
                         _ => None,
                     })
                     .collect();
@@ -190,6 +234,9 @@ impl MessageContent {
                     ContentPart::File { name, content } => tokenizer
                         .count_tokens(name)
                         .saturating_add(content.chars().count().div_ceil(4)),
+                    ContentPart::ResourceLink { resource } => {
+                        tokenizer.count_tokens(&resource.model_text())
+                    }
                 };
                 total.saturating_add(part_tokens)
             }),
@@ -1377,6 +1424,38 @@ mod tests {
         ]);
 
         assert!(content.estimated_tokens(&tokenizer) >= 1_200);
+    }
+
+    #[test]
+    fn linked_resource_stays_typed_and_has_deterministic_model_text() {
+        let resource = LinkedResource {
+            annotations: Some(serde_json::json!({"audience": ["assistant"]})),
+            description: Some("source context".to_string()),
+            mime_type: Some("text/rust".to_string()),
+            name: "lib.rs".to_string(),
+            size: Some(42),
+            title: Some("Library".to_string()),
+            uri: "file:///workspace/src/lib.rs".to_string(),
+            meta: Some(serde_json::json!({"trace": "abc"})),
+        };
+        let content = MessageContent::Parts(vec![ContentPart::ResourceLink {
+            resource: Box::new(resource.clone()),
+        }]);
+        let text = content.as_text().unwrap_or_default();
+        assert!(text.starts_with("[Linked resource]\n"));
+        assert!(text.contains("file:///workspace/src/lib.rs"));
+        assert!(text.contains("source context"));
+
+        let encoded = serde_json::to_string(&content).unwrap_or_default();
+        let decoded = serde_json::from_str::<MessageContent>(&encoded).ok();
+        let decoded_resource = decoded
+            .and_then(MessageContent::into_parts)
+            .and_then(|parts| parts.into_iter().next())
+            .and_then(|part| match part {
+                ContentPart::ResourceLink { resource } => Some(*resource),
+                _ => None,
+            });
+        assert_eq!(decoded_resource, Some(resource));
     }
 
     #[test]

@@ -243,6 +243,54 @@ fn known_facade_semantics_are_classified_correctly() -> TestResult {
         find_entry(&manifest, "echo_agent::agent::AgentEvent")?.acp_relationship,
         AcpRelationship::StandardProjection
     );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::llm::types::LinkedResource")?.acp_relationship,
+        AcpRelationship::StandardProjection
+    );
+    let canonical_resource = find_entry(&manifest, "echo_agent::llm::types::LinkedResource")?;
+    let prelude_resource = find_entry(&manifest, "echo_agent::prelude::LinkedResource")?;
+    assert_eq!(
+        prelude_resource.acp_relationship,
+        AcpRelationship::StandardProjection
+    );
+    assert_eq!(prelude_resource.adapter, canonical_resource.adapter);
+    for field in [
+        "annotations",
+        "description",
+        "mime_type",
+        "name",
+        "size",
+        "title",
+        "uri",
+        "meta",
+    ] {
+        let canonical = find_entry(
+            &manifest,
+            &format!("echo_agent::llm::types::LinkedResource::{field}"),
+        )?;
+        let prelude = find_entry(
+            &manifest,
+            &format!("echo_agent::prelude::LinkedResource::{field}"),
+        )?;
+        assert_eq!(prelude.acp_relationship, canonical.acp_relationship);
+        assert_eq!(prelude.adapter, canonical.adapter);
+    }
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::acp::AcpAgentAdapter")?.acp_relationship,
+        AcpRelationship::LanguageIntrinsic
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::acp::AcpAdapterConfig")?.acp_relationship,
+        AcpRelationship::LanguageIntrinsic
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::acp::AcpSessionFactory")?.acp_relationship,
+        AcpRelationship::LanguageIntrinsic
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::acp::AcpSessionContext")?.acp_relationship,
+        AcpRelationship::StandardProjection
+    );
     assert!(manifest.entries.iter().any(|entry| {
         entry.path.ends_with("RuntimeTaskService") && entry.classification == SemanticClass::Handle
     }));

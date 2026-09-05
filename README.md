@@ -127,6 +127,7 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 | Feature | In `full`? | Description |
 |---------|-----------|-------------|
 | `full` | — | Meta-feature: enables every flag listed below |
+| `acp` | yes | Stable ACP v1 Agent adapter over the canonical turn runtime |
 | `a2a` | yes | Agent-to-Agent protocol server and client |
 | `mcp` | yes | Model Context Protocol client |
 | `lsp` | yes | Language Server Protocol integration |
@@ -229,6 +230,7 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 
 | Feature | Description | API Preview |
 |---------|-------------|-------------|
+| **ACP Agent** | Stable v1 Client-Agent adapter over `AgentTurnDriver` | `AcpAgentAdapter::new(factory)` |
 | **MCP Protocol** | Connect any MCP server (stdio / SSE / HTTP) | `mcp.connect(McpServerConfig::stdio(...))` |
 | **A2A Protocol** | Agent Card publishing, cross-framework collaboration | `A2AServer::bind("0.0.0.0:3000")` |
 | **Skill System** | Progressive disclosure: discover → activate → use | `agent.load_skill("web_research")` |
@@ -1098,14 +1100,15 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Code Search | [EN](docs/en/37-code-search.md) | [ZH](docs/zh/37-code-search.md) |
 | Agent Factory & Model Profiles | [EN](docs/en/38-factory-modes.md) | [ZH](docs/zh/38-factory-modes.md) |
 | Security | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
-| Multilingual SDK (Contract stage) | [EN](docs/sdk/README.md) | — |
+| Multilingual SDK (Contract + ACP adapter) | [EN](docs/sdk/README.md) | — |
 
 ### SDK corner
 
-The TypeScript/Python/Java SDK program is at the **Contract** stage: the
+The TypeScript/Python/Java SDK program remains at the **Contract** stage. The
 ACP v1 baseline, `_echo_agent/*` extension schema, facade parity manifest
-and drift gates are frozen and CI-enforced; the ACP adapter, SDK Host and
-language SDKs are not implemented yet. Start at
+and drift gates are frozen and CI-enforced. A transport-neutral stable ACP v1
+Agent adapter is now available behind `features = ["acp"]`; the configurable
+SDK Host and language SDKs are not implemented yet. Start at
 [docs/sdk/README.md](docs/sdk/README.md) — it is the only SDK entry point
 and states exactly what exists today.
 

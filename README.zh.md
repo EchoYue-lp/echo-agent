@@ -185,6 +185,7 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 
 | 能力 | 描述 | API 预览 |
 |------|------|---------|
+| **ACP Agent** | 基于 `AgentTurnDriver` 的稳定 v1 Client-Agent adapter | `AcpAgentAdapter::new(factory)` |
 | **MCP 协议** | 接入任意 MCP 服务器（stdio/SSE/HTTP） | `mcp.connect(McpServerConfig::stdio(...))` |
 | **A2A 协议** | Agent Card 发布、跨框架协作 | `A2AServer::bind("0.0.0.0:3000")` |
 | **Skill 系统** | 渐进式披露：发现 → 激活 → 使用 | `agent.load_skill("web_research")` |
@@ -219,6 +220,7 @@ echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "
 | Feature | 启用 | 关键依赖 |
 |---------|------|---------|
 | `full` | 启用下列全部 feature | — |
+| `acp` | 稳定 ACP v1 Agent adapter | `agent-client-protocol` |
 | `a2a` | Agent-to-Agent 协议 | `axum`, `jsonwebtoken` |
 | `mcp` | MCP 协议客户端 | — |
 | `lsp` | Language Server Protocol 集成 | — |
@@ -804,13 +806,14 @@ agent.set_circuit_breaker(cb_config);
 | 配置参考 | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
 | 运行时与任务系统 | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
 | 安全指南 | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
-| 多语言 SDK（合同阶段） | [EN](docs/sdk/README.md) | — |
+| 多语言 SDK（合同 + ACP adapter） | [EN](docs/sdk/README.md) | — |
 
 ### SDK 入口
 
-TypeScript/Python/Java SDK 计划当前处于 **Contract（合同冻结）** 阶段：ACP v1
+TypeScript/Python/Java SDK 计划仍处于 **Contract（合同冻结）** 阶段：ACP v1
 基线、`_echo_agent/*` 扩展 Schema、facade 对等清单与漂移门禁已冻结并由 CI
-强制执行；ACP adapter、SDK Host 与三语言 SDK 尚未实现。唯一入口是
+强制执行；根 crate 已在 `acp` feature 下提供 transport-neutral 的稳定 v1 Agent
+adapter，SDK Host 与三语言 SDK 尚未实现。唯一入口是
 [docs/sdk/README.md](docs/sdk/README.md)，其中如实声明了当前状态。
 
 ---

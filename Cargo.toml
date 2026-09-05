@@ -56,7 +56,7 @@ exclude = [
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
+features = ["acp", "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
 rustdoc-args = ["--cfg", "docsrs"]
 # NOTE: `data` (polars) is still excluded from docs.rs. polars-ops 0.46–0.53
 # broke nightly builds by unconditionally enabling its `nightly` cfg and then
@@ -68,7 +68,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-full = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics", "testing"]
+full = ["acp", "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics", "testing"]
+acp = ["dep:agent-client-protocol"]
 a2a = ["dep:axum", "dep:jsonwebtoken"]
 mcp = ["echo_integration/mcp"]
 lsp = ["echo_core/lsp", "echo_integration/lsp"]
@@ -104,6 +105,7 @@ echo_integration = { version = "0.2.0", path = "echo-integration" }
 echo_tools = { version = "0.2.0", path = "echo-tools" }
 echo_state = { version = "0.2.0", path = "echo-state" }
 echo_orchestration = { version = "0.2.0", path = "echo-orchestration" }
+agent-client-protocol = { version = "=2.1.0", optional = true }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "io-util", "fs", "signal", "process"] }

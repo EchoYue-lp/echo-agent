@@ -1548,6 +1548,7 @@ pub fn classify_entry(
         "echo_core::agent::AgentEvent",
         "echo_core::agent::event_envelope::EventEnvelope",
         "echo_core::llm::types::ContentPart",
+        "echo_core::llm::types::LinkedResource",
         "echo_core::llm::types::Message",
         "echo_core::llm::types::MessageContent",
         "echo_core::llm::types::Role",
@@ -1561,7 +1562,22 @@ pub fn classify_entry(
                     .is_some_and(|rest| rest.starts_with("::"))
         })
     });
+    let acp_adapter_item = entry.source_paths.iter().any(|source| {
+        source == "echo_agent::acp"
+            || source
+                .strip_prefix("echo_agent::acp::")
+                .is_some_and(|rest| !rest.is_empty())
+    });
+    let acp_session_context = entry.path == "echo_agent::acp::AcpSessionContext"
+        || entry
+            .path
+            .strip_prefix("echo_agent::acp::AcpSessionContext::")
+            .is_some_and(|rest| !rest.is_empty());
     let relationship = if class == SemanticClass::LanguageIntrinsic {
+        AcpRelationship::LanguageIntrinsic
+    } else if acp_session_context {
+        AcpRelationship::StandardProjection
+    } else if acp_adapter_item {
         AcpRelationship::LanguageIntrinsic
     } else if standard_projection {
         AcpRelationship::StandardProjection
@@ -1600,8 +1616,25 @@ fn adapter_for(
     relationship: AcpRelationship,
     semantic_rule: &str,
 ) -> AdapterObligation {
+    let linked_resource_family = entry.source_paths.iter().any(|source| {
+        source == "echo_core::llm::types::LinkedResource"
+            || source
+                .strip_prefix("echo_core::llm::types::LinkedResource::")
+                .is_some_and(|rest| !rest.is_empty())
+    });
     let operation = if relationship == AcpRelationship::LanguageIntrinsic {
         "language:facade".to_string()
+    } else if linked_resource_family {
+        "acp:v1/session/prompt".to_string()
+    } else if entry.path == "echo_agent::acp::AcpSessionContext"
+        || entry
+            .path
+            .strip_prefix("echo_agent::acp::AcpSessionContext::")
+            .is_some_and(|rest| !rest.is_empty())
+    {
+        "acp:v1/initialize+session/new".to_string()
+    } else if relationship == AcpRelationship::Standard {
+        "acp:v1".to_string()
     } else if relationship == AcpRelationship::StandardProjection {
         "acp:v1+_echo_agent/facade/invoke".to_string()
     } else if class == SemanticClass::Extension {
@@ -1619,6 +1652,24 @@ fn adapter_for(
     } else {
         "_echo_agent/facade/invoke".to_string()
     };
+    let validation = if relationship == AcpRelationship::Standard
+        || linked_resource_family
+        || entry.path == "echo_agent::acp::AcpSessionContext"
+        || entry
+            .path
+            .strip_prefix("echo_agent::acp::AcpSessionContext::")
+            .is_some_and(|rest| !rest.is_empty())
+    {
+        vec![
+            "tests/acp_agent_adapter.rs".to_string(),
+            "echo-sdk-protocol/tests/acp_baseline.rs".to_string(),
+        ]
+    } else {
+        vec![
+            "echo-sdk-protocol/tests/facade_inventory.rs#known_facade_semantics_are_classified_correctly".to_string(),
+            "echo-sdk-protocol/tests/extension_contract.rs".to_string(),
+        ]
+    };
     AdapterObligation {
         operation,
         mapping: format!(
@@ -1626,10 +1677,7 @@ fn adapter_for(
             relationship.as_str(),
             semantic_rule
         ),
-        validation: vec![
-            "echo-sdk-protocol/tests/facade_inventory.rs#known_facade_semantics_are_classified_correctly".to_string(),
-            "echo-sdk-protocol/tests/extension_contract.rs".to_string(),
-        ],
+        validation,
     }
 }
 

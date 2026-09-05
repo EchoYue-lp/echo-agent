@@ -95,7 +95,7 @@ cargo check --workspace --lib --no-default-features --locked
 修改 `Cargo.toml`、feature 定义、`#[cfg(...)]` 分支、可选依赖或跨 crate 公共 API 时,额外逐个编译根 crate 的独立 feature:
 
 ```bash
-for feature in a2a mcp lsp sqlite telemetry topology subagent web media \
+for feature in acp a2a mcp lsp sqlite telemetry topology subagent web media \
   data statistics channels git database rag chart; do
   cargo check -p echo_agent --no-default-features --features "$feature" --locked || exit 1
 done
