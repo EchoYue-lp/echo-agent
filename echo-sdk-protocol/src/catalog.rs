@@ -55,35 +55,131 @@ pub struct MethodDescriptor {
     pub summary: &'static str,
 }
 
-/// Standard ACP v1 method names. The catalog must never define any of
-/// these; the official schema owns them.
-pub const STANDARD_ACP_METHODS: &[&str] = &[
-    "initialize",
-    "authenticate",
-    "session/new",
-    "session/load",
-    "session/prompt",
-    "session/cancel",
-    "session/update",
-    "session/request_permission",
-    "session/set_mode",
-    "session/set_suggestions",
-    "session/show_command",
-    "session/read_clipboard",
-    "session/write_text",
-    "fs/read_text_file",
-    "fs/write_text_file",
-    "terminal/create",
-    "terminal/restart",
-    "terminal/write",
-    "terminal/kill",
-    "terminal/read",
-    "session/request_auth",
-    "session/sign_out",
-    "session/list",
-    "session/delete",
-    "session/close",
-];
+impl MethodDescriptor {
+    /// Request/notification payload definition in the generated extension schema.
+    pub fn params_schema(&self) -> &'static str {
+        match self.name {
+            "_echo_agent/agent/create" => "AgentCreateRequest",
+            "_echo_agent/agent/describe" => "AgentDescribeRequest",
+            "_echo_agent/agent/close" => "AgentCloseRequest",
+            "_echo_agent/session/create" => "SessionCreateRequest",
+            "_echo_agent/session/load" => "SessionLoadRequest",
+            "_echo_agent/session/close" => "SessionCloseRequest",
+            "_echo_agent/run/start" => "RunStartRequest",
+            "_echo_agent/run/get" => "RunGetRequest",
+            "_echo_agent/run/wait" => "RunWaitRequest",
+            "_echo_agent/run/cancel" => "RunCancelRequest",
+            "_echo_agent/run/steer" => "RunSteerRequest",
+            "_echo_agent/run/replay" => "ReplayRequest",
+            "_echo_agent/event" => "EventNotification",
+            "_echo_agent/gap" => "GapNotification",
+            "_echo_agent/task/create" => "TaskCreateRequest",
+            "_echo_agent/task/update" => "TaskUpdateRequest",
+            "_echo_agent/task/list" => "TaskListRequest",
+            "_echo_agent/task/execute" => "TaskExecuteRequest",
+            "_echo_agent/task/control" => "TaskControlRequest",
+            "_echo_agent/subagent/dispatch" => "SubagentDispatchRequest",
+            "_echo_agent/subagent/await" => "SubagentAwaitRequest",
+            "_echo_agent/subagent/control" => "SubagentControlRequest",
+            "_echo_agent/extension/register" => "ExtensionRegisterRequest",
+            "_echo_agent/extension/unregister" => "ExtensionUnregisterRequest",
+            "_echo_agent/extension/invoke" => "ExtensionInvokeCall",
+            "_echo_agent/extension/cancel" => "ExtensionCancelNotice",
+            "_echo_agent/extension/stream" => "ExtensionStreamEvent",
+            "_echo_agent/structured_output/validate"
+            | "_echo_agent/memory/op"
+            | "_echo_agent/workflow/op"
+            | "_echo_agent/state/op"
+            | "_echo_agent/facade/invoke" => "FeatureOperationRequest",
+            _ => "",
+        }
+    }
+
+    /// Successful result definition. Notifications have no result schema.
+    pub fn result_schema(&self) -> Option<&'static str> {
+        match self.name {
+            "_echo_agent/agent/create" => Some("AgentCreateResponse"),
+            "_echo_agent/agent/describe" => Some("AgentDescribeResponse"),
+            "_echo_agent/agent/close" => Some("AgentCloseResponse"),
+            "_echo_agent/session/create" => Some("SessionCreateResponse"),
+            "_echo_agent/session/load" => Some("SessionLoadResponse"),
+            "_echo_agent/session/close" => Some("SessionCloseResponse"),
+            "_echo_agent/run/start" => Some("RunStartResponse"),
+            "_echo_agent/run/get" => Some("RunGetResponse"),
+            "_echo_agent/run/wait" => Some("RunWaitResponse"),
+            "_echo_agent/run/cancel" => Some("RunCancelResponse"),
+            "_echo_agent/run/steer" => Some("RunSteerResponse"),
+            "_echo_agent/run/replay" => Some("ReplayResponse"),
+            "_echo_agent/task/create" => Some("TaskCreateResponse"),
+            "_echo_agent/task/update" => Some("TaskUpdateResponse"),
+            "_echo_agent/task/list" => Some("TaskListResponse"),
+            "_echo_agent/task/execute" => Some("TaskExecuteResponse"),
+            "_echo_agent/task/control" => Some("TaskControlResponse"),
+            "_echo_agent/subagent/dispatch" => Some("SubagentDispatchResponse"),
+            "_echo_agent/subagent/await" => Some("SubagentAwaitResponse"),
+            "_echo_agent/subagent/control" => Some("SubagentControlResponse"),
+            "_echo_agent/extension/register" => Some("ExtensionRegisterResponse"),
+            "_echo_agent/extension/unregister" => Some("ExtensionUnregisterResponse"),
+            "_echo_agent/extension/invoke" => Some("ExtensionInvokeOutcome"),
+            "_echo_agent/structured_output/validate"
+            | "_echo_agent/memory/op"
+            | "_echo_agent/workflow/op"
+            | "_echo_agent/state/op"
+            | "_echo_agent/facade/invoke" => Some("FeatureOperationResponse"),
+            "_echo_agent/event"
+            | "_echo_agent/gap"
+            | "_echo_agent/extension/cancel"
+            | "_echo_agent/extension/stream" => None,
+            _ => None,
+        }
+    }
+
+    pub fn error_schema(&self) -> Option<&'static str> {
+        matches!(
+            self.direction,
+            Direction::Request | Direction::ReverseRequest
+        )
+        .then_some("EchoSdkError")
+    }
+}
+
+/// Stable ACP v1 method names come directly from the pinned official schema
+/// artifact. Keeping the references typed makes an upstream rename a compile
+/// failure rather than a silently stale local list.
+pub fn official_acp_v1_methods() -> std::collections::BTreeSet<&'static str> {
+    use agent_client_protocol_schema::v1::{
+        AGENT_METHOD_NAMES, CLIENT_METHOD_NAMES, PROTOCOL_LEVEL_METHOD_NAMES,
+    };
+    [
+        AGENT_METHOD_NAMES.initialize,
+        AGENT_METHOD_NAMES.authenticate,
+        AGENT_METHOD_NAMES.session_new,
+        AGENT_METHOD_NAMES.session_load,
+        AGENT_METHOD_NAMES.session_set_mode,
+        AGENT_METHOD_NAMES.session_set_config_option,
+        AGENT_METHOD_NAMES.session_prompt,
+        AGENT_METHOD_NAMES.session_cancel,
+        AGENT_METHOD_NAMES.session_list,
+        AGENT_METHOD_NAMES.session_delete,
+        AGENT_METHOD_NAMES.session_resume,
+        AGENT_METHOD_NAMES.session_close,
+        AGENT_METHOD_NAMES.logout,
+        CLIENT_METHOD_NAMES.session_request_permission,
+        CLIENT_METHOD_NAMES.session_update,
+        CLIENT_METHOD_NAMES.fs_write_text_file,
+        CLIENT_METHOD_NAMES.fs_read_text_file,
+        CLIENT_METHOD_NAMES.terminal_create,
+        CLIENT_METHOD_NAMES.terminal_output,
+        CLIENT_METHOD_NAMES.terminal_release,
+        CLIENT_METHOD_NAMES.terminal_wait_for_exit,
+        CLIENT_METHOD_NAMES.terminal_kill,
+        CLIENT_METHOD_NAMES.elicitation_create,
+        CLIENT_METHOD_NAMES.elicitation_complete,
+        PROTOCOL_LEVEL_METHOD_NAMES.cancel_request,
+    ]
+    .into_iter()
+    .collect()
+}
 
 /// The frozen extension method catalog.
 pub const METHOD_CATALOG: &[MethodDescriptor] = &[
@@ -250,6 +346,12 @@ pub const METHOD_CATALOG: &[MethodDescriptor] = &[
         capability: ExtensionCapability::ExtensionBridge,
         summary: "Host -> SDK cancellation notice for an in-flight invocation.",
     },
+    MethodDescriptor {
+        name: "_echo_agent/extension/stream",
+        direction: Direction::ClientNotification,
+        capability: ExtensionCapability::ExtensionBridge,
+        summary: "Chunk or terminal event for a reverse-callback stream.",
+    },
     // ── Structured output ─────────────────────────────────────────────
     MethodDescriptor {
         name: "_echo_agent/structured_output/validate",
@@ -262,7 +364,7 @@ pub const METHOD_CATALOG: &[MethodDescriptor] = &[
         name: "_echo_agent/memory/op",
         direction: Direction::Request,
         capability: ExtensionCapability::Runs,
-        summary: "Memory store operations projected verbatim until typed DTOs land.",
+        summary: "Memory store operations encoded with manifest-identified wire values.",
     },
     MethodDescriptor {
         name: "_echo_agent/workflow/op",
@@ -276,6 +378,12 @@ pub const METHOD_CATALOG: &[MethodDescriptor] = &[
         capability: ExtensionCapability::Runs,
         summary: "State/delivery/trace operations over framework stores.",
     },
+    MethodDescriptor {
+        name: "_echo_agent/facade/invoke",
+        direction: Direction::Request,
+        capability: ExtensionCapability::Runs,
+        summary: "Invoke one manifest-identified facade operation with typed wire values.",
+    },
 ];
 
 /// Mechanically validate the catalog against ACP extensibility rules.
@@ -284,11 +392,9 @@ pub const METHOD_CATALOG: &[MethodDescriptor] = &[
 pub fn validate_catalog(catalog: &[MethodDescriptor]) -> Vec<String> {
     let mut problems = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
+    let official_methods = official_acp_v1_methods();
     for method in catalog {
-        if !method
-            .name
-            .starts_with(crate::EXTENSION_NAMESPACE.to_string().as_str())
-        {
+        if !method.name.starts_with(crate::EXTENSION_NAMESPACE) {
             problems.push(format!(
                 "method {} is outside the extension namespace",
                 method.name
@@ -303,11 +409,27 @@ pub fn validate_catalog(catalog: &[MethodDescriptor]) -> Vec<String> {
                 method.name
             ));
         }
-        if STANDARD_ACP_METHODS.contains(&method.name) {
+        if official_methods.contains(method.name) {
             problems.push(format!(
                 "method {} collides with a standard ACP method",
                 method.name
             ));
+        }
+        if method.params_schema().is_empty() {
+            problems.push(format!("method {} has no params schema", method.name));
+        }
+        let is_notification = matches!(
+            method.direction,
+            Direction::ClientNotification | Direction::HostNotification
+        );
+        if is_notification && method.result_schema().is_some() {
+            problems.push(format!(
+                "notification {} must not declare a result schema",
+                method.name
+            ));
+        }
+        if !is_notification && method.result_schema().is_none() {
+            problems.push(format!("request {} has no result schema", method.name));
         }
         if seen.contains(&method.name) {
             problems.push(format!("duplicate catalog entry {}", method.name));
@@ -338,6 +460,8 @@ mod tests {
             "_echo_agent/subagent/dispatch",
             "_echo_agent/extension/register",
             "_echo_agent/extension/invoke",
+            "_echo_agent/extension/stream",
+            "_echo_agent/facade/invoke",
             "_echo_agent/event",
             "_echo_agent/gap",
         ] {

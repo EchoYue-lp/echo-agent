@@ -1,137 +1,132 @@
-//! Deterministic public-facade inventory extraction from rustdoc JSON.
+//! Deterministic inventory of the public `echo_agent` facade.
 //!
-//! The SDK parity authority is the rustdoc-reachable public surface of the
-//! root `echo_agent` crate (see design §7.1), not a hand-written module list.
-//! This module parses the rustdoc JSON emitted by the toolchain pinned in
-//! `contracts/sdk/toolchain.json` and walks the public module tree to produce
-//! a stable, sorted item list per feature profile.
-//!
-//! Paths follow rustdoc semantics for the facade:
-//! - items defined in the root crate get their module path
-//! - named re-exports are recorded as `import` items with their source
-//! - glob re-exports (typically from workspace sub-crates) stay as a single
-//!   `import` declaration; the crate-local rustdoc JSON has no visibility of
-//!   the foreign targets, which is exactly the facade boundary we snapshot
-//! - methods on inherent or trait impls are keyed by
-//!   `module::(TypeName)::method` so the same logical method stays aligned
-//!   across feature profiles (rustdoc item ids are not stable)
-//!
-//! Struct fields and enum variants are folded into their parent type: the
-//! facade contract is the type, not each field. Anything the parser does not
-//! recognize is surfaced as `other` rather than dropped, so new rustdoc kinds
-//! can never silently shrink the inventory.
+//! Rustdoc JSON for a facade crate does not contain the children of a glob
+//! re-export from another crate. The contract generator therefore supplies
+//! rustdoc JSON for every workspace crate resolved in the same Cargo feature
+//! profile. This module follows those imports across documents and records the
+//! actual public item, its members, fields, variants and a stable API-shape
+//! digest. An unresolved glob or an unknown rustdoc item kind fails closed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-/// Supported rustdoc JSON format version. The pinned nightly toolchain in
-/// `contracts/sdk/toolchain.json` must emit exactly this version; a mismatch
-/// fails the contract check instead of silently changing the inventory.
+/// Rustdoc JSON format emitted by the toolchain pinned in
+/// `contracts/sdk/toolchain.json`.
 pub const RUSTDOC_FORMAT_VERSION: u64 = 61;
 
-/// Public item kinds recorded in the inventory snapshot.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
     Module,
-    Import,
     Function,
     Method,
     Struct,
+    StructField,
     Enum,
+    Variant,
     Union,
     Trait,
+    TraitImpl,
     TraitAlias,
     TypeAlias,
     Macro,
     ProcMacro,
     Constant,
     Static,
-    /// Exotic or future rustdoc kinds. Recorded so new kinds can never be
-    /// silently dropped from the snapshot; the manifest check treats them as
-    /// requiring an explicit review note.
-    Other,
+    ExternType,
+    Primitive,
 }
 
 impl ItemKind {
-    fn parse(inner: &serde_json::Map<String, serde_json::Value>) -> Self {
-        if let Some(key) = inner.keys().next() {
-            return match key.as_str() {
-                "module" => ItemKind::Module,
-                // rustdoc format 61 spells re-exports as `use`.
-                "use" => ItemKind::Import,
-                "function" => ItemKind::Function,
-                "struct" => ItemKind::Struct,
-                "enum" => ItemKind::Enum,
-                "union" => ItemKind::Union,
-                "trait" => ItemKind::Trait,
-                "trait_alias" => ItemKind::TraitAlias,
-                "type_alias" | "assoc_type" => ItemKind::TypeAlias,
-                "macro" => ItemKind::Macro,
-                "proc_macro" => ItemKind::ProcMacro,
-                "constant" | "assoc_const" => ItemKind::Constant,
-                "static" => ItemKind::Static,
-                // variant / struct_field / impl / extern_crate / primitive are
-                // handled structurally by the walker, not recorded as items.
-                _ => ItemKind::Other,
-            };
+    fn parse(inner: &serde_json::Map<String, serde_json::Value>) -> Result<Self, InventoryError> {
+        let Some(key) = inner.keys().next() else {
+            return Err(InventoryError::UnsupportedItemKind("<empty>".to_string()));
+        };
+        match key.as_str() {
+            "module" => Ok(Self::Module),
+            "function" => Ok(Self::Function),
+            "struct" => Ok(Self::Struct),
+            "struct_field" => Ok(Self::StructField),
+            "enum" => Ok(Self::Enum),
+            "variant" => Ok(Self::Variant),
+            "union" => Ok(Self::Union),
+            "trait" => Ok(Self::Trait),
+            "trait_alias" => Ok(Self::TraitAlias),
+            "type_alias" | "assoc_type" => Ok(Self::TypeAlias),
+            "macro" => Ok(Self::Macro),
+            "proc_macro" => Ok(Self::ProcMacro),
+            "constant" | "assoc_const" => Ok(Self::Constant),
+            "static" => Ok(Self::Static),
+            "extern_type" => Ok(Self::ExternType),
+            "primitive" => Ok(Self::Primitive),
+            other => Err(InventoryError::UnsupportedItemKind(other.to_string())),
         }
-        ItemKind::Other
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            ItemKind::Module => "module",
-            ItemKind::Import => "import",
-            ItemKind::Function => "function",
-            ItemKind::Method => "method",
-            ItemKind::Struct => "struct",
-            ItemKind::Enum => "enum",
-            ItemKind::Union => "union",
-            ItemKind::Trait => "trait",
-            ItemKind::TraitAlias => "trait_alias",
-            ItemKind::TypeAlias => "type_alias",
-            ItemKind::Macro => "macro",
-            ItemKind::ProcMacro => "proc_macro",
-            ItemKind::Constant => "constant",
-            ItemKind::Static => "static",
-            ItemKind::Other => "other",
+            Self::Module => "module",
+            Self::Function => "function",
+            Self::Method => "method",
+            Self::Struct => "struct",
+            Self::StructField => "struct_field",
+            Self::Enum => "enum",
+            Self::Variant => "variant",
+            Self::Union => "union",
+            Self::Trait => "trait",
+            Self::TraitImpl => "trait_impl",
+            Self::TraitAlias => "trait_alias",
+            Self::TypeAlias => "type_alias",
+            Self::Macro => "macro",
+            Self::ProcMacro => "proc_macro",
+            Self::Constant => "constant",
+            Self::Static => "static",
+            Self::ExternType => "extern_type",
+            Self::Primitive => "primitive",
         }
     }
 }
 
-/// One public facade item collected from a single feature profile.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PublicItem {
-    /// Facade path such as `echo_agent::llm::ChatRequest` or
-    /// `echo_agent::agent::(ReactAgent)::execute`. Unique within a profile
-    /// after the walker appends a disambiguator for repeated paths.
     pub path: String,
     pub kind: ItemKind,
-    /// For imports: the declared source path (`echo_core::hooks` style).
-    pub import_source: Option<String>,
-    /// For imports: whether this is a glob re-export declaration.
-    pub import_glob: Option<bool>,
+    /// Canonical rustdoc shape with unstable item ids and child-id lists removed.
+    pub api_shape: String,
+    pub api_shape_digest: String,
+    /// Canonical source path for re-exported items.
+    pub source_path: Option<String>,
+    pub required_features: BTreeSet<String>,
+    pub automatically_derived: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct RustdocFile {
     format_version: u64,
+    #[serde(default)]
+    root: Option<u64>,
     index: HashMap<String, RustdocItem>,
+    #[serde(default)]
+    paths: HashMap<String, RustdocPath>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+struct RustdocPath {
+    path: Vec<String>,
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct RustdocItem {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     visibility: serde_json::Value,
-    /// Format 61 encodes attributes as tagged objects (e.g.
-    /// `{"other": "#[doc(hidden)]"}`); keep them as raw values and inspect
-    /// stringly so future attribute shapes cannot break parsing.
     #[serde(default)]
     attrs: Vec<serde_json::Value>,
     #[serde(default)]
@@ -145,16 +140,26 @@ impl RustdocItem {
         self.visibility == "public"
     }
 
+    fn is_default_visibility(&self) -> bool {
+        self.visibility == "default"
+    }
+
     fn is_doc_hidden(&self) -> bool {
-        fn value_mentions_hidden(value: &serde_json::Value) -> bool {
+        fn mentions_hidden(value: &serde_json::Value) -> bool {
             match value {
                 serde_json::Value::String(text) => text.contains("doc(hidden)"),
-                serde_json::Value::Array(items) => items.iter().any(value_mentions_hidden),
-                serde_json::Value::Object(map) => map.values().any(value_mentions_hidden),
+                serde_json::Value::Array(values) => values.iter().any(mentions_hidden),
+                serde_json::Value::Object(values) => values.values().any(mentions_hidden),
                 _ => false,
             }
         }
-        self.attrs.iter().any(value_mentions_hidden)
+        self.attrs.iter().any(mentions_hidden)
+    }
+
+    fn is_automatically_derived(&self) -> bool {
+        self.attrs
+            .iter()
+            .any(|attribute| attribute.to_string().contains("automatically_derived"))
     }
 
     fn inner_map(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -162,102 +167,94 @@ impl RustdocItem {
     }
 
     fn child_ids(&self) -> Vec<String> {
-        let Some(map) = self.inner_map() else {
+        let Some(inner) = self.inner_map() else {
             return Vec::new();
         };
-        // Module, trait and impl items all expose an `items` child list.
-        let mut out = Vec::new();
-        for (key, value) in map {
-            if matches!(key.as_str(), "module" | "trait" | "impl") {
-                let items = value.get("items").and_then(|v| v.as_array());
-                for id in items.into_iter().flatten() {
-                    if let Some(id) = id.as_u64() {
-                        out.push(id.to_string());
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    fn is_impl(&self) -> bool {
-        self.inner_map().is_some_and(|m| m.contains_key("impl"))
-    }
-
-    /// Impl blocks attached to a type definition (rustdoc format 61 stores
-    /// them under the struct/enum/union `impls` array, plural).
-    fn impl_child_ids(&self) -> Vec<String> {
-        let Some(map) = self.inner_map() else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for kind in ["struct", "enum", "union"] {
-            if let Some(impls) = map
-                .get(kind)
-                .and_then(|v| v.get("impls"))
-                .and_then(|v| v.as_array())
+        let mut ids = Vec::new();
+        for key in ["module", "trait", "impl"] {
+            for id in inner
+                .get(key)
+                .and_then(|value| value.get("items"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
             {
-                for id in impls {
-                    if let Some(id) = id.as_u64() {
-                        out.push(id.to_string());
-                    }
+                if let Some(id) = id.as_u64() {
+                    ids.push(id.to_string());
                 }
             }
         }
-        out
+        ids
+    }
+
+    fn impl_ids(&self) -> Vec<String> {
+        let Some(inner) = self.inner_map() else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for key in ["struct", "enum", "union"] {
+            for id in inner
+                .get(key)
+                .and_then(|value| value.get("impls"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(id) = id.as_u64() {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+        ids
     }
 }
 
-/// Import details: (source, is_glob, imported name). Format 61 keeps the
-/// re-exported name inside `use.name` while the item's own `name` stays
-/// empty, so read it from there first.
-fn import_details(
-    inner: &serde_json::Map<String, serde_json::Value>,
-) -> (Option<String>, bool, Option<String>) {
-    let import = inner.get("use").and_then(|v| v.as_object());
-    match import {
-        Some(import) => (
-            import
-                .get("source")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            import
-                .get("is_glob")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            import
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        ),
-        None => (None, false, None),
-    }
-}
-
-/// Errors that abort inventory extraction. Parsing must fail closed: an
-/// unexpected rustdoc shape is a contract failure, never a partial list.
 #[derive(Debug)]
 pub enum InventoryError {
     MalformedJson(String),
     UnsupportedFormatVersion { found: u64, expected: u64 },
-    MissingRootModule,
+    MissingRootModule(String),
+    MissingItem { document: String, id: String },
+    MissingDependencyDocument(String),
+    UnresolvedGlob(String),
+    UnsupportedItemKind(String),
+    ConflictingItemKind(String),
 }
 
 impl std::fmt::Display for InventoryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InventoryError::MalformedJson(msg) => {
-                write!(f, "malformed rustdoc JSON: {msg}")
+            Self::MalformedJson(message) => write!(formatter, "malformed rustdoc JSON: {message}"),
+            Self::UnsupportedFormatVersion { found, expected } => write!(
+                formatter,
+                "rustdoc JSON format version {found} does not match pinned {expected}"
+            ),
+            Self::MissingRootModule(document) => {
+                write!(formatter, "rustdoc JSON for {document} has no root module")
             }
-            InventoryError::UnsupportedFormatVersion { found, expected } => {
+            Self::MissingItem { document, id } => {
                 write!(
-                    f,
-                    "rustdoc JSON format version {found} does not match pinned {expected}; \
-                     re-pin the toolchain in contracts/sdk/toolchain.json and regenerate"
+                    formatter,
+                    "rustdoc JSON for {document} is missing item {id}"
                 )
             }
-            InventoryError::MissingRootModule => {
-                write!(f, "rustdoc JSON has no reachable crate root module")
+            Self::MissingDependencyDocument(name) => {
+                write!(
+                    formatter,
+                    "missing rustdoc JSON for re-export source crate {name}"
+                )
+            }
+            Self::UnresolvedGlob(source) => {
+                write!(formatter, "cannot expand public glob re-export {source}")
+            }
+            Self::UnsupportedItemKind(kind) => {
+                write!(formatter, "unsupported public rustdoc item kind {kind}")
+            }
+            Self::ConflictingItemKind(path) => {
+                write!(
+                    formatter,
+                    "public facade identity {path} changes item kind across profiles"
+                )
             }
         }
     }
@@ -265,238 +262,888 @@ impl std::fmt::Display for InventoryError {
 
 impl std::error::Error for InventoryError {}
 
-/// Parse one rustdoc JSON document and return the sorted public facade items.
-///
-/// Two phases: first a DFS over public modules records every named public
-/// item (with its rustdoc id → facade path) and defers impl blocks; then
-/// each deferred impl is expanded only when its `for` type resolves to a
-/// collected public item, because rustdoc marks impl blocks themselves with
-/// the default (private) visibility regardless of the methods inside.
-pub fn extract_public_items(json: &str) -> Result<Vec<PublicItem>, InventoryError> {
-    let file: RustdocFile =
-        serde_json::from_str(json).map_err(|e| InventoryError::MalformedJson(e.to_string()))?;
-    if file.format_version != RUSTDOC_FORMAT_VERSION {
+struct DocumentGraph {
+    documents: BTreeMap<String, RustdocFile>,
+    ids_by_path: BTreeMap<String, HashMap<Vec<String>, String>>,
+}
+
+impl DocumentGraph {
+    fn new(
+        root_json: &str,
+        dependencies: &BTreeMap<String, String>,
+    ) -> Result<Self, InventoryError> {
+        let mut documents = BTreeMap::new();
+        let root = parse_document(root_json)?;
+        let root_name = document_name(&root, "echo_agent")?;
+        documents.insert(root_name, root);
+        for (declared_name, json) in dependencies {
+            let document = parse_document(json)?;
+            let actual_name = document_name(&document, declared_name)?;
+            documents.insert(actual_name, document);
+        }
+        let ids_by_path = documents
+            .iter()
+            .map(|(name, document)| {
+                let paths = document
+                    .paths
+                    .iter()
+                    .map(|(id, path)| (path.path.clone(), id.clone()))
+                    .collect();
+                (name.clone(), paths)
+            })
+            .collect();
+        Ok(Self {
+            documents,
+            ids_by_path,
+        })
+    }
+
+    fn root(&self, document: &str) -> Result<(String, String), InventoryError> {
+        let file = self
+            .documents
+            .get(document)
+            .ok_or_else(|| InventoryError::MissingDependencyDocument(document.to_string()))?;
+        let id =
+            root_id(file).ok_or_else(|| InventoryError::MissingRootModule(document.to_string()))?;
+        let name = file
+            .index
+            .get(&id)
+            .and_then(|item| item.name.clone())
+            .unwrap_or_else(|| document.to_string());
+        Ok((id, name))
+    }
+
+    fn item(&self, document: &str, id: &str) -> Result<&RustdocItem, InventoryError> {
+        self.documents
+            .get(document)
+            .and_then(|file| file.index.get(id))
+            .ok_or_else(|| InventoryError::MissingItem {
+                document: document.to_string(),
+                id: id.to_string(),
+            })
+    }
+
+    fn path_summary(&self, document: &str, id: &str) -> Option<&RustdocPath> {
+        self.documents.get(document)?.paths.get(id)
+    }
+
+    fn resolve_target(&self, document: &str, id: &str) -> Option<(String, String)> {
+        if self
+            .documents
+            .get(document)
+            .is_some_and(|file| file.index.contains_key(id))
+        {
+            return Some((document.to_string(), id.to_string()));
+        }
+        let summary = self.path_summary(document, id)?;
+        let crate_name = summary.path.first()?.clone();
+        let target_id = self
+            .ids_by_path
+            .get(&crate_name)?
+            .get(&summary.path)?
+            .clone();
+        self.documents
+            .get(&crate_name)
+            .is_some_and(|file| file.index.contains_key(&target_id))
+            .then_some((crate_name, target_id))
+    }
+}
+
+fn parse_document(json: &str) -> Result<RustdocFile, InventoryError> {
+    let document: RustdocFile = serde_json::from_str(json)
+        .map_err(|error| InventoryError::MalformedJson(error.to_string()))?;
+    if document.format_version != RUSTDOC_FORMAT_VERSION {
         return Err(InventoryError::UnsupportedFormatVersion {
-            found: file.format_version,
+            found: document.format_version,
             expected: RUSTDOC_FORMAT_VERSION,
         });
     }
-
-    // Locate the crate root: a module item of crate 0 that is not nested in
-    // any other module.
-    let mut nested: HashSet<String> = HashSet::new();
-    for item in file.index.values() {
-        for child in item.child_ids() {
-            nested.insert(child);
-        }
-    }
-    let mut root: Option<&RustdocItem> = None;
-    for (id, item) in &file.index {
-        if item.crate_id == 0
-            && !nested.contains(id)
-            && item.inner_map().is_some_and(|m| m.contains_key("module"))
-        {
-            root = Some(item);
-        }
-    }
-    let root = root.ok_or(InventoryError::MissingRootModule)?;
-    let root_name = root
-        .name
-        .clone()
-        .unwrap_or_else(|| "echo_agent".to_string());
-
-    let mut state = WalkState::default();
-    walk_module(&file.index, root, &root_name, &mut state);
-    expand_impls(&file.index, &mut state);
-
-    state.out.sort();
-    state.out.dedup();
-    Ok(state.out)
+    Ok(document)
 }
 
-/// Walker state: collected items, path disambiguation, the public id→path
-/// map used to resolve impl targets, and deferred impl blocks.
+fn root_id(document: &RustdocFile) -> Option<String> {
+    if let Some(id) = document.root {
+        return Some(id.to_string());
+    }
+    let mut nested = HashSet::new();
+    for item in document.index.values() {
+        nested.extend(item.child_ids());
+    }
+    document.index.iter().find_map(|(id, item)| {
+        (item.crate_id == 0
+            && !nested.contains(id)
+            && item
+                .inner_map()
+                .is_some_and(|inner| inner.contains_key("module")))
+        .then(|| id.clone())
+    })
+}
+
+fn document_name(document: &RustdocFile, fallback: &str) -> Result<String, InventoryError> {
+    let id =
+        root_id(document).ok_or_else(|| InventoryError::MissingRootModule(fallback.to_string()))?;
+    Ok(document
+        .index
+        .get(&id)
+        .and_then(|item| item.name.clone())
+        .unwrap_or_else(|| fallback.to_string()))
+}
+
+pub fn extract_public_items(json: &str) -> Result<Vec<PublicItem>, InventoryError> {
+    extract_public_items_with_dependencies(json, &BTreeMap::new())
+}
+
+pub fn extract_public_items_with_dependencies(
+    root_json: &str,
+    dependencies: &BTreeMap<String, String>,
+) -> Result<Vec<PublicItem>, InventoryError> {
+    let graph = DocumentGraph::new(root_json, dependencies)?;
+    let root_document = graph
+        .documents
+        .keys()
+        .find(|name| name.as_str() == "echo_agent")
+        .cloned()
+        .or_else(|| graph.documents.keys().next().cloned())
+        .ok_or_else(|| InventoryError::MissingRootModule("echo_agent".to_string()))?;
+    let (root_id, root_name) = graph.root(&root_document)?;
+    let mut state = WalkState::default();
+    walk_module(
+        &graph,
+        &root_document,
+        &root_id,
+        &root_name,
+        &BTreeSet::new(),
+        &mut state,
+    )?;
+    Ok(state.finish())
+}
+
 #[derive(Default)]
 struct WalkState {
-    out: Vec<PublicItem>,
-    seen_paths: HashMap<String, usize>,
-    /// rustdoc id → facade path for every collected named public item.
-    public_paths: HashMap<String, String>,
-    /// Impl item ids awaiting target-type resolution.
-    pending_impls: Vec<String>,
+    items: BTreeMap<String, BTreeMap<String, PublicItem>>,
+    visited_modules: HashSet<(String, String, String)>,
 }
 
-/// Walk a module's direct children. Only public, non-doc-hidden children are
-/// part of the facade; impl blocks are exempt from the visibility check
-/// because rustdoc always marks them default (see `extract_public_items`).
-fn walk_module(
-    index: &HashMap<String, RustdocItem>,
-    module: &RustdocItem,
-    namespace: &str,
-    state: &mut WalkState,
-) {
-    let _ = namespace;
-    for child_id in module.child_ids() {
-        let Some(child) = index.get(&child_id) else {
-            continue;
-        };
-        if child.is_impl() {
-            continue;
-        }
-        if !child.is_public() || child.is_doc_hidden() {
-            continue;
-        }
-        walk_item(index, child, &child_id, namespace, state);
+impl WalkState {
+    fn push(
+        &mut self,
+        path: String,
+        kind: ItemKind,
+        item: &RustdocItem,
+        source_path: Option<String>,
+        required_features: &BTreeSet<String>,
+    ) {
+        let api_shape = item_shape(item);
+        let api_shape_digest = digest(api_shape.as_bytes());
+        self.items
+            .entry(path.clone())
+            .or_default()
+            .entry(api_shape_digest.clone())
+            .and_modify(|existing| {
+                existing
+                    .required_features
+                    .extend(required_features.iter().cloned());
+            })
+            .or_insert(PublicItem {
+                path,
+                kind,
+                api_shape,
+                api_shape_digest,
+                source_path,
+                required_features: required_features.clone(),
+                automatically_derived: item.is_automatically_derived(),
+            });
     }
-}
 
-/// Walk one named public item inside `namespace`.
-fn walk_item(
-    index: &HashMap<String, RustdocItem>,
-    item: &RustdocItem,
-    item_id: &str,
-    namespace: &str,
-    state: &mut WalkState,
-) {
-    let Some(inner) = item.inner_map() else {
-        return;
-    };
-    let kind = ItemKind::parse(inner);
-    let name = item.name.clone().unwrap_or_default();
+    fn push_summary(
+        &mut self,
+        path: String,
+        kind: ItemKind,
+        source_path: String,
+        required_features: &BTreeSet<String>,
+    ) {
+        let api_shape = format!("{{\"external_source\":{}}}", json_string(&source_path));
+        let api_shape_digest = digest(api_shape.as_bytes());
+        self.items
+            .entry(path.clone())
+            .or_default()
+            .entry(api_shape_digest.clone())
+            .and_modify(|existing| {
+                existing
+                    .required_features
+                    .extend(required_features.iter().cloned());
+            })
+            .or_insert(PublicItem {
+                path,
+                kind,
+                api_shape,
+                api_shape_digest,
+                source_path: Some(source_path),
+                required_features: required_features.clone(),
+                automatically_derived: false,
+            });
+    }
 
-    match kind {
-        ItemKind::Module if !name.is_empty() => {
-            let module_path = namespace_path(namespace, &name);
-            state
-                .public_paths
-                .insert(item_id.to_string(), module_path.clone());
-            push_item(state, &module_path, kind, None, None);
-            walk_module(index, item, &module_path, state);
-        }
-        ItemKind::Import => {
-            let (source, glob, imported_name) = import_details(inner);
-            // Glob re-exports carry no item name; record them under the
-            // module path so the facade boundary (what the glob exposes) is
-            // visible in the snapshot instead of silently dropped.
-            let imported = imported_name.as_deref().unwrap_or(name.as_str());
-            let path = if glob {
-                format!("{namespace}::*")
-            } else if !imported.is_empty() {
-                namespace_path(namespace, imported)
-            } else {
-                return;
-            };
-            push_item(state, &path, kind, source, Some(glob));
-        }
-        ItemKind::Trait if !name.is_empty() => {
-            let trait_path = namespace_path(namespace, &name);
-            state
-                .public_paths
-                .insert(item_id.to_string(), trait_path.clone());
-            push_item(state, &trait_path, kind, None, None);
-            walk_members(index, item, &trait_path, state);
-        }
-        ItemKind::Other => {
-            // Unrecognized kinds (extern crates, primitives, ...) are not
-            // facade items; variants and fields never reach here.
-        }
-        _ => {
-            if !name.is_empty() {
-                let path = namespace_path(namespace, &name);
-                state.public_paths.insert(item_id.to_string(), path.clone());
-                push_item(state, &path, kind, None, None);
-                state.pending_impls.extend(item.impl_child_ids());
+    fn finish(self) -> Vec<PublicItem> {
+        let mut result = Vec::new();
+        for (path, variants) in self.items {
+            if variants.len() == 1 {
+                result.extend(variants.into_values());
+                continue;
+            }
+            for (_, mut item) in variants {
+                let suffix: String = item
+                    .api_shape_digest
+                    .chars()
+                    .filter(|character| character.is_ascii_hexdigit())
+                    .take(12)
+                    .collect();
+                item.path = format!("{path}#{suffix}");
+                result.push(item);
             }
         }
+        result.sort();
+        result
     }
 }
 
-/// Expand deferred impl blocks. Only inherent impls (`trait == null`) on a
-/// collected public type contribute facade items: methods of an unreachable
-/// type are not public surface, and trait impls are projections of the trait
-/// definition (or of a foreign trait) rather than new facade API.
-fn expand_impls(index: &HashMap<String, RustdocItem>, state: &mut WalkState) {
-    let pending = std::mem::take(&mut state.pending_impls);
-    for impl_id in pending {
-        let Some(impl_item) = index.get(&impl_id) else {
+fn walk_module(
+    graph: &DocumentGraph,
+    document: &str,
+    module_id: &str,
+    namespace: &str,
+    inherited_features: &BTreeSet<String>,
+    state: &mut WalkState,
+) -> Result<(), InventoryError> {
+    let visit = (
+        document.to_string(),
+        module_id.to_string(),
+        namespace.to_string(),
+    );
+    if !state.visited_modules.insert(visit) {
+        return Ok(());
+    }
+    let module = graph.item(document, module_id)?;
+    for child_id in module.child_ids() {
+        let child = graph.item(document, &child_id)?;
+        if child.is_doc_hidden() || !child.is_public() {
             continue;
+        }
+        walk_item(
+            graph,
+            document,
+            &child_id,
+            namespace,
+            None,
+            inherited_features,
+            state,
+        )?;
+    }
+    Ok(())
+}
+
+fn walk_item(
+    graph: &DocumentGraph,
+    document: &str,
+    item_id: &str,
+    namespace: &str,
+    alias: Option<&str>,
+    inherited_features: &BTreeSet<String>,
+    state: &mut WalkState,
+) -> Result<(), InventoryError> {
+    let item = graph.item(document, item_id)?;
+    let inner = item
+        .inner_map()
+        .ok_or_else(|| InventoryError::UnsupportedItemKind("<missing inner>".to_string()))?;
+    if inner.contains_key("use") {
+        return walk_import(graph, document, item, namespace, inherited_features, state);
+    }
+    if inner.contains_key("impl") || inner.contains_key("extern_crate") {
+        return Ok(());
+    }
+    let kind = ItemKind::parse(inner)?;
+    let name = alias
+        .map(str::to_string)
+        .or_else(|| item.name.clone())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| InventoryError::UnsupportedItemKind(format!("unnamed {}", kind.as_str())))?;
+    let path = namespace_path(namespace, &name);
+    let required_features = combined_features(inherited_features, item);
+    let source_path = graph
+        .path_summary(document, item_id)
+        .map(|summary| summary.path.join("::"));
+    state.push(
+        path.clone(),
+        kind,
+        item,
+        source_path.clone(),
+        &required_features,
+    );
+
+    match kind {
+        ItemKind::Module => {
+            walk_module(graph, document, item_id, &path, &required_features, state)?
+        }
+        ItemKind::Trait => walk_members(
+            graph,
+            item,
+            WalkLocation {
+                document,
+                path: &path,
+                source_path: source_path.as_deref(),
+                required_features: &required_features,
+            },
+            true,
+            state,
+        )?,
+        ItemKind::Struct | ItemKind::Enum | ItemKind::Union => {
+            walk_fields_and_variants(
+                graph,
+                document,
+                item,
+                &path,
+                source_path.as_deref(),
+                &required_features,
+                state,
+            )?;
+            walk_impls(
+                graph,
+                document,
+                item,
+                &path,
+                source_path.as_deref(),
+                &required_features,
+                state,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn walk_import(
+    graph: &DocumentGraph,
+    document: &str,
+    item: &RustdocItem,
+    namespace: &str,
+    inherited_features: &BTreeSet<String>,
+    state: &mut WalkState,
+) -> Result<(), InventoryError> {
+    let required_features = combined_features(inherited_features, item);
+    let import = item
+        .inner_map()
+        .and_then(|inner| inner.get("use"))
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| InventoryError::UnsupportedItemKind("malformed use".to_string()))?;
+    let source = import
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown>");
+    let is_glob = import
+        .get("is_glob")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let target_id = import
+        .get("id")
+        .and_then(serde_json::Value::as_u64)
+        .map(|id| id.to_string());
+    let Some(target_id) = target_id else {
+        return if is_glob {
+            Err(InventoryError::UnresolvedGlob(source.to_string()))
+        } else {
+            let name = import
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(source);
+            state.push_summary(
+                namespace_path(namespace, name),
+                ItemKind::TypeAlias,
+                source.to_string(),
+                &required_features,
+            );
+            Ok(())
         };
-        let Some(impl_inner) = impl_item
-            .inner_map()
-            .and_then(|m| m.get("impl"))
-            .and_then(|v| v.as_object())
-        else {
-            continue;
-        };
-        if impl_inner
-            .get("trait")
-            .map(|t| !t.is_null())
-            .unwrap_or(false)
+    };
+
+    if let Some((target_document, resolved_id)) = graph.resolve_target(document, &target_id) {
+        if is_glob {
+            let target = graph.item(&target_document, &resolved_id)?;
+            let kind = target
+                .inner_map()
+                .map(ItemKind::parse)
+                .transpose()?
+                .ok_or_else(|| InventoryError::UnresolvedGlob(source.to_string()))?;
+            if kind != ItemKind::Module {
+                return Err(InventoryError::UnresolvedGlob(source.to_string()));
+            }
+            let target_features = combined_features(&required_features, target);
+            return walk_module(
+                graph,
+                &target_document,
+                &resolved_id,
+                namespace,
+                &target_features,
+                state,
+            );
+        }
+        let alias = import
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| source.rsplit("::").next());
+        return walk_item(
+            graph,
+            &target_document,
+            &resolved_id,
+            namespace,
+            alias,
+            &required_features,
+            state,
+        );
+    }
+
+    let summary =
+        graph
+            .path_summary(document, &target_id)
+            .ok_or_else(|| InventoryError::MissingItem {
+                document: document.to_string(),
+                id: target_id.clone(),
+            })?;
+    if is_glob {
+        return Err(InventoryError::UnresolvedGlob(source.to_string()));
+    }
+    let kind = kind_from_summary(&summary.kind)?;
+    let alias = import
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| summary.path.last().map(String::as_str))
+        .unwrap_or(source);
+    state.push_summary(
+        namespace_path(namespace, alias),
+        kind,
+        summary.path.join("::"),
+        &required_features,
+    );
+    Ok(())
+}
+
+fn kind_from_summary(kind: &str) -> Result<ItemKind, InventoryError> {
+    match kind {
+        "module" => Ok(ItemKind::Module),
+        "function" => Ok(ItemKind::Function),
+        "struct" => Ok(ItemKind::Struct),
+        "enum" => Ok(ItemKind::Enum),
+        "union" => Ok(ItemKind::Union),
+        "trait" => Ok(ItemKind::Trait),
+        "trait_alias" => Ok(ItemKind::TraitAlias),
+        "type_alias" => Ok(ItemKind::TypeAlias),
+        "macro" => Ok(ItemKind::Macro),
+        "proc_macro" | "proc_attribute" | "proc_derive" => Ok(ItemKind::ProcMacro),
+        "constant" => Ok(ItemKind::Constant),
+        "static" => Ok(ItemKind::Static),
+        "extern_type" => Ok(ItemKind::ExternType),
+        "primitive" => Ok(ItemKind::Primitive),
+        other => Err(InventoryError::UnsupportedItemKind(other.to_string())),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WalkLocation<'a> {
+    document: &'a str,
+    path: &'a str,
+    source_path: Option<&'a str>,
+    required_features: &'a BTreeSet<String>,
+}
+
+fn walk_members(
+    graph: &DocumentGraph,
+    container: &RustdocItem,
+    location: WalkLocation<'_>,
+    trait_members: bool,
+    state: &mut WalkState,
+) -> Result<(), InventoryError> {
+    for child_id in container.child_ids() {
+        let child = graph.item(location.document, &child_id)?;
+        if child.is_doc_hidden()
+            || (!child.is_public() && !(trait_members && child.is_default_visibility()))
         {
             continue;
         }
-        let Some(target_id) = impl_inner
-            .get("for")
-            .and_then(|f| f.get("resolved_path"))
-            .and_then(|p| p.get("id"))
-            .and_then(|id| id.as_u64())
-        else {
-            continue;
-        };
-        let Some(target_path) = state.public_paths.get(&target_id.to_string()) else {
-            continue;
-        };
-        // The impl prefix is the type's full facade path; methods therefore
-        // read `echo_agent::agent::ReactAgent::execute`.
-        let impl_ns = target_path.clone();
-        let _ = &impl_ns;
-        walk_members(index, impl_item, &impl_ns, state);
+        let inner = child.inner_map().ok_or_else(|| {
+            InventoryError::UnsupportedItemKind("member without inner".to_string())
+        })?;
+        let mut kind = ItemKind::parse(inner)?;
+        if kind == ItemKind::Function {
+            kind = ItemKind::Method;
+        }
+        let name = child
+            .name
+            .clone()
+            .ok_or_else(|| InventoryError::UnsupportedItemKind("unnamed member".to_string()))?;
+        let required_features = combined_features(location.required_features, child);
+        let source_path = graph
+            .path_summary(location.document, &child_id)
+            .map(|summary| summary.path.join("::"))
+            .or_else(|| {
+                location
+                    .source_path
+                    .map(|source| namespace_path(source, &name))
+            });
+        state.push(
+            namespace_path(location.path, &name),
+            kind,
+            child,
+            source_path,
+            &required_features,
+        );
     }
+    Ok(())
 }
 
-/// Walk the members of a trait definition or an impl block: methods,
-/// associated types and associated constants are part of the public contract
-/// and are keyed by `container_path::member`.
-fn walk_members(
-    index: &HashMap<String, RustdocItem>,
-    container: &RustdocItem,
-    container_path: &str,
+fn walk_impls(
+    graph: &DocumentGraph,
+    document: &str,
+    item: &RustdocItem,
+    path: &str,
+    source_path: Option<&str>,
+    inherited_features: &BTreeSet<String>,
     state: &mut WalkState,
-) {
-    for child_id in container.child_ids() {
-        let Some(child) = index.get(&child_id) else {
-            continue;
+) -> Result<(), InventoryError> {
+    for impl_id in item.impl_ids() {
+        let implementation = graph.item(document, &impl_id)?;
+        let Some(details) = implementation
+            .inner_map()
+            .and_then(|inner| inner.get("impl"))
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Err(InventoryError::UnsupportedItemKind(
+                "malformed impl".to_string(),
+            ));
         };
-        if !child.is_public() || child.is_doc_hidden() {
+        let required_features = combined_features(inherited_features, implementation);
+        if let Some(trait_path) = details
+            .get("trait")
+            .filter(|value| !value.is_null())
+            .and_then(|value| value.get("path"))
+            .and_then(serde_json::Value::as_str)
+        {
+            let is_synthetic = details
+                .get("is_synthetic")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let is_blanket = details
+                .get("blanket_impl")
+                .is_some_and(|value| !value.is_null());
+            if !is_synthetic && !is_blanket {
+                state.push(
+                    format!("{path}::impl<{trait_path}>"),
+                    ItemKind::TraitImpl,
+                    implementation,
+                    source_path.map(|source| format!("{source}::impl<{trait_path}>")),
+                    &required_features,
+                );
+            }
             continue;
         }
-        let Some(inner) = child.inner_map() else {
+        walk_members(
+            graph,
+            implementation,
+            WalkLocation {
+                document,
+                path,
+                source_path,
+                required_features: &required_features,
+            },
+            false,
+            state,
+        )?;
+    }
+    Ok(())
+}
+
+fn walk_fields_and_variants(
+    graph: &DocumentGraph,
+    document: &str,
+    item: &RustdocItem,
+    path: &str,
+    source_path: Option<&str>,
+    inherited_features: &BTreeSet<String>,
+    state: &mut WalkState,
+) -> Result<(), InventoryError> {
+    let Some(inner) = item.inner_map() else {
+        return Ok(());
+    };
+    if let Some(struct_value) = inner.get("struct") {
+        walk_field_container(
+            graph,
+            struct_value.get("kind"),
+            WalkLocation {
+                document,
+                path,
+                source_path,
+                required_features: inherited_features,
+            },
+            false,
+            state,
+        )?;
+    }
+    if let Some(union_value) = inner.get("union") {
+        walk_id_array(
+            graph,
+            union_value.get("fields"),
+            WalkLocation {
+                document,
+                path,
+                source_path,
+                required_features: inherited_features,
+            },
+            ItemKind::StructField,
+            true,
+            state,
+        )?;
+    }
+    if let Some(enum_value) = inner.get("enum") {
+        let variants = enum_value
+            .get("variants")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten();
+        for variant_id in variants {
+            let Some(variant_id) = variant_id.as_u64().map(|id| id.to_string()) else {
+                continue;
+            };
+            let variant = graph.item(document, &variant_id)?;
+            let name = variant.name.clone().ok_or_else(|| {
+                InventoryError::UnsupportedItemKind("unnamed variant".to_string())
+            })?;
+            let variant_path = namespace_path(path, &name);
+            let required_features = combined_features(inherited_features, variant);
+            let variant_source_path = graph
+                .path_summary(document, &variant_id)
+                .map(|summary| summary.path.join("::"))
+                .or_else(|| source_path.map(|source| namespace_path(source, &name)));
+            state.push(
+                variant_path.clone(),
+                ItemKind::Variant,
+                variant,
+                variant_source_path.clone(),
+                &required_features,
+            );
+            let kind = variant
+                .inner_map()
+                .and_then(|value| value.get("variant"))
+                .and_then(|value| value.get("kind"));
+            walk_field_container(
+                graph,
+                kind,
+                WalkLocation {
+                    document,
+                    path: &variant_path,
+                    source_path: variant_source_path.as_deref(),
+                    required_features: &required_features,
+                },
+                true,
+                state,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_field_container(
+    graph: &DocumentGraph,
+    kind: Option<&serde_json::Value>,
+    location: WalkLocation<'_>,
+    enum_fields_are_public: bool,
+    state: &mut WalkState,
+) -> Result<(), InventoryError> {
+    let Some(kind) = kind.and_then(serde_json::Value::as_object) else {
+        return Ok(());
+    };
+    for key in ["plain", "tuple", "struct"] {
+        let fields = if matches!(key, "plain" | "struct") {
+            kind.get(key).and_then(|value| value.get("fields"))
+        } else {
+            kind.get(key)
+        };
+        walk_id_array(
+            graph,
+            fields,
+            location,
+            ItemKind::StructField,
+            enum_fields_are_public,
+            state,
+        )?;
+    }
+    Ok(())
+}
+
+fn walk_id_array(
+    graph: &DocumentGraph,
+    ids: Option<&serde_json::Value>,
+    location: WalkLocation<'_>,
+    kind: ItemKind,
+    default_is_public: bool,
+    state: &mut WalkState,
+) -> Result<(), InventoryError> {
+    for (position, id) in ids
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let Some(id) = id.as_u64().map(|value| value.to_string()) else {
             continue;
         };
-        let kind = ItemKind::parse(inner);
-        let name = child.name.clone().unwrap_or_default();
-        match kind {
-            ItemKind::Module | ItemKind::Import | ItemKind::Trait => {}
-            ItemKind::Other => {
-                // Nested impls inside impl blocks are not legal Rust; skip.
+        let field = graph.item(location.document, &id)?;
+        if field.is_doc_hidden()
+            || (!field.is_public() && !(default_is_public && field.is_default_visibility()))
+        {
+            continue;
+        }
+        let name = field.name.clone().unwrap_or_else(|| position.to_string());
+        let required_features = combined_features(location.required_features, field);
+        let field_source_path = graph
+            .path_summary(location.document, &id)
+            .map(|summary| summary.path.join("::"))
+            .or_else(|| {
+                location
+                    .source_path
+                    .map(|source| namespace_path(source, &name))
+            });
+        state.push(
+            namespace_path(location.path, &name),
+            kind,
+            field,
+            field_source_path,
+            &required_features,
+        );
+    }
+    Ok(())
+}
+
+fn combined_features(inherited: &BTreeSet<String>, item: &RustdocItem) -> BTreeSet<String> {
+    let mut features = inherited.clone();
+    for attribute in &item.attrs {
+        collect_feature_names(attribute, &mut features);
+    }
+    features
+}
+
+fn collect_feature_names(value: &serde_json::Value, features: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            for segment in text.split("name: \"feature\"").skip(1) {
+                if let Some(feature) = segment
+                    .split("value: Some(\"")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .filter(|feature| !feature.is_empty())
+                {
+                    features.insert(feature.to_string());
+                }
             }
-            _ => {
-                if !name.is_empty() {
-                    let member_kind = if matches!(kind, ItemKind::Function) {
-                        ItemKind::Method
-                    } else {
-                        kind
-                    };
-                    push_item(
-                        state,
-                        &namespace_path(container_path, &name),
-                        member_kind,
-                        None,
-                        None,
-                    );
+            for segment in text.split("feature = \"").skip(1) {
+                if let Some(feature) = segment
+                    .split('"')
+                    .next()
+                    .filter(|feature| !feature.is_empty())
+                {
+                    features.insert(feature.to_string());
                 }
             }
         }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_feature_names(value, features);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_feature_names(value, features);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn item_shape(item: &RustdocItem) -> String {
+    let attrs: Vec<&serde_json::Value> = item
+        .attrs
+        .iter()
+        .filter(|attribute| {
+            let rendered = attribute.to_string();
+            [
+                "serde(",
+                "repr(",
+                "non_exhaustive",
+                "must_use",
+                "echo_sdk_behavior_digest",
+            ]
+            .iter()
+            .any(|marker| rendered.contains(marker))
+        })
+        .collect();
+    let mut value = serde_json::json!({
+        "attrs": attrs,
+        "inner": item.inner,
+    });
+    remove_structural_child_ids(&mut value);
+    normalize_shape(&mut value);
+    serde_json::to_string(&value).unwrap_or_default()
+}
+
+fn remove_structural_child_ids(value: &mut serde_json::Value) {
+    for pointer in [
+        "/inner/struct/kind/tuple",
+        "/inner/variant/kind/tuple",
+        "/inner/variant/kind/struct/fields",
+    ] {
+        if let Some(target) = value.pointer_mut(pointer) {
+            *target = serde_json::Value::Array(Vec::new());
+        }
+    }
+}
+
+fn normalize_shape(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for unstable in [
+                "id",
+                "impls",
+                "items",
+                "fields",
+                "variants",
+                "implementations",
+                "span",
+                "default_unstable",
+                "is_stripped",
+                "has_stripped_fields",
+            ] {
+                map.remove(unstable);
+            }
+            if let Some(inputs) = map
+                .get_mut("inputs")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for input in inputs {
+                    if let Some(pair) = input.as_array_mut().filter(|pair| pair.len() == 2)
+                        && let Some(parameter_type) = pair.pop()
+                    {
+                        pair.clear();
+                        pair.push(parameter_type);
+                    }
+                }
+            }
+            for child in map.values_mut() {
+                normalize_shape(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                normalize_shape(child);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -508,37 +1155,20 @@ fn namespace_path(namespace: &str, name: &str) -> String {
     }
 }
 
-/// Record an item, disambiguating repeated paths (two impls hitting the same
-/// `Type::method` key, for example) with a stable `#n` suffix so the sorted
-/// snapshot stays injective.
-fn push_item(
-    state: &mut WalkState,
-    path: &str,
-    kind: ItemKind,
-    import_source: Option<String>,
-    import_glob: Option<bool>,
-) {
-    let count = state.seen_paths.get(path).copied().unwrap_or(0);
-    state.seen_paths.insert(path.to_string(), count + 1);
-    let final_path = if count == 0 {
-        path.to_string()
-    } else {
-        format!("{path}#{}", count + 1)
-    };
-    state.out.push(PublicItem {
-        path: final_path,
-        kind,
-        import_source,
-        import_glob,
-    });
+fn digest(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
 }
 
-/// A feature profile the inventory is generated for: the empty default, the
-/// `full` aggregate, and one profile per leaf feature.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FeatureProfile {
     pub name: String,
-    /// Cargo feature flags passed with `--no-default-features --features ...`.
     pub features: Vec<String>,
 }
 
@@ -565,37 +1195,39 @@ impl FeatureProfile {
     }
 }
 
-/// Build the canonical profile list from the root crate's leaf features
-/// (everything except `default` and `full`).
 pub fn profiles_for_leaf_features(leaf_features: &[String]) -> Vec<FeatureProfile> {
     let mut profiles = vec![
         FeatureProfile::default_profile(),
         FeatureProfile::full_profile(),
     ];
-    let mut leaves: Vec<&String> = leaf_features.iter().collect();
+    let mut leaves = leaf_features.to_vec();
     leaves.sort();
-    for leaf in leaves {
-        profiles.push(FeatureProfile::leaf(leaf));
-    }
+    leaves.dedup();
+    profiles.extend(leaves.iter().map(|feature| FeatureProfile::leaf(feature)));
     profiles
 }
 
-/// Aggregate of one item across all generated profiles.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct InventoryEntry {
-    pub path: String,
-    pub kind: ItemKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub import_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub import_glob: Option<bool>,
-    /// Profiles (by name) in which the item is present.
+#[derive(Debug, Clone, Serialize)]
+pub struct InventorySignature {
+    pub digest: String,
+    pub shape: String,
     pub profiles: BTreeSet<String>,
 }
 
-/// Merge per-profile item lists into a cross-profile inventory. The same
-/// facade item appears once with the set of profiles that contain it.
-pub fn merge_profiles(per_profile: &BTreeMap<String, Vec<PublicItem>>) -> Vec<InventoryEntry> {
+#[derive(Debug, Clone, Serialize)]
+pub struct InventoryEntry {
+    pub path: String,
+    pub kind: ItemKind,
+    pub source_paths: BTreeSet<String>,
+    pub signatures: BTreeMap<String, InventorySignature>,
+    pub profiles: BTreeSet<String>,
+    pub declared_feature_requirements: BTreeSet<String>,
+    pub automatically_derived: bool,
+}
+
+pub fn merge_profiles(
+    per_profile: &BTreeMap<String, Vec<PublicItem>>,
+) -> Result<Vec<InventoryEntry>, InventoryError> {
     let mut merged: BTreeMap<String, InventoryEntry> = BTreeMap::new();
     for (profile, items) in per_profile {
         for item in items {
@@ -604,85 +1236,78 @@ pub fn merge_profiles(per_profile: &BTreeMap<String, Vec<PublicItem>>) -> Vec<In
                 .or_insert_with(|| InventoryEntry {
                     path: item.path.clone(),
                     kind: item.kind,
-                    import_source: item.import_source.clone(),
-                    import_glob: item.import_glob,
+                    source_paths: BTreeSet::new(),
+                    signatures: BTreeMap::new(),
                     profiles: BTreeSet::new(),
+                    declared_feature_requirements: BTreeSet::new(),
+                    automatically_derived: item.automatically_derived,
                 });
+            if entry.kind != item.kind {
+                return Err(InventoryError::ConflictingItemKind(item.path.clone()));
+            }
+            entry.automatically_derived &= item.automatically_derived;
+            if let Some(source) = &item.source_path {
+                entry.source_paths.insert(source.clone());
+            }
             entry.profiles.insert(profile.clone());
+            entry
+                .declared_feature_requirements
+                .extend(item.required_features.iter().cloned());
+            entry
+                .signatures
+                .entry(item.api_shape_digest.clone())
+                .or_insert_with(|| InventorySignature {
+                    digest: item.api_shape_digest.clone(),
+                    shape: item.api_shape.clone(),
+                    profiles: BTreeSet::new(),
+                })
+                .profiles
+                .insert(profile.clone());
         }
     }
-    merged.into_values().collect()
+    Ok(merged.into_values().collect())
 }
 
-/// Render the deterministic `public-api.txt` snapshot for the merged
-/// inventory.
 pub fn render_public_api_snapshot(
     profiles: &[FeatureProfile],
     merged: &[InventoryEntry],
 ) -> String {
-    let mut out = String::new();
-    out.push_str(
-        "# Generated by `cargo run -p echo-sdk-protocol --bin export_schema -- update`.\n",
-    );
-    out.push_str("# DO NOT EDIT: regenerate instead. Deterministic facade snapshot of the root\n");
-    out.push_str("# echo_agent crate per feature profile (sorted; impl members keyed by\n");
-    out.push_str("# module::(Type)::member). Imports record their source; glob imports stay\n");
-    out.push_str("# as one declaration because foreign targets are outside this crate's\n");
-    out.push_str("# rustdoc JSON.\n");
-    out.push_str(&format!(
+    let mut output = String::new();
+    output.push_str("# Generated by echo-sdk-protocol; do not edit.\n");
+    output.push_str("# Every line records a facade identity plus its stable rustdoc API shape.\n");
+    output.push_str(&format!(
         "# rustdoc JSON format version: {RUSTDOC_FORMAT_VERSION}\n"
     ));
-    let profile_names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
-    out.push_str(&format!("# profiles: {}\n", profile_names.join(", ")));
-    out.push('\n');
+    let profile_names: Vec<&str> = profiles
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .collect();
+    output.push_str(&format!("# profiles: {}\n\n", profile_names.join(", ")));
+    let mut rendered_items = 0usize;
     for entry in merged {
-        let mut import = String::new();
-        if entry.kind == ItemKind::Import {
-            let glob = entry.import_glob.unwrap_or(false);
-            let source = entry.import_source.as_deref().unwrap_or("?");
-            import = if glob {
-                format!("  <= glob {source}")
-            } else {
-                format!("  <= {source}")
-            };
+        if entry.kind == ItemKind::TraitImpl && entry.automatically_derived {
+            continue;
         }
-        let profiles: Vec<&str> = entry.profiles.iter().map(String::as_str).collect();
-        out.push_str(&format!(
-            "{:<12} {}{}  [{}]\n",
-            entry.kind.as_str(),
-            entry.path,
-            import,
-            profiles.join(",")
-        ));
-    }
-    out.push_str(&format!("\n# total items: {}\n", merged.len()));
-    out
-}
-
-/// Derive the leaf feature set that introduces each item: an item present in
-/// `default` needs no feature; otherwise every leaf profile whose feature set
-/// contains the item contributes one entry.
-pub fn features_of_entry(entry: &InventoryEntry) -> BTreeSet<String> {
-    let mut features = BTreeSet::new();
-    for profile in &entry.profiles {
-        if let Some(feature) = profile.strip_prefix("feature:") {
-            features.insert(feature.to_string());
+        rendered_items = rendered_items.saturating_add(1);
+        for signature in entry.signatures.values() {
+            let profiles: Vec<&str> = signature.profiles.iter().map(String::as_str).collect();
+            output.push_str(&format!(
+                "{:<14} {}  {}  [{}]  {}\n",
+                entry.kind.as_str(),
+                entry.path,
+                signature.digest,
+                profiles.join(","),
+                signature.shape
+            ));
         }
     }
-    features
+    output.push_str(&format!("\n# total items: {rendered_items}\n"));
+    output
 }
 
-// ── Parity manifest classification ─────────────────────────────────────────
-//
-// Design §7.2 assigns every facade item exactly one semantic class and one
-// ACP relationship. The defaults below are deterministic rules reviewed with
-// the crate source; `PARITY_OVERRIDES` records deliberate exceptions. New
-// facade items automatically get classified defaults, so the manifest can
-// never silently lag the facade while still surfacing every addition for
-// review in the generated diff.
-
-/// Semantic classification of a facade item (design §7.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticClass {
     WireValue,
@@ -696,18 +1321,19 @@ pub enum SemanticClass {
 impl SemanticClass {
     pub fn as_str(&self) -> &'static str {
         match self {
-            SemanticClass::WireValue => "wire_value",
-            SemanticClass::Operation => "operation",
-            SemanticClass::Handle => "handle",
-            SemanticClass::Stream => "stream",
-            SemanticClass::Extension => "extension",
-            SemanticClass::LanguageIntrinsic => "language_intrinsic",
+            Self::WireValue => "wire_value",
+            Self::Operation => "operation",
+            Self::Handle => "handle",
+            Self::Stream => "stream",
+            Self::Extension => "extension",
+            Self::LanguageIntrinsic => "language_intrinsic",
         }
     }
 }
 
-/// How an item relates to stable ACP v1 (design §7.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpRelationship {
     Standard,
@@ -719,135 +1345,504 @@ pub enum AcpRelationship {
 impl AcpRelationship {
     pub fn as_str(&self) -> &'static str {
         match self {
-            AcpRelationship::Standard => "standard",
-            AcpRelationship::StandardProjection => "standard_projection",
-            AcpRelationship::EchoExtension => "echo_extension",
-            AcpRelationship::LanguageIntrinsic => "language_intrinsic",
+            Self::Standard => "standard",
+            Self::StandardProjection => "standard_projection",
+            Self::EchoExtension => "echo_extension",
+            Self::LanguageIntrinsic => "language_intrinsic",
         }
     }
 }
 
-/// Per-language mapping status of one facade item. Until the language SDKs
-/// exist the honest status for every entry is `not_implemented`; the field is
-/// mandatory precisely so "silent partial parity" can never be claimed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LanguageImplementationStatus {
     NotImplemented,
+    InProgress,
+    Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureSemantics {
+    Default,
+    AnyOf,
+    AllOf,
 }
 
 impl LanguageImplementationStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            LanguageImplementationStatus::NotImplemented => "not_implemented",
+            Self::NotImplemented => "not_implemented",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
         }
     }
 }
 
-/// Deliberate classification exceptions keyed by exact facade path. Defaults
-/// apply everywhere else; keep this list short and justified in-place.
-const PARITY_OVERRIDES: &[(&str, SemanticClass, AcpRelationship)] = &[
-    // Agent/Session handles cross the wire as opaque ids + generation: they
-    // are the handle class by design §8, not plain values.
-    // (Populated as the adapter plans land; the Contract baseline keeps the
-    // rule-based defaults, which already classify every item deterministically.)
-];
-
-pub fn classify_entry(entry: &InventoryEntry) -> (SemanticClass, AcpRelationship) {
-    for (path, class, relationship) in PARITY_OVERRIDES {
-        if *path == entry.path {
-            return (*class, *relationship);
-        }
-    }
-    match entry.kind {
-        ItemKind::Module => (SemanticClass::Operation, AcpRelationship::EchoExtension),
-        ItemKind::Import => (SemanticClass::WireValue, AcpRelationship::EchoExtension),
-        ItemKind::Function | ItemKind::Method => {
-            (SemanticClass::Operation, AcpRelationship::EchoExtension)
-        }
-        ItemKind::Trait | ItemKind::TraitAlias => {
-            (SemanticClass::Extension, AcpRelationship::EchoExtension)
-        }
-        ItemKind::Macro | ItemKind::ProcMacro => (
-            SemanticClass::LanguageIntrinsic,
-            AcpRelationship::LanguageIntrinsic,
-        ),
-        ItemKind::Struct
-        | ItemKind::Enum
-        | ItemKind::Union
-        | ItemKind::TypeAlias
-        | ItemKind::Constant
-        | ItemKind::Static => (SemanticClass::WireValue, AcpRelationship::EchoExtension),
-        ItemKind::Other => (SemanticClass::WireValue, AcpRelationship::EchoExtension),
-    }
-}
-
-/// One parity manifest entry (design §7.2): path, feature condition, semantic
-/// class, ACP relationship and per-language mapping status.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct ManifestEntry {
-    pub path: String,
-    pub kind: &'static str,
-    /// Leaf features that introduce this item (empty for default-reachable).
-    pub features: BTreeSet<String>,
-    pub classification: SemanticClass,
-    pub acp_relationship: AcpRelationship,
-    pub languages: BTreeMap<&'static str, LanguageStatusRecord>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LanguageStatusRecord {
     pub status: LanguageImplementationStatus,
+    pub target: String,
+    pub contract_test: String,
 }
 
-/// Manifest entries for all non-module inventory items.
-pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
-    let mut entries: Vec<ManifestEntry> = merged
-        .iter()
-        .filter(|entry| entry.kind != ItemKind::Module)
-        .map(|entry| ManifestEntry {
-            path: entry.path.clone(),
-            kind: entry.kind.as_str(),
-            features: features_of_entry(entry),
-            classification: classify_entry(entry).0,
-            acp_relationship: classify_entry(entry).1,
-            languages: LANGUAGES
-                .iter()
-                .map(|lang| {
-                    (
-                        *lang,
-                        LanguageStatusRecord {
-                            status: LanguageImplementationStatus::NotImplemented,
-                        },
-                    )
-                })
-                .collect(),
-        })
-        .collect();
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    entries
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterObligation {
+    pub operation: String,
+    pub mapping: String,
+    pub validation: Vec<String>,
 }
 
-/// The three parity-tracked languages (design §5.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestSignature {
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestEntry {
+    pub path: String,
+    pub kind: ItemKind,
+    pub source_paths: BTreeSet<String>,
+    pub features: BTreeSet<String>,
+    pub full_only: bool,
+    pub feature_semantics: FeatureSemantics,
+    pub signatures: Vec<ManifestSignature>,
+    pub classification: SemanticClass,
+    pub acp_relationship: AcpRelationship,
+    pub semantic_rule: String,
+    pub derived_traits: BTreeSet<String>,
+    pub adapter: AdapterObligation,
+    pub languages: BTreeMap<String, LanguageStatusRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestGenerated {
+    pub rustdoc_format_version: u64,
+    pub profiles: Vec<String>,
+    pub inventory_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ParityManifest {
+    pub schema_version: u32,
+    pub extension_protocol_version: u32,
+    pub generated: ManifestGenerated,
+    pub entries: Vec<ManifestEntry>,
+}
+
 pub const LANGUAGES: &[&str] = &["typescript", "python", "java"];
 
-/// Render the deterministic `parity-manifest.json` document.
+pub fn features_of_entry(entry: &InventoryEntry) -> BTreeSet<String> {
+    if entry.profiles.contains("default") {
+        return BTreeSet::new();
+    }
+    let leaf_features: BTreeSet<String> = entry
+        .profiles
+        .iter()
+        .filter_map(|profile| profile.strip_prefix("feature:").map(str::to_string))
+        .collect();
+    if leaf_features.is_empty() && entry.profiles.contains("full") {
+        entry.declared_feature_requirements.clone()
+    } else {
+        leaf_features
+    }
+}
+
+pub fn classify_entry(
+    entry: &InventoryEntry,
+    serializable_types: &BTreeSet<String>,
+    public_value_types: &BTreeSet<String>,
+    process_local_types: &BTreeSet<String>,
+) -> (SemanticClass, AcpRelationship, &'static str) {
+    let shape = entry
+        .signatures
+        .values()
+        .map(|signature| signature.shape.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let last = entry
+        .path
+        .rsplit("::")
+        .next()
+        .unwrap_or(entry.path.as_str());
+    let is_stream = last.ends_with("Stream")
+        || shape.contains("Stream<")
+        || shape.contains("BoxStream")
+        || shape.contains("Receiver")
+        || shape.contains("\"path\":\"Stream\"");
+    let is_builder = last.ends_with("Builder")
+        || last.ends_with("Factory")
+        || last.starts_with("Fn") && last.ends_with("Factory");
+    let has_process_local_shape = shape_is_process_local(&shape);
+    let is_handle = last.ends_with("Handle")
+        || last.ends_with("Registry")
+        || last.ends_with("Manager")
+        || last.ends_with("Service")
+        || last.ends_with("Store")
+        || last.ends_with("Client")
+        || last.ends_with("Pool")
+        || last.ends_with("Bus")
+        || last.ends_with("Connection")
+        || matches!(
+            last,
+            "ReactAgent" | "AgentPool" | "Conversation" | "Session" | "CancellationToken"
+        );
+
+    let (class, rule) = match entry.kind {
+        ItemKind::Module | ItemKind::Macro | ItemKind::ProcMacro | ItemKind::Primitive => {
+            (SemanticClass::LanguageIntrinsic, "rust-language-surface")
+        }
+        ItemKind::Trait | ItemKind::TraitAlias => {
+            (SemanticClass::Extension, "consumer-implemented-trait")
+        }
+        ItemKind::TraitImpl => (
+            SemanticClass::LanguageIntrinsic,
+            "rust-trait-implementation",
+        ),
+        ItemKind::StructField if has_process_local_shape => {
+            (SemanticClass::LanguageIntrinsic, "process-local-field")
+        }
+        ItemKind::TypeAlias if is_stream => (SemanticClass::Stream, "async-stream-signature"),
+        ItemKind::TypeAlias
+            if shape.contains("function_pointer")
+                || shape.contains("\"path\":\"Fn")
+                || shape.contains("BoxFuture") =>
+        {
+            (SemanticClass::LanguageIntrinsic, "callback-type-alias")
+        }
+        ItemKind::TypeAlias if shape.contains("dyn_trait") => {
+            (SemanticClass::Extension, "trait-object-alias")
+        }
+        ItemKind::TypeAlias if has_process_local_shape => {
+            (SemanticClass::Handle, "process-local-type-alias")
+        }
+        _ if is_builder => (SemanticClass::LanguageIntrinsic, "builder-or-factory"),
+        ItemKind::Function | ItemKind::Method if is_stream => {
+            (SemanticClass::Stream, "async-stream-signature")
+        }
+        ItemKind::Function | ItemKind::Method => (SemanticClass::Operation, "callable-operation"),
+        _ if is_handle => (SemanticClass::Handle, "long-lived-resource"),
+        ItemKind::Struct | ItemKind::Enum | ItemKind::Union
+            if process_local_types.contains(&entry.path) =>
+        {
+            (SemanticClass::Handle, "contains-process-local-state")
+        }
+        ItemKind::Struct | ItemKind::Enum | ItemKind::Union
+            if serializable_types.contains(&entry.path)
+                || public_value_types.contains(&entry.path) =>
+        {
+            (SemanticClass::WireValue, "verified-value-shape")
+        }
+        ItemKind::Struct | ItemKind::Enum | ItemKind::Union => {
+            (SemanticClass::Handle, "opaque-nonwire-type")
+        }
+        _ => (SemanticClass::WireValue, "serializable-value"),
+    };
+    const ACP_PROJECTION_SOURCES: &[&str] = &[
+        "echo_core::agent::AgentEvent",
+        "echo_core::agent::event_envelope::EventEnvelope",
+        "echo_core::llm::types::ContentPart",
+        "echo_core::llm::types::Message",
+        "echo_core::llm::types::MessageContent",
+        "echo_core::llm::types::Role",
+        "echo_core::llm::types::ToolCall",
+    ];
+    let standard_projection = entry.source_paths.iter().any(|source| {
+        ACP_PROJECTION_SOURCES.iter().any(|prefix| {
+            source == prefix
+                || source
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with("::"))
+        })
+    });
+    let relationship = if class == SemanticClass::LanguageIntrinsic {
+        AcpRelationship::LanguageIntrinsic
+    } else if standard_projection {
+        AcpRelationship::StandardProjection
+    } else {
+        AcpRelationship::EchoExtension
+    };
+    (class, relationship, rule)
+}
+
+fn shape_is_process_local(shape: &str) -> bool {
+    [
+        "Arc<",
+        "Mutex<",
+        "RwLock<",
+        "Instant",
+        "dyn ",
+        "CancellationToken",
+        "Fn(",
+        "Future<",
+        "Pin<",
+        "\"path\":\"Arc\"",
+        "\"path\":\"Mutex\"",
+        "\"path\":\"RwLock\"",
+        "\"path\":\"Instant\"",
+        "dyn_trait",
+        "function_pointer",
+        "impl_trait",
+    ]
+    .iter()
+    .any(|marker| shape.contains(marker))
+}
+
+fn adapter_for(
+    entry: &InventoryEntry,
+    class: SemanticClass,
+    relationship: AcpRelationship,
+    semantic_rule: &str,
+) -> AdapterObligation {
+    let operation = if relationship == AcpRelationship::LanguageIntrinsic {
+        "language:facade".to_string()
+    } else if relationship == AcpRelationship::StandardProjection {
+        "acp:v1+_echo_agent/facade/invoke".to_string()
+    } else if class == SemanticClass::Extension {
+        "_echo_agent/extension/register+invoke".to_string()
+    } else if entry.path.contains("::tasks::") {
+        "_echo_agent/task/*".to_string()
+    } else if entry.path.contains("::subagent::") {
+        "_echo_agent/subagent/*".to_string()
+    } else if entry.path.contains("::memory::") || entry.path.contains("::compression::") {
+        "_echo_agent/memory/op".to_string()
+    } else if entry.path.contains("::workflow::") {
+        "_echo_agent/workflow/op".to_string()
+    } else if class == SemanticClass::Handle {
+        "_echo_agent/agent/*".to_string()
+    } else {
+        "_echo_agent/facade/invoke".to_string()
+    };
+    AdapterObligation {
+        operation,
+        mapping: format!(
+            "{} via {}; Rust remains authoritative",
+            relationship.as_str(),
+            semantic_rule
+        ),
+        validation: vec![
+            "echo-sdk-protocol/tests/facade_inventory.rs#known_facade_semantics_are_classified_correctly".to_string(),
+            "echo-sdk-protocol/tests/extension_contract.rs".to_string(),
+        ],
+    }
+}
+
+fn language_target(class: SemanticClass) -> &'static str {
+    match class {
+        SemanticClass::WireValue => "generated_or_lossless_value",
+        SemanticClass::Operation => "idiomatic_method",
+        SemanticClass::Handle => "opaque_lifecycle_handle",
+        SemanticClass::Stream => "native_async_stream",
+        SemanticClass::Extension => "callback_interface",
+        SemanticClass::LanguageIntrinsic => "native_language_construct",
+    }
+}
+
+pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
+    let parent_of_impl = |path: &str| {
+        path.rsplit_once("::impl<")
+            .map(|(parent, _)| parent.to_string())
+    };
+    let serialized: BTreeSet<String> = merged
+        .iter()
+        .filter(|entry| {
+            entry.kind == ItemKind::TraitImpl && entry.path.contains("::impl<Serialize>")
+        })
+        .filter_map(|entry| parent_of_impl(&entry.path))
+        .collect();
+    let deserialized: BTreeSet<String> = merged
+        .iter()
+        .filter(|entry| {
+            entry.kind == ItemKind::TraitImpl && entry.path.contains("::impl<Deserialize>")
+        })
+        .filter_map(|entry| parent_of_impl(&entry.path))
+        .collect();
+    let serializable_types: BTreeSet<String> =
+        serialized.intersection(&deserialized).cloned().collect();
+    let mut derived_traits_by_parent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for implementation in merged
+        .iter()
+        .filter(|entry| entry.kind == ItemKind::TraitImpl && entry.automatically_derived)
+    {
+        if let Some((parent, suffix)) = implementation.path.rsplit_once("::impl<")
+            && let Some(trait_name) = suffix.split('>').next()
+        {
+            derived_traits_by_parent
+                .entry(parent.to_string())
+                .or_default()
+                .insert(trait_name.to_string());
+        }
+    }
+    let kind_by_path: BTreeMap<&str, ItemKind> = merged
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.kind))
+        .collect();
+    let mut public_value_types = BTreeSet::new();
+    let mut process_local_types = BTreeSet::new();
+    for field in merged
+        .iter()
+        .filter(|entry| entry.kind == ItemKind::StructField)
+    {
+        let process_local = field
+            .signatures
+            .values()
+            .any(|signature| shape_is_process_local(&signature.shape));
+        let mut current = field.path.as_str();
+        while let Some((parent, _)) = current.rsplit_once("::") {
+            if matches!(
+                kind_by_path.get(parent),
+                Some(ItemKind::Struct | ItemKind::Enum | ItemKind::Union)
+            ) {
+                public_value_types.insert(parent.to_string());
+                if process_local {
+                    process_local_types.insert(parent.to_string());
+                }
+                break;
+            }
+            current = parent;
+        }
+    }
+    merged
+        .iter()
+        .filter(|entry| !(entry.kind == ItemKind::TraitImpl && entry.automatically_derived))
+        .map(|entry| {
+            let (classification, acp_relationship, semantic_rule) = classify_entry(
+                entry,
+                &serializable_types,
+                &public_value_types,
+                &process_local_types,
+            );
+            let features = features_of_entry(entry);
+            let full_only = !entry.profiles.contains("default")
+                && entry
+                    .profiles
+                    .iter()
+                    .all(|profile| !profile.starts_with("feature:"))
+                && entry.profiles.contains("full");
+            let feature_semantics = if entry.profiles.contains("default") {
+                FeatureSemantics::Default
+            } else if full_only {
+                FeatureSemantics::AllOf
+            } else {
+                FeatureSemantics::AnyOf
+            };
+            ManifestEntry {
+                path: entry.path.clone(),
+                kind: entry.kind,
+                source_paths: entry.source_paths.clone(),
+                features,
+                full_only,
+                feature_semantics,
+                signatures: entry
+                    .signatures
+                    .values()
+                    .map(|signature| ManifestSignature {
+                        digest: signature.digest.clone(),
+                    })
+                    .collect(),
+                classification,
+                acp_relationship,
+                semantic_rule: semantic_rule.to_string(),
+                derived_traits: derived_traits_by_parent
+                    .get(&entry.path)
+                    .cloned()
+                    .unwrap_or_default(),
+                adapter: adapter_for(entry, classification, acp_relationship, semantic_rule),
+                languages: LANGUAGES
+                    .iter()
+                    .map(|language| {
+                        (
+                            (*language).to_string(),
+                            LanguageStatusRecord {
+                                status: LanguageImplementationStatus::NotImplemented,
+                                target: language_target(classification).to_string(),
+                                contract_test: format!(
+                                    "sdk-parity/{language}/{}",
+                                    classification.as_str()
+                                ),
+                            },
+                        )
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+pub fn manifest_document(
+    extension_protocol_version: u32,
+    profiles: &[FeatureProfile],
+    merged: &[InventoryEntry],
+) -> ParityManifest {
+    let profile_names: Vec<String> = profiles
+        .iter()
+        .map(|profile| profile.name.clone())
+        .collect();
+    let inventory_value = serde_json::to_vec(merged).unwrap_or_default();
+    ParityManifest {
+        schema_version: 1,
+        extension_protocol_version,
+        generated: ManifestGenerated {
+            rustdoc_format_version: RUSTDOC_FORMAT_VERSION,
+            profiles: profile_names,
+            inventory_digest: digest(&inventory_value),
+        },
+        entries: manifest_entries(merged),
+    }
+}
+
 pub fn render_parity_manifest(
     extension_protocol_version: u32,
     profiles: &[FeatureProfile],
     merged: &[InventoryEntry],
 ) -> String {
-    let profile_names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
-    let doc = serde_json::json!({
-        "schema_version": 1,
-        "extension_protocol_version": extension_protocol_version,
-        "generated": {
-            "rustdoc_format_version": RUSTDOC_FORMAT_VERSION,
-            "profiles": profile_names,
-        },
-        "entries": manifest_entries(merged),
-    });
-    serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
+    let document = manifest_document(extension_protocol_version, profiles, merged);
+    let generated = serde_json::to_string_pretty(&document.generated).unwrap_or_default();
+    let mut output = format!(
+        "{{\n  \"schema_version\": {},\n  \"extension_protocol_version\": {},\n  \"generated\": {},\n  \"entries\": [\n",
+        document.schema_version,
+        document.extension_protocol_version,
+        indent_json(&generated, 2)
+    );
+    let entry_count = document.entries.len();
+    for (index, entry) in document.entries.iter().enumerate() {
+        let rendered = serde_json::to_string(entry).unwrap_or_default();
+        output.push_str("    ");
+        output.push_str(&rendered);
+        if index.saturating_add(1) < entry_count {
+            output.push(',');
+        }
+        output.push('\n');
+    }
+    output.push_str("  ]\n}\n");
+    output
+}
+
+fn indent_json(value: &str, spaces: usize) -> String {
+    let indentation = " ".repeat(spaces);
+    value
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                line.to_string()
+            } else {
+                format!("{indentation}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn render_parity_manifest_schema() -> String {
+    let schema = schemars::schema_for!(ParityManifest);
+    serde_json::to_string_pretty(&schema).unwrap_or_default() + "\n"
 }
 
 #[cfg(test)]
@@ -855,63 +1850,90 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = r##"{
-        "format_version": 61,
-        "index": {
-            "1": {"name": "echo_agent", "crate_id": 0, "visibility": "public",
-                  "attrs": [], "inner": {"module": {"items": [2, 3, 7]}}},
-            "2": {"name": "agent", "crate_id": 0, "visibility": "public",
-                  "attrs": [], "inner": {"module": {"items": [4]}}},
-            "3": {"name": "hidden_mod", "crate_id": 0, "visibility": "public",
-                  "attrs": ["#[doc(hidden)]"], "inner": {"module": {"items": [5]}}},
-            "4": {"name": "run", "crate_id": 0, "visibility": "public",
-                  "attrs": [], "inner": {"function": {"sig": {}}}},
-            "5": {"name": "secret", "crate_id": 0, "visibility": "public",
-                  "attrs": [], "inner": {"function": {"sig": {}}}},
-            "7": {"name": null, "crate_id": 0, "visibility": "public",
-                  "attrs": [], "inner": {"use": {"source": "echo_core::Client", "name": "Client", "is_glob": false}}},
-            "8": {"name": "hooked", "crate_id": 0, "visibility": "public",
-                  "attrs": [], "inner": {"use": {"source": "echo_core::hooks", "is_glob": true}}},
-            "9": {"name": "Agent", "crate_id": 0, "visibility": "public",
-                  "attrs": [], "inner": {"struct": {"kind": "plain", "impls": [11]}}},
-            "10": {"name": "status", "crate_id": 0, "visibility": "public",
-                   "attrs": [], "inner": {"enum": {"variants": []}}},
-            "11": {"name": null, "crate_id": 0, "visibility": "default",
-                   "attrs": [], "inner": {"impl": {"for": {"resolved_path": {"path": "Agent", "id": 9, "args": null}}, "items": [12]}}},
-            "12": {"name": "execute", "crate_id": 0, "visibility": "public",
-                   "attrs": [], "inner": {"function": {"sig": {}}}}
-        },
-        "paths": {}
+      "format_version":61,"root":1,
+      "index":{
+        "1":{"name":"echo_agent","crate_id":0,"visibility":"public","attrs":[],"inner":{"module":{"items":[2,3,8]}}},
+        "2":{"name":"audit","crate_id":0,"visibility":"public","attrs":[],"inner":{"module":{"items":[4]}}},
+        "3":{"name":"hidden","crate_id":0,"visibility":"public","attrs":["#[doc(hidden)]"],"inner":{"module":{"items":[7]}}},
+        "4":{"name":"ChangeLog","crate_id":0,"visibility":"public","attrs":[],"inner":{"trait":{"items":[5]}}},
+        "5":{"name":"record","crate_id":0,"visibility":"default","attrs":[],"inner":{"function":{"sig":{"inputs":[],"output":null},"generics":{"params":[]}}}},
+        "7":{"name":"secret","crate_id":0,"visibility":"public","attrs":[],"inner":{"function":{"sig":{}}}},
+        "8":{"name":"State","crate_id":0,"visibility":"public","attrs":[],"inner":{"enum":{"variants":[9],"impls":[]}}},
+        "9":{"name":"Ready","crate_id":0,"visibility":"default","attrs":[],"inner":{"variant":{"kind":"plain","discriminant":null}}}
+      },"paths":{}
     }"##;
 
     #[test]
-    fn extracts_public_items_and_skips_doc_hidden() {
-        let items = extract_public_items(SAMPLE).expect("sample parses");
-        let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
-        assert!(paths.contains(&"echo_agent::agent::run"));
-        assert!(!paths.iter().any(|p| p.contains("secret")));
-        assert!(!paths.iter().any(|p| p.contains("hidden_mod")));
-        assert!(paths.contains(&"echo_agent::Client"));
+    fn extracts_trait_members_variants_and_skips_doc_hidden() -> Result<(), String> {
+        let items = extract_public_items(SAMPLE).map_err(|error| error.to_string())?;
+        let paths: Vec<&str> = items.iter().map(|item| item.path.as_str()).collect();
+        assert!(paths.contains(&"echo_agent::audit::ChangeLog::record"));
+        assert!(paths.contains(&"echo_agent::State::Ready"));
+        assert!(!paths.iter().any(|path| path.contains("secret")));
+        Ok(())
     }
 
     #[test]
-    fn impl_members_keyed_by_type_name() {
-        // Root also lists the struct and the impl for the sample tree.
-        let json = SAMPLE.replace("\"items\": [2, 3, 7]", "\"items\": [2, 3, 7, 8, 9]");
-        let items = extract_public_items(&json).expect("sample parses");
-        let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
-        assert!(paths.contains(&"echo_agent::Agent::execute"));
-        assert!(paths.contains(&"echo_agent::Agent"));
-        let hook = items
-            .iter()
-            .find(|i| i.path == "echo_agent::*" && i.import_glob == Some(true))
-            .expect("glob present");
-        assert!(hook.import_source.as_deref().is_some());
+    fn default_items_have_no_feature_condition() -> Result<(), String> {
+        let item = PublicItem {
+            path: "echo_agent::Agent".to_string(),
+            kind: ItemKind::Trait,
+            api_shape: "{}".to_string(),
+            api_shape_digest: "sha256:a".to_string(),
+            source_path: None,
+            required_features: BTreeSet::new(),
+            automatically_derived: false,
+        };
+        let profiles = BTreeMap::from([
+            ("default".to_string(), vec![item.clone()]),
+            ("full".to_string(), vec![item]),
+        ]);
+        let merged = merge_profiles(&profiles).map_err(|error| error.to_string())?;
+        let first = merged
+            .first()
+            .ok_or_else(|| "expected one merged item".to_string())?;
+        assert!(features_of_entry(first).is_empty());
+        Ok(())
     }
 
     #[test]
-    fn format_version_mismatch_fails_closed() {
-        let bad = SAMPLE.replace("61", "99");
-        let err = extract_public_items(&bad).expect_err("must fail");
-        assert!(err.to_string().contains("99"));
+    fn format_version_mismatch_fails_closed() -> Result<(), String> {
+        let error = match extract_public_items(&SAMPLE.replace("61", "99")) {
+            Ok(_) => return Err("format mismatch must fail".to_string()),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("99"));
+        Ok(())
+    }
+
+    #[test]
+    fn api_shape_ignores_rustdoc_ids_spans_and_function_bodies() -> Result<(), String> {
+        let make = |implementation: u64, line: u64, has_body: bool| {
+            serde_json::from_value::<RustdocItem>(serde_json::json!({
+                "name": "Contract",
+                "crate_id": 0,
+                "visibility": "public",
+                "attrs": [{"other": format!(
+                    "#[attr = CfgTrace([NameValue {{ name: \"feature\", value: Some(\"eval\"), span: src/lib.rs:{line}:1 }}])]"
+                )}],
+                "inner": {"trait": {
+                    "items": [1],
+                    "implementations": [implementation],
+                    "generics": {"params": [], "where_predicates": []},
+                    "has_body": has_body
+                }}
+            }))
+            .map_err(|error| error.to_string())
+        };
+        let first = make(7, 10, false)?;
+        let second = make(99, 300, false)?;
+        assert_eq!(item_shape(&first), item_shape(&second));
+        let provided = make(99, 300, true)?;
+        assert_ne!(item_shape(&first), item_shape(&provided));
+        assert_eq!(
+            combined_features(&BTreeSet::new(), &first),
+            BTreeSet::from(["eval".to_string()])
+        );
+        Ok(())
     }
 }

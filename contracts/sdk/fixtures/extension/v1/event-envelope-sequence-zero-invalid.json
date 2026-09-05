@@ -6,14 +6,17 @@
   "payload": {
     "schema_version": 4,
     "event_id": "event-0",
-    "content_hash": "sha256:x",
+    "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "sequence": "0",
     "stream_id": "stream-1",
     "turn_id": "turn-1",
     "timestamp": {
-      "unix_nanos": "1"
+      "unix_seconds": "0",
+      "nanos": 1
     },
-    "payload": {}
+    "payload": {
+      "event_type": "think_start"
+    }
   },
   "expect_error": "invalid_value"
 }

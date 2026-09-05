@@ -1,12 +1,16 @@
 {
   "name": "scalar-unknown-additive-valid",
   "kind": "valid",
-  "target": "WireUnknown",
+  "target": "WireValue",
   "description": "Unknown additive values keep their type tag and bounded payload.",
   "payload": {
-    "type_tag": "agent_event/tool_progress_v2",
-    "payload": {
-      "opaque": true
+    "kind": "unknown",
+    "value": {
+      "type_tag": "agent_event/tool_progress_v2",
+      "payload": {
+        "kind": "bool",
+        "value": true
+      }
     }
   }
 }

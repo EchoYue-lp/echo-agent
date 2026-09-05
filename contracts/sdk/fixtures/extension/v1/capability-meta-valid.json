@@ -21,14 +21,15 @@
       }
     ],
     "limits": {
-      "max_message_bytes": 1048576,
-      "max_stream_buffer_events": 1024,
+      "max_message_bytes": "1048576",
+      "max_stream_buffer_events": "1024",
       "max_callback_concurrency": 8,
       "callback_timeout": {
-        "nanos": "30000000000"
+        "seconds": "30",
+        "nanos": 0
       },
-      "max_replay_events": 512,
-      "max_structured_output_bytes": 262144
+      "max_replay_events": "512",
+      "max_structured_output_bytes": "262144"
     }
   }
 }

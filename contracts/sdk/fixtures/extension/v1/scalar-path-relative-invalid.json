@@ -1,0 +1,11 @@
+{
+  "name": "scalar-path-relative-invalid",
+  "kind": "invalid",
+  "target": "WirePath",
+  "description": "Relative paths are not accepted by the lossless path contract.",
+  "payload": {
+    "encoding": "utf8",
+    "path": "relative/file"
+  },
+  "expect_error": "invalid_value"
+}

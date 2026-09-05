@@ -194,10 +194,20 @@ fn standardized_moments(values: &[f64], mean: f64) -> (Option<f64>, Option<f64>)
     )
 }
 
-// Quantile lives in the feature-neutral `quantile` module so `data_quality`
-// (`data` feature) can share it without depending on `statistics`, whose
-// Cargo feature graph points the other way (`statistics = ["data"]`).
-pub(crate) use crate::quantile::quantile;
+pub(crate) fn quantile(values: &[f64], probability: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let bounded_probability = probability.clamp(0.0, 1.0);
+    let max_index = values.len().saturating_sub(1);
+    let position = bounded_probability * max_index as f64;
+    let lower_index = position.floor() as usize;
+    let upper_index = position.ceil() as usize;
+    let lower = values.get(lower_index).copied()?;
+    let upper = values.get(upper_index).copied()?;
+    let fraction = position - lower_index as f64;
+    Some(lower + (upper - lower) * fraction)
+}
 
 #[cfg(test)]
 mod tests {

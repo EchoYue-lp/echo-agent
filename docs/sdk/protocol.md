@@ -46,7 +46,8 @@ silently degrades to partial parity (design §10.2).
 All custom methods live under `_echo_agent/*` (leading underscore per ACP
 extensibility) and every family is declared in the capability object
 published under `initialize._meta.echo_agent`. The frozen catalog (method
-name, direction, capability) is embedded in the generated
+name, direction, capability, request, result and error schema) is embedded in
+the generated
 [`echo-agent-extension-v1.schema.json`](../../contracts/sdk/schema/echo-agent-extension-v1.schema.json)
 and enforced by `echo_sdk_protocol::catalog`:
 
@@ -57,20 +58,28 @@ and enforced by `echo_sdk_protocol::catalog`:
   lossless event stream, bounded replay, retention gaps
 - `_echo_agent/task/*` — TaskRun/PlanTask graph operations
 - `_echo_agent/subagent/*` — dispatch/await/control
-- `_echo_agent/extension/*` — host-language extension registration and the
-  reverse invocation bridge (Host → SDK)
-- `_echo_agent/memory|workflow|state/op` — feature surfaces carried verbatim
-  until their typed DTO plans land
+- `_echo_agent/extension/*` — host-language extension registration and reverse
+  invocation (Host → SDK); when an SDK callback returns a stream handle, its
+  independently identified chunk/terminal events flow SDK → Host
+- `_echo_agent/facade/invoke` and `_echo_agent/memory|workflow|state/op` —
+  manifest-identified operations using the closed tagged `WireValue` algebra
 
 The catalog contains **no** standard ACP method and nothing outside the
 namespace; both are machine-checked.
+
+The parity manifest does not infer ACP projection from words such as
+`prompt` or `session`. Only explicitly listed ACP-owned value families receive
+`standard_projection`; builders, trait implementations and process-local Rust
+fields are language-intrinsic, while long-lived resources use handles. APIs
+visible only under feature combinations record an `all_of` condition rather
+than an unexplained `full` marker.
 
 ## Identity and handles
 
 JSON-RPC request ids follow the official ACP schema and are never domain
 identity. Framework objects cross the wire as
 [`WireHandle`](../../echo-sdk-protocol/src/handle.rs): a non-empty domain id,
-a generation counter and a typed kind (agent, session, run, task_run,
+a generation counter and a typed kind (agent, session, run, stream, task_run,
 plan_task, subagent, extension). A handle whose generation no longer matches
 resolves to a typed `stale_handle`/`closed_handle` error — never a silent
 rebind.
@@ -81,15 +90,22 @@ Standard ACP paths are absolute UTF-8 strings and standard numbers must
 survive every client runtime. The extension profile therefore carries the
 facts ACP cannot (design §10.5):
 
-- `WireU64` — decimal-string integers (canonical spelling, `u64::MAX`-safe)
-- `WireDuration` — nanosecond durations
-- `WireTimestamp` — nanoseconds since epoch (RFC 3339 display is optional)
+- `WireI64` / `WireU64` — canonical decimal strings with no JSON precision loss
+- `WireDuration` — full-range unsigned seconds plus sub-second nanoseconds
+- `WireTimestamp` — signed Unix seconds plus sub-second nanoseconds, including
+  times before the epoch (RFC 3339 display is optional)
 - `WirePath` — Unix bytes (base64) / Windows UTF-16 units / exact UTF-8
 - `WireBytes` — base64 binary
-- `WireUnknown` — typed view of unknown additive values (old SDKs observe
-  without crashing)
+- `WireValue` — a closed tagged algebra for scalar, collection, record,
+  variant, handle and unknown additive values; method contracts have no
+  schema-free JSON payload escape hatch
 
 All are covered by golden fixtures with mandatory lossless round-trips.
+Native path and binary fields declare `echo-*` JSON Schema formats. The
+contract validator registers those formats with the same canonical no-pad
+base64 and absolute-path functions used by Rust runtime validation, preventing
+language generators from accepting a relative encoded path that the Host
+would later reject.
 
 ## Error contract
 
@@ -108,7 +124,9 @@ bound violations.
 
 The framework `EventEnvelope` is the event authority; the extension
 notification carries every identity fact (schema version, event id, content
-hash, sequence from 1, parent link, timestamp) plus the payload verbatim.
+hash, sequence from 1, parent link, timestamp) plus the real framework
+`AgentEvent` tag/data payload. Contract tests convert an actual framework
+event envelope to the wire DTO and back.
 Replay is cursor-based (`after_sequence`, bounded `max_events`), and falling
 below the retention floor produces a typed `event_gap` with a snapshot
 watermark — events are incremental facts, never a substitute for a snapshot
@@ -122,7 +140,7 @@ exit is never success.
   (sha256 over the canonical schema document) and the official ACP artifact
   versions move independently.
 - Additive wire fields are forward-compatible; unknown values surface as
-  `WireUnknown` without crashing older SDKs.
+  `WireValue::Unknown` without crashing older SDKs.
 - Removing fields, changing defaults or terminal/cancel semantics, or
   reusing an error code is a breaking change: in this development-phase
   repository such a change updates Host, SDKs, fixtures, manifest and docs

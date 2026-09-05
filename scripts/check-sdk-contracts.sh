@@ -11,7 +11,7 @@
 #   rustup toolchain install <toolchain from contracts/sdk/toolchain.json>
 #
 # Regenerate after intentional changes with:
-#   cargo run -p echo-sdk-protocol --bin export_schema -- --update
+#   cargo run -p echo-sdk-protocol --bin export_schema --locked -- --update
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -23,7 +23,7 @@ if ! rustup which --toolchain "$toolchain" rustdoc >/dev/null 2>&1; then
   exit 1
 fi
 
-cargo run -q -p echo-sdk-protocol --bin export_schema -- --check
+cargo run -q -p echo-sdk-protocol --bin export_schema --locked -- --check
 
 cargo test -q -p echo-sdk-protocol \
   --test facade_inventory \

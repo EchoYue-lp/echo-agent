@@ -1,0 +1,11 @@
+{
+  "name": "scalar-path-windows-relative-encoded-invalid",
+  "kind": "invalid",
+  "target": "WirePath",
+  "description": "Canonical UTF-16 base64 is invalid when its Windows path is relative.",
+  "payload": {
+    "encoding": "windows",
+    "utf16_base64": "ZgBvAG8A"
+  },
+  "expect_error": "invalid_value"
+}

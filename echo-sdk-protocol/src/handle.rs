@@ -22,6 +22,7 @@ pub enum HandleKind {
     Agent,
     Session,
     Run,
+    Stream,
     TaskRun,
     PlanTask,
     Subagent,
@@ -34,6 +35,7 @@ impl HandleKind {
             HandleKind::Agent => "agent",
             HandleKind::Session => "session",
             HandleKind::Run => "run",
+            HandleKind::Stream => "stream",
             HandleKind::TaskRun => "task_run",
             HandleKind::PlanTask => "plan_task",
             HandleKind::Subagent => "subagent",
@@ -50,6 +52,7 @@ impl HandleKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WireHandle {
     /// Non-empty domain identity assigned by the framework.
+    #[schemars(length(min = 1, max = 256))]
     pub id: String,
     /// Monotonic generation of the owning Host; incremented across restarts
     /// so pre-restart handles fail as stale instead of rebinding.
@@ -63,6 +66,9 @@ impl WireHandle {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.id.trim().is_empty() {
             return Err("handle id must be non-empty");
+        }
+        if self.id.chars().count() > 256 {
+            return Err("handle id exceeds 256 characters");
         }
         Ok(())
     }

@@ -8,7 +8,7 @@
 //! asserts that each method is declared in the capability.
 //!
 //! Payload shapes deliberately keep request/response DTOs thin: they carry
-//! handles, lossless scalars and verbatim framework values. They never
+//! handles, lossless scalars and the closed tagged `WireValue` algebra. They never
 //! recompute framework semantics — ready-frontier decisions, terminal
 //! states, retries and recovery belong to the Rust authority (design §10.4).
 
@@ -17,7 +17,61 @@ use serde::{Deserialize, Serialize};
 use crate::error::EchoSdkError;
 use crate::event::WireEventEnvelope;
 use crate::handle::{HandleKind, WireHandle};
-use crate::scalar::{WireDuration, WirePath, WireU64};
+use crate::scalar::{WireDuration, WireNonZeroU64, WirePath, WireU64, WireValue};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunInputKind {
+    Chat,
+    Execute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Pending,
+    Running,
+    Paused,
+    Completed,
+    Cancelled,
+    Failed,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlAction {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum WireTaskStatus {
+    Pending,
+    Running,
+    Blocked { reason: String },
+    Completed,
+    Failed { error: String },
+    Skipped,
+    Cancelled,
+    TimedOut { error: String },
+    Retrying { attempt: u32, last_error: String },
+    Paused { reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionKind {
+    Tool,
+    LlmClient,
+    Store,
+    HumanLoopProvider,
+    Hook,
+    AgentCallback,
+    AgentFactory,
+}
 
 // ── Agent lifecycle ─────────────────────────────────────────────────────────
 
@@ -26,11 +80,11 @@ use crate::scalar::{WireDuration, WirePath, WireU64};
 /// remains the validation authority.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentCreateRequest {
-    /// Framework agent construction config, verbatim (schema owned by the
-    /// facade DTOs the adapter plan will map).
-    pub config: serde_json::Value,
+    /// Framework construction config represented by manifest-identified values.
+    pub config: WireValue,
     /// Client-assigned idempotency identity; independent from JSON-RPC ids.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
     pub idempotency_id: Option<String>,
 }
 
@@ -49,7 +103,7 @@ pub struct AgentDescribeRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentDescribeResponse {
     /// Immutable construction facts and capability snapshot of the agent.
-    pub snapshot: serde_json::Value,
+    pub snapshot: WireValue,
 }
 
 /// `_echo_agent/agent/close` request. In-flight runs settle per the
@@ -73,9 +127,9 @@ pub struct AgentCloseResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionCreateRequest {
     pub agent: WireHandle,
-    /// Session configuration, verbatim.
+    /// Session configuration represented by manifest-identified values.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub config: Option<serde_json::Value>,
+    pub config: Option<WireValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_id: Option<String>,
 }
@@ -90,6 +144,7 @@ pub struct SessionCreateResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionLoadRequest {
     pub agent: WireHandle,
+    #[schemars(length(min = 1, max = 256))]
     pub session_id: String,
 }
 
@@ -114,14 +169,13 @@ pub struct SessionCloseResponse {
 
 // ── Runs ────────────────────────────────────────────────────────────────────
 
-/// Input of one run: chat prompt parts or execute directive, carried
-/// verbatim from the facade request types.
+/// Input of one run: chat prompt parts or execute directive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RunInput {
     /// `chat` or `execute`, mirroring the facade's unified turn driver.
-    pub kind: String,
-    /// Facade request payload, verbatim (TurnRequest/ChatRequest shape).
-    pub payload: serde_json::Value,
+    pub kind: RunInputKind,
+    /// Facade request payload (TurnRequest/ChatRequest shape).
+    pub payload: WireValue,
 }
 
 /// `_echo_agent/run/start` request.
@@ -131,8 +185,9 @@ pub struct RunStartRequest {
     pub input: RunInput,
     /// Optional structured-output contract; validated by the framework.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub structured_output: Option<serde_json::Value>,
+    pub structured_output: Option<WireValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
     pub idempotency_id: Option<String>,
 }
 
@@ -155,13 +210,13 @@ pub struct RunGetRequest {
 /// framework has not emitted (exactly-one-terminal, design §11.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RunGetResponse {
-    pub status: String,
+    pub status: RunStatus,
     /// Last sequence the snapshot covers.
     pub last_sequence: WireU64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal: Option<serde_json::Value>,
+    pub terminal: Option<WireValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub receipt: Option<serde_json::Value>,
+    pub receipt: Option<WireValue>,
 }
 
 /// `_echo_agent/run/wait` request: bounded wait for the terminal.
@@ -176,9 +231,9 @@ pub struct RunWaitRequest {
 pub struct RunWaitResponse {
     pub settled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal: Option<serde_json::Value>,
+    pub terminal: Option<WireValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub receipt: Option<serde_json::Value>,
+    pub receipt: Option<WireValue>,
 }
 
 /// `_echo_agent/run/cancel` request. Competing with natural completion, the
@@ -194,7 +249,7 @@ pub struct RunCancelResponse {
     /// Whether this call initiated cancellation.
     pub cancellation_initiated: bool,
     /// Status at the time of the call; final state still arrives as events.
-    pub status: String,
+    pub status: RunStatus,
 }
 
 /// `_echo_agent/run/steer` request: mid-flight steering for chats that
@@ -202,7 +257,7 @@ pub struct RunCancelResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RunSteerRequest {
     pub run: WireHandle,
-    pub payload: serde_json::Value,
+    pub payload: WireValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -216,8 +271,8 @@ pub struct RunSteerResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskCreateRequest {
     pub task_run: WireHandle,
-    /// TaskSpec payload, verbatim.
-    pub spec: serde_json::Value,
+    /// TaskSpec payload.
+    pub spec: WireValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -233,7 +288,7 @@ pub struct TaskUpdateRequest {
     /// Expected revision for optimistic concurrency; the framework rejects
     /// stale writers.
     pub expected_revision: WireU64,
-    pub patch: serde_json::Value,
+    pub patch: WireValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -257,7 +312,7 @@ pub struct TaskListResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskSummary {
     pub task: WireHandle,
-    pub status: String,
+    pub status: WireTaskStatus,
     pub revision: WireU64,
 }
 
@@ -267,6 +322,7 @@ pub struct TaskSummary {
 pub struct TaskExecuteRequest {
     pub task: WireHandle,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
     pub idempotency_id: Option<String>,
 }
 
@@ -281,24 +337,25 @@ pub struct TaskExecuteResponse {
 pub struct TaskControlRequest {
     pub task: WireHandle,
     /// One of the framework control verbs (`pause`, `resume`, `cancel`).
-    pub action: String,
+    pub action: ControlAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskControlResponse {
     pub accepted: bool,
-    pub status: String,
+    pub status: WireTaskStatus,
 }
 
 // ── Subagents ───────────────────────────────────────────────────────────────
 
-/// `_echo_agent/subagent/dispatch` request. DispatchRequest facts travel
-/// verbatim; the framework executor remains the only scheduler.
+/// `_echo_agent/subagent/dispatch` request. The framework executor remains
+/// the only scheduler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubagentDispatchRequest {
     pub session: WireHandle,
-    pub request: serde_json::Value,
+    pub request: WireValue,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
     pub idempotency_id: Option<String>,
 }
 
@@ -318,16 +375,16 @@ pub struct SubagentAwaitRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubagentAwaitResponse {
     pub settled: bool,
-    /// SubagentResult payload, verbatim.
+    /// SubagentResult payload.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
+    pub result: Option<WireValue>,
 }
 
 /// `_echo_agent/subagent/control` request/response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubagentControlRequest {
     pub subagent: WireHandle,
-    pub action: String,
+    pub action: ControlAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -343,12 +400,13 @@ pub struct SubagentControlResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExtensionRegisterRequest {
     /// Which extension point is implemented.
-    pub kind: String,
+    pub kind: ExtensionKind,
     /// Client-side implementation identity (non-empty).
+    #[schemars(length(min = 1, max = 256))]
     pub implementation_id: String,
     /// Descriptor the Host uses for dispatch: for Tools this covers name,
     /// description, JSON Schema parameters, revision and modality.
-    pub descriptor: serde_json::Value,
+    pub descriptor: WireValue,
     /// Declared concurrency/timeout contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<WireDuration>,
@@ -377,9 +435,10 @@ pub struct ExtensionUnregisterResponse {
 pub struct ExtensionInvokeCall {
     pub extension: WireHandle,
     /// Invocation identity; unique per call, used for cancellation.
+    #[schemars(length(min = 1, max = 256))]
     pub invocation_id: String,
     /// Typed invocation payload (tool input, chat request, store op, ...).
-    pub input: serde_json::Value,
+    pub input: WireValue,
     /// Deadline for this invocation.
     pub deadline: WireDuration,
 }
@@ -387,12 +446,27 @@ pub struct ExtensionInvokeCall {
 /// One callback outcome. Failures use the typed extension errors; there is
 /// no implicit fallback to a built-in implementation (design §12.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ExtensionInvokeOutcome {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    /// Terminal failure of the invocation, typed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<EchoSdkError>,
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ExtensionInvokeOutcome {
+    Result { value: WireValue },
+    Stream { stream: WireHandle },
+    Error { error: EchoSdkError },
+}
+
+impl ExtensionInvokeOutcome {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Result { value } => value.validate().map_err(|_| "invalid callback result"),
+            Self::Stream { stream } => {
+                stream.validate()?;
+                if stream.kind != HandleKind::Stream {
+                    return Err("stream outcome requires a stream handle");
+                }
+                Ok(())
+            }
+            Self::Error { error } => error.validate(),
+        }
+    }
 }
 
 /// `_echo_agent/extension/cancel` reverse notification (Host -> SDK): the
@@ -400,28 +474,117 @@ pub struct ExtensionInvokeOutcome {
 /// still answer the original call with a `cancelled` error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExtensionCancelNotice {
+    #[schemars(length(min = 1, max = 256))]
     pub invocation_id: String,
+}
+
+/// `_echo_agent/extension/stream` event. Sequence is monotonic per stream and
+/// exactly one terminal variant may be emitted by the Host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ExtensionStreamEvent {
+    Chunk {
+        stream: WireHandle,
+        sequence: WireNonZeroU64,
+        value: WireValue,
+    },
+    Complete {
+        stream: WireHandle,
+        sequence: WireNonZeroU64,
+        value: WireValue,
+    },
+    Failed {
+        stream: WireHandle,
+        sequence: WireNonZeroU64,
+        error: EchoSdkError,
+    },
+    Cancelled {
+        stream: WireHandle,
+        sequence: WireNonZeroU64,
+    },
+}
+
+impl ExtensionStreamEvent {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let (stream, sequence) = match self {
+            Self::Chunk {
+                stream,
+                sequence,
+                value,
+            }
+            | Self::Complete {
+                stream,
+                sequence,
+                value,
+            } => {
+                value.validate().map_err(|_| "invalid stream value")?;
+                (stream, sequence)
+            }
+            Self::Failed {
+                stream,
+                sequence,
+                error,
+            } => {
+                error.validate()?;
+                (stream, sequence)
+            }
+            Self::Cancelled { stream, sequence } => (stream, sequence),
+        };
+        stream.validate()?;
+        if stream.kind != HandleKind::Stream {
+            return Err("stream event requires a stream handle");
+        }
+        if sequence.to_u64().is_none_or(|sequence| sequence == 0) {
+            return Err("stream sequence must start at one");
+        }
+        Ok(())
+    }
 }
 
 // ── Feature surfaces (memory / mcp / a2a / workflow / ...) ─────────────────
 
-/// Generic verbatim operation envelope for feature-surface methods whose
-/// full DTO mapping lands with the adapter plans: the method family is
-/// frozen here, payloads carry the facade value under `opaque` until the
-/// typed DTO plan replaces them (no second authority is introduced).
+/// Manifest-identified facade operation using the closed `WireValue` algebra.
+/// The operation must match an exact parity-manifest identity and signature.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FeatureOperationRequest {
-    pub op: String,
+    #[schemars(length(min = 1, max = 1024))]
+    pub operation: String,
+    #[schemars(regex(pattern = "^sha256:[0-9a-fA-F]{64}$"))]
+    pub signature_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handle: Option<WireHandle>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<WireValue>,
+}
+
+impl FeatureOperationRequest {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.operation.trim().is_empty() {
+            return Err("facade operation must be non-empty");
+        }
+        let digest_is_valid = self
+            .signature_digest
+            .strip_prefix("sha256:")
+            .is_some_and(|hex| {
+                hex.chars().count() == 64
+                    && hex.chars().all(|character| character.is_ascii_hexdigit())
+            });
+        if !digest_is_valid {
+            return Err("facade signature digest must be sha256");
+        }
+        if let Some(handle) = &self.handle {
+            handle.validate()?;
+        }
+        for argument in &self.arguments {
+            argument.validate().map_err(|_| "invalid facade argument")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FeatureOperationResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<serde_json::Value>,
+    pub value: WireValue,
 }
 
 /// Working directory declaration a client may pass for run/session methods

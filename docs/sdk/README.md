@@ -41,8 +41,9 @@ scalar rules live in [protocol.md](protocol.md).
 |---|---|
 | `contracts/sdk/acp-baseline.json` | Pinned official ACP wire version (1), crate and schema artifact versions; tests assert the lockfile matches. |
 | `contracts/sdk/toolchain.json` | The exact nightly toolchain used for rustdoc-JSON inventory generation. Contributors only; normal builds never need it. |
-| `contracts/sdk/public-api.txt` | Deterministic snapshot of the root `echo_agent` facade per feature profile (default, `full`, and every leaf feature). |
-| `contracts/sdk/parity-manifest.json` | Every public facade item classified by semantic class, ACP relationship and per-language mapping status. |
+| `contracts/sdk/public-api.txt` | Deterministic root-facade snapshot with expanded workspace re-exports, members, fields, variants and API-shape digests. |
+| `contracts/sdk/parity-manifest.schema.json` | Machine schema for facade identities, signatures, feature availability, adapter obligations and language mappings. |
+| `contracts/sdk/parity-manifest.json` | Every facade item classified by an explicit semantic rule, ACP relationship, feature condition, adapter operation and per-language mapping/test status. Entries use one JSON line each so diffs remain reviewable. |
 | `contracts/sdk/schema/echo-agent-extension-v1.schema.json` | Generated JSON Schema of the `_echo_agent/*` extension DTOs and method catalog. |
 | `contracts/sdk/fixtures/extension/v1/` | Golden fixtures: valid samples must round-trip losslessly, invalid samples must be rejected deterministically. |
 
@@ -53,7 +54,7 @@ byte-stable:
 
 ```bash
 # regenerate after an intentional facade or contract change
-cargo run -p echo-sdk-protocol --bin export_schema -- --update
+cargo run -p echo-sdk-protocol --bin export_schema --locked -- --update
 
 # read-only drift check (also run by scripts/verify.sh and CI)
 ./scripts/check-sdk-contracts.sh
@@ -83,10 +84,13 @@ manifest honestly read `not_implemented`.
   [`toolchain.json`](../../contracts/sdk/toolchain.json); install it with
   `rustup toolchain install <toolchain>` if you intend to regenerate
   contracts. Nothing in a normal build installs it for you.
-- Any new public facade item automatically appears in the inventory; the
-  parity manifest check then **blocks CI** until the item is classified and
-  the manifest regenerated. This is intentional: parity is a contract, not
-  an aspiration.
+- Any new public facade item or signature change appears in the inventory;
+  the parity manifest check then **blocks CI** until its semantic mapping and
+  generated artifacts are reviewed. Cross-crate glob re-exports are expanded
+  from matching workspace rustdoc documents instead of stored as `::*`
+  placeholders. Public registry re-exports use the exact locked dependency's
+  rustdoc JSON; procedural and declarative macros carry behavior-source
+  digests so helper/body changes cannot bypass drift detection.
 - Extension versioning, digest and compatibility rules: see
   [protocol.md](protocol.md#versioning-and-compatibility).
 

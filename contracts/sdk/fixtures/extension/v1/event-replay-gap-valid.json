@@ -4,10 +4,11 @@
   "target": "ReplayResponse",
   "description": "Replay below the watermark returns bounded events plus a typed gap.",
   "payload": {
+    "requested_after_sequence": "4",
     "events": [],
     "next_cursor": {
       "stream_id": "stream-1",
-      "last_processed_sequence": "4"
+      "last_processed_sequence": "9"
     },
     "gap": {
       "from_sequence": "5",

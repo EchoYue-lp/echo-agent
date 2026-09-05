@@ -1,0 +1,24 @@
+{
+  "name": "error-details-duplicate-invalid",
+  "kind": "invalid",
+  "target": "EchoSdkError",
+  "description": "Error detail keys are bounded and unique.",
+  "payload": {
+    "code": "invalid_value",
+    "message": "duplicate detail key",
+    "retryable": "never",
+    "details": {
+      "fields": [
+        {
+          "key": "field",
+          "value": "one"
+        },
+        {
+          "key": "field",
+          "value": "two"
+        }
+      ]
+    }
+  },
+  "expect_error": "invalid_value"
+}

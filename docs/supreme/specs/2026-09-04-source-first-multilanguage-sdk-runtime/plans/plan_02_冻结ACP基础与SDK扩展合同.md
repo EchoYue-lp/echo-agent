@@ -65,7 +65,7 @@ todos:
     verify: 本地与CI都执行inventory、ACP
       baseline、manifest及扩展Schema/fixture检查；docs/sdk准确说明双profile、源码交付和状态，根README不宣称Adapter、Host、语言SDK或发布产物已存在。
 artifact_id: plan:b76eb4e0-64ec-4adb-ac12-8dab069a502c
-lifecycle: ready
+lifecycle: completed
 design_revision: sha256:9685cabd8f692ea060b67e46fe1c7d47531edb44efd998913e252803ef122817
 ---
 ## Approach

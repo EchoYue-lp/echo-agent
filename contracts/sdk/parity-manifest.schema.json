@@ -1,0 +1,252 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ParityManifest",
+  "type": "object",
+  "required": [
+    "entries",
+    "extension_protocol_version",
+    "generated",
+    "schema_version"
+  ],
+  "properties": {
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ManifestEntry"
+      }
+    },
+    "extension_protocol_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "generated": {
+      "$ref": "#/definitions/ManifestGenerated"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "AcpRelationship": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "standard_projection",
+        "echo_extension",
+        "language_intrinsic"
+      ]
+    },
+    "AdapterObligation": {
+      "type": "object",
+      "required": [
+        "mapping",
+        "operation",
+        "validation"
+      ],
+      "properties": {
+        "mapping": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "validation": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "FeatureSemantics": {
+      "type": "string",
+      "enum": [
+        "default",
+        "any_of",
+        "all_of"
+      ]
+    },
+    "ItemKind": {
+      "type": "string",
+      "enum": [
+        "module",
+        "function",
+        "method",
+        "struct",
+        "struct_field",
+        "enum",
+        "variant",
+        "union",
+        "trait",
+        "trait_impl",
+        "trait_alias",
+        "type_alias",
+        "macro",
+        "proc_macro",
+        "constant",
+        "static",
+        "extern_type",
+        "primitive"
+      ]
+    },
+    "LanguageImplementationStatus": {
+      "type": "string",
+      "enum": [
+        "not_implemented",
+        "in_progress",
+        "done"
+      ]
+    },
+    "LanguageStatusRecord": {
+      "type": "object",
+      "required": [
+        "contract_test",
+        "status",
+        "target"
+      ],
+      "properties": {
+        "contract_test": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/LanguageImplementationStatus"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManifestEntry": {
+      "type": "object",
+      "required": [
+        "acp_relationship",
+        "adapter",
+        "classification",
+        "derived_traits",
+        "feature_semantics",
+        "features",
+        "full_only",
+        "kind",
+        "languages",
+        "path",
+        "semantic_rule",
+        "signatures",
+        "source_paths"
+      ],
+      "properties": {
+        "acp_relationship": {
+          "$ref": "#/definitions/AcpRelationship"
+        },
+        "adapter": {
+          "$ref": "#/definitions/AdapterObligation"
+        },
+        "classification": {
+          "$ref": "#/definitions/SemanticClass"
+        },
+        "derived_traits": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "feature_semantics": {
+          "$ref": "#/definitions/FeatureSemantics"
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "full_only": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/definitions/ItemKind"
+        },
+        "languages": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/LanguageStatusRecord"
+          }
+        },
+        "path": {
+          "type": "string"
+        },
+        "semantic_rule": {
+          "type": "string"
+        },
+        "signatures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManifestSignature"
+          }
+        },
+        "source_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManifestGenerated": {
+      "type": "object",
+      "required": [
+        "inventory_digest",
+        "profiles",
+        "rustdoc_format_version"
+      ],
+      "properties": {
+        "inventory_digest": {
+          "type": "string"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rustdoc_format_version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManifestSignature": {
+      "type": "object",
+      "required": [
+        "digest"
+      ],
+      "properties": {
+        "digest": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SemanticClass": {
+      "type": "string",
+      "enum": [
+        "wire_value",
+        "operation",
+        "handle",
+        "stream",
+        "extension",
+        "language_intrinsic"
+      ]
+    }
+  }
+}

@@ -19,11 +19,16 @@ use crate::catalog::METHOD_CATALOG;
 use crate::error::{EchoSdkError, ErrorDetails, ExtensionErrorCode, Retryability};
 use crate::event::{
     EventCursor, EventGap, EventNotification, GapNotification, ReplayRequest, ReplayResponse,
-    WireEventEnvelope,
+    WireEventEnvelope, WireEventPayload,
 };
 use crate::handle::{HandleKind, WireHandle};
 use crate::methods::*;
-use crate::scalar::{WireBytes, WireDuration, WirePath, WireTimestamp, WireU64, WireUnknown};
+use crate::scalar::{
+    ABSOLUTE_UNIX_PATH_FORMAT, ABSOLUTE_UTF8_PATH_FORMAT, ABSOLUTE_WINDOWS_PATH_FORMAT,
+    BASE64_NO_PAD_FORMAT, WireBytes, WireDuration, WireField, WireI64, WireMapEntry,
+    WireNonZeroU64, WirePath, WireTimestamp, WireU64, WireValue, is_absolute_unix_path_base64,
+    is_absolute_utf8_path, is_absolute_windows_path_base64, is_base64_no_pad,
+};
 
 /// Names that would signal the schema is re-defining official ACP concepts.
 /// The generated definitions must not contain any of these titles.
@@ -67,12 +72,30 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
+fn insert_schema<T: schemars::JsonSchema>(
+    definitions: &mut serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) {
+    let schema = schemars::schema_for!(T);
+    let mut value = serde_json::to_value(&schema).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("$schema");
+        if let Some(nested) = object
+            .remove("definitions")
+            .and_then(|definitions| definitions.as_object().cloned())
+        {
+            for (nested_name, nested_schema) in nested {
+                definitions.entry(nested_name).or_insert(nested_schema);
+            }
+        }
+    }
+    definitions.insert(name.to_string(), value);
+}
+
 macro_rules! schema_entry {
-    ($map:expr, $ty:ty) => {{
-        let schema = schemars::schema_for!($ty);
-        let value = serde_json::to_value(&schema).unwrap_or(serde_json::Value::Null);
-        $map.insert(stringify!($ty).to_string(), value);
-    }};
+    ($map:expr, $ty:ty) => {
+        insert_schema::<$ty>(&mut $map, stringify!($ty));
+    };
 }
 
 /// Build the full extension schema document.
@@ -80,11 +103,15 @@ pub fn build_extension_schema_doc() -> serde_json::Value {
     let mut definitions = serde_json::Map::new();
     // Scalars.
     schema_entry!(definitions, WireU64);
+    schema_entry!(definitions, WireNonZeroU64);
+    schema_entry!(definitions, WireI64);
     schema_entry!(definitions, WireDuration);
     schema_entry!(definitions, WireTimestamp);
     schema_entry!(definitions, WirePath);
     schema_entry!(definitions, WireBytes);
-    schema_entry!(definitions, WireUnknown);
+    schema_entry!(definitions, WireField);
+    schema_entry!(definitions, WireMapEntry);
+    schema_entry!(definitions, WireValue);
     // Handles.
     schema_entry!(definitions, WireHandle);
     schema_entry!(definitions, HandleKind);
@@ -95,6 +122,7 @@ pub fn build_extension_schema_doc() -> serde_json::Value {
     schema_entry!(definitions, ErrorDetails);
     // Events.
     schema_entry!(definitions, WireEventEnvelope);
+    schema_entry!(definitions, WireEventPayload);
     schema_entry!(definitions, EventNotification);
     schema_entry!(definitions, EventCursor);
     schema_entry!(definitions, ReplayRequest);
@@ -151,6 +179,7 @@ pub fn build_extension_schema_doc() -> serde_json::Value {
     schema_entry!(definitions, ExtensionInvokeCall);
     schema_entry!(definitions, ExtensionInvokeOutcome);
     schema_entry!(definitions, ExtensionCancelNotice);
+    schema_entry!(definitions, ExtensionStreamEvent);
     schema_entry!(definitions, FeatureOperationRequest);
     schema_entry!(definitions, FeatureOperationResponse);
     schema_entry!(definitions, WorkingDirectory);
@@ -163,6 +192,13 @@ pub fn build_extension_schema_doc() -> serde_json::Value {
                 "direction": method.direction.as_str(),
                 "capability": method.capability.as_str(),
                 "summary": method.summary,
+                "params_schema": format!("#/definitions/{}", method.params_schema()),
+                "result_schema": method
+                    .result_schema()
+                    .map(|name| format!("#/definitions/{name}")),
+                "error_schema": method
+                    .error_schema()
+                    .map(|name| format!("#/definitions/{name}")),
             })
         })
         .collect();
@@ -181,6 +217,20 @@ pub fn build_extension_schema_doc() -> serde_json::Value {
         "method_catalog": catalog,
         "definitions": definitions,
     })
+}
+
+pub fn build_extension_validator(
+    schema: &serde_json::Value,
+) -> Result<jsonschema::Validator, jsonschema::ValidationError<'static>> {
+    jsonschema::options()
+        .with_format(BASE64_NO_PAD_FORMAT, is_base64_no_pad)
+        .with_format(ABSOLUTE_UNIX_PATH_FORMAT, is_absolute_unix_path_base64)
+        .with_format(
+            ABSOLUTE_WINDOWS_PATH_FORMAT,
+            is_absolute_windows_path_base64,
+        )
+        .with_format(ABSOLUTE_UTF8_PATH_FORMAT, is_absolute_utf8_path)
+        .build(schema)
 }
 
 /// Contract digest of the extension schema (design §18: extension version,
@@ -262,6 +312,7 @@ pub fn all_fixtures() -> Vec<Fixture> {
     push_handle_fixtures(&mut fixtures);
     push_error_fixtures(&mut fixtures);
     push_event_fixtures(&mut fixtures);
+    push_bridge_fixtures(&mut fixtures);
     push_capability_fixtures(&mut fixtures);
     push_boundary_fixtures(&mut fixtures);
     fixtures
@@ -311,6 +362,14 @@ fn push_scalar_fixtures(fixtures: &mut Vec<Fixture>) {
         Some("invalid_value"),
     ));
     fixtures.push(fixture(
+        "scalar-u64-overflow-invalid",
+        FixtureKind::Invalid,
+        "WireU64",
+        "Decimal strings above u64::MAX are rejected by Rust and JSON Schema.",
+        serde_json::json!("18446744073709551616"),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
         "scalar-path-unix-lossless-valid",
         FixtureKind::Valid,
         "WirePath",
@@ -329,25 +388,111 @@ fn push_scalar_fixtures(fixtures: &mut Vec<Fixture>) {
         "Windows UTF-16 unit sequence preserved verbatim.",
         serde_json::json!({
             "encoding": "windows",
-            "utf16_base64": "QwA6AFwAXAA="
+            "utf16_base64": "QwA6AFwAXAA"
         }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "scalar-path-root-valid",
+        FixtureKind::Valid,
+        "WirePath",
+        "Filesystem roots are valid absolute paths.",
+        serde_json::json!({"encoding": "utf8", "path": "/"}),
         None,
     ));
     fixtures.push(fixture(
         "scalar-duration-nanos-valid",
         FixtureKind::Valid,
         "WireDuration",
-        "Nanosecond durations travel as decimal strings.",
-        serde_json::json!({"nanos": "9007199254740993"}),
+        "Full duration range uses decimal seconds plus sub-second nanos.",
+        serde_json::json!({"seconds": "9007199", "nanos": 254740993}),
         None,
     ));
     fixtures.push(fixture(
         "scalar-unknown-additive-valid",
         FixtureKind::Valid,
-        "WireUnknown",
+        "WireValue",
         "Unknown additive values keep their type tag and bounded payload.",
-        serde_json::json!({"type_tag": "agent_event/tool_progress_v2", "payload": {"opaque": true}}),
+        serde_json::json!({
+            "kind": "unknown",
+            "value": {
+                "type_tag": "agent_event/tool_progress_v2",
+                "payload": {"kind": "bool", "value": true}
+            }
+        }),
         None,
+    ));
+    fixtures.push(fixture(
+        "scalar-path-relative-invalid",
+        FixtureKind::Invalid,
+        "WirePath",
+        "Relative paths are not accepted by the lossless path contract.",
+        serde_json::json!({"encoding": "utf8", "path": "relative/file"}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "scalar-path-base64-invalid",
+        FixtureKind::Invalid,
+        "WirePath",
+        "Encoded native paths must contain canonical base64.",
+        serde_json::json!({"encoding": "unix", "bytes_base64": "not base64"}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "scalar-path-unix-relative-encoded-invalid",
+        FixtureKind::Invalid,
+        "WirePath",
+        "Canonical base64 is still invalid when its Unix path is relative.",
+        serde_json::json!({"encoding": "unix", "bytes_base64": "cmVsYXRpdmU"}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "scalar-path-windows-relative-encoded-invalid",
+        FixtureKind::Invalid,
+        "WirePath",
+        "Canonical UTF-16 base64 is invalid when its Windows path is relative.",
+        serde_json::json!({"encoding": "windows", "utf16_base64": "ZgBvAG8A"}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "scalar-path-native-empty-invalid",
+        FixtureKind::Invalid,
+        "WirePath",
+        "An empty native path cannot be absolute.",
+        serde_json::json!({"encoding": "unix", "bytes_base64": ""}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "scalar-bytes-base64-invalid",
+        FixtureKind::Invalid,
+        "WireBytes",
+        "Binary payloads reject malformed base64.",
+        serde_json::json!({"base64": "***"}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "scalar-bytes-empty-valid",
+        FixtureKind::Valid,
+        "WireBytes",
+        "An empty binary payload has the empty canonical no-pad base64 encoding.",
+        serde_json::json!({"base64": ""}),
+        None,
+    ));
+    fixtures.push(fixture(
+        "scalar-bytes-length-invalid",
+        FixtureKind::Invalid,
+        "WireBytes",
+        "A one-character no-pad base64 value cannot encode complete bytes.",
+        serde_json::json!({"base64": "A"}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "scalar-unknown-empty-tag-invalid",
+        FixtureKind::Invalid,
+        "WireValue",
+        "Unknown additive values require a non-empty type identity.",
+        serde_json::json!({"kind": "unknown", "value": {"type_tag": "", "payload": null}}),
+        Some("invalid_value"),
     ));
 }
 
@@ -410,6 +555,22 @@ fn push_error_fixtures(fixtures: &mut Vec<Fixture>) {
         }),
         None,
     ));
+    fixtures.push(fixture(
+        "error-details-duplicate-invalid",
+        FixtureKind::Invalid,
+        "EchoSdkError",
+        "Error detail keys are bounded and unique.",
+        serde_json::json!({
+            "code": "invalid_value",
+            "message": "duplicate detail key",
+            "retryable": "never",
+            "details": {"fields": [
+                {"key": "field", "value": "one"},
+                {"key": "field", "value": "two"}
+            ]}
+        }),
+        Some("invalid_value"),
+    ));
 }
 
 fn push_event_fixtures(fixtures: &mut Vec<Fixture>) {
@@ -417,17 +578,20 @@ fn push_event_fixtures(fixtures: &mut Vec<Fixture>) {
         "event-envelope-full-valid",
         FixtureKind::Valid,
         "WireEventEnvelope",
-        "Complete envelope: every framework identity fact plus verbatim payload.",
+        "Complete envelope: every framework identity fact plus typed AgentEvent payload.",
         serde_json::json!({
             "schema_version": 4,
             "event_id": "event-3",
-            "content_hash": "sha256:deadbeef",
+            "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "sequence": "3",
             "stream_id": "stream-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
-            "timestamp": {"unix_nanos": "1757000000000000000"},
-            "payload": {"kind": "agent_message"}
+            "timestamp": {"unix_seconds": "1757000000", "nanos": 0},
+            "payload": {
+                "event_type": "token",
+                "data": {"kind": "string", "value": "hello"}
+            }
         }),
         None,
     ));
@@ -439,12 +603,12 @@ fn push_event_fixtures(fixtures: &mut Vec<Fixture>) {
         serde_json::json!({
             "schema_version": 4,
             "event_id": "event-0",
-            "content_hash": "sha256:x",
+            "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "sequence": "0",
             "stream_id": "stream-1",
             "turn_id": "turn-1",
-            "timestamp": {"unix_nanos": "1"},
-            "payload": {}
+            "timestamp": {"unix_seconds": "0", "nanos": 1},
+            "payload": {"event_type": "think_start"}
         }),
         Some("invalid_value"),
     ));
@@ -454,8 +618,9 @@ fn push_event_fixtures(fixtures: &mut Vec<Fixture>) {
         "ReplayResponse",
         "Replay below the watermark returns bounded events plus a typed gap.",
         serde_json::json!({
+            "requested_after_sequence": "4",
             "events": [],
-            "next_cursor": {"stream_id": "stream-1", "last_processed_sequence": "4"},
+            "next_cursor": {"stream_id": "stream-1", "last_processed_sequence": "9"},
             "gap": {
                 "from_sequence": "5",
                 "to_sequence": "9",
@@ -464,6 +629,110 @@ fn push_event_fixtures(fixtures: &mut Vec<Fixture>) {
             }
         }),
         None,
+    ));
+    fixtures.push(fixture(
+        "event-live-gap-valid",
+        FixtureKind::Valid,
+        "GapNotification",
+        "A live gap is explicitly associated with one stream.",
+        serde_json::json!({
+            "stream_id": "stream-1",
+            "gap": {
+                "from_sequence": "5",
+                "to_sequence": "9",
+                "reason": "retention floor",
+                "snapshot_watermark": "9"
+            }
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "event-live-gap-watermark-invalid",
+        FixtureKind::Invalid,
+        "GapNotification",
+        "A recovery snapshot cannot precede the missing range.",
+        serde_json::json!({
+            "stream_id": "stream-1",
+            "gap": {
+                "from_sequence": "5",
+                "to_sequence": "9",
+                "reason": "retention floor",
+                "snapshot_watermark": "4"
+            }
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "event-replay-empty-stream-invalid",
+        FixtureKind::Invalid,
+        "ReplayRequest",
+        "Replay requests require a stream identity.",
+        serde_json::json!({"stream_id": "", "after_sequence": "0", "max_events": "1"}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "event-replay-zero-limit-invalid",
+        FixtureKind::Invalid,
+        "ReplayRequest",
+        "A present replay limit must be positive.",
+        serde_json::json!({"stream_id": "stream-1", "after_sequence": "0", "max_events": "0"}),
+        Some("invalid_value"),
+    ));
+}
+
+fn push_bridge_fixtures(fixtures: &mut Vec<Fixture>) {
+    fixtures.push(fixture(
+        "extension-outcome-stream-valid",
+        FixtureKind::Valid,
+        "ExtensionInvokeOutcome",
+        "A streaming callback returns one stream handle instead of a large response.",
+        serde_json::json!({
+            "outcome": "stream",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"}
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-outcome-empty-invalid",
+        FixtureKind::Invalid,
+        "ExtensionInvokeOutcome",
+        "A callback outcome must choose exactly one tagged variant.",
+        serde_json::json!({}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-outcome-ambiguous-invalid",
+        FixtureKind::Invalid,
+        "ExtensionInvokeOutcome",
+        "Independent result and error fields cannot be combined.",
+        serde_json::json!({"result": null, "error": null}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-stream-chunk-valid",
+        FixtureKind::Valid,
+        "ExtensionStreamEvent",
+        "Callback stream chunks preserve stream identity and monotonic sequence.",
+        serde_json::json!({
+            "event": "chunk",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
+            "sequence": "1",
+            "value": {"kind": "string", "value": "token"}
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-stream-sequence-zero-invalid",
+        FixtureKind::Invalid,
+        "ExtensionStreamEvent",
+        "Callback stream sequences start at one.",
+        serde_json::json!({
+            "event": "chunk",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
+            "sequence": "0",
+            "value": {"kind": "string", "value": "token"}
+        }),
+        Some("invalid_value"),
     ));
 }
 
@@ -482,12 +751,12 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
                 {"capability": "event_replay", "required": false}
             ],
             "limits": {
-                "max_message_bytes": 1048576,
-                "max_stream_buffer_events": 1024,
+                "max_message_bytes": "1048576",
+                "max_stream_buffer_events": "1024",
                 "max_callback_concurrency": 8,
-                "callback_timeout": {"nanos": "30000000000"},
-                "max_replay_events": 512,
-                "max_structured_output_bytes": 262144
+                "callback_timeout": {"seconds": "30", "nanos": 0},
+                "max_replay_events": "512",
+                "max_structured_output_bytes": "262144"
             }
         }),
         None,
@@ -503,12 +772,12 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
             "features": ["subagent", "mcp"],
             "capabilities": [{"capability": "runs", "required": true}],
             "limits": {
-                "max_message_bytes": 1,
-                "max_stream_buffer_events": 1,
+                "max_message_bytes": "1",
+                "max_stream_buffer_events": "1",
                 "max_callback_concurrency": 1,
-                "callback_timeout": {"nanos": "1"},
-                "max_replay_events": 1,
-                "max_structured_output_bytes": 1
+                "callback_timeout": {"seconds": "0", "nanos": 1},
+                "max_replay_events": "1",
+                "max_structured_output_bytes": "1"
             }
         }),
         Some("invalid_value"),
@@ -577,11 +846,17 @@ mod tests {
         for target in [
             "WireU64",
             "WirePath",
+            "WireBytes",
+            "WireValue",
             "WireHandle",
             "EchoSdkError",
             "WireEventEnvelope",
+            "ReplayRequest",
             "ReplayResponse",
+            "GapNotification",
             "EchoAgentCapability",
+            "ExtensionInvokeOutcome",
+            "ExtensionStreamEvent",
             "MethodCatalog",
         ] {
             assert!(targets.contains(&target), "fixtures missing {target}");

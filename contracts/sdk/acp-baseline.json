@@ -6,13 +6,53 @@
     "agent-client-protocol": "2.1.0",
     "agent-client-protocol-schema": "1.7.0"
   },
+  "official_checksums": {
+    "agent-client-protocol": "6395d81d91fd2ee93f48ea31cfc511356e75b9061ca0389cefd0308507cc11ba",
+    "agent-client-protocol-schema": "ca98360c7bb8cc97d7acd49e2a8a851c3f7bee6b2f0535036d8ab86b5fcd223d"
+  },
+  "stable_v1_methods": [
+    "$/cancel_request",
+    "authenticate",
+    "elicitation/complete",
+    "elicitation/create",
+    "fs/read_text_file",
+    "fs/write_text_file",
+    "initialize",
+    "logout",
+    "session/cancel",
+    "session/close",
+    "session/delete",
+    "session/list",
+    "session/load",
+    "session/new",
+    "session/prompt",
+    "session/request_permission",
+    "session/resume",
+    "session/set_config_option",
+    "session/set_mode",
+    "session/update",
+    "terminal/create",
+    "terminal/kill",
+    "terminal/output",
+    "terminal/release",
+    "terminal/wait_for_exit"
+  ],
   "schema_artifact": {
     "source": "agent-client-protocol-schema",
     "version": "1.7.0",
     "note": "The official schema crate is the only wire authority; this repository never copies or regenerates official ACP schemas."
   },
   "excluded_unstable_features": [
-    "unstable_protocol_v2"
+    "unstable",
+    "unstable_end_turn_token_usage",
+    "unstable_llm_providers",
+    "unstable_mcp_over_acp",
+    "unstable_nes",
+    "unstable_plan_operations",
+    "unstable_protocol_v2",
+    "unstable_session_compaction",
+    "unstable_session_fork",
+    "unstable_tool_call_name"
   ],
   "verified_at": "2026-09-05"
 }

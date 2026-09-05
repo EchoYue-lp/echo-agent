@@ -1,0 +1,9 @@
+{
+  "name": "scalar-bytes-empty-valid",
+  "kind": "valid",
+  "target": "WireBytes",
+  "description": "An empty binary payload has the empty canonical no-pad base64 encoding.",
+  "payload": {
+    "base64": ""
+  }
+}

@@ -115,17 +115,24 @@ pub enum Retryability {
 /// per-entry size) is enforced by the Host before emission; secrets never
 /// enter error details (design §16).
 pub const MAX_ERROR_DETAIL_ENTRIES: usize = 16;
+pub const MAX_ERROR_MESSAGE_CHARS: usize = 4096;
+pub const MAX_ERROR_OPERATION_CHARS: usize = 256;
+pub const MAX_ERROR_DETAIL_KEY_CHARS: usize = 128;
+pub const MAX_ERROR_DETAIL_VALUE_CHARS: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ErrorDetails {
     /// Bounded key/value facts; values are strings, never raw payloads.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 16))]
     pub fields: Option<Vec<DetailField>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DetailField {
+    #[schemars(length(max = 128))]
     pub key: String,
+    #[schemars(length(max = 2048))]
     pub value: String,
 }
 
@@ -133,11 +140,13 @@ pub struct DetailField {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EchoSdkError {
     pub code: ExtensionErrorCode,
+    #[schemars(length(max = 4096))]
     pub message: String,
     pub retryable: Retryability,
     /// Domain operation identity (e.g. `run/start`), independent from any
     /// JSON-RPC request id.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
     pub operation: Option<String>,
     /// Handle the error refers to, when applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,6 +173,23 @@ impl EchoSdkError {
 
     /// Validate the bounded shape before emission/parsing.
     pub fn validate(&self) -> Result<(), &'static str> {
+        if self.message.chars().count() > MAX_ERROR_MESSAGE_CHARS {
+            return Err("error message exceeds the character bound");
+        }
+        if self
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.trim().is_empty())
+        {
+            return Err("error operation must be non-empty when present");
+        }
+        if self
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.chars().count() > MAX_ERROR_OPERATION_CHARS)
+        {
+            return Err("error operation exceeds the character bound");
+        }
         let over_bound = self
             .details
             .as_ref()
@@ -171,6 +197,27 @@ impl EchoSdkError {
             .is_some_and(|fields| fields.len() > MAX_ERROR_DETAIL_ENTRIES);
         if over_bound {
             return Err("error details exceed the bounded entry count");
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for field in self
+            .details
+            .as_ref()
+            .and_then(|details| details.fields.as_ref())
+            .into_iter()
+            .flatten()
+        {
+            if field.key.trim().is_empty() {
+                return Err("error detail key must be non-empty");
+            }
+            if field.key.chars().count() > MAX_ERROR_DETAIL_KEY_CHARS {
+                return Err("error detail key exceeds the character bound");
+            }
+            if field.value.chars().count() > MAX_ERROR_DETAIL_VALUE_CHARS {
+                return Err("error detail value exceeds the character bound");
+            }
+            if !keys.insert(field.key.as_str()) {
+                return Err("error detail keys must be unique");
+            }
         }
         if let Some(handle) = &self.handle {
             handle.validate()?;

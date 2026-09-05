@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::scalar::WireDuration;
+use crate::scalar::{WireDuration, WireU64};
 
 /// Extension capabilities the Host may expose. Each maps to a family of
 /// `_echo_agent/*` methods; the method catalog asserts that every method's
@@ -60,17 +60,18 @@ impl ExtensionCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EchoLimits {
     /// Maximum serialized request/response payload in bytes.
-    pub max_message_bytes: u64,
+    pub max_message_bytes: WireU64,
     /// Maximum events buffered per subscriber before backpressure/gap.
-    pub max_stream_buffer_events: u64,
+    pub max_stream_buffer_events: WireU64,
     /// Maximum concurrently executing reverse callbacks.
+    #[schemars(range(min = 1))]
     pub max_callback_concurrency: u32,
     /// Default reverse-callback deadline.
     pub callback_timeout: WireDuration,
     /// Maximum events returned by one replay request.
-    pub max_replay_events: u64,
+    pub max_replay_events: WireU64,
     /// Maximum structured output payload in bytes.
-    pub max_structured_output_bytes: u64,
+    pub max_structured_output_bytes: WireU64,
 }
 
 /// The capability object published under `initialize._meta.echo_agent`.
@@ -81,6 +82,7 @@ pub struct EchoAgentCapability {
     pub extension_protocol_version: u32,
     /// Digest of the extension contract (schema + catalog), computed by the
     /// schema export tool and pinned in the contract artifacts.
+    #[schemars(regex(pattern = "^sha256:[0-9a-fA-F]{64}$"))]
     pub contract_digest: String,
     /// Leaf Cargo features compiled into the Host, sorted. Operations
     /// requiring absent features fail with `feature_unavailable`.
@@ -104,8 +106,21 @@ impl EchoAgentCapability {
     /// capability. Returns the list of unsatisfied preconditions.
     pub fn validate_shape(&self) -> Vec<String> {
         let mut problems = Vec::new();
-        if self.contract_digest.trim().is_empty() {
-            problems.push("contract_digest must be non-empty".to_string());
+        let digest_is_valid = self
+            .contract_digest
+            .strip_prefix("sha256:")
+            .is_some_and(|hex| {
+                hex.chars().count() == 64
+                    && hex.chars().all(|character| character.is_ascii_hexdigit())
+            });
+        if !digest_is_valid {
+            problems.push("contract_digest must be sha256 plus 64 hex characters".to_string());
+        }
+        if self.extension_protocol_version != crate::EXTENSION_PROTOCOL_VERSION {
+            problems.push(format!(
+                "unsupported extension_protocol_version {}",
+                self.extension_protocol_version
+            ));
         }
         let mut sorted = self.features.clone();
         sorted.sort();
@@ -116,8 +131,36 @@ impl EchoAgentCapability {
         if self.capabilities.is_empty() {
             problems.push("at least one capability must be declared".to_string());
         }
-        if self.limits.max_message_bytes == 0 {
-            problems.push("max_message_bytes must be positive".to_string());
+        let mut seen_capabilities = std::collections::BTreeSet::new();
+        for declaration in &self.capabilities {
+            if !seen_capabilities.insert(declaration.capability.as_str()) {
+                problems.push(format!(
+                    "duplicate capability {}",
+                    declaration.capability.as_str()
+                ));
+            }
+        }
+        for (name, value) in [
+            ("max_message_bytes", &self.limits.max_message_bytes),
+            (
+                "max_stream_buffer_events",
+                &self.limits.max_stream_buffer_events,
+            ),
+            ("max_replay_events", &self.limits.max_replay_events),
+            (
+                "max_structured_output_bytes",
+                &self.limits.max_structured_output_bytes,
+            ),
+        ] {
+            if value.to_u64() == Some(0) {
+                problems.push(format!("{name} must be positive"));
+            }
+        }
+        if self.limits.max_callback_concurrency == 0 {
+            problems.push("max_callback_concurrency must be positive".to_string());
+        }
+        if let Err(error) = self.limits.callback_timeout.validate() {
+            problems.push(error.to_string());
         }
         problems
     }
@@ -135,19 +178,19 @@ mod tests {
     fn capability() -> EchoAgentCapability {
         EchoAgentCapability {
             extension_protocol_version: 1,
-            contract_digest: "sha256:abc".to_string(),
+            contract_digest: format!("sha256:{}", "a".repeat(64)),
             features: vec!["mcp".to_string(), "subagent".to_string()],
             capabilities: vec![CapabilityDeclaration {
                 capability: ExtensionCapability::Runs,
                 required: true,
             }],
             limits: EchoLimits {
-                max_message_bytes: 1_048_576,
-                max_stream_buffer_events: 1024,
+                max_message_bytes: WireU64::from_u64(1_048_576),
+                max_stream_buffer_events: WireU64::from_u64(1024),
                 max_callback_concurrency: 8,
                 callback_timeout: WireDuration::from_nanos(30_000_000_000),
-                max_replay_events: 512,
-                max_structured_output_bytes: 262_144,
+                max_replay_events: WireU64::from_u64(512),
+                max_structured_output_bytes: WireU64::from_u64(262_144),
             },
         }
     }
@@ -175,12 +218,12 @@ mod tests {
                 features: vec![],
                 capabilities: vec![],
                 limits: EchoLimits {
-                    max_message_bytes: 0,
-                    max_stream_buffer_events: 0,
+                    max_message_bytes: WireU64::from_u64(0),
+                    max_stream_buffer_events: WireU64::from_u64(0),
                     max_callback_concurrency: 0,
                     callback_timeout: WireDuration::from_nanos(0),
-                    max_replay_events: 0,
-                    max_structured_output_bytes: 0,
+                    max_replay_events: WireU64::from_u64(0),
+                    max_structured_output_bytes: WireU64::from_u64(0),
                 },
             });
         assert!(back.declares(ExtensionCapability::Runs));

@@ -1,0 +1,15 @@
+{
+  "name": "event-live-gap-valid",
+  "kind": "valid",
+  "target": "GapNotification",
+  "description": "A live gap is explicitly associated with one stream.",
+  "payload": {
+    "stream_id": "stream-1",
+    "gap": {
+      "from_sequence": "5",
+      "to_sequence": "9",
+      "reason": "retention floor",
+      "snapshot_watermark": "9"
+    }
+  }
+}

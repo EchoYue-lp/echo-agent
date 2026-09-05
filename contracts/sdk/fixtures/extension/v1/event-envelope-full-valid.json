@@ -2,20 +2,25 @@
   "name": "event-envelope-full-valid",
   "kind": "valid",
   "target": "WireEventEnvelope",
-  "description": "Complete envelope: every framework identity fact plus verbatim payload.",
+  "description": "Complete envelope: every framework identity fact plus typed AgentEvent payload.",
   "payload": {
     "schema_version": 4,
     "event_id": "event-3",
-    "content_hash": "sha256:deadbeef",
+    "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "sequence": "3",
     "stream_id": "stream-1",
     "run_id": "run-1",
     "turn_id": "turn-1",
     "timestamp": {
-      "unix_nanos": "1757000000000000000"
+      "unix_seconds": "1757000000",
+      "nanos": 0
     },
     "payload": {
-      "kind": "agent_message"
+      "event_type": "token",
+      "data": {
+        "kind": "string",
+        "value": "hello"
+      }
     }
   }
 }

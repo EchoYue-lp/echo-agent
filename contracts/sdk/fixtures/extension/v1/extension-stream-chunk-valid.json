@@ -1,0 +1,19 @@
+{
+  "name": "extension-stream-chunk-valid",
+  "kind": "valid",
+  "target": "ExtensionStreamEvent",
+  "description": "Callback stream chunks preserve stream identity and monotonic sequence.",
+  "payload": {
+    "event": "chunk",
+    "stream": {
+      "id": "stream-9",
+      "generation": "2",
+      "kind": "stream"
+    },
+    "sequence": "1",
+    "value": {
+      "kind": "string",
+      "value": "token"
+    }
+  }
+}

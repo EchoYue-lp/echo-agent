@@ -1348,10 +1348,15 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
+ "base64",
+ "chrono",
+ "echo_core",
+ "jsonschema",
  "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

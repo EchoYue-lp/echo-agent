@@ -1,209 +1,296 @@
-//! Facade inventory ↔ parity manifest consistency tests.
-//!
-//! Design §7.2/§20.1: the parity manifest must cover exactly the public
-//! facade inventory. These tests read the committed artifacts (no rustdoc
-//! toolchain needed) and fail on duplicates, stale identities, illegal
-//! enum values or missing language fields — so any facade change that skips
-//! a manifest update fails `cargo test` even before the heavier
-//! `export_schema --check` drift gate.
+//! Artifact-level facade inventory and parity-manifest checks.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use echo_sdk_protocol::inventory::ItemKind;
+use echo_sdk_protocol::inventory::{
+    AcpRelationship, FeatureSemantics, ItemKind, ManifestEntry, ParityManifest, SemanticClass,
+};
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-fn read(path: &str) -> String {
-    let full = repo_root().join(path);
-    std::fs::read_to_string(&full)
-        .unwrap_or_else(|err| panic!("cannot read {}: {err}", full.display()))
+fn read(path: &str) -> TestResult<String> {
+    Ok(std::fs::read_to_string(repo_root().join(path))?)
 }
 
-/// Parse `public-api.txt` into (kind, path) pairs, ignoring the header and
-/// footer comments.
-fn parse_snapshot() -> Vec<(String, String)> {
-    let mut items = Vec::new();
-    for line in read("contracts/sdk/public-api.txt").lines() {
-        if !line.starts_with('#') {
-            let mut parts = line.splitn(2, ' ');
-            let kind = parts.next().unwrap_or_default().to_string();
-            let rest = parts.next().unwrap_or_default();
-            // Path runs until the import marker or the profile bracket.
-            let path = rest
-                .split("  <=")
-                .next()
-                .unwrap_or_default()
-                .split("  [")
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if !kind.is_empty() && !path.is_empty() {
-                items.push((kind, path));
+fn parse_snapshot() -> TestResult<Vec<(String, String, String)>> {
+    Ok(read("contracts/sdk/public-api.txt")?
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            Some((
+                parts.next()?.to_string(),
+                parts.next()?.to_string(),
+                parts.next()?.to_string(),
+            ))
+        })
+        .collect())
+}
+
+fn manifest() -> TestResult<ParityManifest> {
+    Ok(serde_json::from_str(&read(
+        "contracts/sdk/parity-manifest.json",
+    )?)?)
+}
+
+fn find_entry<'a>(manifest: &'a ParityManifest, path: &str) -> TestResult<&'a ManifestEntry> {
+    manifest
+        .entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .ok_or_else(|| format!("missing facade identity {path}").into())
+}
+
+#[test]
+fn manifest_entries_match_every_inventory_signature() -> TestResult {
+    let snapshot: BTreeSet<(String, String)> = parse_snapshot()?
+        .into_iter()
+        .map(|(_, path, digest)| (path, digest))
+        .collect();
+    assert!(!snapshot.is_empty(), "snapshot must not be empty");
+    let manifest: BTreeSet<(String, String)> = manifest()?
+        .entries
+        .into_iter()
+        .flat_map(|entry| {
+            entry
+                .signatures
+                .into_iter()
+                .map(move |signature| (entry.path.clone(), signature.digest))
+        })
+        .collect();
+    assert_eq!(
+        snapshot, manifest,
+        "manifest and inventory signatures drifted"
+    );
+    Ok(())
+}
+
+#[test]
+fn manifest_schema_compiles_and_validates_document() -> TestResult {
+    let schema: serde_json::Value =
+        serde_json::from_str(&read("contracts/sdk/parity-manifest.schema.json")?)?;
+    let document: serde_json::Value =
+        serde_json::from_str(&read("contracts/sdk/parity-manifest.json")?)?;
+    let validator = jsonschema::validator_for(&schema)?;
+    assert!(
+        validator.validate(&document).is_ok(),
+        "manifest does not satisfy its schema"
+    );
+    Ok(())
+}
+
+#[test]
+fn entries_have_complete_mapping_and_language_obligations() -> TestResult {
+    let manifest = manifest()?;
+    let expected_languages: BTreeSet<&str> = ["typescript", "python", "java"].into_iter().collect();
+    let mut classes = BTreeSet::new();
+    let mut relationships = BTreeSet::new();
+    for entry in &manifest.entries {
+        assert!(
+            !entry.path.ends_with("::*"),
+            "unexpanded glob: {}",
+            entry.path
+        );
+        assert!(
+            !entry.signatures.is_empty(),
+            "missing signatures: {}",
+            entry.path
+        );
+        assert!(
+            !entry.adapter.operation.is_empty(),
+            "missing adapter: {}",
+            entry.path
+        );
+        assert!(
+            !entry.semantic_rule.is_empty(),
+            "missing semantic rule: {}",
+            entry.path
+        );
+        assert!(
+            !entry.adapter.validation.is_empty(),
+            "missing validation: {}",
+            entry.path
+        );
+        let languages: BTreeSet<&str> = entry.languages.keys().map(String::as_str).collect();
+        assert_eq!(
+            languages, expected_languages,
+            "language mapping: {}",
+            entry.path
+        );
+        for language in entry.languages.values() {
+            assert!(
+                !language.target.is_empty(),
+                "empty language target: {}",
+                entry.path
+            );
+            assert!(
+                !language.contract_test.is_empty(),
+                "missing language contract test: {}",
+                entry.path
+            );
+        }
+        if entry.features.is_empty() && !entry.full_only {
+            assert_eq!(entry.feature_semantics, FeatureSemantics::Default);
+        }
+        match entry.feature_semantics {
+            FeatureSemantics::Default => assert!(entry.features.is_empty()),
+            FeatureSemantics::AnyOf => assert!(!entry.features.is_empty()),
+            FeatureSemantics::AllOf => {
+                assert!(entry.full_only);
+                assert!(
+                    entry.features.len() >= 2,
+                    "full-only entry lacks an AND condition: {}",
+                    entry.path
+                );
             }
         }
+        classes.insert(entry.classification);
+        relationships.insert(entry.acp_relationship);
     }
-    items
+    for class in [
+        SemanticClass::WireValue,
+        SemanticClass::Operation,
+        SemanticClass::Handle,
+        SemanticClass::Stream,
+        SemanticClass::Extension,
+        SemanticClass::LanguageIntrinsic,
+    ] {
+        assert!(classes.contains(&class), "missing semantic class {class:?}");
+    }
+    for relationship in [
+        AcpRelationship::StandardProjection,
+        AcpRelationship::EchoExtension,
+        AcpRelationship::LanguageIntrinsic,
+    ] {
+        assert!(
+            relationships.contains(&relationship),
+            "missing ACP relationship {relationship:?}"
+        );
+    }
+    Ok(())
 }
 
 #[test]
-fn manifest_entries_match_inventory_exactly() {
-    let snapshot = parse_snapshot();
-    assert!(
-        !snapshot.is_empty(),
-        "snapshot is empty; artifacts not generated?"
+fn known_facade_semantics_are_classified_correctly() -> TestResult {
+    let manifest = manifest()?;
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::agent::Agent")?.classification,
+        SemanticClass::Extension
     );
-
-    let manifest: serde_json::Value =
-        serde_json::from_str(&read("contracts/sdk/parity-manifest.json"))
-            .unwrap_or_else(|err| panic!("manifest JSON invalid: {err}"));
-    let entries = manifest
-        .get("entries")
-        .and_then(|v| v.as_array())
-        .expect("manifest.entries missing");
-
-    let mut snapshot_paths: BTreeSet<&str> = BTreeSet::new();
-    for (kind, path) in &snapshot {
-        if kind == ItemKind::Module.as_str() {
-            continue;
-        }
-        assert!(
-            snapshot_paths.insert(path.as_str()),
-            "duplicate identity in snapshot: {path}"
-        );
-    }
-
-    let mut manifest_paths: BTreeSet<&str> = BTreeSet::new();
-    for entry in entries {
-        let path = entry
-            .get("path")
-            .and_then(|v| v.as_str())
-            .expect("entry.path");
-        assert!(
-            manifest_paths.insert(path),
-            "duplicate manifest entry: {path}"
-        );
-    }
-
-    let missing_in_manifest: Vec<&str> = snapshot_paths
-        .difference(&manifest_paths)
-        .copied()
-        .collect();
-    let stale_in_manifest: Vec<&str> = manifest_paths
-        .difference(&snapshot_paths)
-        .copied()
-        .collect();
-    assert!(
-        missing_in_manifest.is_empty() && stale_in_manifest.is_empty(),
-        "manifest/inventory drift; missing: {missing_in_manifest:?}; stale: {stale_in_manifest:?}"
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::agent::AgentHandle")?.classification,
+        SemanticClass::Handle
     );
-}
-
-#[test]
-fn every_entry_has_valid_classification_relationship_and_languages() {
-    let manifest: serde_json::Value =
-        serde_json::from_str(&read("contracts/sdk/parity-manifest.json"))
-            .unwrap_or_else(|err| panic!("manifest JSON invalid: {err}"));
-    let entries = manifest
-        .get("entries")
-        .and_then(|v| v.as_array())
-        .expect("manifest.entries missing");
-
-    const CLASSES: &[&str] = &[
-        "wire_value",
-        "operation",
-        "handle",
-        "stream",
-        "extension",
-        "language_intrinsic",
-    ];
-    const RELATIONSHIPS: &[&str] = &[
-        "standard",
-        "standard_projection",
-        "echo_extension",
-        "language_intrinsic",
-    ];
-
-    for entry in entries {
-        let path = entry
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let class = entry.get("classification").and_then(|v| v.as_str());
-        let Some(class) = class else {
-            panic!("entry {path} missing classification");
-        };
-        assert!(
-            CLASSES.contains(&class),
-            "entry {path} illegal classification {class}"
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::llm::LlmClient")?.classification,
+        SemanticClass::Extension
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::agent::ReactAgentBuilder")?.classification,
+        SemanticClass::LanguageIntrinsic
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::agent::CancellationToken")?.classification,
+        SemanticClass::Handle
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::agent::AgentRunSnapshot::llm_client")?.classification,
+        SemanticClass::LanguageIntrinsic
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::agent::AgentRunSnapshot")?.classification,
+        SemanticClass::Handle
+    );
+    for resource in [
+        "echo_agent::agent::subagent::SubagentExecutor",
+        "echo_agent::intent::IntentRouter",
+        "echo_agent::agent::react::run::pipeline::ToolExecutionPipeline",
+    ] {
+        assert_eq!(
+            find_entry(&manifest, resource)?.classification,
+            SemanticClass::Handle,
+            "resource {resource} must remain opaque"
         );
-
-        let relationship = entry
-            .get("acp_relationship")
-            .and_then(|v| v.as_str())
-            .unwrap_or_else(|| panic!("entry {path} missing acp_relationship"));
-        assert!(
-            RELATIONSHIPS.contains(&relationship),
-            "entry {path} illegal acp_relationship {relationship}"
-        );
-
-        let languages = entry
-            .get("languages")
-            .and_then(|v| v.as_object())
-            .unwrap_or_else(|| panic!("entry {path} missing languages"));
-        for language in ["typescript", "python", "java"] {
-            let status = languages
-                .get(language)
-                .and_then(|l| l.get("status"))
-                .and_then(|s| s.as_str())
-                .unwrap_or_else(|| panic!("entry {path} missing {language} status"));
-            assert!(
-                ["not_implemented", "in_progress", "done"].contains(&status),
-                "entry {path} illegal {language} status {status}"
-            );
-        }
-
-        // Language-intrinsic items must not claim wire relationships.
-        if class == "language_intrinsic" {
-            assert_eq!(
-                relationship, "language_intrinsic",
-                "entry {path} is language_intrinsic but claims {relationship}"
-            );
-        }
     }
+    assert_eq!(
+        find_entry(
+            &manifest,
+            "echo_agent::agent::subagent::SharedIsolationProvider"
+        )?
+        .classification,
+        SemanticClass::Extension
+    );
+    for callback in [
+        "echo_agent::tools::SubagentUplinkFn",
+        "echo_agent::scheduler::FireFn",
+    ] {
+        assert_eq!(
+            find_entry(&manifest, callback)?.classification,
+            SemanticClass::LanguageIntrinsic,
+            "callback alias {callback} must not be a wire value"
+        );
+    }
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::evolution::PromptInjectionDetector")?.acp_relationship,
+        AcpRelationship::EchoExtension
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::agent::AgentEvent")?.acp_relationship,
+        AcpRelationship::StandardProjection
+    );
+    assert!(manifest.entries.iter().any(|entry| {
+        entry.path.ends_with("RuntimeTaskService") && entry.classification == SemanticClass::Handle
+    }));
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .any(|entry| entry.path.ends_with("TurnReceipt"))
+    );
+    assert!(manifest.entries.iter().any(|entry| {
+        entry.path.ends_with("FileConversationStore")
+            && entry.classification == SemanticClass::Handle
+    }));
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .any(|entry| { entry.path.ends_with("EventJournal") && entry.kind == ItemKind::Trait })
+    );
+    assert!(manifest.entries.iter().any(|entry| {
+        entry.kind == ItemKind::TraitImpl && entry.path.contains("ReactAgent::impl<Agent>")
+    }));
+    assert!(manifest.entries.iter().any(|entry| {
+        entry.kind == ItemKind::TraitImpl && entry.path.contains("ReactAgentBuilder::impl<Default>")
+    }));
+    assert!(manifest.entries.iter().any(|entry| {
+        entry.path.ends_with("AgentEvent::ThinkEnd::prompt_tokens")
+            && entry.kind == ItemKind::StructField
+    }));
+    assert!(
+        find_entry(&manifest, "echo_agent::agent::Agent")?
+            .features
+            .is_empty()
+    );
+    Ok(())
 }
 
 #[test]
-fn manifest_and_snapshot_agree_on_profiles() {
-    let snapshot = read("contracts/sdk/public-api.txt");
+fn manifest_and_snapshot_agree_on_profiles() -> TestResult {
+    let snapshot = read("contracts/sdk/public-api.txt")?;
     let snapshot_profiles = snapshot
         .lines()
         .find_map(|line| line.strip_prefix("# profiles: "))
-        .expect("snapshot profiles header");
-    let manifest: serde_json::Value =
-        serde_json::from_str(&read("contracts/sdk/parity-manifest.json"))
-            .unwrap_or_else(|err| panic!("manifest JSON invalid: {err}"));
-    let generated = manifest
-        .pointer("/generated/profiles")
-        .and_then(|v| v.as_array())
-        .expect("manifest generated.profiles");
-    let manifest_profiles: Vec<String> = generated
-        .iter()
-        .map(|p| p.as_str().unwrap_or_default().to_string())
-        .collect();
-    let snapshot_list: Vec<String> = snapshot_profiles.split(", ").map(str::to_string).collect();
-    assert_eq!(snapshot_list, manifest_profiles, "profile lists diverged");
-
-    // The leaf-feature matrix must cover every leaf feature exactly once.
-    let leaf_count = manifest_profiles
-        .iter()
-        .filter(|p| p.starts_with("feature:"))
-        .count();
-    assert!(
-        leaf_count >= 20,
-        "suspiciously small feature matrix: {leaf_count} leaf profiles"
+        .ok_or("snapshot profiles header missing")?;
+    assert_eq!(
+        snapshot_profiles,
+        manifest()?.generated.profiles.join(", "),
+        "profile lists diverged"
     );
+    Ok(())
 }

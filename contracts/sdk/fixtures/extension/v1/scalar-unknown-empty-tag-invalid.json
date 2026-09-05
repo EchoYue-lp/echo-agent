@@ -1,0 +1,14 @@
+{
+  "name": "scalar-unknown-empty-tag-invalid",
+  "kind": "invalid",
+  "target": "WireValue",
+  "description": "Unknown additive values require a non-empty type identity.",
+  "payload": {
+    "kind": "unknown",
+    "value": {
+      "type_tag": "",
+      "payload": null
+    }
+  },
+  "expect_error": "invalid_value"
+}
