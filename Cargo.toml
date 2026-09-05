@@ -8,6 +8,7 @@ members = [
     "echo-tools",
     "echo-state",
     "echo-orchestration",
+    "echo-sdk-protocol",
 ]
 default-members = [
     ".",
@@ -19,6 +20,7 @@ default-members = [
     "echo-tools",
     "echo-state",
     "echo-orchestration",
+    "echo-sdk-protocol",
 ]
 resolver = "3"
 
@@ -56,11 +58,13 @@ exclude = [
 no-default-features = true
 features = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
 rustdoc-args = ["--cfg", "docsrs"]
-# NOTE: `data` feature (polars) is excluded because polars-ops 0.46–0.53 has a build.rs that
-# unconditionally enables `feature="nightly"` on nightly compilers, then uses
-# `core::unicode::{Case_Ignorable, Cased}` which was removed in Rust nightly 1.97+.
-# Upstream fix: https://github.com/pola-rs/polars/commit/67422be6 (not yet published to crates.io).
-# Re-enable `data` once polars releases a version containing this fix.
+# NOTE: `data` (polars) is still excluded from docs.rs. polars-ops 0.46–0.53
+# broke nightly builds by unconditionally enabling its `nightly` cfg and then
+# using `core::unicode::{Case_Ignorable, Cased}` (removed in Rust 1.97);
+# polars 0.55 vendors those tables (upstream fix polars#67422be6) and compiles
+# on nightly again — contracts/sdk/toolchain.json pins a nightly toolchain for
+# the SDK facade inventory, which covers `data`. Re-enabling `data` on docs.rs
+# still needs its own verification against the docs.rs builder before shipping.
 
 [features]
 default = []

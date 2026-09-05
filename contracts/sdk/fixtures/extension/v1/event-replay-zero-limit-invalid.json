@@ -1,0 +1,12 @@
+{
+  "name": "event-replay-zero-limit-invalid",
+  "kind": "invalid",
+  "target": "ReplayRequest",
+  "description": "A present replay limit must be positive.",
+  "payload": {
+    "stream_id": "stream-1",
+    "after_sequence": "0",
+    "max_events": "0"
+  },
+  "expect_error": "invalid_value"
+}

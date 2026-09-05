@@ -2264,6 +2264,9 @@ fn replace_tool_when_not_exists() {
 async fn invocation_history_is_inserted_before_current_input() -> Result<(), String> {
     use crate::agent::react::run::types::StreamMode;
 
+    // Disable workspace rule injection: this test asserts exact message
+    // content ordering, which must not depend on whether the checkout
+    // directory happens to carry project rule files (e.g. AGENTS.md).
     let config =
         AgentConfig::new("test-model", "history-order", "system prompt").auto_project_rules(false);
     let agent = ReactAgent::new(config);

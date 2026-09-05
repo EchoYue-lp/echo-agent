@@ -77,7 +77,7 @@ impl ToolRunner<ExploratoryStatisticsToolParams> for ExploratoryStatisticsTool {
                     tool: TOOL_NAME.to_string(),
                     message: format!("Convert column '{column_name}' to f64 failed: {error}"),
                 })?
-                .into_iter()
+                .iter()
                 .flatten()
                 .filter(|value| value.is_finite())
                 .collect();

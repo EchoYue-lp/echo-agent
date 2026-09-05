@@ -1,0 +1,10 @@
+{
+  "name": "scalar-path-root-valid",
+  "kind": "valid",
+  "target": "WirePath",
+  "description": "Filesystem roots are valid absolute paths.",
+  "payload": {
+    "encoding": "utf8",
+    "path": "/"
+  }
+}

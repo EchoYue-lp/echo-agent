@@ -1,0 +1,17 @@
+{
+  "name": "error-stale-handle-valid",
+  "kind": "valid",
+  "target": "EchoSdkError",
+  "description": "Typed stale-handle error with operation identity and retryability.",
+  "payload": {
+    "code": "stale_handle",
+    "message": "run handle predates host restart",
+    "retryable": "never",
+    "operation": "run/start",
+    "handle": {
+      "id": "run-9",
+      "generation": "1",
+      "kind": "run"
+    }
+  }
+}

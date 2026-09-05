@@ -1,0 +1,11 @@
+{
+  "name": "scalar-path-base64-invalid",
+  "kind": "invalid",
+  "target": "WirePath",
+  "description": "Encoded native paths must contain canonical base64.",
+  "payload": {
+    "encoding": "unix",
+    "bytes_base64": "not base64"
+  },
+  "expect_error": "invalid_value"
+}

@@ -3,6 +3,7 @@
 set -euo pipefail
 
 cargo fmt --all -- --check
+./scripts/check-sdk-contracts.sh
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo clippy --workspace --lib --bins --all-features --locked -- \
   -D clippy::unwrap_used \

@@ -1,0 +1,14 @@
+{
+  "name": "extension-outcome-stream-valid",
+  "kind": "valid",
+  "target": "ExtensionInvokeOutcome",
+  "description": "A streaming callback returns one stream handle instead of a large response.",
+  "payload": {
+    "outcome": "stream",
+    "stream": {
+      "id": "stream-9",
+      "generation": "2",
+      "kind": "stream"
+    }
+  }
+}

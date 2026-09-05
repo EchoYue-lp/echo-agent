@@ -804,6 +804,14 @@ agent.set_circuit_breaker(cb_config);
 | 配置参考 | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
 | 运行时与任务系统 | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
 | 安全指南 | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
+| 多语言 SDK（合同阶段） | [EN](docs/sdk/README.md) | — |
+
+### SDK 入口
+
+TypeScript/Python/Java SDK 计划当前处于 **Contract（合同冻结）** 阶段：ACP v1
+基线、`_echo_agent/*` 扩展 Schema、facade 对等清单与漂移门禁已冻结并由 CI
+强制执行；ACP adapter、SDK Host 与三语言 SDK 尚未实现。唯一入口是
+[docs/sdk/README.md](docs/sdk/README.md)，其中如实声明了当前状态。
 
 ---
 

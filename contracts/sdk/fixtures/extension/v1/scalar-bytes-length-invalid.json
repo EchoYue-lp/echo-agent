@@ -1,0 +1,10 @@
+{
+  "name": "scalar-bytes-length-invalid",
+  "kind": "invalid",
+  "target": "WireBytes",
+  "description": "A one-character no-pad base64 value cannot encode complete bytes.",
+  "payload": {
+    "base64": "A"
+  },
+  "expect_error": "invalid_value"
+}

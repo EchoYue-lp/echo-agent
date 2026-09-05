@@ -1,0 +1,12 @@
+{
+  "name": "event-replay-empty-stream-invalid",
+  "kind": "invalid",
+  "target": "ReplayRequest",
+  "description": "Replay requests require a stream identity.",
+  "payload": {
+    "stream_id": "",
+    "after_sequence": "0",
+    "max_events": "1"
+  },
+  "expect_error": "invalid_value"
+}
