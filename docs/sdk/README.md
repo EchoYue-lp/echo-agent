@@ -1,16 +1,15 @@
-# echo-agent SDK (Contract stage, ACP adapter available)
+# echo-agent SDK (standard ACP Host available)
 
 This is the single external entry point for the echo-agent multilingual SDK
 program. The SDK's goal is full **functional and semantic parity** between
 the Rust framework's public facade and TypeScript, Python and Java — without
 rewriting the agent framework in any of those languages.
 
-> **Current status: Contract.** The protocol contracts, parity manifest and
-> drift gates described below exist and are enforced in CI. The root crate now
-> includes a transport-neutral stable ACP v1 Agent adapter behind the `acp`
-> feature, with typed in-process conformance coverage. There is still no
-> configurable SDK Host binary or language SDK, so the program does not yet
-> claim **ACP conformant** or **Runnable** status. See
+> **Current status: ACP conformant for the supported standard profile.** The
+> source-built `echo-agent-sdk-host` passes initialize/new/prompt/update/cancel
+> and shutdown scenarios through the official v1 Client and stdio runtime.
+> Language SDKs and the `_echo_agent/*` runtime profile are not implemented, so
+> the program does not claim **Runnable** or full parity. See
 > [Status ladder](#status-ladder) for the exact claims.
 
 ## What the SDK program is
@@ -39,6 +38,8 @@ scalar rules live in [protocol.md](protocol.md).
 
 The implemented Rust adapter and its current method/content boundary are
 documented in [acp-agent-adapter.md](acp-agent-adapter.md).
+Build, configuration and lifecycle instructions for the executable are in
+[acp-standard-host.md](acp-standard-host.md).
 
 ## Contract artifacts
 
@@ -73,9 +74,9 @@ previous ones.
 | Status | Meaning | Reached |
 |---|---|---|
 | **Design** | The design document is agreed | ✅ |
-| **Contract** | Protocol contracts, schema, parity manifest exist and pass drift gates | ✅ (you are here) |
-| **ACP conformant** | A standard ACP v1 client passes the supported profile against a real source-built Host | ❌ adapter tested; Host not delivered |
-| **Runnable** | A real Host plus at least one language's full SDK extension path executes end-to-end | ❌ not started |
+| **Contract** | Protocol contracts, schema, parity manifest exist and pass drift gates | ✅ |
+| **ACP conformant** | A standard ACP v1 client passes the supported profile against a real source-built Host | ✅ (you are here) |
+| **Runnable** | A real Host plus at least one language's full SDK extension path executes end-to-end | ❌ language extension path not started |
 | **Parity complete** | TypeScript, Python and Java all pass the full facade/all-features parity suite | ❌ not started |
 | **Published** | Registry/binary publication — **explicitly out of scope**; this design ships source only | never (by design) |
 

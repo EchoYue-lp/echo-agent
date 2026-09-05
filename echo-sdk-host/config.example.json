@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "default_agent": {
+    "model": {
+      "provider": "local",
+      "name": "qwen3",
+      "base_url": "http://127.0.0.1:11434/v1/chat/completions",
+      "api_protocol": "chat_completions"
+    },
+    "agent": {
+      "name": "assistant",
+      "system_prompt": "You are a helpful assistant.",
+      "max_iterations": 10,
+      "enable_tools": true
+    }
+  }
+}

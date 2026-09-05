@@ -180,9 +180,33 @@ impersonate resource metadata. Providers without a native linked-resource block
 render a deterministic text fallback only at their own wire boundary.
 
 This increment advertises only the stable initialize/new/prompt/update/cancel
-baseline. `_meta.echo_agent`, optional Session methods, the configurable stdio
-Host and language SDKs remain unavailable until their delivery outcomes make
-the corresponding handlers real.
+baseline. `_meta.echo_agent`, optional Session methods and language SDKs remain
+unavailable until their delivery outcomes make the corresponding handlers real.
+
+## Implemented Standard Host Contract
+
+The second framework increment adds the non-published `echo-sdk-host` workspace
+crate and source-built `echo-agent-sdk-host` executable. It requires an explicit
+`--config` path, accepts at most 1 MiB of versioned JSON, validates the default
+Agent and constructs the model client before ACP stdio begins. Configuration
+discovery, EKO profiles, `.env` loading and bundled language runtimes are not
+part of the Host.
+
+One stateless model client is shared, while every `session/new` creates a fresh
+`ReactAgent` carrying that ACP Session's identity and cwd. The Host factory
+accepts only ACP stdio MCP declarations with unique names and absolute UTF-8
+commands. Each process starts in the ACP Session cwd, and all declared servers
+must connect before the Session response. Partial setup closes the Agent.
+Remote MCP, additional directories, memory and human-loop settings fail
+explicitly because this standard profile does not yet advertise their required
+semantics.
+
+The Host delegates framing and process EOF to the official `Stdio` transport
+and delegates all ACP handlers, cancellation, projection and bounded shutdown
+to `AcpAgentAdapter`. Subprocess conformance tests launch the real binary with
+the official Client and a loopback streaming model endpoint. Therefore the
+supported standard profile is ACP conformant, while `_echo_agent/*`, language
+SDK execution, Runnable and parity-complete status remain unclaimed.
 
 ## Consequences
 

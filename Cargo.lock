@@ -1344,6 +1344,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "echo-sdk-host"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "echo_agent",
+ "serde",
+ "serde_json",
+ "static_assertions",
+ "tempfile",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "echo-sdk-protocol"
 version = "0.1.0"
 dependencies = [

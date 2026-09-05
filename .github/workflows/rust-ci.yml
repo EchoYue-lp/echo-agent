@@ -52,6 +52,8 @@ jobs:
             packages: -p echo_tools
           - group: learning
             packages: -p echo-agent-learning
+          - group: sdk-host
+            packages: -p echo-sdk-host
           - group: foundations
             packages: >-
               -p echo_core -p echo_execution -p echo_integration -p echo_macros
@@ -85,6 +87,8 @@ jobs:
           cache-targets: "false"
       - name: Compile framework libraries for Windows
         run: cargo check --workspace --lib --all-features --locked
+      - name: Compile source-built SDK Host for Windows
+        run: cargo check -p echo-sdk-host --bin echo-agent-sdk-host --locked
       - name: Exercise Windows atomic file replacement
         run: cargo test -p echo_core --lib --all-features --locked utils::fs::tests
 

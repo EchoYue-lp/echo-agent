@@ -1,0 +1,34 @@
+[package]
+name = "echo-sdk-host"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+description = "Source-built standard ACP v1 Host for the echo-agent framework"
+
+[lib]
+name = "echo_sdk_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "echo-agent-sdk-host"
+path = "src/main.rs"
+required-features = ["runtime"]
+
+[features]
+default = ["runtime"]
+runtime = ["dep:agent-client-protocol", "echo_agent/acp", "echo_agent/mcp"]
+
+[dependencies]
+echo_agent = { version = "0.2.0", path = "..", default-features = false }
+agent-client-protocol = { version = "=2.1.0", optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+static_assertions = "1.1.0"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["io-util", "net", "process", "sync", "time"] }
