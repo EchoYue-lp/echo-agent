@@ -26,6 +26,12 @@ pub(crate) struct PreparedAgentDefinition {
     llm_client: Arc<dyn LlmClient>,
     state_store: Option<Arc<dyn RuntimeStateStore>>,
     host_default: bool,
+    /// Bridge context for host-language extension proxies. When present,
+    /// every Session Agent constructed from this definition receives the
+    /// extensions registered on the owning connection at construction time
+    /// (plan 06, design §12).
+    #[cfg(feature = "sdk-extension-bridge")]
+    extensions: Option<Arc<crate::core_profile::extension_bridge::ExtensionBridge>>,
 }
 
 impl PreparedAgentDefinition {
@@ -41,7 +47,21 @@ impl PreparedAgentDefinition {
             llm_client,
             state_store,
             host_default,
+            #[cfg(feature = "sdk-extension-bridge")]
+            extensions: None,
         }
+    }
+
+    /// Attach the connection's extension bridge so Session Agents built
+    /// from this definition receive the registered proxies. Called once by
+    /// the core profile state after the bridge exists.
+    #[cfg(feature = "sdk-extension-bridge")]
+    pub fn with_extension_bridge(
+        mut self,
+        bridge: std::sync::Arc<crate::core_profile::extension_bridge::ExtensionBridge>,
+    ) -> Self {
+        self.extensions = Some(bridge);
+        self
     }
 
     #[cfg(feature = "sdk-core-profile")]
@@ -82,6 +102,12 @@ impl PreparedAgentDefinition {
             agent.set_state_store(store.clone());
         }
         self.framework.apply_compressor(&agent).await;
+        #[cfg(feature = "sdk-extension-bridge")]
+        if let Some(bridge) = &self.extensions {
+            super::core_profile::extension_bridge::apply_extensions_to_agent(bridge, &mut agent)
+                .await
+                .map_err(ReactError::Other)?;
+        }
         for server in mcp_servers {
             if let Err(error) = agent.connect_mcp_from_config(server).await {
                 let cleanup = Agent::close(&agent).await;

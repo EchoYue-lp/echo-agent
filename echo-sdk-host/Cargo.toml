@@ -32,6 +32,15 @@ sdk-core-profile = [
     "dep:tracing",
     "dep:sha2",
 ]
+# Bidirectional `_echo_agent/extension/*` bridge over the core profile:
+# host-language Tool/LlmClient/Store/HumanLoop/Hook/Callback/Agent
+# implementations are reverse-invoked with lease, deadline and cancellation
+# semantics. Requires the framework surfaces those proxies inject into.
+sdk-extension-bridge = [
+    "sdk-core-profile",
+    "echo_agent/human-loop",
+    "echo_agent/subagent",
+]
 
 [dependencies]
 echo_agent = { version = "0.2.0", path = "..", default-features = false }

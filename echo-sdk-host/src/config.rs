@@ -68,6 +68,24 @@ pub struct SdkProfileLimits {
     pub max_replay_bytes: usize,
     /// Maximum simultaneously open Agent/Session/Run/Stream handles.
     pub max_open_handles: usize,
+    /// Maximum simultaneously registered extension implementations. Extension
+    /// registrations are connection-owned and never persist across a Host
+    /// restart or reconnect.
+    pub max_registered_extensions: usize,
+    /// Maximum serialized bytes of one extension registration descriptor.
+    pub max_extension_descriptor_bytes: usize,
+    /// Maximum serialized bytes of one extension invocation input/result.
+    pub max_extension_payload_bytes: usize,
+    /// Maximum serialized bytes of one extension stream chunk payload.
+    pub max_extension_stream_bytes: usize,
+    /// Maximum simultaneously in-flight extension reverse invocations.
+    pub max_extension_invocations: usize,
+    /// Maximum concurrently executing extension reverse callbacks (the
+    /// connection-level lease concurrency).
+    pub max_callback_concurrency: usize,
+    /// Default reverse-callback deadline in seconds when a registration does
+    /// not declare its own timeout.
+    pub callback_timeout_secs: u64,
     /// Seconds allowed for the bounded shutdown chain.
     pub shutdown_timeout_secs: u64,
 }
@@ -81,6 +99,13 @@ impl Default for SdkProfileLimits {
             max_replay_events: 512,
             max_replay_bytes: 8 * 1024 * 1024,
             max_open_handles: 512,
+            max_registered_extensions: 64,
+            max_extension_descriptor_bytes: 65_536,
+            max_extension_payload_bytes: 1_048_576,
+            max_extension_stream_bytes: 262_144,
+            max_extension_invocations: 16,
+            max_callback_concurrency: 8,
+            callback_timeout_secs: 30,
             shutdown_timeout_secs: 5,
         }
     }
@@ -94,6 +119,13 @@ impl SdkProfileLimits {
             || self.max_replay_events == 0
             || self.max_replay_bytes == 0
             || self.max_open_handles == 0
+            || self.max_registered_extensions == 0
+            || self.max_extension_descriptor_bytes == 0
+            || self.max_extension_payload_bytes == 0
+            || self.max_extension_stream_bytes == 0
+            || self.max_extension_invocations == 0
+            || self.max_callback_concurrency == 0
+            || self.callback_timeout_secs == 0
             || self.shutdown_timeout_secs == 0
         {
             return Err(HostError::Config(

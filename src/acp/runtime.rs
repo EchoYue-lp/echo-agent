@@ -769,6 +769,11 @@ pub trait AcpConnectionProfile: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Release connection-owned profile resources (e.g. extension
+    /// registrations) after Session Agents/MCP closed. Last step of the
+    /// teardown order in design §12.3/§16.
+    fn release_after_agents(&self) {}
+
     fn wait_for_settlements(
         &self,
         _timeout: Duration,

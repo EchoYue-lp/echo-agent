@@ -10,7 +10,10 @@
 
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
 use echo_sdk_protocol::handle::{HandleKind, WireHandle};
-use echo_sdk_protocol::methods::AgentConfigWire;
+use echo_sdk_protocol::methods::{
+    AgentConfigWire, ExtensionDescriptor, ExtensionKind, MAX_EXTENSION_DESCRIPTOR_BYTES,
+};
+use echo_sdk_protocol::scalar::WireDuration;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -58,6 +61,19 @@ pub(crate) struct StreamRecord {
     pub run_handle_id: String,
 }
 
+/// One registered extension implementation. The record is connection-owned:
+/// it exists only while the registering connection lives and is never
+/// persisted or restored across a Host restart (design §12.1).
+pub(crate) struct ExtensionRecord {
+    pub kind: ExtensionKind,
+    pub implementation_id: String,
+    pub descriptor: ExtensionDescriptor,
+    /// Canonical descriptor fingerprint for idempotent re-registration.
+    pub descriptor_fingerprint: String,
+    /// Per-registration default invocation deadline.
+    pub timeout: Option<WireDuration>,
+}
+
 struct HandleInner {
     generation: u64,
     max_handles: usize,
@@ -65,6 +81,10 @@ struct HandleInner {
     sessions: HashMap<String, Arc<SessionRecord>>,
     runs: HashMap<String, Arc<RunRecord>>,
     streams: HashMap<String, Arc<StreamRecord>>,
+    extensions: HashMap<String, Arc<ExtensionRecord>>,
+    /// `(kind, implementation_id)` identity → extension handle id, for
+    /// idempotent re-registration and typed conflicts.
+    extension_index: HashMap<String, String>,
     tombstones: VecDeque<(HandleKind, String)>,
     idempotency: HashMap<String, Arc<AgentCreateOutcome>>,
     next_agent_id: u64,
@@ -104,6 +124,8 @@ impl HandleRegistry {
                 sessions: HashMap::new(),
                 runs: HashMap::new(),
                 streams: HashMap::new(),
+                extensions: HashMap::new(),
+                extension_index: HashMap::new(),
                 tombstones: VecDeque::new(),
                 idempotency: HashMap::new(),
                 next_agent_id: 0,
@@ -129,7 +151,8 @@ impl HandleRegistry {
             .len()
             .saturating_add(inner.sessions.len())
             .saturating_add(inner.runs.len())
-            .saturating_add(inner.streams.len());
+            .saturating_add(inner.streams.len())
+            .saturating_add(inner.extensions.len());
         if open.saturating_add(additional) > inner.max_handles {
             return Err(sdk_error(
                 ExtensionErrorCode::PayloadTooLarge,
@@ -395,6 +418,214 @@ impl HandleRegistry {
             .streams
             .insert(stream_id.clone(), Arc::new(StreamRecord { run_handle_id }));
         self.insert(&mut inner, HandleKind::Stream, stream_id)
+    }
+
+    // ── Extension registrations ─────────────────────────────────────────
+
+    /// Register one extension implementation. Registration is idempotent per
+    /// `(kind, implementation_id)`: the same identity with the same
+    /// descriptor fingerprint returns the same handle; a different descriptor
+    /// is a typed conflict. Records are connection-owned and never persist.
+    pub fn register_extension(
+        &self,
+        max_extensions: usize,
+        max_descriptor_bytes: usize,
+        kind: ExtensionKind,
+        implementation_id: &str,
+        descriptor: ExtensionDescriptor,
+        timeout: Option<WireDuration>,
+    ) -> Result<(WireHandle, Arc<ExtensionRecord>), EchoSdkError> {
+        const OPERATION: &str = "_echo_agent/extension/register";
+        if descriptor.kind() != kind {
+            return Err(sdk_error(
+                ExtensionErrorCode::InvalidValue,
+                "descriptor kind does not match the registration kind",
+                Retryability::Never,
+                OPERATION,
+            ));
+        }
+        let fingerprint = descriptor.fingerprint();
+        let encoded_len = serde_json::to_vec(&descriptor)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        if encoded_len > max_descriptor_bytes || encoded_len > MAX_EXTENSION_DESCRIPTOR_BYTES {
+            return Err(sdk_error(
+                ExtensionErrorCode::PayloadTooLarge,
+                "extension descriptor exceeds the serialized descriptor bound",
+                Retryability::Never,
+                OPERATION,
+            ));
+        }
+        let identity = format!("{}/{}", kind.as_str(), implementation_id);
+        let mut inner = self.lock();
+        if let Some(existing_id) = inner.extension_index.get(&identity).cloned() {
+            if let Some(existing) = inner.extensions.get(&existing_id).cloned() {
+                if existing.descriptor_fingerprint == fingerprint {
+                    let generation = inner.generation;
+                    return Ok((
+                        handle(existing_id, HandleKind::Extension, generation),
+                        existing,
+                    ));
+                }
+                let prior = handle(existing_id, HandleKind::Extension, inner.generation);
+                drop(inner);
+                return Err(handle_error(
+                    ExtensionErrorCode::ExtensionConflict,
+                    format!(
+                        "implementation {identity} is already registered with a different descriptor"
+                    ),
+                    OPERATION,
+                    &prior,
+                ));
+            }
+        }
+        if inner.extensions.len() >= max_extensions {
+            return Err(sdk_error(
+                ExtensionErrorCode::PayloadTooLarge,
+                format!("registered extension limit {max_extensions} reached"),
+                Retryability::AfterDelay,
+                OPERATION,
+            ));
+        }
+        self.enforce_budget(&mut inner, 1)?;
+        let id = Self::mint_id(&mut inner, HandleKind::Extension)?;
+        let record = Arc::new(ExtensionRecord {
+            kind,
+            implementation_id: implementation_id.to_string(),
+            descriptor,
+            descriptor_fingerprint: fingerprint,
+            timeout,
+        });
+        inner.extensions.insert(id.clone(), record.clone());
+        inner.extension_index.insert(identity, id.clone());
+        let extension = handle(id, HandleKind::Extension, inner.generation);
+        Ok((extension, record))
+    }
+
+    /// Resolve one extension registration through the fixed ladder.
+    pub fn extension(&self, handle: &WireHandle) -> Result<Arc<ExtensionRecord>, EchoSdkError> {
+        let found = self.lock().extensions.get(&handle.id).cloned();
+        found.ok_or_else(|| {
+            self.resolve_error(handle, HandleKind::Extension, "_echo_agent/extension")
+        })
+    }
+
+    /// Release one extension registration; idempotent. Returns false when it
+    /// was already released, true when this call released it.
+    pub fn close_extension(&self, handle: &WireHandle) -> Result<bool, EchoSdkError> {
+        const OPERATION: &str = "_echo_agent/extension/unregister";
+        let removed = {
+            let mut inner = self.lock();
+            let record = inner.extensions.remove(&handle.id);
+            if let Some(record) = &record {
+                let identity = format!("{}/{}", record.kind.as_str(), record.implementation_id);
+                inner.extension_index.remove(&identity);
+                // Cascade: drop callback streams minted for this extension.
+                inner
+                    .streams
+                    .retain(|_, stream| stream.run_handle_id != handle.id);
+            }
+            record
+        };
+        let Some(record) = removed else {
+            return if self.is_closed(handle) {
+                Ok(false)
+            } else {
+                Err(self.resolve_error(handle, HandleKind::Extension, OPERATION))
+            };
+        };
+        let _ = record;
+        let mut inner = self.lock();
+        inner
+            .tombstones
+            .push_back((HandleKind::Extension, handle.id.clone()));
+        while inner.tombstones.len() > inner.max_handles {
+            inner.tombstones.pop_front();
+        }
+        Ok(true)
+    }
+
+    /// Release every extension registration (connection teardown).
+    pub fn close_all_extensions(&self) {
+        let mut inner = self.lock();
+        let drained: Vec<(String, String)> = inner
+            .extensions
+            .drain()
+            .map(|(id, record)| {
+                (
+                    format!("{}/{}", record.kind.as_str(), record.implementation_id),
+                    id,
+                )
+            })
+            .collect();
+        for (identity, id) in drained {
+            inner.extension_index.remove(&identity);
+            inner.tombstones.push_back((HandleKind::Extension, id));
+        }
+        while inner.tombstones.len() > inner.max_handles {
+            inner.tombstones.pop_front();
+        }
+    }
+
+    /// All live registrations of one kind, ordered by handle id.
+    pub fn extensions_of_kind(
+        &self,
+        kind: ExtensionKind,
+    ) -> Vec<(WireHandle, Arc<ExtensionRecord>)> {
+        let inner = self.lock();
+        let mut found: Vec<(WireHandle, Arc<ExtensionRecord>)> = inner
+            .extensions
+            .iter()
+            .filter(|(_, record)| record.kind == kind)
+            .map(|(id, record)| {
+                (
+                    handle(id.clone(), HandleKind::Extension, inner.generation),
+                    record.clone(),
+                )
+            })
+            .collect();
+        found.sort_by(|left, right| left.0.id.cmp(&right.0.id));
+        found
+    }
+
+    /// Mint one callback stream handle owned by an extension registration.
+    /// Used by streaming reverse invocations; the SDK must echo this exact
+    /// handle, so stream identities stay Host-minted and generation-fenced.
+    pub fn register_extension_stream(
+        &self,
+        extension_id: &str,
+    ) -> Result<WireHandle, EchoSdkError> {
+        let mut inner = self.lock();
+        if !inner.extensions.contains_key(extension_id) {
+            return Err(sdk_error(
+                ExtensionErrorCode::ClosedHandle,
+                "extension registration is no longer live",
+                Retryability::Never,
+                "_echo_agent/extension/invoke",
+            ));
+        }
+        self.enforce_budget(&mut inner, 1)?;
+        let id = Self::mint_id(&mut inner, HandleKind::Stream)?;
+        inner.streams.insert(
+            id.clone(),
+            Arc::new(StreamRecord {
+                run_handle_id: extension_id.to_string(),
+            }),
+        );
+        Ok(handle(id, HandleKind::Stream, inner.generation))
+    }
+
+    /// Release one callback stream handle after its single terminal.
+    pub fn remove_extension_stream(&self, stream_id: &str) {
+        let mut inner = self.lock();
+        if inner.streams.remove(stream_id).is_some() {
+            inner
+                .tombstones
+                .push_back((HandleKind::Stream, stream_id.to_string()));
+            while inner.tombstones.len() > inner.max_handles {
+                inner.tombstones.pop_front();
+            }
+        }
     }
 
     pub fn agent(&self, handle: &WireHandle) -> Result<Arc<AgentRecord>, EchoSdkError> {

@@ -49,6 +49,8 @@ pub(crate) struct CoreProfileState {
     pub session_factory: crate::factory::CoreProfileSessionFactory,
     journals: Mutex<HashMap<String, Arc<SegmentedFileEventJournal<EventEnvelope>>>>,
     deliveries: Mutex<HashMap<String, Arc<StreamDelivery>>>,
+    #[cfg(feature = "sdk-extension-bridge")]
+    pub extension_shared: Arc<super::extension_bridge::ExtensionBridgeShared>,
     pending_settlements: AtomicUsize,
     settlement_notify: Notify,
     settlement_error: Mutex<Option<String>>,
@@ -64,16 +66,37 @@ impl CoreProfileState {
         limits: SdkProfileLimits,
         framework: echo_agent::config::FrameworkConfig,
         llm_client: std::sync::Arc<dyn echo_agent::llm::LlmClient>,
-    ) -> std::result::Result<Self, HostError> {
+    ) -> std::result::Result<std::sync::Arc<Self>, HostError> {
         let persistence = CorePersistence::open(state_root)
             .map_err(|error| HostError::Config(error.to_string()))?;
         let state_store = persistence.state_store();
-        let default_definition = Arc::new(PreparedAgentDefinition::new(
+        #[cfg(feature = "sdk-extension-bridge")]
+        let extension_shared = Arc::new(super::extension_bridge::ExtensionBridgeShared::new());
+        #[cfg(feature = "sdk-extension-bridge")]
+        let extension_bridge: Option<Arc<super::extension_bridge::ExtensionBridge>>;
+        let mut default_definition = Arc::new(PreparedAgentDefinition::new(
             framework,
             llm_client,
             Some(state_store.clone()),
             true,
         ));
+        // The bridge is created unbound (the state does not exist yet) and
+        // captured by the default definition so every Session Agent built
+        // from it resolves registered extensions; the state binds itself
+        // immediately after construction below.
+        #[cfg(feature = "sdk-extension-bridge")]
+        {
+            let bridge = Arc::new(super::extension_bridge::ExtensionBridge::unbound(
+                extension_shared.clone(),
+            ));
+            default_definition = Arc::new(
+                default_definition
+                    .as_ref()
+                    .clone()
+                    .with_extension_bridge(bridge.clone()),
+            );
+            extension_bridge = Some(bridge);
+        }
         let mut recovered_runs = Vec::new();
         for mut recovered in persistence
             .load_recovered_runs()
@@ -101,7 +124,7 @@ impl CoreProfileState {
             default_definition.clone(),
             limits.max_open_handles,
         );
-        Ok(Self {
+        let state = Arc::new(Self {
             services: OnceLock::new(),
             handles,
             persistence,
@@ -114,10 +137,17 @@ impl CoreProfileState {
             session_factory,
             journals: Mutex::new(HashMap::new()),
             deliveries: Mutex::new(HashMap::new()),
+            #[cfg(feature = "sdk-extension-bridge")]
+            extension_shared,
             pending_settlements: AtomicUsize::new(0),
             settlement_notify: Notify::new(),
             settlement_error: Mutex::new(None),
-        })
+        });
+        #[cfg(feature = "sdk-extension-bridge")]
+        if let Some(bridge) = extension_bridge {
+            bridge.bind_state(state.clone());
+        }
+        Ok(state)
     }
 
     /// Meta key under which the Session context carries its definition id.
@@ -286,7 +316,7 @@ fn build_advertisement(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| HostError::Config("source contract missing aggregate_digest".to_string()))?
         .to_string();
-    let capabilities = vec![
+    let mut capabilities = vec![
         CapabilityDeclaration {
             capability: ExtensionCapability::AgentLifecycle,
             required: false,
@@ -304,6 +334,14 @@ fn build_advertisement(
             required: false,
         },
     ];
+    // The extension bridge is advertised only when the Host actually
+    // compiled it (plan 06, design §10.2): a capability declaration without
+    // the compiled handlers would be a false advertisement.
+    #[cfg(feature = "sdk-extension-bridge")]
+    capabilities.push(CapabilityDeclaration {
+        capability: ExtensionCapability::ExtensionBridge,
+        required: false,
+    });
     let advertisement = EchoAgentCapability {
         extension_protocol_version: echo_sdk_protocol::EXTENSION_PROTOCOL_VERSION,
         contract_digest,
@@ -315,8 +353,13 @@ fn build_advertisement(
             max_stream_buffer_events: WireU64::from_u64(
                 u64::try_from(limits.max_outstanding_live_events).unwrap_or(u64::MAX),
             ),
-            max_callback_concurrency: 1,
-            callback_timeout: WireDuration::from_nanos(30_000_000_000),
+            max_callback_concurrency: limits
+                .max_callback_concurrency
+                .try_into()
+                .unwrap_or(u32::MAX),
+            callback_timeout: WireDuration::from_nanos(
+                limits.callback_timeout_secs.saturating_mul(1_000_000_000),
+            ),
             max_replay_events: WireU64::from_u64(
                 u64::try_from(limits.max_replay_events).unwrap_or(u64::MAX),
             ),
@@ -337,6 +380,21 @@ fn build_advertisement(
             max_open_handles: WireU64::from_u64(
                 u64::try_from(limits.max_open_handles).unwrap_or(u64::MAX),
             ),
+            max_registered_extensions: WireU64::from_u64(
+                u64::try_from(limits.max_registered_extensions).unwrap_or(u64::MAX),
+            ),
+            max_extension_descriptor_bytes: WireU64::from_u64(
+                u64::try_from(limits.max_extension_descriptor_bytes).unwrap_or(u64::MAX),
+            ),
+            max_extension_payload_bytes: WireU64::from_u64(
+                u64::try_from(limits.max_extension_payload_bytes).unwrap_or(u64::MAX),
+            ),
+            max_extension_stream_bytes: WireU64::from_u64(
+                u64::try_from(limits.max_extension_stream_bytes).unwrap_or(u64::MAX),
+            ),
+            max_inflight_extension_invocations: WireU64::from_u64(
+                u64::try_from(limits.max_extension_invocations).unwrap_or(u64::MAX),
+            ),
         },
     };
     let problems = advertisement.validate_shape();
@@ -354,6 +412,13 @@ fn build_advertisement(
 /// extend this list, and the advertisement is validated against it.
 fn compiled_leaf_features() -> Vec<String> {
     let mut features = vec!["acp".to_string(), "mcp".to_string()];
+    // The bridge compiles the framework surfaces its proxies inject into;
+    // the advertisement must name them so capability checks stay honest.
+    #[cfg(feature = "sdk-extension-bridge")]
+    {
+        features.push("human-loop".to_string());
+        features.push("subagent".to_string());
+    }
     features.sort();
     features.dedup();
     features

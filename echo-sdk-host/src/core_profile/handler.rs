@@ -1493,3 +1493,98 @@ pub(crate) async fn event_ack(
     }
     Ok(())
 }
+
+// ── Extension bridge (feature `sdk-extension-bridge`) ───────────────────────
+
+#[cfg(feature = "sdk-extension-bridge")]
+mod extension_handlers {
+    use super::*;
+    use echo_sdk_protocol::methods::{
+        ExtensionRegisterRequest, ExtensionRegisterResponse, ExtensionStreamEvent,
+        ExtensionUnregisterRequest, ExtensionUnregisterResponse,
+    };
+
+    /// `_echo_agent/extension/register`: registration is connection-owned.
+    /// The transport handle captured here serves every proxy invocation of
+    /// this connection. Idempotent per identity + descriptor fingerprint;
+    /// a different descriptor for the same identity is a typed conflict.
+    pub(crate) async fn extension_register(
+        state: Arc<CoreProfileState>,
+        request: ExtensionRegisterRequest,
+        responder: Responder<ExtensionRegisterResponse>,
+        connection: ConnectionTo<Client>,
+    ) -> std::result::Result<(), agent_client_protocol::Error> {
+        let method = "_echo_agent/extension/register";
+        require_extended(&state, method).await?;
+        require_capability(&state, ExtensionCapability::ExtensionBridge, method)?;
+        if let Err(reason) = request.validate() {
+            return respond_error(
+                |error| responder.respond_with_error(error),
+                wire::sdk_error(
+                    ExtensionErrorCode::InvalidConfig,
+                    reason,
+                    Retryability::Never,
+                    method,
+                ),
+            );
+        }
+        // Bind the official transport once; every later reverse invocation
+        // of this connection goes through this single handle.
+        state.extension_shared.bind_connection(connection.clone());
+        match state.handles.register_extension(
+            state.limits.max_registered_extensions,
+            state.limits.max_extension_descriptor_bytes,
+            request.kind,
+            &request.implementation_id,
+            request.descriptor,
+            request.timeout,
+        ) {
+            Ok((extension, _record)) => responder.respond(ExtensionRegisterResponse { extension }),
+            Err(error) => respond_error(
+                |error| responder.respond_with_error(error),
+                error.with_operation(method),
+            ),
+        }
+    }
+
+    /// `_echo_agent/extension/unregister`: idempotent release. In-flight
+    /// invocations of the released registration settle through their own
+    /// lease lifecycle; new invocations fail closed.
+    pub(crate) async fn extension_unregister(
+        state: Arc<CoreProfileState>,
+        request: ExtensionUnregisterRequest,
+        responder: Responder<ExtensionUnregisterResponse>,
+        _connection: ConnectionTo<Client>,
+    ) -> std::result::Result<(), agent_client_protocol::Error> {
+        let method = "_echo_agent/extension/unregister";
+        require_extended(&state, method).await?;
+        require_capability(&state, ExtensionCapability::ExtensionBridge, method)?;
+        if let Err(error) = state.handles.check_shape_and_generation(
+            &request.extension,
+            HandleKind::Extension,
+            method,
+        ) {
+            return respond_error(|error| responder.respond_with_error(error), error);
+        }
+        match state.handles.close_extension(&request.extension) {
+            Ok(released) => responder.respond(ExtensionUnregisterResponse { released }),
+            Err(error) => respond_error(
+                |error| responder.respond_with_error(error),
+                error.with_operation(method),
+            ),
+        }
+    }
+
+    /// `_echo_agent/extension/stream` (client → host notification): route
+    /// one chunk or terminal to its stream sink. Unknown streams and late
+    /// events are discarded with bounded diagnostics.
+    pub(crate) async fn extension_stream(
+        state: Arc<CoreProfileState>,
+        event: ExtensionStreamEvent,
+    ) -> std::result::Result<(), String> {
+        state.extension_shared.deliver_stream_event(event).await
+    }
+}
+
+#[cfg(feature = "sdk-extension-bridge")]
+pub(crate) use extension_handlers::{extension_register, extension_stream, extension_unregister};

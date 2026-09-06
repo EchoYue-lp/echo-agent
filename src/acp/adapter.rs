@@ -387,7 +387,9 @@ async fn run_connection<P: AcpConnectionProfile>(
                 close_services
                     .close_sessions()
                     .await
-                    .map_err(framework_error)
+                    .map_err(framework_error)?;
+                close_profile.release_after_agents();
+                Ok::<(), Error>(())
             })
             .await
             .map_err(|_| {
@@ -412,7 +414,9 @@ async fn run_connection<P: AcpConnectionProfile>(
             .await
             .map_err(framework_error)?;
         profile.flush_before_agents().map_err(framework_error)?;
-        services.close_sessions().await.map_err(framework_error)
+        services.close_sessions().await.map_err(framework_error)?;
+        profile.release_after_agents();
+        Ok(())
     })
     .await
     .map_err(|_| {
