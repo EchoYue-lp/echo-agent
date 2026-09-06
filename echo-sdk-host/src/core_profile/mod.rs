@@ -556,6 +556,7 @@ impl AcpConnectionProfile for SdkCoreProfile {
             .on_receive_notification(
                 async move |notification: echo_sdk_protocol::methods::ExtensionStreamEvent,
                             connection: ConnectionTo<Client>| {
+                    eprintln!("[host] stream notification handler entered");
                     let state = stream_state.clone();
                     let task_connection = connection.clone();
                     task_connection.spawn(async move {

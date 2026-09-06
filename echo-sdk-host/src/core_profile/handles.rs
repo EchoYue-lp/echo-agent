@@ -458,26 +458,26 @@ impl HandleRegistry {
         }
         let identity = format!("{}/{}", kind.as_str(), implementation_id);
         let mut inner = self.lock();
-        if let Some(existing_id) = inner.extension_index.get(&identity).cloned() {
-            if let Some(existing) = inner.extensions.get(&existing_id).cloned() {
-                if existing.descriptor_fingerprint == fingerprint {
-                    let generation = inner.generation;
-                    return Ok((
-                        handle(existing_id, HandleKind::Extension, generation),
-                        existing,
-                    ));
-                }
-                let prior = handle(existing_id, HandleKind::Extension, inner.generation);
-                drop(inner);
-                return Err(handle_error(
-                    ExtensionErrorCode::ExtensionConflict,
-                    format!(
-                        "implementation {identity} is already registered with a different descriptor"
-                    ),
-                    OPERATION,
-                    &prior,
+        if let Some(existing_id) = inner.extension_index.get(&identity).cloned()
+            && let Some(existing) = inner.extensions.get(&existing_id).cloned()
+        {
+            if existing.descriptor_fingerprint == fingerprint {
+                let generation = inner.generation;
+                return Ok((
+                    handle(existing_id, HandleKind::Extension, generation),
+                    existing,
                 ));
             }
+            let prior = handle(existing_id, HandleKind::Extension, inner.generation);
+            drop(inner);
+            return Err(handle_error(
+                ExtensionErrorCode::ExtensionConflict,
+                format!(
+                    "implementation {identity} is already registered with a different descriptor"
+                ),
+                OPERATION,
+                &prior,
+            ));
         }
         if inner.extensions.len() >= max_extensions {
             return Err(sdk_error(

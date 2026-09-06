@@ -111,7 +111,13 @@ impl ExtensionBridgeShared {
                 .streams
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            streams.get(event.stream().id.as_str()).cloned()
+            let sink = streams.get(event.stream().id.as_str()).cloned();
+            eprintln!(
+                "[host] sink lookup {} -> {}",
+                event.stream().id,
+                sink.is_some()
+            );
+            sink
         };
         let Some(sink) = sink else {
             tracing::warn!(
@@ -251,7 +257,7 @@ fn transport_error(error: &agent_client_protocol::Error) -> EchoSdkError {
             Retryability::Never,
             "_echo_agent/extension/invoke",
         )
-    } else if let Some(decoded) = EchoSdkError::from_jsonrpc_data(error.data.as_ref()).ok() {
+    } else if let Ok(decoded) = EchoSdkError::from_jsonrpc_data(error.data.as_ref()) {
         decoded
     } else {
         sdk_error(
@@ -416,7 +422,7 @@ impl ExtensionBridge {
                 }
             }
             () = cancellation.cancelled() => {
-                let _ = self.send_cancel_notice(&lease.identity().to_string(), "cancelled");
+                let _ = self.send_cancel_notice(lease.identity(), "cancelled");
                 lease.settle(echo_agent::acp::ExtensionSettlement::Cancelled);
                 Err(sdk_error(
                     ExtensionErrorCode::Cancelled,
@@ -426,7 +432,7 @@ impl ExtensionBridge {
                 ))
             }
             _ = tokio::time::sleep(deadline) => {
-                let _ = self.send_cancel_notice(&lease.identity().to_string(), "timeout");
+                let _ = self.send_cancel_notice(lease.identity(), "timeout");
                 lease.settle_timeout();
                 Err(sdk_error(
                     ExtensionErrorCode::ExtensionTimeout,
@@ -458,8 +464,7 @@ impl ExtensionBridge {
         let stream = self
             .state()?
             .handles
-            .register_extension_stream(&extension.id)
-            .map_err(|error| error)?;
+            .register_extension_stream(&extension.id)?;
         let (sink, receiver) = ExtensionStreamSink::new(stream.clone());
         self.shared.register_stream(sink);
         let call = ExtensionInvokeCall {
@@ -626,6 +631,36 @@ fn from_wire<T: serde::de::DeserializeOwned>(value: WireValue) -> std::result::R
     serde_json::from_value(json).map_err(|error| error.to_string())
 }
 
+/// Build the callback-event stream that ends exactly at the terminal.
+///
+/// The sink keeps its bounded `Sender` registered for late-delivery
+/// admission, so the raw receiver would never close on its own: ending at
+/// the terminal (and releasing the stream resources then) is what makes the
+/// exactly-one-terminal contract observable to the Rust consumer.
+fn extension_event_stream(
+    bridge: Arc<ExtensionBridge>,
+    stream: WireHandle,
+    receiver: mpsc::Receiver<ExtensionStreamEvent>,
+) -> impl futures::Stream<Item = ExtensionStreamEvent> {
+    futures::stream::unfold(Some((bridge, stream, receiver)), |state| async move {
+        let (bridge, stream, mut receiver) = state?;
+        match receiver.recv().await {
+            Some(event) => {
+                if event.is_terminal() {
+                    bridge.release_stream(&stream);
+                    Some((event, None))
+                } else {
+                    Some((event, Some((bridge, stream, receiver))))
+                }
+            }
+            None => {
+                bridge.release_stream(&stream);
+                None
+            }
+        }
+    })
+}
+
 fn react_error(error: EchoSdkError) -> ReactError {
     ReactError::Other(format!(
         "extension bridge failure {}: {}",
@@ -755,7 +790,7 @@ impl ExtensionToolProxy {
                 &self.extension,
                 operation,
                 None,
-                to_wire(&input).map_err(ReactError::Other)?,
+                to_wire(input).map_err(ReactError::Other)?,
                 context
                     .and_then(|context| context.cancel.clone())
                     .unwrap_or_else(cancelled_token_arc)
@@ -828,21 +863,21 @@ impl echo_agent::tools::Tool for ExtensionToolProxy {
                 .unwrap_or_else(cancelled_token_arc)
                 .as_ref()
                 .clone();
-            let (receiver, _stream) = self
+            let (receiver, stream) = self
                 .bridge
                 .invoke_stream(
                     &self.extension,
                     ExtensionOperation::ToolExecuteStream,
                     None,
-                    to_wire(&input).map_err(ReactError::Other)?,
+                    to_wire(input).map_err(ReactError::Other)?,
                     cancellation,
                 )
                 .await
                 .map_err(react_error)?;
+            let stream_clone = stream.clone();
+            let _ = stream;
             Ok(Box::pin(futures::StreamExt::map(
-                futures::stream::unfold(receiver, |mut receiver| async move {
-                    receiver.recv().await.map(|event| (event, receiver))
-                }),
+                extension_event_stream(self.bridge.clone(), stream_clone, receiver),
                 |event: ExtensionStreamEvent| match event {
                     ExtensionStreamEvent::Chunk { value, .. }
                     | ExtensionStreamEvent::Complete { value, .. } => {
@@ -869,13 +904,24 @@ impl echo_agent::tools::Tool for ExtensionToolProxy {
         parameters: &'a ToolParameters,
     ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<()>> {
         Box::pin(async move {
-            self.execute_over(
-                ExtensionOperation::ToolValidateParameters,
-                parameters.clone(),
-                None,
-            )
-            .await
-            .map(|_| ())
+            let input = serde_json::json!({"parameters": parameters});
+            let value = self
+                .bridge
+                .invoke_once(
+                    &self.extension,
+                    ExtensionOperation::ToolValidateParameters,
+                    None,
+                    to_wire(input).map_err(ReactError::Other)?,
+                    cancelled_token(),
+                )
+                .await
+                .map_err(react_error)?;
+            // The validation contract is `null` when the parameters are
+            // valid and a bounded rejection reason otherwise.
+            match from_wire::<Option<String>>(value).map_err(ReactError::Other)? {
+                Some(reason) => Err(ReactError::Other(reason)),
+                None => Ok(()),
+            }
         })
     }
 }
@@ -1077,7 +1123,7 @@ impl echo_agent::llm::LlmClient for ExtensionLlmClientProxy {
                     &self.extension,
                     ExtensionOperation::LlmChat,
                     None,
-                    to_wire(&Self::request_wire(&request)).map_err(ReactError::Other)?,
+                    to_wire(Self::request_wire(&request)).map_err(ReactError::Other)?,
                     cancellation,
                 )
                 .await
@@ -1101,21 +1147,19 @@ impl echo_agent::llm::LlmClient for ExtensionLlmClientProxy {
     > {
         Box::pin(async move {
             let cancellation = request.cancel_token.clone().unwrap_or_else(cancelled_token);
-            let (receiver, _stream) = self
+            let (receiver, stream) = self
                 .bridge
                 .invoke_stream(
                     &self.extension,
                     ExtensionOperation::LlmChatStream,
                     None,
-                    to_wire(&Self::request_wire(&request)).map_err(ReactError::Other)?,
+                    to_wire(Self::request_wire(&request)).map_err(ReactError::Other)?,
                     cancellation,
                 )
                 .await
                 .map_err(react_error)?;
             Ok(futures::StreamExt::map(
-                futures::stream::unfold(receiver, |mut receiver| async move {
-                    receiver.recv().await.map(|event| (event, receiver))
-                }),
+                extension_event_stream(self.bridge.clone(), stream, receiver),
                 |event: ExtensionStreamEvent| {
                     let result: echo_agent::error::Result<echo_agent::llm::ChatChunk> = match event
                     {
@@ -1200,7 +1244,7 @@ impl ExtensionStoreProxy {
                 &self.extension,
                 operation,
                 None,
-                to_wire(&payload).map_err(ReactError::Other)?,
+                to_wire(payload).map_err(ReactError::Other)?,
                 cancelled_token(),
             )
             .await
@@ -1531,7 +1575,7 @@ impl echo_agent::human_loop::HumanLoopProvider for ExtensionHumanLoopProxy {
                     &self.extension,
                     ExtensionOperation::HumanLoopRequest,
                     None,
-                    to_wire(&payload).map_err(ReactError::Other)?,
+                    to_wire(payload).map_err(ReactError::Other)?,
                     cancelled_token(),
                 )
                 .await
@@ -1705,7 +1749,7 @@ impl ExtensionAgentCallbackProxy {
     ) -> futures::future::BoxFuture<'_, ()> {
         let bridge = self.bridge.clone();
         let extension = self.extension.clone();
-        let input = to_wire(&payload).ok();
+        let input = to_wire(payload).ok();
         Box::pin(async move {
             let Some(input) = input else {
                 return;
@@ -1873,7 +1917,7 @@ impl ExtensionInterventionProxy {
     ) -> futures::future::BoxFuture<'_, echo_agent::agent::InterventionResult> {
         let bridge = self.bridge.clone();
         let extension = self.extension.clone();
-        let input = to_wire(&payload).ok();
+        let input = to_wire(payload).ok();
         Box::pin(async move {
             let Some(input) = input else {
                 return echo_agent::agent::InterventionResult::allow();
@@ -1980,7 +2024,7 @@ impl echo_agent::agent::subagent::AgentFactory for SubagentFactoryAdapter {
                 system_prompt: String::new(),
                 tool_count: 0,
             };
-            let input = to_wire(&payload).map_err(ReactError::Other)?;
+            let input = to_wire(payload).map_err(ReactError::Other)?;
             let value = bridge
                 .invoke_once(
                     &extension,
@@ -2024,7 +2068,7 @@ impl ExtensionCustomAgentProxy {
                 &self.extension,
                 operation,
                 None,
-                to_wire(&payload).map_err(ReactError::Other)?,
+                to_wire(payload).map_err(ReactError::Other)?,
                 cancelled_token(),
             )
             .await
@@ -2039,21 +2083,19 @@ impl ExtensionCustomAgentProxy {
     ) -> echo_agent::error::Result<
         futures::stream::BoxStream<'static, echo_agent::error::Result<AgentEvent>>,
     > {
-        let (receiver, _stream) = self
+        let (receiver, stream) = self
             .bridge
             .invoke_stream(
                 &self.extension,
                 operation,
                 None,
-                to_wire(&payload).map_err(ReactError::Other)?,
+                to_wire(payload).map_err(ReactError::Other)?,
                 cancelled_token(),
             )
             .await
             .map_err(react_error)?;
         Ok(futures::StreamExt::map(
-            futures::stream::unfold(receiver, |mut receiver| async move {
-                receiver.recv().await.map(|event| (event, receiver))
-            }),
+            extension_event_stream(self.bridge.clone(), stream, receiver),
             |event: ExtensionStreamEvent| {
                 let result: echo_agent::error::Result<AgentEvent> = match event {
                     ExtensionStreamEvent::Chunk { value, .. }
@@ -2184,10 +2226,9 @@ pub(crate) async fn apply_extensions_to_agent(
         .handles
         .extensions_of_kind(ExtensionKind::LlmClient)
         .pop()
+        && let Some(proxy) = ExtensionLlmClientProxy::new(bridge.clone(), extension)
     {
-        if let Some(proxy) = ExtensionLlmClientProxy::new(bridge.clone(), extension) {
-            agent.set_llm_client(Arc::new(proxy));
-        }
+        agent.set_llm_client(Arc::new(proxy));
     }
     // Tools.
     for (extension, _) in state.handles.extensions_of_kind(ExtensionKind::Tool) {
@@ -2195,27 +2236,32 @@ pub(crate) async fn apply_extensions_to_agent(
             agent.add_tool(Box::new(proxy));
         }
     }
-    // Memory store.
+    // Memory store: set_memory_store re-registers the remember/recall/forget
+    // tools against the extension-backed store, so model-driven memory calls
+    // become real reverse invocations.
     if let Some((extension, _)) = state
         .handles
         .extensions_of_kind(ExtensionKind::Store)
         .first()
         .cloned()
+        && let Some(proxy) = ExtensionStoreProxy::new(bridge.clone(), extension)
     {
-        if let Some(proxy) = ExtensionStoreProxy::new(bridge.clone(), extension) {
-            agent.set_store(Arc::new(proxy));
-        }
+        agent.set_memory_store(Arc::new(proxy));
     }
-    // Human-in-the-loop provider.
+    // Human-in-the-loop provider: swap the approval channel and register the
+    // appeal tool so model-initiated approvals also reach the extension.
     if let Some((extension, _)) = state
         .handles
         .extensions_of_kind(ExtensionKind::HumanLoopProvider)
         .first()
         .cloned()
+        && let Some(proxy) = ExtensionHumanLoopProxy::new(bridge.clone(), extension)
     {
-        if let Some(proxy) = ExtensionHumanLoopProxy::new(bridge.clone(), extension) {
-            agent.set_approval_provider(Arc::new(proxy));
-        }
+        let shared = Arc::new(proxy);
+        agent.set_approval_provider(shared.clone());
+        agent.add_need_appeal_tool(Box::new(
+            echo_agent::tools::builtin::human_in_loop::HumanInLoop::new(shared),
+        ));
     }
     // Hooks: programmatic sources in the agent's hook registry.
     {
@@ -2325,10 +2371,8 @@ mod tests {
             finish_reason: Some("stop".to_string()),
             usage: None,
         };
-        let wire = to_wire(ChatChunkWire::from_chunk(&chunk))
-            .ok()
-            .expect("wire");
-        let back: ChatChunkWire = from_wire(wire).ok().expect("decode");
+        let wire = to_wire(ChatChunkWire::from_chunk(&chunk)).expect("wire");
+        let back: ChatChunkWire = from_wire(wire).expect("decode");
         let restored = back.into_chunk();
         assert_eq!(restored.delta.content.as_deref(), Some("hello"));
         assert_eq!(restored.finish_reason.as_deref(), Some("stop"));
