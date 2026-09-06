@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Negotiated `_echo_agent/*` SDK core profile.** The echo-agent SDK Host
+  now serves an explicitly negotiated core extension profile over the same
+  standard ACP v1 connection: capability hello/advertisement under
+  `initialize._meta`, typed JSON-RPC handlers for the Agent/Session/Run
+  families (`_echo_agent/agent|session|run/*`, `_echo_agent/run/replay`,
+  `_echo_agent/event`, `_echo_agent/event/ack`, `_echo_agent/gap`),
+  generation-fenced Agent/Session/Run/Stream handles with fixed
+  shape→kind→generation→issued/closed validation and idempotent create, one
+  fixed extension error code (`-32050`) carrying a bounded `EchoSdkError`,
+  ACK-bounded live event delivery with typed gaps, durable per-run journals
+  with bounded replay, explicit state-root persistence with Host generation
+  counters, session recovery and honest `interrupted` semantics for runs
+  active across a crash, and a stdin newline-frame byte limiter ahead of the
+  official parser. Standard and extension entries share one connection-level
+  Session/Run/event authority, so a standard Prompt and an extension Run are
+  the same object with one active-run slot. Real-process E2E covers the
+  valid-hello lifecycle, the fail-closed matrix, restart recovery, crash
+  interruption and oversized-frame rejection. Language SDKs remain future
+  deliveries.
+
 - **Source-built standard ACP v1 Host.** Added the non-published
   `echo-sdk-host` workspace crate and `echo-agent-sdk-host` executable. It
   loads one explicit, bounded schema-v1 JSON configuration, constructs a new

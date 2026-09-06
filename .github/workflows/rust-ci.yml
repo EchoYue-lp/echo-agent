@@ -73,6 +73,9 @@ jobs:
           cache-targets: "false"
       - name: Test default feature surface
         run: cargo test ${{ matrix.packages }} --lib --tests --locked
+      - name: Test core profile E2E (sdk-host group only)
+        if: matrix.group == 'sdk-host'
+        run: cargo test -p echo-sdk-host --features sdk-core-profile --lib --tests --locked
 
   windows-check:
     runs-on: windows-latest
@@ -87,8 +90,8 @@ jobs:
           cache-targets: "false"
       - name: Compile framework libraries for Windows
         run: cargo check --workspace --lib --all-features --locked
-      - name: Compile source-built SDK Host for Windows
-        run: cargo check -p echo-sdk-host --bin echo-agent-sdk-host --locked
+      - name: Compile source-built SDK Host for Windows (all features)
+        run: cargo check -p echo-sdk-host --all-features --locked
       - name: Exercise Windows atomic file replacement
         run: cargo test -p echo_core --lib --all-features --locked utils::fs::tests
 

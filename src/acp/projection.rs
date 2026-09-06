@@ -17,7 +17,13 @@ struct ProjectionState {
     total_update_chars: usize,
 }
 
-pub(crate) struct AcpEventProjector {
+/// Standard ACP view of one run's committed events.
+///
+/// The projector never owns the events: the shared run ledger commits every
+/// accepted [`EventEnvelope`] first, and this type only renders the bounded
+/// `session/update` projection of the same facts (design §11.1 — the
+/// projection may not introduce new sequences or terminals).
+pub struct AcpEventProjector {
     session_id: SessionId,
     connection: ConnectionTo<Client>,
     max_update_chars: usize,
@@ -44,12 +50,36 @@ impl AcpEventProjector {
         }
     }
 
-    fn project(&self, envelope: EventEnvelope) -> Result<Vec<SessionUpdate>> {
+    /// Render and send the standard updates for one committed envelope.
+    /// A bounds violation or a failed send fails the whole run through the
+    /// driver's exactly-one-terminal contract — the projection is part of
+    /// the run's accepted output, not best-effort decoration.
+    pub async fn emit(&self, envelope: &EventEnvelope) -> Result<()> {
+        for notification in self.project(envelope)? {
+            self.reserve(&notification)?;
+            self.connection
+                .send_notification(notification)
+                .map_err(|error| {
+                    ReactError::Other(format!("failed to send ACP session/update: {error}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn project(&self, envelope: &EventEnvelope) -> Result<Vec<SessionNotification>> {
+        let updates = self.updates(&envelope.payload)?;
+        Ok(updates
+            .into_iter()
+            .map(|update| SessionNotification::new(self.session_id.clone(), update))
+            .collect())
+    }
+
+    fn updates(&self, payload: &AgentEvent) -> Result<Vec<SessionUpdate>> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| ReactError::Other("ACP projector state lock poisoned".to_string()))?;
-        let updates = match envelope.payload {
+        let updates = match payload {
             AgentEvent::ThinkStart => {
                 state.thinking = true;
                 Vec::new()
@@ -59,8 +89,8 @@ impl AcpEventProjector {
                 Vec::new()
             }
             AgentEvent::Token(text) => {
-                validate_update_size(&text, self.max_update_chars)?;
-                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+                validate_update_size(text, self.max_update_chars)?;
+                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text.clone())));
                 if state.thinking {
                     vec![SessionUpdate::AgentThoughtChunk(chunk)]
                 } else {
@@ -69,10 +99,10 @@ impl AcpEventProjector {
                 }
             }
             AgentEvent::FinalAnswer(answer) if !state.emitted_agent_text => {
-                validate_update_size(&answer, self.max_update_chars)?;
+                validate_update_size(answer, self.max_update_chars)?;
                 state.emitted_agent_text = true;
                 vec![SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::Text(TextContent::new(answer)),
+                    ContentBlock::Text(TextContent::new(answer.clone())),
                 ))]
             }
             AgentEvent::ToolCall {
@@ -82,15 +112,15 @@ impl AcpEventProjector {
                 validate_update_size(&invocation.name, self.max_update_chars)?;
                 let raw_input = encode_bounded(&invocation.args, self.max_update_chars)?;
                 vec![SessionUpdate::ToolCall(
-                    ToolCall::new(call_id, invocation.name)
+                    ToolCall::new(call_id.clone(), invocation.name.clone())
                         .status(ToolCallStatus::Pending)
                         .raw_input(raw_input),
                 )]
             }
             AgentEvent::ToolStream { call_id, event, .. } => {
-                let output = encode_bounded(&event, self.max_update_chars)?;
+                let output = encode_bounded(event, self.max_update_chars)?;
                 vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                    call_id,
+                    call_id.clone(),
                     ToolCallUpdateFields::new()
                         .status(ToolCallStatus::InProgress)
                         .raw_output(output),
@@ -100,9 +130,9 @@ impl AcpEventProjector {
                 call_id, result, ..
             } => {
                 let failed = !result.success;
-                let output = encode_bounded(&result, self.max_update_chars)?;
+                let output = encode_bounded(result, self.max_update_chars)?;
                 vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                    call_id,
+                    call_id.clone(),
                     ToolCallUpdateFields::new()
                         .status(if failed {
                             ToolCallStatus::Failed
@@ -156,15 +186,7 @@ impl AcpEventProjector {
 #[async_trait]
 impl EventSink for AcpEventProjector {
     async fn on_event(&self, envelope: EventEnvelope) -> Result<SinkControl> {
-        for update in self.project(envelope)? {
-            let notification = SessionNotification::new(self.session_id.clone(), update);
-            self.reserve(&notification)?;
-            self.connection
-                .send_notification(notification)
-                .map_err(|error| {
-                    ReactError::Other(format!("failed to send ACP session/update: {error}"))
-                })?;
-        }
+        self.emit(&envelope).await?;
         Ok(SinkControl::Continue)
     }
 }

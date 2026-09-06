@@ -1,0 +1,17 @@
+{
+  "name": "event-ack-zero-cursor-invalid",
+  "kind": "invalid",
+  "target": "EventAckNotification",
+  "description": "Acknowledged sequences start at one.",
+  "payload": {
+    "ack": {
+      "stream": {
+        "id": "stream-1",
+        "generation": "3",
+        "kind": "stream"
+      },
+      "last_processed_sequence": "0"
+    }
+  },
+  "expect_error": "invalid_value"
+}

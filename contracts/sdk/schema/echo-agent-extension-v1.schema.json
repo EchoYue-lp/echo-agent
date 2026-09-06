@@ -125,6 +125,15 @@
       "error_schema": null
     },
     {
+      "name": "_echo_agent/event/ack",
+      "direction": "client_notification",
+      "capability": "runs",
+      "summary": "Client acknowledgement cursor that retires outstanding live events.",
+      "params_schema": "#/definitions/EventAckNotification",
+      "result_schema": null,
+      "error_schema": null
+    },
+    {
       "name": "_echo_agent/gap",
       "direction": "host_notification",
       "capability": "event_replay",
@@ -1253,16 +1262,26 @@
       ]
     },
     "EventNotification": {
-      "properties": {
-        "envelope": {
-          "$ref": "#/definitions/WireEventEnvelope"
-        }
-      },
+      "additionalProperties": false,
       "title": "EventNotification",
       "type": "object",
       "required": [
-        "envelope"
-      ]
+        "envelope",
+        "stream"
+      ],
+      "properties": {
+        "envelope": {
+          "$ref": "#/definitions/WireEventEnvelope"
+        },
+        "stream": {
+          "description": "Live event stream the envelope belongs to; the generation fence prevents a pre-restart subscriber from consuming a newer stream.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
+        }
+      }
     },
     "EventCursor": {
       "properties": {
@@ -1283,9 +1302,21 @@
       ]
     },
     "ReplayRequest": {
+      "additionalProperties": false,
+      "title": "ReplayRequest",
+      "type": "object",
+      "required": [
+        "after_sequence",
+        "stream"
+      ],
       "properties": {
         "after_sequence": {
-          "$ref": "#/definitions/WireU64"
+          "description": "Replay events strictly after this sequence (0 = from the retained beginning).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
         },
         "max_events": {
           "anyOf": [
@@ -1297,18 +1328,15 @@
             }
           ]
         },
-        "stream_id": {
-          "type": "string",
-          "maxLength": 256,
-          "minLength": 1
+        "stream": {
+          "description": "Event stream to replay. The handle's generation must match the currently served stream incarnation; stale or wrong-kind handles fail with typed errors before any event is read.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
         }
-      },
-      "title": "ReplayRequest",
-      "type": "object",
-      "required": [
-        "after_sequence",
-        "stream_id"
-      ]
+      }
     },
     "EventGap": {
       "properties": {
@@ -1375,22 +1403,26 @@
       ]
     },
     "GapNotification": {
-      "properties": {
-        "gap": {
-          "$ref": "#/definitions/EventGap"
-        },
-        "stream_id": {
-          "type": "string",
-          "maxLength": 256,
-          "minLength": 1
-        }
-      },
+      "additionalProperties": false,
       "title": "GapNotification",
       "type": "object",
       "required": [
         "gap",
-        "stream_id"
-      ]
+        "stream"
+      ],
+      "properties": {
+        "gap": {
+          "$ref": "#/definitions/EventGap"
+        },
+        "stream": {
+          "description": "Event stream that hit its live-delivery bound.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
+        }
+      }
     },
     "CapabilityDeclaration": {
       "description": "One declared capability. Required capabilities must be understood by the SDK client for initialization to succeed; optional ones may be ignored.",
@@ -1415,7 +1447,11 @@
         "callback_timeout",
         "max_callback_concurrency",
         "max_message_bytes",
+        "max_open_handles",
+        "max_outstanding_live_events",
+        "max_replay_bytes",
         "max_replay_events",
+        "max_stream_buffer_bytes",
         "max_stream_buffer_events",
         "max_structured_output_bytes"
       ],
@@ -1442,8 +1478,40 @@
             }
           ]
         },
+        "max_open_handles": {
+          "description": "Maximum simultaneously issued (open) Agent/Session/Run/Stream handles per connection.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_outstanding_live_events": {
+          "description": "Maximum not-yet-acknowledged live events per stream. Reaching this bound emits one gap notification and pauses live delivery until the Client acknowledges a cursor (`_echo_agent/event/ack`).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_replay_bytes": {
+          "description": "Maximum cumulative serialized event bytes returned by one replay.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
         "max_replay_events": {
           "description": "Maximum events returned by one replay request.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_stream_buffer_bytes": {
+          "description": "Maximum cumulative serialized live event bytes per stream before the gap/pause behavior above applies.",
           "allOf": [
             {
               "$ref": "#/definitions/WireU64"
@@ -1558,6 +1626,11 @@
         },
         "limits": {
           "$ref": "#/definitions/EchoLimits"
+        },
+        "source_contract_digest": {
+          "description": "Digest of the generated source-compatibility inputs (`contracts/sdk/source-contract.json`: Cargo.lock + facade inventory + parity manifest). Negotiated separately from `contract_digest`; both must match for the SDK Client to enter Extended mode.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-fA-F]{64}$"
         }
       },
       "title": "EchoAgentCapability",
@@ -1568,21 +1641,641 @@
         "contract_digest",
         "extension_protocol_version",
         "features",
-        "limits"
+        "limits",
+        "source_contract_digest"
       ]
     },
-    "AgentCreateRequest": {
+    "EchoAgentClientHello": {
       "properties": {
-        "config": {
-          "description": "Framework construction config represented by manifest-identified values.",
-          "allOf": [
+        "contract_digest": {
+          "description": "Extension contract digest the Client validates.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-fA-F]{64}$"
+        },
+        "extension_protocol_version": {
+          "description": "Extension protocol version the Client was built against.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "required_capabilities": {
+          "description": "Extension capabilities the Client requires, sorted by declaration order-free identity; duplicates are a shape violation.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ExtensionCapability"
+          }
+        },
+        "required_features": {
+          "description": "Leaf features the Client requires on the Host, sorted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source_contract_digest": {
+          "description": "Source-contract digest the Client validates.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-fA-F]{64}$"
+        }
+      },
+      "title": "EchoAgentClientHello",
+      "description": "The echo-agent SDK Client hello published under `clientCapabilities._meta.echo_agent`. A Client that sends this object requests Extended mode; the Host enters Extended mode only when every field matches its own [`EchoAgentCapability`]. A missing key means a plain standard ACP Client; a malformed or mismatched hello degrades the connection to Standard mode without failing `initialize` and without creating any extension handles.",
+      "type": "object",
+      "required": [
+        "contract_digest",
+        "extension_protocol_version",
+        "required_capabilities",
+        "required_features",
+        "source_contract_digest"
+      ]
+    },
+    "AgentSettingsWire": {
+      "additionalProperties": false,
+      "title": "AgentSettingsWire",
+      "description": "Agent behavior settings projected on the wire. Deliberately minimal: every unsupported knob (memory, human-in-loop, compressor strategy, subagent timeouts, tool toggles) is rejected by `deny_unknown_fields` rather than silently ignored.",
+      "type": "object",
+      "required": [
+        "max_iterations",
+        "name",
+        "system_prompt"
+      ],
+      "properties": {
+        "max_iterations": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1.0
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "system_prompt": {
+          "type": "string",
+          "maxLength": 65536,
+          "minLength": 1
+        }
+      }
+    },
+    "CredentialSourceWire": {
+      "oneOf": [
+        {
+          "description": "Literal token passed inline. Only for local, single-user machines.",
+          "type": "object",
+          "required": [
+            "source",
+            "token"
+          ],
+          "properties": {
+            "source": {
+              "type": "string",
+              "enum": [
+                "inline"
+              ]
+            },
+            "token": {
+              "type": "string",
+              "maxLength": 4096,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Name of the environment variable holding the token.",
+          "type": "object",
+          "required": [
+            "source",
+            "variable"
+          ],
+          "properties": {
+            "source": {
+              "type": "string",
+              "enum": [
+                "env"
+              ]
+            },
+            "variable": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "CredentialSourceWire",
+      "description": "Mutually exclusive credential sourcing (design §10.4). Environment sourcing keeps secrets out of the wire entirely."
+    },
+    "LlmApiProtocolWire": {
+      "enum": [
+        "chat_completions",
+        "responses",
+        "anthropic"
+      ],
+      "title": "LlmApiProtocolWire",
+      "description": "API protocols the core profile can construct. Unlisted protocols fail closed; new protocols extend this enum in a later contract version.",
+      "type": "string"
+    },
+    "ModelConfigWire": {
+      "additionalProperties": false,
+      "title": "ModelConfigWire",
+      "description": "Wire projection of the model construction settings. Exactly one credential source may be provided — the tagged `credential` field makes inline-token and environment sourcing mutually exclusive by grammar.",
+      "type": "object",
+      "required": [
+        "api_protocol",
+        "base_url",
+        "name",
+        "provider"
+      ],
+      "properties": {
+        "api_protocol": {
+          "$ref": "#/definitions/LlmApiProtocolWire"
+        },
+        "base_url": {
+          "description": "Absolute HTTP(S) endpoint of the model API.",
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1
+        },
+        "context_window": {
+          "anyOf": [
             {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/WireU64"
+            },
+            {
+              "type": "null"
             }
           ]
         },
+        "credential": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CredentialSourceWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "provider": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "temperature": {
+          "description": "Temperature is serialized as a bounded string decimal to avoid float ambiguity across languages.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "AgentConfigWire": {
+      "oneOf": [
+        {
+          "description": "Bind the Host default Agent definition. Credential handling stays Host-local, so SDK Clients never transmit secrets for this branch.",
+          "type": "object",
+          "required": [
+            "variant"
+          ],
+          "properties": {
+            "variant": {
+              "type": "string",
+              "enum": [
+                "host_default"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Explicit wire projection of the framework construction config.",
+          "type": "object",
+          "required": [
+            "agent",
+            "config_version",
+            "model",
+            "variant"
+          ],
+          "properties": {
+            "agent": {
+              "$ref": "#/definitions/AgentSettingsWire"
+            },
+            "config_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "model": {
+              "$ref": "#/definitions/ModelConfigWire"
+            },
+            "variant": {
+              "type": "string",
+              "enum": [
+                "explicit"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "AgentConfigWire",
+      "description": "Versioned Agent construction config (design §10.4 agent family)."
+    },
+    "AgentConfigExplicitWire": {
+      "additionalProperties": false,
+      "title": "AgentConfigExplicitWire",
+      "description": "Explicit Agent construction payload. `config_version` gates evolution: Hosts reject unknown versions with `invalid_config` instead of guessing.",
+      "type": "object",
+      "required": [
+        "agent",
+        "config_version",
+        "model"
+      ],
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/AgentSettingsWire"
+        },
+        "config_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "model": {
+          "$ref": "#/definitions/ModelConfigWire"
+        }
+      }
+    },
+    "AgentSnapshotWire": {
+      "additionalProperties": false,
+      "title": "AgentSnapshotWire",
+      "description": "Typed capability snapshot of one Agent handle.",
+      "type": "object",
+      "required": [
+        "host_default",
+        "mcp_server_names",
+        "model_name",
+        "name",
+        "skill_names",
+        "system_prompt",
+        "tool_names"
+      ],
+      "properties": {
+        "host_default": {
+          "description": "Whether the definition came from the Host default configuration.",
+          "type": "boolean"
+        },
+        "mcp_server_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model_name": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "skill_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "system_prompt": {
+          "type": "string"
+        },
+        "tool_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "working_dir": {
+          "description": "Absolute working directory bound to new Sessions of this agent, when the definition carries one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "AgentFailureWire": {
+      "additionalProperties": false,
+      "title": "AgentFailureWire",
+      "description": "Lossless wire projection of the framework failure contract (`echo_core::error::AgentFailure`). Categories and terminal kinds are serialized as their framework snake_case names so a later framework variant remains observable instead of collapsing into a generic code.",
+      "type": "object",
+      "required": [
+        "category",
+        "code",
+        "message",
+        "retryable",
+        "terminal_kind"
+      ],
+      "properties": {
+        "category": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "code": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "http_status": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "terminal_kind": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        }
+      }
+    },
+    "RunStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "pending",
+            "running",
+            "paused",
+            "completed",
+            "cancelled",
+            "failed",
+            "closed"
+          ]
+        },
+        {
+          "description": "The Host process restarted while the run was still active. Interrupted runs never gain a terminal or receipt: `run/get` reports the status, `run/wait` fails with typed `host_exited`, and new work continues from the framework's committed checkpoint only.",
+          "type": "string",
+          "enum": [
+            "interrupted"
+          ]
+        }
+      ],
+      "title": "RunStatus"
+    },
+    "RunTerminal": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "final_answer": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "completed"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "cancelled"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "failure",
+            "status"
+          ],
+          "properties": {
+            "failure": {
+              "description": "Lossless framework failure contract (category, terminal kind, retryability, code, bounded message).",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/AgentFailureWire"
+                }
+              ]
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "failed"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "RunTerminal",
+      "description": "The single authoritative terminal of a settled run. There is no `interrupted` terminal: interruption is a run *status* without terminal or receipt, so a crashed run can never be mistaken for success."
+    },
+    "RunReceiptWire": {
+      "additionalProperties": false,
+      "title": "RunReceiptWire",
+      "description": "Typed projection of the framework `TurnReceipt` (design §4.1). Counters use `WireU64` so JavaScript numbers never see an unsafe integer.",
+      "type": "object",
+      "required": [
+        "compaction_count",
+        "completion_tokens",
+        "elapsed_ms",
+        "last_event_sequence",
+        "llm_calls",
+        "outcome",
+        "prompt_tokens",
+        "turn_id"
+      ],
+      "properties": {
+        "compaction_count": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "completion_tokens": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "elapsed_ms": {
+          "description": "Total wall time of the run in milliseconds.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "final_answer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "final_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_event_sequence": {
+          "description": "Sequence watermark of the last emitted event; aligned with the journal and replay cursors.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "llm_calls": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "outcome": {
+          "description": "`completed`, `cancelled`, or `failed` — identical to the terminal.",
+          "type": "string",
+          "maxLength": 32,
+          "minLength": 1
+        },
+        "prompt_tokens": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "turn_id": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        }
+      }
+    },
+    "RecoveredRunWire": {
+      "additionalProperties": false,
+      "title": "RecoveredRunWire",
+      "description": "One recovered historical Run with its fresh-generation handles.",
+      "type": "object",
+      "required": [
+        "last_sequence",
+        "run",
+        "status",
+        "stream"
+      ],
+      "properties": {
+        "last_sequence": {
+          "description": "Last sequence the recovered event history covers.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        },
+        "status": {
+          "$ref": "#/definitions/RunStatus"
+        },
+        "stream": {
+          "$ref": "#/definitions/WireHandle"
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RunTerminal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "EventAck": {
+      "additionalProperties": false,
+      "title": "EventAck",
+      "description": "Client acknowledgement of consumed live events. The Host counts outstanding notifications per stream against the negotiated `max_outstanding_live_events` window; acknowledgements retire them and resume live delivery after a gap pause. Hosts ignore unknown or un-negotiated ACK notifications without producing a response (ACP notification rules).",
+      "type": "object",
+      "required": [
+        "last_processed_sequence",
+        "stream"
+      ],
+      "properties": {
+        "last_processed_sequence": {
+          "description": "Highest contiguous sequence the Client has consumed.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireNonZeroU64"
+            }
+          ]
+        },
+        "stream": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      }
+    },
+    "EventAckNotification": {
+      "additionalProperties": false,
+      "title": "EventAckNotification",
+      "type": "object",
+      "required": [
+        "ack"
+      ],
+      "properties": {
+        "ack": {
+          "$ref": "#/definitions/EventAck"
+        }
+      }
+    },
+    "AgentCreateRequest": {
+      "additionalProperties": false,
+      "title": "AgentCreateRequest",
+      "description": "`_echo_agent/agent/create` request. The construction grammar is a versioned typed config, not a free-form value: `host_default` binds the Host's own startup definition; `explicit` carries a strict projection of the framework config. Unsupported builder capabilities (tool callbacks, custom stores, human-in-loop, structured-output contracts) are absent from this versioned surface on purpose — sending unknown fields fails closed as invalid params instead of being silently ignored.",
+      "type": "object",
+      "required": [
+        "config"
+      ],
+      "properties": {
+        "config": {
+          "$ref": "#/definitions/AgentConfigWire"
+        },
         "idempotency_id": {
-          "description": "Client-assigned idempotency identity; independent from JSON-RPC ids.",
+          "description": "Client-assigned idempotency identity; independent from JSON-RPC ids. The same id plus the same canonical config returns the same handle; the same id with a different config is a typed conflict.",
           "type": [
             "string",
             "null"
@@ -1590,13 +2283,7 @@
           "maxLength": 256,
           "minLength": 1
         }
-      },
-      "title": "AgentCreateRequest",
-      "description": "`_echo_agent/agent/create` request. The full construction grammar of the Rust builder is projected as a typed, versioned config value; the Host remains the validation authority.",
-      "type": "object",
-      "required": [
-        "config"
-      ]
+      }
     },
     "AgentCreateResponse": {
       "properties": {
@@ -1612,47 +2299,50 @@
       ]
     },
     "AgentDescribeRequest": {
-      "properties": {
-        "agent": {
-          "$ref": "#/definitions/WireHandle"
-        }
-      },
+      "additionalProperties": false,
       "title": "AgentDescribeRequest",
       "description": "`_echo_agent/agent/describe` request/response.",
       "type": "object",
       "required": [
         "agent"
-      ]
+      ],
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      }
     },
     "AgentDescribeResponse": {
+      "additionalProperties": false,
+      "title": "AgentDescribeResponse",
+      "type": "object",
+      "required": [
+        "snapshot"
+      ],
       "properties": {
         "snapshot": {
           "description": "Immutable construction facts and capability snapshot of the agent.",
           "allOf": [
             {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/AgentSnapshotWire"
             }
           ]
         }
-      },
-      "title": "AgentDescribeResponse",
-      "type": "object",
-      "required": [
-        "snapshot"
-      ]
+      }
     },
     "AgentCloseRequest": {
-      "properties": {
-        "agent": {
-          "$ref": "#/definitions/WireHandle"
-        }
-      },
+      "additionalProperties": false,
       "title": "AgentCloseRequest",
       "description": "`_echo_agent/agent/close` request. In-flight runs settle per the framework's own cancellation semantics; closing never fabricates terminals.",
       "type": "object",
       "required": [
         "agent"
-      ]
+      ],
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      }
     },
     "AgentCloseResponse": {
       "properties": {
@@ -1668,48 +2358,74 @@
       ]
     },
     "SessionCreateRequest": {
+      "additionalProperties": false,
+      "title": "SessionCreateRequest",
+      "description": "`_echo_agent/session/create` request.",
+      "type": "object",
+      "required": [
+        "agent"
+      ],
       "properties": {
         "agent": {
           "$ref": "#/definitions/WireHandle"
-        },
-        "config": {
-          "description": "Session configuration represented by manifest-identified values.",
-          "anyOf": [
-            {
-              "$ref": "#/definitions/WireValue"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "idempotency_id": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "session_id": {
+          "description": "Stable framework identity to bind the Session to. When omitted the Host assigns one; the response always reports the resolved identity.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "working_dir": {
+          "description": "Absolute primary working directory for the new Session.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WirePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
-      },
-      "title": "SessionCreateRequest",
-      "description": "`_echo_agent/session/create` request.",
-      "type": "object",
-      "required": [
-        "agent"
-      ]
+      }
     },
     "SessionCreateResponse": {
-      "properties": {
-        "session": {
-          "$ref": "#/definitions/WireHandle"
-        }
-      },
+      "additionalProperties": false,
       "title": "SessionCreateResponse",
       "type": "object",
       "required": [
+        "acp_session_id",
         "session"
-      ]
+      ],
+      "properties": {
+        "acp_session_id": {
+          "description": "ACP Session identity of the same Session object, so the SDK Client can address the standard `session/prompt` / `session/cancel` methods on it without a second creation step.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "session": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      }
     },
     "SessionLoadRequest": {
+      "additionalProperties": false,
+      "title": "SessionLoadRequest",
+      "description": "`_echo_agent/session/load` request: resume a persisted session by framework identity. Only state roots configured for persistence can serve it; loading mints fresh-generation Session/Run/Stream handles and never revives an interrupted Driver.",
+      "type": "object",
+      "required": [
+        "agent",
+        "session_id"
+      ],
       "properties": {
         "agent": {
           "$ref": "#/definitions/WireHandle"
@@ -1718,18 +2434,35 @@
           "type": "string",
           "maxLength": 256,
           "minLength": 1
+        },
+        "working_dir": {
+          "description": "Absolute primary working directory for the resumed Session.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WirePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
-      },
-      "title": "SessionLoadRequest",
-      "description": "`_echo_agent/session/load` request: resume a persisted session by framework identity. Only stores that support persistence can serve it.",
-      "type": "object",
-      "required": [
-        "agent",
-        "session_id"
-      ]
+      }
     },
     "SessionLoadResponse": {
+      "additionalProperties": false,
+      "title": "SessionLoadResponse",
+      "type": "object",
+      "required": [
+        "acp_session_id",
+        "session"
+      ],
       "properties": {
+        "acp_session_id": {
+          "description": "ACP Session identity of the resumed Session (see [`SessionCreateResponse::acp_session_id`]).",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
         "recovered_sequence": {
           "description": "Sequence watermark the session recovered to, when replayable.",
           "anyOf": [
@@ -1741,28 +2474,31 @@
             }
           ]
         },
+        "runs": {
+          "description": "Historical runs recovered for this session, in run start order. Interrupted runs carry `status: \"interrupted\"` without terminal or receipt; settled runs keep their single authoritative terminal.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RecoveredRunWire"
+          }
+        },
         "session": {
           "$ref": "#/definitions/WireHandle"
         }
-      },
-      "title": "SessionLoadResponse",
-      "type": "object",
-      "required": [
-        "session"
-      ]
+      }
     },
     "SessionCloseRequest": {
-      "properties": {
-        "session": {
-          "$ref": "#/definitions/WireHandle"
-        }
-      },
+      "additionalProperties": false,
       "title": "SessionCloseRequest",
       "description": "`_echo_agent/session/close` request/response.",
       "type": "object",
       "required": [
         "session"
-      ]
+      ],
+      "properties": {
+        "session": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      }
     },
     "SessionCloseResponse": {
       "properties": {
@@ -1776,41 +2512,65 @@
         "released"
       ]
     },
-    "RunInputKind": {
-      "type": "string",
-      "enum": [
-        "chat",
-        "execute"
-      ]
-    },
     "RunInput": {
-      "properties": {
-        "kind": {
-          "description": "`chat` or `execute`, mirroring the facade's unified turn driver.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/RunInputKind"
+      "oneOf": [
+        {
+          "description": "Interactive chat turn with one text message.",
+          "type": "object",
+          "required": [
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "chat"
+              ]
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1048576,
+              "minLength": 1
             }
-          ]
+          },
+          "additionalProperties": false
         },
-        "payload": {
-          "description": "Facade request payload (TurnRequest/ChatRequest shape).",
-          "allOf": [
-            {
-              "$ref": "#/definitions/WireValue"
+        {
+          "description": "Non-interactive execution directive.",
+          "type": "object",
+          "required": [
+            "kind",
+            "task"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "execute"
+              ]
+            },
+            "task": {
+              "type": "string",
+              "maxLength": 1048576,
+              "minLength": 1
             }
-          ]
+          },
+          "additionalProperties": false
         }
-      },
+      ],
       "title": "RunInput",
-      "description": "Input of one run: chat prompt parts or execute directive.",
-      "type": "object",
-      "required": [
-        "kind",
-        "payload"
-      ]
+      "description": "Input of one run: a chat prompt or an execute directive, mirroring the facade's unified turn driver. The payload is typed — the Host never guesses payload tags or applies defaults."
     },
     "RunStartRequest": {
+      "additionalProperties": false,
+      "title": "RunStartRequest",
+      "description": "`_echo_agent/run/start` request.",
+      "type": "object",
+      "required": [
+        "input",
+        "session"
+      ],
       "properties": {
         "idempotency_id": {
           "type": [
@@ -1825,28 +2585,17 @@
         },
         "session": {
           "$ref": "#/definitions/WireHandle"
-        },
-        "structured_output": {
-          "description": "Optional structured-output contract; validated by the framework.",
-          "anyOf": [
-            {
-              "$ref": "#/definitions/WireValue"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
-      },
-      "title": "RunStartRequest",
-      "description": "`_echo_agent/run/start` request.",
-      "type": "object",
-      "required": [
-        "input",
-        "session"
-      ]
+      }
     },
     "RunStartResponse": {
+      "additionalProperties": false,
+      "title": "RunStartResponse",
+      "type": "object",
+      "required": [
+        "run",
+        "stream"
+      ],
       "properties": {
         "first_event": {
           "description": "First accepted event of the run, if already available.",
@@ -1861,40 +2610,40 @@
         },
         "run": {
           "$ref": "#/definitions/WireHandle"
+        },
+        "stream": {
+          "description": "Live event stream of the run; `_echo_agent/event` notifications and `run/replay` requests address it by this handle.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
         }
-      },
-      "title": "RunStartResponse",
-      "type": "object",
-      "required": [
-        "run"
-      ]
+      }
     },
     "RunGetRequest": {
-      "properties": {
-        "run": {
-          "$ref": "#/definitions/WireHandle"
-        }
-      },
+      "additionalProperties": false,
       "title": "RunGetRequest",
       "description": "`_echo_agent/run/get` request/response.",
       "type": "object",
       "required": [
         "run"
-      ]
-    },
-    "RunStatus": {
-      "type": "string",
-      "enum": [
-        "pending",
-        "running",
-        "paused",
-        "completed",
-        "cancelled",
-        "failed",
-        "closed"
-      ]
+      ],
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      }
     },
     "RunGetResponse": {
+      "additionalProperties": false,
+      "title": "RunGetResponse",
+      "description": "Run state snapshot: status, the single authoritative terminal (when settled) and the receipt facts. Never synthesizes a terminal that the framework has not emitted (exactly-one-terminal, design §11.1).",
+      "type": "object",
+      "required": [
+        "last_sequence",
+        "status"
+      ],
       "properties": {
         "last_sequence": {
           "description": "Last sequence the snapshot covers.",
@@ -1907,7 +2656,7 @@
         "receipt": {
           "anyOf": [
             {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/RunReceiptWire"
             },
             {
               "type": "null"
@@ -1917,26 +2666,37 @@
         "status": {
           "$ref": "#/definitions/RunStatus"
         },
+        "stream": {
+          "description": "Live event stream of the run, when one exists.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "terminal": {
           "anyOf": [
             {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/RunTerminal"
             },
             {
               "type": "null"
             }
           ]
         }
-      },
-      "title": "RunGetResponse",
-      "description": "Run state snapshot: status, the single authoritative terminal (when settled) and the receipt facts. Never synthesizes a terminal that the framework has not emitted (exactly-one-terminal, design §11.1).",
-      "type": "object",
-      "required": [
-        "last_sequence",
-        "status"
-      ]
+      }
     },
     "RunWaitRequest": {
+      "additionalProperties": false,
+      "title": "RunWaitRequest",
+      "description": "`_echo_agent/run/wait` request: bounded wait for the terminal. A run that is already `interrupted` never settles — the wait responds with the typed `host_exited` error instead of success.",
+      "type": "object",
+      "required": [
+        "run"
+      ],
       "properties": {
         "run": {
           "$ref": "#/definitions/WireHandle"
@@ -1951,20 +2711,20 @@
             }
           ]
         }
-      },
-      "title": "RunWaitRequest",
-      "description": "`_echo_agent/run/wait` request: bounded wait for the terminal.",
-      "type": "object",
-      "required": [
-        "run"
-      ]
+      }
     },
     "RunWaitResponse": {
+      "additionalProperties": false,
+      "title": "RunWaitResponse",
+      "type": "object",
+      "required": [
+        "settled"
+      ],
       "properties": {
         "receipt": {
           "anyOf": [
             {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/RunReceiptWire"
             },
             {
               "type": "null"
@@ -1977,34 +2737,37 @@
         "terminal": {
           "anyOf": [
             {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/RunTerminal"
             },
             {
               "type": "null"
             }
           ]
         }
-      },
-      "title": "RunWaitResponse",
-      "type": "object",
-      "required": [
-        "settled"
-      ]
+      }
     },
     "RunCancelRequest": {
-      "properties": {
-        "run": {
-          "$ref": "#/definitions/WireHandle"
-        }
-      },
+      "additionalProperties": false,
       "title": "RunCancelRequest",
       "description": "`_echo_agent/run/cancel` request. Competing with natural completion, the framework's own CAS/terminal semantics decide the unique outcome; the transport never writes a second terminal (design §14.3).",
       "type": "object",
       "required": [
         "run"
-      ]
+      ],
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      }
     },
     "RunCancelResponse": {
+      "additionalProperties": false,
+      "title": "RunCancelResponse",
+      "type": "object",
+      "required": [
+        "cancellation_initiated",
+        "status"
+      ],
       "properties": {
         "cancellation_initiated": {
           "description": "Whether this call initiated cancellation.",
@@ -2018,42 +2781,49 @@
             }
           ]
         }
-      },
-      "title": "RunCancelResponse",
-      "type": "object",
-      "required": [
-        "cancellation_initiated",
-        "status"
-      ]
+      }
     },
     "RunSteerRequest": {
-      "properties": {
-        "payload": {
-          "$ref": "#/definitions/WireValue"
-        },
-        "run": {
-          "$ref": "#/definitions/WireHandle"
-        }
-      },
+      "additionalProperties": false,
       "title": "RunSteerRequest",
       "description": "`_echo_agent/run/steer` request: mid-flight steering for chats that support it.",
       "type": "object",
       "required": [
-        "payload",
-        "run"
-      ]
+        "run",
+        "text"
+      ],
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/WireHandle"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1048576,
+          "minLength": 1
+        }
+      }
     },
     "RunSteerResponse": {
-      "properties": {
-        "accepted": {
-          "type": "boolean"
-        }
-      },
+      "additionalProperties": false,
       "title": "RunSteerResponse",
       "type": "object",
       "required": [
         "accepted"
-      ]
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "steer_id": {
+          "description": "Steer identity assigned by the framework when accepted.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        }
+      }
     },
     "TaskCreateRequest": {
       "properties": {

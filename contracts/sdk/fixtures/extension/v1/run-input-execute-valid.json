@@ -1,0 +1,10 @@
+{
+  "name": "run-input-execute-valid",
+  "kind": "valid",
+  "target": "RunInput",
+  "description": "Execute runs carry the task directive.",
+  "payload": {
+    "kind": "execute",
+    "task": "run the benchmark"
+  }
+}

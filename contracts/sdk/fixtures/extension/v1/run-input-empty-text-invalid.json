@@ -1,0 +1,11 @@
+{
+  "name": "run-input-empty-text-invalid",
+  "kind": "invalid",
+  "target": "RunInput",
+  "description": "Empty turn input cannot start a run.",
+  "payload": {
+    "kind": "chat",
+    "text": ""
+  },
+  "expect_error": "invalid_value"
+}

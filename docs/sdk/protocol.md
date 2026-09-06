@@ -45,14 +45,20 @@ conversation history. The adapter then drives every Prompt through
 message/thought/tool updates. Both cancellation routes cancel the same
 framework token, and only `TurnReceipt` decides the final stop reason or error.
 
-The adapter advertises only the stable baseline it implements. It does not yet
-advertise `_meta.echo_agent`, `session/load`, optional lifecycle/config methods,
-or rich Prompt content. Text and ResourceLink are accepted; ResourceLink maps
-to the provider-neutral structured `LinkedResource` content part with every ACP
-field preserved. Text-only Agents fail a ResourceLink Prompt explicitly rather
-than receiving an ambiguous private text marker. Other content types fail
-before Agent execution. See
-[acp-agent-adapter.md](acp-agent-adapter.md) for construction and limitations.
+The adapter also owns the negotiation surface: a composable extension profile
+publishes `agentCapabilities._meta.echo_agent`, validates the Client hello
+under `clientCapabilities._meta.echo_agent`, and merges its typed handlers
+onto the same official dispatch loop via `Builder::with_connection_builder`.
+Standard and extension entries share one connection runtime (one Session
+map, one Run authority, one ledger-first event path), so a standard Prompt
+and an extension Run observe the same run ids and the single active-run slot.
+
+Text and ResourceLink are accepted; ResourceLink maps to the provider-neutral
+structured `LinkedResource` content part with every ACP field preserved.
+Text-only Agents fail a ResourceLink Prompt explicitly rather than receiving
+an ambiguous private text marker. Other content types fail before Agent
+execution. See [acp-agent-adapter.md](acp-agent-adapter.md) for construction
+and limitations.
 
 ## Source-built standard Host
 
@@ -60,8 +66,12 @@ The non-published `echo-sdk-host` crate builds the `echo-agent-sdk-host`
 executable. It loads only the path supplied by `--config`, validates the
 bounded schema-v1 document and model client before opening stdio, constructs a
 new `ReactAgent` for each Session, and connects the adapter to the official
-`Stdio` transport. It does not parse JSON-RPC or own another Session, Turn,
-event, cancellation, or terminal state machine.
+stdio transport (a bounded newline-frame byte limiter feeds the official
+runtime when the core profile is enabled). It does not parse JSON-RPC or own
+another Session, Turn, event, cancellation, or terminal state machine.
+With `sdk_profile` configured (and the `sdk-core-profile` feature built in),
+the same process additionally serves the negotiated core profile over the
+same connection — see [sdk-core-profile.md](sdk-core-profile.md).
 
 While serving ACP, stdout contains protocol frames only. Diagnostics use
 stderr and are bounded. Closing stdin closes the official transport and enters
@@ -73,17 +83,19 @@ rejected before Session creation. See
 
 ## Two profiles
 
-| | Standard ACP profile | echo-agent SDK profile |
+| | Standard ACP profile | echo-agent SDK core profile |
 |---|---|---|
 | Consumer | any ACP v1 client | echo-agent SDK (TS/Python/Java, future) |
-| Methods | standard ACP only | standard + negotiated `_echo_agent/*` |
-| Event view | ACP `session/update` (bounded projection) | full `EventEnvelope` extension stream |
-| Negotiation | plain `initialize` | `initialize` + `_meta` capability check |
+| Methods | standard ACP only | standard + negotiated `_echo_agent/*` core families |
+| Event view | ACP `session/update` (bounded projection) | full `EventEnvelope` extension stream + ACK/replay |
+| Negotiation | plain `initialize` | `initialize` + `_meta` hello/advertisement match |
+| Delivered | ✅ Rust Host | ✅ core families (Rust Host); language SDKs ❌ |
 
-A future standard client ignores the `_meta` capability and keeps working. An
-SDK client **fails closed** when the extension protocol version, contract
-digest, required capability or feature set does not match — it never
-silently degrades to partial parity (design §10.2).
+A standard client ignores the `_meta` capability and keeps working. An SDK
+client **fails closed** when the extension protocol version, contract/source
+digest, required capability or feature set does not match — the Host stays
+Standard and extension calls answer method-not-found; it never silently
+degrades to partial parity (design §10.2).
 
 ## Extension namespace
 
@@ -95,11 +107,12 @@ the generated
 [`echo-agent-extension-v1.schema.json`](../../contracts/sdk/schema/echo-agent-extension-v1.schema.json)
 and enforced by `echo_sdk_protocol::catalog`:
 
-- `_echo_agent/agent/*` — construction, description, close
-- `_echo_agent/session/*` — extension session handles
-- `_echo_agent/run/*` — start/get/wait/cancel/steer
-- `_echo_agent/run/replay` + `_echo_agent/event` + `_echo_agent/gap` —
-  lossless event stream, bounded replay, retention gaps
+- `_echo_agent/agent/*` — construction, description, close **(delivered)**
+- `_echo_agent/session/*` — extension session handles and recovery load **(delivered)**
+- `_echo_agent/run/*` — start/get/wait/cancel/steer **(delivered)**
+- `_echo_agent/run/replay` + `_echo_agent/event` + `_echo_agent/event/ack` +
+  `_echo_agent/gap` — lossless event stream, ACK-bounded live delivery,
+  durable replay, retention gaps **(delivered)**
 - `_echo_agent/task/*` — TaskRun/PlanTask graph operations
 - `_echo_agent/subagent/*` — dispatch/await/control
 - `_echo_agent/extension/*` — host-language extension registration and reverse
@@ -169,20 +182,31 @@ bound violations.
 The framework `EventEnvelope` is the event authority; the extension
 notification carries every identity fact (schema version, event id, content
 hash, sequence from 1, parent link, timestamp) plus the real framework
-`AgentEvent` tag/data payload. Contract tests convert an actual framework
-event envelope to the wire DTO and back.
-Replay is cursor-based (`after_sequence`, bounded `max_events`), and falling
-below the retention floor produces a typed `event_gap` with a snapshot
-watermark — events are incremental facts, never a substitute for a snapshot
-(design §11.2). A run has exactly one authoritative terminal; EOF or process
-exit is never success.
+`AgentEvent` tag/data payload, bound to a current-generation stream handle.
+Contract tests convert an actual framework event envelope to the wire DTO and
+back.
+
+Live delivery is ACK-bounded: the Host keeps at most
+`max_outstanding_live_events` un-acknowledged notifications per stream, and
+at the bound it sends one `_echo_agent/gap` notification and pauses live
+delivery until the Client ACKs a cursor (`_echo_agent/event/ack`) after
+recovering through `run/replay`. Replay is cursor-based (stream handle,
+`after_sequence`, bounded `max_events`/bytes), journal/envelope sequence
+alignment is validated, and falling below the retention floor produces a
+typed `event_gap` with a snapshot watermark — events are incremental facts,
+never a substitute for a snapshot (design §11.2). A run has exactly one
+authoritative terminal; EOF or process exit is never success, and a run that
+was active across a Host crash is recovered as `interrupted` without
+terminal or receipt (`run/wait` answers typed `host_exited`).
 
 ## Versioning and compatibility
 
 - Git revision is the source-delivery compatibility boundary.
 - The extension protocol version (currently `1`), the contract digest
-  (sha256 over the canonical schema document) and the official ACP artifact
-  versions move independently.
+  (sha256 over the canonical schema document), the source-contract digest
+  (sha256 over Cargo.lock + facade inventory + parity manifest, delivered as
+  the small generated `contracts/sdk/source-contract.json` that the Host
+  embeds) and the official ACP artifact versions move independently.
 - Additive wire fields are forward-compatible; unknown values surface as
   `WireValue::Unknown` without crashing older SDKs.
 - Removing fields, changing defaults or terminal/cancel semantics, or

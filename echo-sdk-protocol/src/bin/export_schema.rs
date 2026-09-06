@@ -91,10 +91,39 @@ fn main() -> ExitCode {
     let manifest = inv::render_parity_manifest(EXTENSION_PROTOCOL_VERSION, &profiles, &merged);
     let manifest_schema = inv::render_parity_manifest_schema();
 
+    // Source-compatibility digest over the fixed inputs: Cargo.lock plus the
+    // two freshly generated inventory artifacts. The Host embeds only this
+    // small document (design §17/§18); it never embeds the inventory.
+    let cargo_lock_bytes = match std::fs::read(repo_root.join("Cargo.lock")) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("error: reading Cargo.lock: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let source_contract = echo_sdk_protocol::schema::build_source_contract_doc(&[
+        (
+            echo_sdk_protocol::schema::SOURCE_CONTRACT_INPUTS[0],
+            cargo_lock_bytes.as_slice(),
+        ),
+        (
+            echo_sdk_protocol::schema::SOURCE_CONTRACT_INPUTS[1],
+            snapshot.as_bytes(),
+        ),
+        (
+            echo_sdk_protocol::schema::SOURCE_CONTRACT_INPUTS[2],
+            manifest.as_bytes(),
+        ),
+    ]);
+
     let mut artifacts: Vec<(PathBuf, String)> = vec![
         (repo_root.join(PUBLIC_API_TXT), snapshot),
         (repo_root.join(PARITY_MANIFEST_SCHEMA_JSON), manifest_schema),
         (repo_root.join(PARITY_MANIFEST_JSON), manifest),
+        (
+            repo_root.join("contracts/sdk/source-contract.json"),
+            echo_sdk_protocol::schema::canonical_json(&source_contract),
+        ),
     ];
     // Boundary validation before writing: the extension schema must never
     // shadow official ACP concepts.

@@ -6,6 +6,7 @@
   "payload": {
     "extension_protocol_version": 1,
     "contract_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "source_contract_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
     "features": [
       "mcp",
       "subagent"
@@ -29,7 +30,11 @@
         "nanos": 0
       },
       "max_replay_events": "512",
-      "max_structured_output_bytes": "262144"
+      "max_structured_output_bytes": "262144",
+      "max_outstanding_live_events": "256",
+      "max_stream_buffer_bytes": "4194304",
+      "max_replay_bytes": "4194304",
+      "max_open_handles": "512"
     }
   }
 }

@@ -14,9 +14,11 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::capability::EchoAgentCapability;
+use crate::capability::{EchoAgentCapability, EchoAgentClientHello};
 use crate::catalog::METHOD_CATALOG;
-use crate::error::{EchoSdkError, ErrorDetails, ExtensionErrorCode, Retryability};
+use crate::error::{
+    AgentFailureWire, EchoSdkError, ErrorDetails, ExtensionErrorCode, Retryability,
+};
 use crate::event::{
     EventCursor, EventGap, EventNotification, GapNotification, ReplayRequest, ReplayResponse,
     WireEventEnvelope, WireEventPayload,
@@ -131,6 +133,23 @@ pub fn build_extension_schema_doc() -> serde_json::Value {
     schema_entry!(definitions, GapNotification);
     // Capability.
     schema_entry!(definitions, EchoAgentCapability);
+    schema_entry!(definitions, EchoAgentClientHello);
+    // Core profile typed payloads (agent config / run input / terminal /
+    // receipt / recovery descriptions).
+    schema_entry!(definitions, AgentConfigWire);
+    schema_entry!(definitions, AgentConfigExplicitWire);
+    schema_entry!(definitions, ModelConfigWire);
+    schema_entry!(definitions, LlmApiProtocolWire);
+    schema_entry!(definitions, CredentialSourceWire);
+    schema_entry!(definitions, AgentSettingsWire);
+    schema_entry!(definitions, AgentSnapshotWire);
+    schema_entry!(definitions, AgentFailureWire);
+    schema_entry!(definitions, RunStatus);
+    schema_entry!(definitions, RunTerminal);
+    schema_entry!(definitions, RunReceiptWire);
+    schema_entry!(definitions, RecoveredRunWire);
+    schema_entry!(definitions, EventAck);
+    schema_entry!(definitions, EventAckNotification);
     // Method payloads (request/response DTOs of the frozen catalog families).
     schema_entry!(definitions, AgentCreateRequest);
     schema_entry!(definitions, AgentCreateResponse);
@@ -239,6 +258,59 @@ pub fn extension_contract_digest() -> String {
     digest_of(&build_extension_schema_doc())
 }
 
+// ── Source contract ─────────────────────────────────────────────────────────
+
+/// Algorithm identifier of the source-compatibility digest.
+pub const SOURCE_CONTRACT_ALGORITHM: &str = "sha256-length-prefixed-v1";
+
+/// Fixed input order of the source contract. The Host embeds only the small
+/// generated document — never the large inventory artifacts themselves.
+pub const SOURCE_CONTRACT_INPUTS: &[&str] = &[
+    "Cargo.lock",
+    "contracts/sdk/public-api.txt",
+    "contracts/sdk/parity-manifest.json",
+];
+
+/// Aggregate digest over the source-contract inputs: for every entry in the
+/// fixed [`SOURCE_CONTRACT_INPUTS`] order, hash the u64 big-endian length of
+/// the relative path, the path bytes, the u64 big-endian content length, and
+/// the content bytes. Length prefixes make the stream unambiguous without
+/// relying on delimiters.
+pub fn aggregate_source_digest(entries: &[(&str, &[u8])]) -> String {
+    let mut hasher = Sha256::new();
+    for (path, content) in entries {
+        let path_bytes = path.as_bytes();
+        hasher.update((path_bytes.len() as u64).to_be_bytes());
+        hasher.update(path_bytes);
+        hasher.update((content.len() as u64).to_be_bytes());
+        hasher.update(content);
+    }
+    format!("sha256:{}", hex(&hasher.finalize()))
+}
+
+/// Build the `contracts/sdk/source-contract.json` document. `entries` must
+/// be given in the [`SOURCE_CONTRACT_INPUTS`] order; each entry is hashed
+/// individually so a drift in one input is attributable.
+pub fn build_source_contract_doc(entries: &[(&str, &[u8])]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|(path, content)| {
+            let mut hasher = Sha256::new();
+            hasher.update(content);
+            serde_json::json!({
+                "path": path,
+                "bytes": content.len(),
+                "sha256": format!("sha256:{}", hex(&hasher.finalize())),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "algorithm": SOURCE_CONTRACT_ALGORITHM,
+        "inputs": items,
+        "aggregate_digest": aggregate_source_digest(entries),
+    })
+}
+
 /// Fail if the generated schema would shadow official ACP concepts.
 pub fn validate_schema_boundaries(doc: &serde_json::Value) -> Vec<String> {
     let mut problems = Vec::new();
@@ -312,8 +384,12 @@ pub fn all_fixtures() -> Vec<Fixture> {
     push_handle_fixtures(&mut fixtures);
     push_error_fixtures(&mut fixtures);
     push_event_fixtures(&mut fixtures);
+    push_ack_fixtures(&mut fixtures);
     push_bridge_fixtures(&mut fixtures);
     push_capability_fixtures(&mut fixtures);
+    push_hello_fixtures(&mut fixtures);
+    push_agent_config_fixtures(&mut fixtures);
+    push_run_fixtures(&mut fixtures);
     push_boundary_fixtures(&mut fixtures);
     fixtures
 }
@@ -634,9 +710,9 @@ fn push_event_fixtures(fixtures: &mut Vec<Fixture>) {
         "event-live-gap-valid",
         FixtureKind::Valid,
         "GapNotification",
-        "A live gap is explicitly associated with one stream.",
+        "A live gap is explicitly associated with one stream handle.",
         serde_json::json!({
-            "stream_id": "stream-1",
+            "stream": {"id": "stream-1", "generation": "3", "kind": "stream"},
             "gap": {
                 "from_sequence": "5",
                 "to_sequence": "9",
@@ -652,7 +728,7 @@ fn push_event_fixtures(fixtures: &mut Vec<Fixture>) {
         "GapNotification",
         "A recovery snapshot cannot precede the missing range.",
         serde_json::json!({
-            "stream_id": "stream-1",
+            "stream": {"id": "stream-1", "generation": "3", "kind": "stream"},
             "gap": {
                 "from_sequence": "5",
                 "to_sequence": "9",
@@ -663,11 +739,38 @@ fn push_event_fixtures(fixtures: &mut Vec<Fixture>) {
         Some("invalid_value"),
     ));
     fixtures.push(fixture(
+        "event-replay-request-valid",
+        FixtureKind::Valid,
+        "ReplayRequest",
+        "Replay is addressed by a generation-fenced stream handle.",
+        serde_json::json!({
+            "stream": {"id": "stream-1", "generation": "3", "kind": "stream"},
+            "after_sequence": "0",
+            "max_events": "16"
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "event-replay-request-wrong-kind-invalid",
+        FixtureKind::Invalid,
+        "ReplayRequest",
+        "Replay requires a stream handle; run handles are rejected by kind.",
+        serde_json::json!({
+            "stream": {"id": "run-1", "generation": "3", "kind": "run"},
+            "after_sequence": "0"
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
         "event-replay-empty-stream-invalid",
         FixtureKind::Invalid,
         "ReplayRequest",
         "Replay requests require a stream identity.",
-        serde_json::json!({"stream_id": "", "after_sequence": "0", "max_events": "1"}),
+        serde_json::json!({
+            "stream": {"id": "", "generation": "3", "kind": "stream"},
+            "after_sequence": "0",
+            "max_events": "1"
+        }),
         Some("invalid_value"),
     ));
     fixtures.push(fixture(
@@ -675,7 +778,40 @@ fn push_event_fixtures(fixtures: &mut Vec<Fixture>) {
         FixtureKind::Invalid,
         "ReplayRequest",
         "A present replay limit must be positive.",
-        serde_json::json!({"stream_id": "stream-1", "after_sequence": "0", "max_events": "0"}),
+        serde_json::json!({
+            "stream": {"id": "stream-1", "generation": "3", "kind": "stream"},
+            "after_sequence": "0",
+            "max_events": "0"
+        }),
+        Some("invalid_value"),
+    ));
+}
+
+fn push_ack_fixtures(fixtures: &mut Vec<Fixture>) {
+    fixtures.push(fixture(
+        "event-ack-valid",
+        FixtureKind::Valid,
+        "EventAckNotification",
+        "Client acknowledges one contiguous cursor on a stream handle.",
+        serde_json::json!({
+            "ack": {
+                "stream": {"id": "stream-1", "generation": "3", "kind": "stream"},
+                "last_processed_sequence": "12"
+            }
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "event-ack-zero-cursor-invalid",
+        FixtureKind::Invalid,
+        "EventAckNotification",
+        "Acknowledged sequences start at one.",
+        serde_json::json!({
+            "ack": {
+                "stream": {"id": "stream-1", "generation": "3", "kind": "stream"},
+                "last_processed_sequence": "0"
+            }
+        }),
         Some("invalid_value"),
     ));
 }
@@ -745,6 +881,7 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
         serde_json::json!({
             "extension_protocol_version": 1,
             "contract_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "source_contract_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
             "features": ["mcp", "subagent"],
             "capabilities": [
                 {"capability": "runs", "required": true},
@@ -756,7 +893,11 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
                 "max_callback_concurrency": 8,
                 "callback_timeout": {"seconds": "30", "nanos": 0},
                 "max_replay_events": "512",
-                "max_structured_output_bytes": "262144"
+                "max_structured_output_bytes": "262144",
+                "max_outstanding_live_events": "256",
+                "max_stream_buffer_bytes": "4194304",
+                "max_replay_bytes": "4194304",
+                "max_open_handles": "512"
             }
         }),
         None,
@@ -769,6 +910,7 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
         serde_json::json!({
             "extension_protocol_version": 1,
             "contract_digest": "sha256:0",
+            "source_contract_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
             "features": ["subagent", "mcp"],
             "capabilities": [{"capability": "runs", "required": true}],
             "limits": {
@@ -777,10 +919,194 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
                 "max_callback_concurrency": 1,
                 "callback_timeout": {"seconds": "0", "nanos": 1},
                 "max_replay_events": "1",
-                "max_structured_output_bytes": "1"
+                "max_structured_output_bytes": "1",
+                "max_outstanding_live_events": "1",
+                "max_stream_buffer_bytes": "1",
+                "max_replay_bytes": "1",
+                "max_open_handles": "1"
             }
         }),
         Some("invalid_value"),
+    ));
+}
+
+fn push_hello_fixtures(fixtures: &mut Vec<Fixture>) {
+    fixtures.push(fixture(
+        "hello-client-valid",
+        FixtureKind::Valid,
+        "EchoAgentClientHello",
+        "clientCapabilities._meta payload requesting Extended mode.",
+        serde_json::json!({
+            "extension_protocol_version": 1,
+            "contract_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "source_contract_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "required_features": ["mcp"],
+            "required_capabilities": ["runs"]
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "hello-duplicate-capability-invalid",
+        FixtureKind::Invalid,
+        "EchoAgentClientHello",
+        "Required capabilities must be unique.",
+        serde_json::json!({
+            "extension_protocol_version": 1,
+            "contract_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "source_contract_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "required_features": [],
+            "required_capabilities": ["runs", "runs"]
+        }),
+        Some("invalid_value"),
+    ));
+}
+
+fn push_agent_config_fixtures(fixtures: &mut Vec<Fixture>) {
+    fixtures.push(fixture(
+        "agent-config-host-default-valid",
+        FixtureKind::Valid,
+        "AgentCreateRequest",
+        "Bind the Host default definition; no credential crosses the wire.",
+        serde_json::json!({
+            "config": {"variant": "host_default"}
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "agent-config-explicit-env-credential-valid",
+        FixtureKind::Valid,
+        "AgentCreateRequest",
+        "Explicit construction with environment credential sourcing.",
+        serde_json::json!({
+            "config": {
+                "variant": "explicit",
+                "config_version": 1,
+                "model": {
+                    "provider": "openai",
+                    "name": "g-test",
+                    "base_url": "https://api.example.com/v1/chat/completions",
+                    "api_protocol": "chat_completions",
+                    "credential": {"source": "env", "variable": "ECHO_MODEL_TOKEN"}
+                },
+                "agent": {
+                    "name": "worker",
+                    "system_prompt": "Do the task.",
+                    "max_iterations": 8
+                }
+            },
+            "idempotency_id": "cli-agent-1"
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "agent-config-unsupported-knob-invalid",
+        FixtureKind::Invalid,
+        "AgentCreateRequest",
+        "Unsupported builder knobs fail closed via deny_unknown_fields.",
+        serde_json::json!({
+            "config": {
+                "variant": "explicit",
+                "config_version": 1,
+                "model": {
+                    "provider": "openai",
+                    "name": "g-test",
+                    "base_url": "https://api.example.com/v1/chat/completions",
+                    "api_protocol": "chat_completions"
+                },
+                "agent": {
+                    "name": "worker",
+                    "system_prompt": "Do the task.",
+                    "max_iterations": 8,
+                    "enable_memory": true
+                }
+            }
+        }),
+        Some("invalid_value"),
+    ));
+}
+
+fn push_run_fixtures(fixtures: &mut Vec<Fixture>) {
+    fixtures.push(fixture(
+        "run-input-chat-valid",
+        FixtureKind::Valid,
+        "RunInput",
+        "Chat runs carry exactly one typed text message.",
+        serde_json::json!({"kind": "chat", "text": "Summarize the report."}),
+        None,
+    ));
+    fixtures.push(fixture(
+        "run-input-execute-valid",
+        FixtureKind::Valid,
+        "RunInput",
+        "Execute runs carry the task directive.",
+        serde_json::json!({"kind": "execute", "task": "run the benchmark"}),
+        None,
+    ));
+    fixtures.push(fixture(
+        "run-input-empty-text-invalid",
+        FixtureKind::Invalid,
+        "RunInput",
+        "Empty turn input cannot start a run.",
+        serde_json::json!({"kind": "chat", "text": ""}),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "run-terminal-completed-valid",
+        FixtureKind::Valid,
+        "RunTerminal",
+        "A completed terminal carries the optional final answer.",
+        serde_json::json!({"status": "completed", "final_answer": "done"}),
+        None,
+    ));
+    fixtures.push(fixture(
+        "run-terminal-failed-valid",
+        FixtureKind::Valid,
+        "RunTerminal",
+        "A failed terminal carries the lossless framework failure.",
+        serde_json::json!({
+            "status": "failed",
+            "failure": {
+                "category": "llm",
+                "terminal_kind": "failed",
+                "retryable": true,
+                "code": "llm_network",
+                "http_status": 503,
+                "message": "connection reset by peer"
+            }
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "run-receipt-completed-valid",
+        FixtureKind::Valid,
+        "RunReceiptWire",
+        "Receipt counters use lossless integer strings.",
+        serde_json::json!({
+            "turn_id": "run-7",
+            "outcome": "completed",
+            "final_answer": "done",
+            "final_message_id": "msg-7",
+            "prompt_tokens": "120",
+            "completion_tokens": "48",
+            "llm_calls": "2",
+            "compaction_count": "0",
+            "last_event_sequence": "14",
+            "elapsed_ms": "1834"
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "run-recovered-interrupted-valid",
+        FixtureKind::Valid,
+        "RecoveredRunWire",
+        "Interrupted runs expose fresh-generation handles without terminal.",
+        serde_json::json!({
+            "run": {"id": "run-9", "generation": "4", "kind": "run"},
+            "stream": {"id": "stream-9", "generation": "4", "kind": "stream"},
+            "status": "interrupted",
+            "last_sequence": "21"
+        }),
+        None,
     ));
 }
 
@@ -854,7 +1180,14 @@ mod tests {
             "ReplayRequest",
             "ReplayResponse",
             "GapNotification",
+            "EventAckNotification",
             "EchoAgentCapability",
+            "EchoAgentClientHello",
+            "AgentCreateRequest",
+            "RunInput",
+            "RunTerminal",
+            "RunReceiptWire",
+            "RecoveredRunWire",
             "ExtensionInvokeOutcome",
             "ExtensionStreamEvent",
             "MethodCatalog",

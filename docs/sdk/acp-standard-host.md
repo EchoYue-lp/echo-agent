@@ -33,13 +33,14 @@ Adjust the endpoint and model name for the provider running on your machine.
 
 ## Configuration schema v1
 
-The JSON document is limited to 1 MiB and has three top-level fields:
+The JSON document is limited to 1 MiB and has these top-level fields:
 
 | Field | Meaning |
 |---|---|
 | `schema_version` | Required; must be `1`. |
 | `default_agent` | Required `FrameworkConfig` containing `model` and `agent`. |
 | `api_key_env` | Optional environment variable name read by the Host process. |
+| `sdk_profile` | Optional core-profile section (`state_root` + `limits`); Hosts built without the `sdk-core-profile` feature reject it. |
 
 `default_agent.model.provider`, `name`, `base_url` and `api_protocol` are
 required. `default_agent.agent.name` and `system_prompt` must be non-empty,
@@ -73,12 +74,25 @@ transport. Logs and bounded startup failures use stderr. Stdin EOF triggers the
 official transport close, cancellation of active Turns and the adapter's
 bounded concurrent Agent cleanup.
 
+## Core profile (optional)
+
+With `sdk_profile` configured and the feature enabled
+(`cargo build -p echo-sdk-host --features sdk-core-profile`), the same
+executable negotiates the [`_echo_agent/*` core profile](sdk-core-profile.md)
+over a bounded stdin transport: explicit absolute `state_root`, generation
+counters, run journals and the run index all live under that root. Without
+the section the Host is standard-only and never advertises the extension.
+See [`config.sdk.example.json`](../../echo-sdk-host/config.sdk.example.json)
+for a complete tested example.
+
 ## Current status
 
 The real subprocess suite launches this source-built binary through the
 official ACP Rust Client and covers success, updates, cancellation, clean EOF,
 invalid configuration, protocol-only stdout and credential non-disclosure.
 This evidence supports **ACP conformant** for the documented standard profile.
-It does not provide `_echo_agent/*` runtime handlers or TypeScript, Python or
-Java clients, so **Runnable**, **Parity complete** and **Published** remain
+The core-profile suite additionally covers valid-hello lifecycle, the
+fail-closed matrix, restart recovery, crash interruption and the stdin frame
+limiter for the negotiated profile. TypeScript, Python and Java clients do
+not exist yet, so **Runnable**, **Parity complete** and **Published** remain
 unreached.

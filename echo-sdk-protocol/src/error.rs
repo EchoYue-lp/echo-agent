@@ -171,6 +171,18 @@ impl EchoSdkError {
         }
     }
 
+    /// Attach the domain operation identity (e.g. `run/start`).
+    pub fn with_operation(mut self, operation: impl Into<String>) -> Self {
+        self.operation = Some(operation.into());
+        self
+    }
+
+    /// Attach the handle the error refers to.
+    pub fn with_handle(mut self, handle: WireHandle) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+
     /// Validate the bounded shape before emission/parsing.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.message.chars().count() > MAX_ERROR_MESSAGE_CHARS {
@@ -223,6 +235,140 @@ impl EchoSdkError {
             handle.validate()?;
         }
         Ok(())
+    }
+}
+
+/// The single fixed JSON-RPC server-error code used by every semantic
+/// `_echo_agent/*` failure (design §10.6). It sits in the JSON-RPC reserved
+/// server-error range (-32000..-32099) so it can never collide with the
+/// standard ACP codes the official runtime returns (-32700..-32603,
+/// -32800, -32002). `error.data` carries the bounded [`EchoSdkError`];
+/// malformed typed params and unknown methods keep returning the standard
+/// parse/invalid-params/method-not-found errors instead.
+pub const EXTENSION_ERROR_CODE: i32 = -32050;
+
+/// Maximum serialized bytes accepted inside `error.data`; larger encodings
+/// fail closed as `serialization_violation` instead of leaking unbounded
+/// payloads.
+pub const MAX_ERROR_DATA_BYTES: usize = 8192;
+
+impl EchoSdkError {
+    /// Encode this typed error as the extension JSON-RPC error response
+    /// value: fixed [`EXTENSION_ERROR_CODE`], bounded message, and
+    /// `data` = the bounds-validated `EchoSdkError`. Violating shapes never
+    /// reach the wire: they are replaced by a bounded
+    /// `serialization_violation` error so callers cannot accidentally emit
+    /// unvalidated payloads.
+    pub fn into_jsonrpc_error(self) -> agent_client_protocol::Error {
+        if let Err(reason) = self.validate() {
+            let fallback = EchoSdkError::new(
+                ExtensionErrorCode::SerializationViolation,
+                format!("bounded error encoding rejected the payload: {reason}"),
+                Retryability::Never,
+            );
+            return fallback.encode_bounded();
+        }
+        self.encode_bounded()
+    }
+
+    /// Decode a typed error from an extension JSON-RPC error `data` value.
+    /// Fails closed when the payload is missing, malformed, or out of
+    /// bounds — callers must not fabricate defaults for protocol errors.
+    pub fn from_jsonrpc_data(data: Option<&serde_json::Value>) -> Result<Self, String> {
+        let data = data.ok_or_else(|| "extension error is missing error.data".to_string())?;
+        let serialized = serde_json::to_vec(data)
+            .map_err(|error| format!("extension error data is not JSON: {error}"))?;
+        if serialized.len() > MAX_ERROR_DATA_BYTES {
+            return Err("extension error data exceeds the byte bound".to_string());
+        }
+        let error: Self = serde_json::from_value(data.clone())
+            .map_err(|error| format!("malformed echo-agent error data: {error}"))?;
+        error
+            .validate()
+            .map_err(|reason| format!("invalid echo-agent error data: {reason}"))?;
+        Ok(error)
+    }
+
+    fn encode_bounded(self) -> agent_client_protocol::Error {
+        let mut error =
+            agent_client_protocol::Error::new(EXTENSION_ERROR_CODE, bounded_message(&self.message));
+        let data = match serde_json::to_value(&self) {
+            Ok(data) => match serde_json::to_vec(&data) {
+                Ok(bytes) if bytes.len() <= MAX_ERROR_DATA_BYTES => data,
+                _ => serde_json::json!({
+                    "code": ExtensionErrorCode::SerializationViolation,
+                    "message": "typed error data exceeded the byte bound",
+                    "retryable": Retryability::Never,
+                }),
+            },
+            Err(_) => serde_json::json!({
+                "code": ExtensionErrorCode::SerializationViolation,
+                "message": "typed error data was not serializable",
+                "retryable": Retryability::Never,
+            }),
+        };
+        error = error.data(data);
+        error
+    }
+}
+
+fn bounded_message(message: &str) -> String {
+    message.chars().take(MAX_ERROR_MESSAGE_CHARS).collect()
+}
+
+/// Maximum characters accepted in one framework failure message projected
+/// on the wire; longer framework messages are truncated UTF-8 safely.
+pub const MAX_FAILURE_MESSAGE_CHARS: usize = 4096;
+
+/// Lossless wire projection of the framework failure contract
+/// (`echo_core::error::AgentFailure`). Categories and terminal kinds are
+/// serialized as their framework snake_case names so a later framework
+/// variant remains observable instead of collapsing into a generic code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentFailureWire {
+    #[schemars(length(min = 1, max = 64))]
+    pub category: String,
+    #[schemars(length(min = 1, max = 64))]
+    pub terminal_kind: String,
+    pub retryable: bool,
+    #[schemars(length(min = 1, max = 128))]
+    pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[schemars(length(min = 1, max = 4096))]
+    pub message: String,
+}
+
+impl AgentFailureWire {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.message.chars().count() > MAX_FAILURE_MESSAGE_CHARS {
+            return Err("failure message exceeds the character bound");
+        }
+        Ok(())
+    }
+}
+
+impl From<&echo_core::error::AgentFailure> for AgentFailureWire {
+    fn from(failure: &echo_core::error::AgentFailure) -> Self {
+        fn serde_name(value: &impl serde::Serialize) -> String {
+            serde_json::to_value(value)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default()
+        }
+        Self {
+            category: serde_name(&failure.category),
+            terminal_kind: serde_name(&failure.terminal_kind),
+            retryable: failure.retryable,
+            code: failure.code.chars().take(128).collect(),
+            http_status: failure.http_status,
+            message: failure
+                .message
+                .chars()
+                .take(MAX_FAILURE_MESSAGE_CHARS)
+                .collect(),
+        }
     }
 }
 
@@ -288,5 +434,55 @@ mod tests {
         assert_eq!(back.code.as_str(), "stale_handle");
         assert!(back.handle.is_some());
         assert!(back.validate().is_ok());
+    }
+
+    #[test]
+    fn jsonrpc_error_codec_round_trips_and_fails_closed() {
+        let error = EchoSdkError::new(
+            ExtensionErrorCode::ClosedHandle,
+            "session was closed",
+            Retryability::Never,
+        )
+        .with_operation("run/start");
+        let rpc = error.clone().into_jsonrpc_error();
+        assert_eq!(
+            rpc.code,
+            agent_client_protocol::ErrorCode::Other(EXTENSION_ERROR_CODE)
+        );
+        let decoded =
+            EchoSdkError::from_jsonrpc_data(rpc.data.as_ref()).unwrap_or_else(|message| {
+                EchoSdkError::new(
+                    ExtensionErrorCode::SerializationViolation,
+                    message,
+                    Retryability::Never,
+                )
+            });
+        assert_eq!(decoded, error);
+
+        // Missing / malformed / out-of-bounds data must fail closed.
+        assert!(EchoSdkError::from_jsonrpc_data(None).is_err());
+        assert!(
+            EchoSdkError::from_jsonrpc_data(Some(&serde_json::Value::Null)).is_err(),
+            "null data is not a typed error"
+        );
+        let mut oversized =
+            EchoSdkError::new(ExtensionErrorCode::InvalidValue, "x", Retryability::Never);
+        let mut fields = Vec::new();
+        for index in 0..20 {
+            fields.push(DetailField {
+                key: format!("key-{index}"),
+                value: "v".to_string(),
+            });
+        }
+        oversized.details = Some(ErrorDetails {
+            fields: Some(fields),
+        });
+        assert!(oversized.validate().is_err());
+        // Unbounded payloads are replaced by the bounded fallback, never forwarded.
+        let rpc = oversized.into_jsonrpc_error();
+        let decoded = EchoSdkError::from_jsonrpc_data(rpc.data.as_ref());
+        assert!(
+            decoded.is_ok_and(|decoded| decoded.code == ExtensionErrorCode::SerializationViolation)
+        );
     }
 }

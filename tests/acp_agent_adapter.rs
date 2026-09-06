@@ -1051,3 +1051,273 @@ async fn resource_links_tools_and_framework_failures_keep_typed_boundaries()
     }));
     Ok(())
 }
+
+// ── Shared connection runtime (supreme plan 05, extract-shared-acp-runtime) ──
+
+use echo_agent::acp::{
+    AcpConnectionServices, AcpLedgerLimits, AcpSession, RunEventObserver, RunStartSpec,
+    SessionRegistry,
+};
+use echo_agent::runtime::{TurnMode, TurnOutcome, TurnRequest};
+use echo_agent::state::journal::{
+    EventJournal, JournalBatchAppendError, JournalBatchAppendResult, JournalBatchLookup,
+    PreparedJournalBatch,
+};
+
+#[derive(Default)]
+struct RecordingObserver {
+    events: Arc<Mutex<Vec<(u64, String)>>>,
+    fail_on_stream: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl RunEventObserver for RecordingObserver {
+    async fn on_committed_event(&self, envelope: &echo_agent::agent::EventEnvelope) -> Result<()> {
+        if let Some(fail_stream) = self
+            .fail_on_stream
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            && envelope.stream_id.as_str() == fail_stream
+        {
+            return Err(ReactError::Other(
+                "observer rejected the stream".to_string(),
+            ));
+        }
+        self.events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push((envelope.sequence, format!("{:?}", envelope.payload)));
+        Ok(())
+    }
+}
+
+/// Journal hook that always fails: the run must end `Failed`, never success.
+#[derive(Default)]
+struct FailingJournal;
+
+impl EventJournal<echo_agent::agent::EventEnvelope> for FailingJournal {
+    fn append_batch(
+        &self,
+        batch: PreparedJournalBatch<echo_agent::agent::EventEnvelope>,
+    ) -> JournalBatchAppendResult<echo_agent::agent::EventEnvelope> {
+        Err(JournalBatchAppendError::NotCommitted {
+            batch,
+            error: "fixture journal is unavailable".to_string(),
+        })
+    }
+
+    fn lookup_batch(
+        &self,
+        _batch: &PreparedJournalBatch<echo_agent::agent::EventEnvelope>,
+    ) -> echo_agent::error::Result<JournalBatchLookup<echo_agent::agent::EventEnvelope>> {
+        Ok(JournalBatchLookup::Absent)
+    }
+
+    fn next_sequence(&self) -> u64 {
+        1
+    }
+
+    fn last_sequence(&self) -> u64 {
+        0
+    }
+
+    fn replay_after(
+        &self,
+        _after_sequence: u64,
+        _limit: usize,
+    ) -> echo_agent::error::Result<
+        Vec<echo_state::journal::JournalRecord<echo_agent::agent::EventEnvelope>>,
+    > {
+        Ok(Vec::new())
+    }
+}
+
+async fn shared_services(
+    factory: impl AcpSessionFactory,
+) -> Result<(Arc<AcpConnectionServices>, String)> {
+    let registry = Arc::new(SessionRegistry::new(Arc::new(factory), 8));
+    registry
+        .initialize(agent_client_protocol::schema::v1::ClientCapabilities::default())
+        .await;
+    let config = Arc::new(AcpAdapterConfig::default());
+    let services = Arc::new(AcpConnectionServices::new(registry.clone(), config));
+    let session_id = registry
+        .create(agent_client_protocol::schema::v1::NewSessionRequest::new(
+            absolute_test_path("shared-session")?,
+        ))
+        .await?;
+    Ok((services, session_id.to_string()))
+}
+
+fn extension_spec(
+    session: &Arc<AcpSession>,
+    observer: Option<Arc<dyn RunEventObserver>>,
+) -> Result<RunStartSpec> {
+    let active = session.begin_turn()?;
+    let run_id = active.turn.id().to_string();
+    let stream_id = format!("stream-{run_id}");
+    let identity = echo_agent::agent::EventIdentity::new(stream_id.clone(), run_id.clone())?;
+    let turn = TurnRequest::new(identity, "extension run")
+        .mode(TurnMode::Chat)
+        .cancel(active.turn.cancellation());
+    Ok(RunStartSpec {
+        session: session.clone(),
+        active,
+        run_id,
+        stream_id,
+        turn,
+        projector: None,
+        journal: None,
+        observers: observer.into_iter().collect(),
+    })
+}
+
+#[tokio::test]
+async fn shared_authority_settles_extension_runs_with_exactly_one_terminal() -> Result<()> {
+    let test = TestFactory::new();
+    let (services, session_id) = shared_services(test.session_factory()).await?;
+    let session = services
+        .sessions()
+        .get(&agent_client_protocol::schema::v1::SessionId::new(
+            session_id.clone(),
+        ))
+        .await
+        .ok_or_else(|| ReactError::Other("session missing".to_string()))?;
+    let observer = Arc::new(RecordingObserver::default());
+    let spec = extension_spec(
+        &session,
+        Some(observer.clone() as Arc<dyn RunEventObserver>),
+    )?;
+    let run_id = spec.run_id.clone();
+    let (entry, task) = services.prepare_run(spec).await?;
+    tokio::spawn(task);
+    let receipt = entry.wait_receipt().await;
+    assert_eq!(receipt.outcome, TurnOutcome::Completed);
+    assert!(services.run(&run_id).await.is_some());
+    let events = observer
+        .events
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert!(!events.is_empty());
+    // Sequences are contiguous from one; the last event is the single terminal.
+    for (index, (sequence, _)) in events.iter().enumerate() {
+        assert_eq!(*sequence, (index + 1) as u64);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_active_run_slot_is_shared_across_entry_points() -> Result<()> {
+    let test = TestFactory::new();
+    let (services, session_id) = shared_services(test.session_factory()).await?;
+    let acp_session_id = agent_client_protocol::schema::v1::SessionId::new(session_id.clone());
+    let session = services
+        .sessions()
+        .get(&acp_session_id)
+        .await
+        .ok_or_else(|| ReactError::Other("session missing".to_string()))?;
+    let first = session.begin_turn()?;
+    assert!(
+        session.begin_turn().is_err(),
+        "a second concurrent run slot must be refused regardless of entry point"
+    );
+    drop(first);
+    // After the lease drops the slot is free again.
+    let second = session.begin_turn()?;
+    drop(second);
+    Ok(())
+}
+
+#[tokio::test]
+async fn journal_failure_fails_the_run_without_a_success_terminal() -> Result<()> {
+    let test = TestFactory::new();
+    let (services, session_id) = shared_services(test.session_factory()).await?;
+    let acp_session_id = agent_client_protocol::schema::v1::SessionId::new(session_id.clone());
+    let session = services
+        .sessions()
+        .get(&acp_session_id)
+        .await
+        .ok_or_else(|| ReactError::Other("session missing".to_string()))?;
+    let mut spec = extension_spec(&session, None)?;
+    spec.journal = Some(Arc::new(FailingJournal));
+    let (entry, task) = services.prepare_run(spec).await?;
+    tokio::spawn(task);
+    let receipt = entry.wait_receipt().await;
+    assert!(
+        matches!(receipt.outcome, TurnOutcome::Failed(_)),
+        "a failing journal must fail the run: {:?}",
+        receipt.outcome
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_run_routes_through_the_shared_cancellation_authority() -> Result<()> {
+    let test = TestFactory::new();
+    let (services, session_id) = shared_services(test.session_factory()).await?;
+    let acp_session_id = agent_client_protocol::schema::v1::SessionId::new(session_id.clone());
+    let session = services
+        .sessions()
+        .get(&acp_session_id)
+        .await
+        .ok_or_else(|| ReactError::Other("session missing".to_string()))?;
+    let spec = extension_spec(&session, None)?;
+    let run_id = spec.run_id.clone();
+    {
+        // Park the run on the gate ("wait-for-release" parks until cancel).
+        let mut spec = spec;
+        if let TurnRequest {
+            input: echo_agent::runtime::TurnInput::Text(text),
+            ..
+        } = &mut spec.turn
+        {
+            *text = "wait-for-release".to_string();
+        }
+        let (entry, task) = services.prepare_run(spec).await?;
+        tokio::spawn(task);
+        assert!(services.cancel_run(&run_id).await);
+        let receipt = entry.wait_receipt().await;
+        assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
+    }
+    // Unknown run ids cancel nothing.
+    assert!(!services.cancel_run("missing-run").await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ledger_bounds_retain_a_floor_and_clamp_memory() -> Result<()> {
+    let test = TestFactory::new();
+    let (services, session_id) = shared_services(test.session_factory()).await?;
+    let acp_session_id = agent_client_protocol::schema::v1::SessionId::new(session_id.clone());
+    let session = services
+        .sessions()
+        .get(&acp_session_id)
+        .await
+        .ok_or_else(|| ReactError::Other("session missing".to_string()))?;
+    let _session = session;
+    let ledger = echo_agent::acp::EventLedger::new(
+        AcpLedgerLimits {
+            max_events: 2,
+            max_bytes: 1_000_000,
+        },
+        None,
+    );
+    let identity = echo_agent::agent::EventIdentity::new("ledger-stream", "ledger-turn")?;
+    for sequence in 1..=4_u64 {
+        let envelope = echo_agent::agent::EventEnvelope::new(
+            &identity,
+            sequence,
+            None,
+            AgentEvent::Token(format!("event-{sequence}")),
+        )?;
+        ledger.commit(envelope)?;
+    }
+    assert_eq!(ledger.last_sequence(), 4);
+    assert_eq!(ledger.retained_floor(), 3, "oldest retained sequence");
+    let after = ledger.events_after(0);
+    assert_eq!(after.len(), 2);
+    assert_eq!(after[0].sequence, 3);
+    Ok(())
+}

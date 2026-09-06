@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "default_agent": {
+    "model": {
+      "provider": "local",
+      "name": "test-model",
+      "base_url": "http://127.0.0.1:11434/v1/chat/completions",
+      "api_protocol": "chat_completions"
+    },
+    "agent": {
+      "name": "echo-agent",
+      "system_prompt": "Answer the user directly.",
+      "max_iterations": 16,
+      "enable_tools": true
+    }
+  },
+  "sdk_profile": {
+    "state_root": "/tmp/echo-agent-sdk-host-state",
+    "limits": {
+      "max_frame_bytes": 1048576,
+      "max_event_bytes": 1048576,
+      "max_outstanding_live_events": 128,
+      "max_replay_events": 512,
+      "max_replay_bytes": 8388608,
+      "max_open_handles": 512,
+      "shutdown_timeout_secs": 5
+    }
+  }
+}

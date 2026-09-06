@@ -1,0 +1,11 @@
+{
+  "name": "agent-config-host-default-valid",
+  "kind": "valid",
+  "target": "AgentCreateRequest",
+  "description": "Bind the Host default definition; no credential crosses the wire.",
+  "payload": {
+    "config": {
+      "variant": "host_default"
+    }
+  }
+}

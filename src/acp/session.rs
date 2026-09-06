@@ -7,6 +7,7 @@ use futures::future::BoxFuture;
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use tokio::sync::{Mutex, Notify, RwLock};
 
@@ -60,15 +61,31 @@ where
     }
 }
 
+/// Cancellation authority of one in-flight execution on a Session.
 #[derive(Clone)]
-pub(crate) struct ActiveTurn {
-    pub id: String,
-    pub message_id: String,
-    pub cancel: CancellationToken,
+pub struct ActiveTurn {
+    pub(crate) id: String,
+    pub(crate) message_id: String,
+    pub(crate) cancel: CancellationToken,
 }
 
-pub(crate) struct ActiveTurnLease {
-    session: Weak<AcpSession>,
+impl ActiveTurn {
+    /// Stable run identity of the active execution (`<session>:turn:<n>`).
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Cancellation token shared with the framework driver.
+    pub fn cancellation(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+}
+
+/// Exclusive lease on a Session's single active run slot. Dropping the lease
+/// releases the slot; standard Prompts and extension Runs hold exactly one
+/// lease for the lifetime of their driver.
+pub struct ActiveTurnLease {
+    pub(crate) session: Weak<AcpSession>,
     pub turn: ActiveTurn,
 }
 
@@ -97,11 +114,15 @@ struct TurnSlot {
     active: Option<ActiveTurn>,
 }
 
-pub(crate) struct AcpSession {
+/// One ACP Session: an independent framework Agent plus the Session-scoped
+/// run slot. Shared by the standard profile and negotiated extension
+/// profiles — there is deliberately no second Session map.
+pub struct AcpSession {
     pub context: AcpSessionContext,
     pub agent: Arc<dyn Agent>,
     turn: StdMutex<TurnSlot>,
     turn_settled: Notify,
+    closed: AtomicBool,
 }
 
 impl AcpSession {
@@ -114,11 +135,15 @@ impl AcpSession {
                 active: None,
             }),
             turn_settled: Notify::new(),
+            closed: AtomicBool::new(false),
         }
     }
 
     pub fn begin_turn(self: &Arc<Self>) -> Result<ActiveTurnLease> {
         let mut slot = self.turn.lock().unwrap_or_else(|error| error.into_inner());
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ReactError::Other("ACP Session is closed".to_string()));
+        }
         if slot.active.is_some() {
             return Err(ReactError::Other(
                 "ACP Session already has an active Prompt Turn".to_string(),
@@ -158,7 +183,12 @@ impl AcpSession {
         }
     }
 
-    async fn wait_until_idle(&self) {
+    fn mark_closed(&self) {
+        let _slot = self.turn.lock().unwrap_or_else(|error| error.into_inner());
+        self.closed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_idle(&self) {
         loop {
             let notified = self.turn_settled.notified();
             if self
@@ -175,7 +205,7 @@ impl AcpSession {
     }
 }
 
-pub(crate) struct SessionRegistry {
+pub struct SessionRegistry {
     factory: Arc<dyn AcpSessionFactory>,
     max_sessions: usize,
     creation_gate: Mutex<()>,
@@ -200,6 +230,31 @@ impl SessionRegistry {
 
     pub async fn create(&self, request: NewSessionRequest) -> Result<SessionId> {
         validate_session_paths(&request)?;
+        let context = AcpSessionContext {
+            session_id: SessionId::new(format!("sess_{}", uuid::Uuid::new_v4())),
+            cwd: request.cwd,
+            additional_directories: request.additional_directories,
+            mcp_servers: request.mcp_servers,
+            client_capabilities: self.capabilities().await?,
+            meta: request.meta,
+        };
+        self.insert_session(context).await
+    }
+
+    /// Client capability snapshot captured during `initialize`.
+    pub async fn capabilities(&self) -> Result<ClientCapabilities> {
+        self.client_capabilities
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| ReactError::Other("ACP connection is not initialized".to_string()))
+    }
+
+    /// Insert a fully described Session, creating its independent Agent
+    /// through the connection's single factory. Standard `session/new` and
+    /// extension profile create/load both funnel through here so the
+    /// Session limit and per-Session Agent ownership stay authoritative.
+    pub async fn insert_session(&self, context: AcpSessionContext) -> Result<SessionId> {
         let _creation = self.creation_gate.lock().await;
         if self.sessions.read().await.len() >= self.max_sessions {
             return Err(ReactError::Other(format!(
@@ -207,26 +262,18 @@ impl SessionRegistry {
                 self.max_sessions
             )));
         }
-        let capabilities = self
-            .client_capabilities
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| ReactError::Other("ACP connection is not initialized".to_string()))?;
-        let session_id = SessionId::new(format!("sess_{}", uuid::Uuid::new_v4()));
-        let context = AcpSessionContext {
-            session_id: session_id.clone(),
-            cwd: request.cwd,
-            additional_directories: request.additional_directories,
-            mcp_servers: request.mcp_servers,
-            client_capabilities: capabilities,
-            meta: request.meta,
-        };
+        if self.sessions.read().await.contains_key(&context.session_id) {
+            return Err(ReactError::Other(format!(
+                "ACP Session {} is already registered",
+                context.session_id
+            )));
+        }
         let agent = self.factory.create_session(context.clone()).await?;
         // ACP Sessions own distinct Agents, so binding the Session cwd as the
         // Agent default cannot leak across conversations. This also keeps the
         // adapter compatible with text-only Agent implementations.
         agent.set_working_dir(Some(context.cwd.clone()));
+        let session_id = context.session_id.clone();
         self.sessions.write().await.insert(
             session_id.clone(),
             Arc::new(AcpSession::new(context, agent)),
@@ -236,6 +283,23 @@ impl SessionRegistry {
 
     pub async fn get(&self, session_id: &SessionId) -> Option<Arc<AcpSession>> {
         self.sessions.read().await.get(session_id).cloned()
+    }
+
+    /// Close one Session explicitly: cancel its active run, wait for the
+    /// framework receipt, close the Session Agent, and remove it from the
+    /// registry. Returns false when the Session is unknown.
+    pub async fn close_session(&self, session_id: &SessionId) -> Result<bool> {
+        let _creation = self.creation_gate.lock().await;
+        let session = self.sessions.read().await.get(session_id).cloned();
+        let Some(session) = session else {
+            return Ok(false);
+        };
+        session.mark_closed();
+        session.cancel_active();
+        session.wait_until_idle().await;
+        session.agent.close().await?;
+        self.sessions.write().await.remove(session_id);
+        Ok(true)
     }
 
     pub async fn cancel(&self, session_id: &SessionId) -> bool {
@@ -248,6 +312,7 @@ impl SessionRegistry {
     }
 
     pub async fn close_all(&self) -> Result<()> {
+        let _creation = self.creation_gate.lock().await;
         let sessions = {
             let mut guard = self.sessions.write().await;
             guard
@@ -256,6 +321,7 @@ impl SessionRegistry {
                 .collect::<Vec<_>>()
         };
         for session in &sessions {
+            session.mark_closed();
             session.cancel_active();
         }
         let results = join_all(sessions.into_iter().map(|session| async move {

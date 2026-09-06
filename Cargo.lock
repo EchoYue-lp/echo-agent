@@ -1348,13 +1348,21 @@ name = "echo-sdk-host"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "async-trait",
+ "base64",
+ "echo-sdk-protocol",
  "echo_agent",
+ "futures",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "static_assertions",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -6289,6 +6297,7 @@ checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "futures-util",
  "libc",
