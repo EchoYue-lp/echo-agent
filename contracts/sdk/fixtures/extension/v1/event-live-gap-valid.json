@@ -2,9 +2,13 @@
   "name": "event-live-gap-valid",
   "kind": "valid",
   "target": "GapNotification",
-  "description": "A live gap is explicitly associated with one stream.",
+  "description": "A live gap is explicitly associated with one stream handle.",
   "payload": {
-    "stream_id": "stream-1",
+    "stream": {
+      "id": "stream-1",
+      "generation": "3",
+      "kind": "stream"
+    },
     "gap": {
       "from_sequence": "5",
       "to_sequence": "9",

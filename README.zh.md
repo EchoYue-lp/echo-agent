@@ -811,12 +811,15 @@ agent.set_circuit_breaker(cb_config);
 ### SDK 入口
 
 可从源码构建的 `echo-agent-sdk-host` 已通过官方 Client 与 stdio runtime 的标准
-ACP v1 支持面验证。它复用根 crate 的 `AcpAgentAdapter`，每个 Session 创建一个
+ACP v1 支持面验证；在 `sdk-core-profile` feature 与显式 state root 下，还支持协商式
+`_echo_agent/*` 核心扩展 Profile（Agent/Session/Run handle、完整事件与 ACK/replay、
+重启恢复）。它复用根 crate 的 `AcpAgentAdapter`，每个 Session 创建一个
 独立框架 Agent，并只接受显式、产品无关的 JSON 配置。开发者用
-`cargo build -p echo-sdk-host --bin echo-agent-sdk-host --locked` 自行构建；仓库不
+`cargo build -p echo-sdk-host --features sdk-core-profile --locked` 自行构建；仓库不
 携带 binary 或任何语言 runtime。TypeScript/Python/Java 扩展 Client 尚未实现，
 因此还不能宣称 **Runnable** 或完整 facade 对等。唯一 SDK 入口是
-[docs/sdk/README.md](docs/sdk/README.md)。
+[docs/sdk/README.md](docs/sdk/README.md)，核心 Profile 参考见
+[docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md)。
 
 ---
 

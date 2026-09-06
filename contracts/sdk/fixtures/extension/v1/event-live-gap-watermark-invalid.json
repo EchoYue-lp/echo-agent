@@ -4,7 +4,11 @@
   "target": "GapNotification",
   "description": "A recovery snapshot cannot precede the missing range.",
   "payload": {
-    "stream_id": "stream-1",
+    "stream": {
+      "id": "stream-1",
+      "generation": "3",
+      "kind": "stream"
+    },
     "gap": {
       "from_sequence": "5",
       "to_sequence": "9",

@@ -260,3 +260,40 @@ SDK execution, Runnable and parity-complete status remain unclaimed.
   callback responses.
 - Compile and execute ACP and language quickstarts from a clean source checkout
   without project-published or downloaded prebuilt artifacts.
+
+## Post-decision record: core profile runtime decisions (supreme plan 05)
+
+When the negotiated `_echo_agent/*` core profile was implemented, the
+following runtime and recovery decisions were made and verified with
+real-process E2E (`echo-sdk-host/tests/core_profile_e2e.rs`):
+
+- **One shared connection runtime.** The root adapter owns a single
+  protocol-neutral `AcpConnectionServices` (Session registry, Run authority,
+  ledger-first event path). Standard `session/prompt` and extension
+  `run/start` both enter `start_run`, so a Session has exactly one active
+  run slot and both entries share run ids, cancellation tokens and
+  terminals. Extension handlers merge onto the official dispatch loop via
+  `Builder::with_connection_builder`; nothing is parsed twice.
+- **Ledger-first events.** Every accepted `EventEnvelope` is committed to a
+  bounded per-run ledger (durable journal hook first) before the standard
+  projection and the `_echo_agent/event` view are produced. Journal or
+  projection failure fails the run — a run never reports success over an
+  unverified journal.
+- **ACK-bounded live delivery.** Because the official outgoing queue is
+  unbounded, backpressure is enforced by the ACK window: at
+  `max_outstanding_live_events` the Host sends one gap notification and
+  pauses live delivery; Clients recover through bounded `run/replay` plus
+  `_echo_agent/event/ack`. Host memory stays bounded regardless of consumer
+  speed.
+- **Generation-fenced recovery.** Every Host start advances a persisted
+  generation under the explicit state root. Pre-restart handles answer
+  `stale_handle`; `session/load` mints fresh-generation handles and reports
+  history from the run index; runs active at crash time recover as
+  `interrupted` with no terminal or receipt, and `run/wait` answers typed
+  `host_exited`. Interrupted drivers are never revived; new runs continue
+  from the framework checkpoint only.
+- **Executable typed contract.** Core DTOs implement the official typed
+  JSON-RPC traits (derive-based) instead of the raw `_`-fallback, one fixed
+  server-error code (`-32050`) carries the bounded `EchoSdkError` in
+  `error.data`, and the Host embeds only the small generated
+  `source-contract.json` digest — never the large inventory artifacts.

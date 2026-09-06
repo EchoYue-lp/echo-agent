@@ -1,0 +1,10 @@
+{
+  "name": "run-input-chat-valid",
+  "kind": "valid",
+  "target": "RunInput",
+  "description": "Chat runs carry exactly one typed text message.",
+  "payload": {
+    "kind": "chat",
+    "text": "Summarize the report."
+  }
+}

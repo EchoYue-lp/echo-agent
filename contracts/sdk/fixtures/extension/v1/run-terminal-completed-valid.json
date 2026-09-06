@@ -1,0 +1,10 @@
+{
+  "name": "run-terminal-completed-valid",
+  "kind": "valid",
+  "target": "RunTerminal",
+  "description": "A completed terminal carries the optional final answer.",
+  "payload": {
+    "status": "completed",
+    "final_answer": "done"
+  }
+}

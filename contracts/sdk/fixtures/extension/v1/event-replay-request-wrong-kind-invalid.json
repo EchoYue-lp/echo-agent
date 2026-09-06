@@ -1,0 +1,15 @@
+{
+  "name": "event-replay-request-wrong-kind-invalid",
+  "kind": "invalid",
+  "target": "ReplayRequest",
+  "description": "Replay requires a stream handle; run handles are rejected by kind.",
+  "payload": {
+    "stream": {
+      "id": "run-1",
+      "generation": "3",
+      "kind": "run"
+    },
+    "after_sequence": "0"
+  },
+  "expect_error": "invalid_value"
+}

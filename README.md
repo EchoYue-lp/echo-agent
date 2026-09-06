@@ -1104,14 +1104,19 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 
 ### SDK corner
 
-The source-built `echo-agent-sdk-host` now passes the supported standard ACP v1
-profile through the official Client and stdio runtime. It uses the root
+The source-built `echo-agent-sdk-host` passes the supported standard ACP v1
+profile through the official Client and stdio runtime, and — with the
+`sdk-core-profile` feature and an explicit state root — the negotiated
+`_echo_agent/*` core extension profile (Agent/Session/Run handles, full
+events with ACK/replay, restart recovery). It uses the root
 `AcpAgentAdapter`, creates one framework Agent per Session, and accepts an
 explicit product-neutral JSON configuration. Build it with
-`cargo build -p echo-sdk-host --bin echo-agent-sdk-host --locked`; no binary or
-language runtime is bundled. The TypeScript/Python/Java extension clients are
-not implemented yet, so **Runnable** and full facade parity are not claimed.
-Start at [docs/sdk/README.md](docs/sdk/README.md), the only SDK entry point.
+`cargo build -p echo-sdk-host --features sdk-core-profile --locked`; no binary
+or language runtime is bundled. The TypeScript/Python/Java extension clients
+are not implemented yet, so **Runnable** and full facade parity are not
+claimed. Start at [docs/sdk/README.md](docs/sdk/README.md), the only SDK
+entry point; the core profile reference is
+[docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md).
 
 ---
 

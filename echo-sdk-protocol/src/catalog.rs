@@ -72,6 +72,7 @@ impl MethodDescriptor {
             "_echo_agent/run/steer" => "RunSteerRequest",
             "_echo_agent/run/replay" => "ReplayRequest",
             "_echo_agent/event" => "EventNotification",
+            "_echo_agent/event/ack" => "EventAckNotification",
             "_echo_agent/gap" => "GapNotification",
             "_echo_agent/task/create" => "TaskCreateRequest",
             "_echo_agent/task/update" => "TaskUpdateRequest",
@@ -264,6 +265,12 @@ pub const METHOD_CATALOG: &[MethodDescriptor] = &[
         direction: Direction::HostNotification,
         capability: ExtensionCapability::Runs,
         summary: "Full EventEnvelope notification for accepted framework events.",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/event/ack",
+        direction: Direction::ClientNotification,
+        capability: ExtensionCapability::Runs,
+        summary: "Client acknowledgement cursor that retires outstanding live events.",
     },
     MethodDescriptor {
         name: "_echo_agent/gap",

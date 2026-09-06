@@ -5,12 +5,14 @@ program. The SDK's goal is full **functional and semantic parity** between
 the Rust framework's public facade and TypeScript, Python and Java — without
 rewriting the agent framework in any of those languages.
 
-> **Current status: ACP conformant for the supported standard profile.** The
-> source-built `echo-agent-sdk-host` passes initialize/new/prompt/update/cancel
-> and shutdown scenarios through the official v1 Client and stdio runtime.
-> Language SDKs and the `_echo_agent/*` runtime profile are not implemented, so
-> the program does not claim **Runnable** or full parity. See
-> [Status ladder](#status-ladder) for the exact claims.
+> **Current status: ACP conformant (standard profile) + core extension profile
+> delivered in the Rust Host.** The source-built `echo-agent-sdk-host` passes
+> initialize/new/prompt/update/cancel and shutdown scenarios through the
+> official v1 Client, and the negotiated `_echo_agent/*` **core profile**
+> (Agent/Session/Run handles, full events, ACK/replay, restart recovery) passes
+> real-process E2E ([sdk-core-profile.md](sdk-core-profile.md)). Language SDKs
+> do not exist yet, so the program still does not claim **Runnable** or full
+> parity. See [Status ladder](#status-ladder) for the exact claims.
 
 ## What the SDK program is
 
@@ -34,7 +36,9 @@ rewriting the agent framework in any of those languages.
   and state authority — the wire never becomes a second framework.
 
 Details of the two profiles, the extension namespace and the error/lossless
-scalar rules live in [protocol.md](protocol.md).
+scalar rules live in [protocol.md](protocol.md). The delivered core profile —
+negotiation, handles, events/ACK/replay and recovery semantics — is specified
+in [sdk-core-profile.md](sdk-core-profile.md).
 
 The implemented Rust adapter and its current method/content boundary are
 documented in [acp-agent-adapter.md](acp-agent-adapter.md).
@@ -52,6 +56,7 @@ Build, configuration and lifecycle instructions for the executable are in
 | `contracts/sdk/parity-manifest.json` | Every facade item classified by an explicit semantic rule, ACP relationship, feature condition, adapter operation and per-language mapping/test status. Entries use one JSON line each so diffs remain reviewable. |
 | `contracts/sdk/schema/echo-agent-extension-v1.schema.json` | Generated JSON Schema of the `_echo_agent/*` extension DTOs and method catalog. |
 | `contracts/sdk/fixtures/extension/v1/` | Golden fixtures: valid samples must round-trip losslessly, invalid samples must be rejected deterministically. |
+| `contracts/sdk/source-contract.json` | Small generated source-compatibility digest (Cargo.lock + facade inventory + parity manifest) embedded by the Host and matched by the Client hello. |
 
 The generating code lives in the workspace member crate
 [`echo-sdk-protocol`](../../echo-sdk-protocol/) (`publish = false`). All
@@ -75,7 +80,8 @@ previous ones.
 |---|---|---|
 | **Design** | The design document is agreed | ✅ |
 | **Contract** | Protocol contracts, schema, parity manifest exist and pass drift gates | ✅ |
-| **ACP conformant** | A standard ACP v1 client passes the supported profile against a real source-built Host | ✅ (you are here) |
+| **ACP conformant** | A standard ACP v1 client passes the supported profile against a real source-built Host | ✅ |
+| **Core extension profile** | The negotiated `_echo_agent/*` core families run against a real Host with typed lifecycle, events, replay and recovery | ✅ (Rust Host only) |
 | **Runnable** | A real Host plus at least one language's full SDK extension path executes end-to-end | ❌ language extension path not started |
 | **Parity complete** | TypeScript, Python and Java all pass the full facade/all-features parity suite | ❌ not started |
 | **Published** | Registry/binary publication — **explicitly out of scope**; this design ships source only | never (by design) |

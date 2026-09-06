@@ -66,6 +66,29 @@ cancelled framework receipts become `end_turn` and `cancelled`. Other framework
 failures return a bounded standard ACP internal error, and the connection stays
 available for later requests.
 
+## Shared connection runtime and extension profiles
+
+`session/prompt` no longer owns a private execution path: the adapter builds
+one `echo_agent::acp::AcpConnectionServices` per connection — a single
+`SessionRegistry`, a single Run authority (`start`/`get`/`wait`/`cancel`/
+`steer` over framework `RunEntry` values), and a ledger-first event path that
+commits every accepted `EventEnvelope` to a bounded per-run ledger (optionally
+through a durable `EventJournal` hook) before rendering the standard
+`session/update` projection and forwarding to extension observers. Exactly
+one framework terminal per run is preserved; a journal or projection failure
+fails the run instead of reporting success.
+
+Extension profiles plug in through the `AcpConnectionProfile` trait:
+`with_profile` wraps the adapter, the profile publishes its capability
+advertisement under `agentCapabilities._meta`, decides Extended vs Standard
+from the Client hello, contributes per-run observers, annotates standard
+responses with extension handles for `_meta` bridging, and registers typed
+handlers that the adapter merges via the official
+`Builder::with_connection_builder` — the initialize/stdio/reader-writer/
+standard-handler/close chain is still built exactly once. The delivered
+profile is the [`_echo_agent/*` core profile](sdk-core-profile.md); a
+standard-only consumer never depends on it.
+
 `AcpAdapterConfig` bounds Session count, Prompt text, each serialized update,
 the update count and cumulative serialized update size for one Turn, and total
 shutdown wait. Connection teardown first cancels every active Turn, then waits
@@ -87,10 +110,13 @@ and attempts Agent closes concurrently within the configured global timeout.
 - Optional stable methods such as `session/load`, `session/resume`,
   `session/close`, list/delete/config/mode and authentication are not advertised
   or handled in this increment.
-- `_echo_agent/*` contracts are frozen but their runtime handlers are not part
-  of this adapter increment, so initialize does not publish the echo-agent
-  extension capability yet.
+- The core `_echo_agent/*` families (agent/session/run lifecycle, events,
+  ACK/replay, recovery) are delivered behind the optional
+  [`sdk-core-profile`](sdk-core-profile.md) composition; without an attached
+  profile the adapter never publishes the extension capability. Task graph,
+  subagent, extension-bridge, structured-output and feature operations stay
+  unadvertised until their plans land.
 - ACP conformance and full multilingual SDK parity remain separate gates. The
   adapter has typed in-process coverage and the source-built Host passes its
-  supported standard profile through the official Client; no language
-  extension path or full facade parity is implied.
+  supported standard and core profiles through the official Client; no
+  language extension path or full facade parity is implied.

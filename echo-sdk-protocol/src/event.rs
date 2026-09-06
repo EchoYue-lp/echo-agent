@@ -1,5 +1,6 @@
 //! Lossless event, replay and gap contracts for the SDK extension profile.
 
+use agent_client_protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use chrono::{DateTime, Utc};
 use echo_core::agent::{
     AgentEvent, ConversationId, EventEnvelope, EventId, ExecutionId, MessageId, RunId, StreamId,
@@ -7,6 +8,7 @@ use echo_core::agent::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::handle::{HandleKind, WireHandle};
 use crate::scalar::{ScalarError, WireNonZeroU64, WireTimestamp, WireU64, WireValue};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -243,9 +245,75 @@ impl TryFrom<WireEventEnvelope> for EventEnvelope<AgentEvent> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcNotification,
+)]
+#[notification(method = "_echo_agent/event")]
+#[serde(deny_unknown_fields)]
 pub struct EventNotification {
+    /// Live event stream the envelope belongs to; the generation fence
+    /// prevents a pre-restart subscriber from consuming a newer stream.
+    pub stream: WireHandle,
     pub envelope: WireEventEnvelope,
+}
+
+impl EventNotification {
+    pub fn validate(&self) -> Result<(), EventWireError> {
+        self.stream
+            .validate()
+            .map_err(|_| EventWireError::InvalidIdentity("stream handle"))?;
+        if self.stream.kind != HandleKind::Stream {
+            return Err(EventWireError::InvalidIdentity("stream handle kind"));
+        }
+        if self.stream.id != self.envelope.stream_id {
+            return Err(EventWireError::InvalidIdentity(
+                "notification stream must match the envelope stream_id",
+            ));
+        }
+        self.envelope.validate()
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcNotification,
+)]
+#[notification(method = "_echo_agent/event/ack")]
+#[serde(deny_unknown_fields)]
+pub struct EventAckNotification {
+    pub ack: EventAck,
+}
+
+/// Client acknowledgement of consumed live events. The Host counts
+/// outstanding notifications per stream against the negotiated
+/// `max_outstanding_live_events` window; acknowledgements retire them and
+/// resume live delivery after a gap pause. Hosts ignore unknown or
+/// un-negotiated ACK notifications without producing a response (ACP
+/// notification rules).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EventAck {
+    pub stream: WireHandle,
+    /// Highest contiguous sequence the Client has consumed.
+    pub last_processed_sequence: WireNonZeroU64,
+}
+
+impl EventAck {
+    pub fn validate(&self) -> Result<(), EventWireError> {
+        self.stream
+            .validate()
+            .map_err(|_| EventWireError::InvalidIdentity("stream handle"))?;
+        if self.stream.kind != HandleKind::Stream {
+            return Err(EventWireError::InvalidIdentity("stream handle kind"));
+        }
+        if self
+            .last_processed_sequence
+            .to_u64()
+            .is_none_or(|sequence| sequence == 0)
+        {
+            return Err(EventWireError::InvalidSequence);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -265,10 +333,18 @@ impl EventCursor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcRequest,
+)]
+#[request(method = "_echo_agent/run/replay", response = ReplayResponse)]
+#[serde(deny_unknown_fields)]
 pub struct ReplayRequest {
-    #[schemars(length(min = 1, max = 256))]
-    pub stream_id: String,
+    /// Event stream to replay. The handle's generation must match the
+    /// currently served stream incarnation; stale or wrong-kind handles
+    /// fail with typed errors before any event is read.
+    pub stream: WireHandle,
+    /// Replay events strictly after this sequence (0 = from the retained
+    /// beginning).
     pub after_sequence: WireU64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_events: Option<WireNonZeroU64>,
@@ -276,8 +352,11 @@ pub struct ReplayRequest {
 
 impl ReplayRequest {
     pub fn validate(&self) -> Result<(), EventWireError> {
-        if self.stream_id.trim().is_empty() {
-            return Err(EventWireError::InvalidIdentity("stream_id"));
+        self.stream
+            .validate()
+            .map_err(|_| EventWireError::InvalidIdentity("stream handle"))?;
+        if self.stream.kind != HandleKind::Stream {
+            return Err(EventWireError::InvalidIdentity("stream handle kind"));
         }
         if self
             .max_events
@@ -290,7 +369,9 @@ impl ReplayRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcResponse,
+)]
 pub struct ReplayResponse {
     /// Cursor supplied by the request. This makes an empty response and a
     /// retention gap independently verifiable.
@@ -393,17 +474,24 @@ impl EventGap {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcNotification,
+)]
+#[notification(method = "_echo_agent/gap")]
+#[serde(deny_unknown_fields)]
 pub struct GapNotification {
-    #[schemars(length(min = 1, max = 256))]
-    pub stream_id: String,
+    /// Event stream that hit its live-delivery bound.
+    pub stream: WireHandle,
     pub gap: EventGap,
 }
 
 impl GapNotification {
     pub fn validate(&self) -> Result<(), EventWireError> {
-        if self.stream_id.trim().is_empty() {
-            return Err(EventWireError::InvalidIdentity("stream_id"));
+        self.stream
+            .validate()
+            .map_err(|_| EventWireError::InvalidIdentity("stream handle"))?;
+        if self.stream.kind != HandleKind::Stream {
+            return Err(EventWireError::InvalidIdentity("stream handle kind"));
         }
         self.gap.validate()
     }

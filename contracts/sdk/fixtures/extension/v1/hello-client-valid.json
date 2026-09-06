@@ -1,0 +1,17 @@
+{
+  "name": "hello-client-valid",
+  "kind": "valid",
+  "target": "EchoAgentClientHello",
+  "description": "clientCapabilities._meta payload requesting Extended mode.",
+  "payload": {
+    "extension_protocol_version": 1,
+    "contract_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "source_contract_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "required_features": [
+      "mcp"
+    ],
+    "required_capabilities": [
+      "runs"
+    ]
+  }
+}

@@ -5,30 +5,82 @@ use echo_agent::agent::{Agent, AgentConfig, ReactAgent};
 use echo_agent::config::FrameworkConfig;
 use echo_agent::error::{ReactError, Result};
 use echo_agent::llm::LlmClient;
+use echo_agent::state::RuntimeStateStore;
 use std::sync::Arc;
 
+/// One immutable Agent construction definition.
+///
+/// Extension handles reference a definition, never a shared conversation
+/// Agent: every Session created from a definition still constructs its own
+/// independent [`ReactAgent`] through [`PreparedAgentDefinition::create_agent`],
+/// so histories, working directories and MCP connections never leak across
+/// Sessions (design §8).
 #[derive(Clone)]
-pub(crate) struct DefaultHostSessionFactory {
+#[allow(dead_code)]
+pub(crate) struct PreparedAgentDefinition {
+    /// Stable factory identity: the Session factory resolves this id from
+    /// the Session context meta so every Session of an Agent definition is
+    /// built from exactly that definition.
+    id: Arc<str>,
     framework: Arc<FrameworkConfig>,
     llm_client: Arc<dyn LlmClient>,
+    state_store: Option<Arc<dyn RuntimeStateStore>>,
+    host_default: bool,
 }
 
-impl DefaultHostSessionFactory {
-    pub fn new(framework: FrameworkConfig, llm_client: Arc<dyn LlmClient>) -> Self {
+impl PreparedAgentDefinition {
+    pub fn new(
+        framework: FrameworkConfig,
+        llm_client: Arc<dyn LlmClient>,
+        state_store: Option<Arc<dyn RuntimeStateStore>>,
+        host_default: bool,
+    ) -> Self {
         Self {
+            id: Arc::from(uuid::Uuid::new_v4().to_string().as_str()),
             framework: Arc::new(framework),
             llm_client,
+            state_store,
+            host_default,
         }
     }
 
-    async fn create_agent(&self, context: AcpSessionContext) -> Result<ReactAgent> {
-        let mcp_servers = translate_mcp_servers(&context)?;
+    #[cfg(feature = "sdk-core-profile")]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Typed capability snapshot served by `_echo_agent/agent/describe`.
+    /// Tool and MCP lists are Session-scoped in this framework: a definition
+    /// alone does not own them, so the snapshot reports construction facts
+    /// and the per-Session surfaces stay empty at definition level.
+    #[cfg(feature = "sdk-core-profile")]
+    pub fn snapshot(&self) -> echo_sdk_protocol::methods::AgentSnapshotWire {
+        echo_sdk_protocol::methods::AgentSnapshotWire {
+            name: self.framework.agent.name.clone(),
+            model_name: self.framework.model.name.clone(),
+            system_prompt: self.framework.agent.system_prompt.clone(),
+            tool_names: Vec::new(),
+            skill_names: Vec::new(),
+            mcp_server_names: Vec::new(),
+            working_dir: None,
+            host_default: self.host_default,
+        }
+    }
+
+    /// Construct the independent Agent that owns one Session's history,
+    /// installing the state store before first use so the framework can
+    /// checkpoint after every tool batch and resume from it later.
+    pub async fn create_agent(&self, context: &AcpSessionContext) -> Result<ReactAgent> {
+        let mcp_servers = translate_mcp_servers(context)?;
         let session_id = context.session_id.to_string();
         let agent_config = AgentConfig::from(self.framework.as_ref().clone())
             .session_id(&session_id)
             .conversation_id(&session_id)
-            .working_dir(Some(context.cwd));
+            .working_dir(Some(context.cwd.clone()));
         let mut agent = ReactAgent::new(agent_config).with_llm_client(self.llm_client.clone());
+        if let Some(store) = &self.state_store {
+            agent.set_state_store(store.clone());
+        }
         self.framework.apply_compressor(&agent).await;
         for server in mcp_servers {
             if let Err(error) = agent.connect_mcp_from_config(server).await {
@@ -46,15 +98,134 @@ impl DefaultHostSessionFactory {
     }
 }
 
+/// Session factory of the core profile: resolves the Session's Agent
+/// definition from the context meta (`echo_agent_definition_id`) and
+/// constructs an independent Agent from exactly that definition. Sessions
+/// without a marker bind the Host default definition, keeping standard
+/// `session/new` behavior unchanged.
+#[cfg(feature = "sdk-core-profile")]
+#[derive(Clone)]
+pub(crate) struct CoreProfileSessionFactory {
+    default: Arc<PreparedAgentDefinition>,
+    definitions:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<PreparedAgentDefinition>>>>,
+    max_definitions: usize,
+}
+
+#[cfg(feature = "sdk-core-profile")]
+pub(crate) const DEFINITION_META_KEY: &str = "echo_agent_definition_id";
+
+#[cfg(feature = "sdk-core-profile")]
+impl CoreProfileSessionFactory {
+    pub fn new(default: Arc<PreparedAgentDefinition>, max_definitions: usize) -> Self {
+        let mut definitions = std::collections::HashMap::new();
+        definitions.insert(default.id().to_string(), default.clone());
+        Self {
+            default,
+            definitions: Arc::new(std::sync::Mutex::new(definitions)),
+            max_definitions,
+        }
+    }
+
+    /// Shared registration sink; the profile state registers every created
+    /// definition here so later Sessions can resolve it.
+    pub fn register_definition(
+        &self,
+        definition: Arc<PreparedAgentDefinition>,
+    ) -> std::result::Result<(), String> {
+        let mut definitions = self
+            .definitions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if definitions.contains_key(definition.id()) {
+            return Ok(());
+        }
+        if definitions.len() >= self.max_definitions {
+            return Err(format!(
+                "Agent definition limit {} reached",
+                self.max_definitions
+            ));
+        }
+        definitions.insert(definition.id().to_string(), definition);
+        Ok(())
+    }
+
+    pub fn remove_definition(&self, id: &str) {
+        if id != self.default.id() {
+            self.definitions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(id);
+        }
+    }
+}
+
+#[cfg(feature = "sdk-core-profile")]
+impl AcpSessionFactory for CoreProfileSessionFactory {
+    fn create_session(
+        &self,
+        context: AcpSessionContext,
+    ) -> BoxFuture<'static, Result<Box<dyn Agent>>> {
+        let definition_id = context
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get(DEFINITION_META_KEY))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let definitions = self.definitions.clone();
+        let default = self.default.clone();
+        Box::pin(async move {
+            let definition = match definition_id {
+                Some(id) => definitions
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ReactError::Other(format!("unknown Agent definition id {id}"))
+                    })?,
+                None => default,
+            };
+            definition
+                .create_agent(&context)
+                .await
+                .map(|agent| Box::new(agent) as Box<dyn Agent>)
+        })
+    }
+}
+
+/// Standard-profile Session factory over the Host default definition.
+#[derive(Clone)]
+pub(crate) struct DefaultHostSessionFactory {
+    definition: std::sync::Arc<PreparedAgentDefinition>,
+}
+
+impl DefaultHostSessionFactory {
+    pub fn new(framework: FrameworkConfig, llm_client: Arc<dyn LlmClient>) -> Self {
+        Self {
+            definition: std::sync::Arc::new(PreparedAgentDefinition::new(
+                framework, llm_client, None, true,
+            )),
+        }
+    }
+
+    /// Factory over an explicit definition (used by the core profile so the
+    /// standard `session/new` shares the profile's default definition).
+    #[cfg(test)]
+    pub(crate) fn definition(&self) -> &PreparedAgentDefinition {
+        &self.definition
+    }
+}
+
 impl AcpSessionFactory for DefaultHostSessionFactory {
     fn create_session(
         &self,
         context: AcpSessionContext,
     ) -> BoxFuture<'static, Result<Box<dyn Agent>>> {
-        let factory = self.clone();
+        let definition = self.definition.clone();
         Box::pin(async move {
-            factory
-                .create_agent(context)
+            definition
+                .create_agent(&context)
                 .await
                 .map(|agent| Box::new(agent) as Box<dyn Agent>)
         })
@@ -118,10 +289,12 @@ mod tests {
         std::fs::create_dir_all(&second_cwd).map_err(ReactError::Io)?;
         let factory = factory()?;
         let first = factory
-            .create_agent(context("session-a", first_cwd.clone(), Vec::new()))
+            .definition()
+            .create_agent(&context("session-a", first_cwd.clone(), Vec::new()))
             .await?;
         let second = factory
-            .create_agent(context("session-b", second_cwd.clone(), Vec::new()))
+            .definition()
+            .create_agent(&context("session-b", second_cwd.clone(), Vec::new()))
             .await?;
 
         assert_eq!(first.config().get_session_id(), Some("session-a"));
@@ -140,6 +313,84 @@ mod tests {
         assert!(Arc::ptr_eq(first_llm, second_llm));
         Agent::close(&first).await?;
         Agent::close(&second).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn definition_snapshot_reports_construction_facts() -> Result<()> {
+        let snapshot = factory()?.definition().snapshot();
+        // AgentSettings::default() names the agent "assistant"; the model
+        // name comes from the fixture config.
+        assert_eq!(snapshot.name, "assistant");
+        assert_eq!(snapshot.model_name, "fixture-model");
+        assert!(snapshot.host_default);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "sdk-core-profile")]
+    async fn core_profile_factory_binds_each_session_to_its_definition() -> Result<()> {
+        let standard = factory()?;
+        let default = standard.definition.clone();
+        let explicit_framework = FrameworkConfig {
+            model: ModelConfig {
+                provider: "local".to_string(),
+                name: "explicit-model".to_string(),
+                base_url: Some("http://127.0.0.1:9/v1/chat/completions".to_string()),
+                api_protocol: Some(LlmApiProtocol::ChatCompletions),
+                ..ModelConfig::default()
+            },
+            agent: AgentSettings {
+                name: "explicit-agent".to_string(),
+                ..AgentSettings::default()
+            },
+        };
+        let explicit_client = LlmConfig::for_provider(
+            "local",
+            "http://127.0.0.1:9/v1/chat/completions",
+            "",
+            "explicit-model",
+            LlmApiProtocol::ChatCompletions,
+        )?
+        .build_client()?;
+        let explicit = Arc::new(PreparedAgentDefinition::new(
+            explicit_framework,
+            Arc::from(explicit_client),
+            None,
+            false,
+        ));
+        let profile = CoreProfileSessionFactory::new(default, 8);
+        profile
+            .register_definition(explicit.clone())
+            .map_err(ReactError::Other)?;
+        let mut meta = agent_client_protocol::schema::v1::Meta::new();
+        meta.insert(
+            DEFINITION_META_KEY.to_string(),
+            serde_json::Value::String(explicit.id().to_string()),
+        );
+        let agent = profile
+            .create_session(context(
+                "explicit-session",
+                PathBuf::from("/tmp"),
+                Vec::new(),
+            ))
+            .await?;
+        assert_eq!(agent.model_name(), "fixture-model");
+        let explicit_context = AcpSessionContext {
+            meta: Some(meta),
+            ..context("explicit-session-2", PathBuf::from("/tmp"), Vec::new())
+        };
+        assert!(
+            explicit_context
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(DEFINITION_META_KEY))
+                .is_some()
+        );
+        let explicit_agent = profile.create_session(explicit_context).await?;
+        assert_eq!(explicit_agent.model_name(), "explicit-model");
+        Agent::close(agent.as_ref()).await?;
+        Agent::close(explicit_agent.as_ref()).await?;
         Ok(())
     }
 
@@ -164,7 +415,8 @@ mod tests {
         let second = McpServer::Stdio(McpServerStdio::new("second", missing_command));
 
         let result = factory()?
-            .create_agent(context(
+            .definition()
+            .create_agent(&context(
                 "mcp-cleanup",
                 session_cwd.clone(),
                 vec![first, second],

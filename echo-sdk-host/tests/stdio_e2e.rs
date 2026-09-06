@@ -2,16 +2,40 @@ use agent_client_protocol::schema::{ProtocolVersion, v1};
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, Error, LineDirection,
 };
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
+mod support;
+
 const SENTINEL_SECRET: &str = "sdk-host-sentinel-secret";
+
+struct E2eProcessLock(PathBuf);
+
+impl Drop for E2eProcessLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn acquire_e2e_process_lock() -> E2eProcessLock {
+    let path = PathBuf::from("/tmp/echo-agent-sdk-host-e2e.lock");
+    loop {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return E2eProcessLock(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => panic!("failed to acquire E2E process lock: {error}"),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum ModelResponse {
@@ -74,13 +98,7 @@ async fn start_model_server(
     let server_request_seen = request_seen.clone();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
-        let mut request = vec![0_u8; 64 * 1024];
-        let read = socket.read(&mut request).await?;
-        if read == 0 {
-            return Err(std::io::Error::other(
-                "fixture model received EOF before request bytes",
-            ));
-        }
+        support::read_http_request(&mut socket).await?;
         server_request_seen.notify_one();
         match response {
             ModelResponse::Complete => {
@@ -163,6 +181,7 @@ fn assert_protocol_stdout(lines: &[String]) -> Result<(), Box<dyn std::error::Er
 #[tokio::test]
 async fn source_built_host_completes_standard_acp_prompt() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _process_lock = acquire_e2e_process_lock();
     let (endpoint, _request_seen, server) = start_model_server(ModelResponse::Complete).await?;
     let directory = tempfile::tempdir()?;
     let config = write_config(&directory, &endpoint, Some(SENTINEL_SECRET), None)?;
@@ -240,6 +259,7 @@ async fn source_built_host_completes_standard_acp_prompt() -> Result<(), Box<dyn
 #[tokio::test]
 async fn source_built_host_cancels_parked_model_request() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _process_lock = acquire_e2e_process_lock();
     let (endpoint, request_seen, server) =
         start_model_server(ModelResponse::ParkAfterFirstChunk).await?;
     let directory = tempfile::tempdir()?;
@@ -306,6 +326,7 @@ async fn source_built_host_cancels_parked_model_request() -> Result<(), Box<dyn 
 
 #[tokio::test]
 async fn stdin_eof_exits_cleanly_without_stdout_noise() -> Result<(), Box<dyn std::error::Error>> {
+    let _process_lock = acquire_e2e_process_lock();
     let directory = tempfile::tempdir()?;
     let config = write_config(
         &directory,
@@ -332,6 +353,7 @@ async fn stdin_eof_exits_cleanly_without_stdout_noise() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn invalid_configuration_fails_without_stdout_or_secret()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _process_lock = acquire_e2e_process_lock();
     let missing = tokio::process::Command::new(binary()).output().await?;
     assert!(!missing.status.success());
     assert!(missing.stdout.is_empty());

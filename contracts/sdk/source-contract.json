@@ -1,0 +1,21 @@
+{
+  "algorithm": "sha256-length-prefixed-v1",
+  "inputs": [
+    {
+      "path": "Cargo.lock",
+      "bytes": 178370,
+      "sha256": "sha256:6c637851fc270a7373c772645a96b7e839fb60b1c142ab27447e286a217339f2"
+    },
+    {
+      "path": "contracts/sdk/public-api.txt",
+      "bytes": 16545199,
+      "sha256": "sha256:29a9717cdb46cb2eef1e2c8abcb244ac3e59afb8b31d7d1c113d17384e2b1132"
+    },
+    {
+      "path": "contracts/sdk/parity-manifest.json",
+      "bytes": 26292420,
+      "sha256": "sha256:0bfddae3a5e992f9b557f4fc2a4096d323e1e55d07f5035cf452c27e62b27ff1"
+    }
+  ],
+  "aggregate_digest": "sha256:64e92bcc7630b36707f9535ea47fb77bfe3381dfa38a6fc46cdd1ad40f58ab81"
+}

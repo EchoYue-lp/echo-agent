@@ -27,11 +27,99 @@ pub struct SdkHostConfig {
     /// Optional environment variable containing the model credential.
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Optional negotiated `_echo_agent/*` core profile. Absent means the
+    /// Host serves the standard ACP profile only and never advertises the
+    /// extension; present, it must point at an explicit absolute state root.
+    #[serde(default)]
+    pub sdk_profile: Option<SdkProfileConfig>,
 }
 
+/// Explicit configuration for the negotiated core profile. The state root is
+/// deliberately an absolute path that the operator wrote down: the Host never
+/// searches the working directory, home, `.env`, or product configuration for
+/// a default (design §16 — persistence is only ever opt-in and visible).
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdkProfileConfig {
+    /// Absolute directory owning generation counters, run journals and the
+    /// run index. Must be a path; created on demand.
+    pub state_root: PathBuf,
+    /// Resource bounds; every field is validated positive.
+    #[serde(default)]
+    pub limits: SdkProfileLimits,
+}
+
+/// Bounds enforced by the core profile (mirrors the negotiated
+/// `EchoLimits`-adjacent host-side knobs, design §10.2/§16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SdkProfileLimits {
+    /// Maximum bytes of one newline-delimited stdin frame; larger frames
+    /// fail the connection before any business side effect.
+    pub max_frame_bytes: u64,
+    /// Maximum serialized bytes of one live event delivery.
+    pub max_event_bytes: usize,
+    /// Maximum not-yet-acknowledged live events per stream before the single
+    /// gap notification pauses live delivery.
+    pub max_outstanding_live_events: usize,
+    /// Maximum events returned by one replay request.
+    pub max_replay_events: usize,
+    /// Maximum cumulative serialized bytes returned by one replay request.
+    pub max_replay_bytes: usize,
+    /// Maximum simultaneously open Agent/Session/Run/Stream handles.
+    pub max_open_handles: usize,
+    /// Seconds allowed for the bounded shutdown chain.
+    pub shutdown_timeout_secs: u64,
+}
+
+impl Default for SdkProfileLimits {
+    fn default() -> Self {
+        Self {
+            max_frame_bytes: 1024 * 1024,
+            max_event_bytes: 1024 * 1024,
+            max_outstanding_live_events: 128,
+            max_replay_events: 512,
+            max_replay_bytes: 8 * 1024 * 1024,
+            max_open_handles: 512,
+            shutdown_timeout_secs: 5,
+        }
+    }
+}
+
+impl SdkProfileLimits {
+    fn validate(&self) -> Result<(), HostError> {
+        if self.max_frame_bytes == 0
+            || self.max_event_bytes == 0
+            || self.max_outstanding_live_events == 0
+            || self.max_replay_events == 0
+            || self.max_replay_bytes == 0
+            || self.max_open_handles == 0
+            || self.shutdown_timeout_secs == 0
+        {
+            return Err(HostError::Config(
+                "sdk_profile.limits values must all be positive".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SdkProfileConfig {
+    pub(crate) fn validate(&self) -> Result<(), HostError> {
+        if !self.state_root.is_absolute() {
+            return Err(HostError::Config(
+                "sdk_profile.state_root must be an absolute path".to_string(),
+            ));
+        }
+        self.limits.validate()
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) struct PreparedHostConfig {
     pub framework: FrameworkConfig,
     pub llm_client: Arc<dyn LlmClient>,
+    pub sdk_profile: Option<SdkProfileConfig>,
 }
 
 impl SdkHostConfig {
@@ -63,11 +151,8 @@ impl SdkHostConfig {
 
     /// Validate the configuration and construct its model client without starting ACP.
     pub fn validate(self) -> Result<(), HostError> {
-        let PreparedHostConfig {
-            framework,
-            llm_client,
-        } = self.prepare()?;
-        drop((framework, llm_client));
+        let prepared = self.prepare()?;
+        drop(prepared);
         Ok(())
     }
 
@@ -84,6 +169,9 @@ impl SdkHostConfig {
                 "unsupported Host config schema_version {}; expected {HOST_CONFIG_SCHEMA_VERSION}",
                 self.schema_version
             )));
+        }
+        if let Some(profile) = &self.sdk_profile {
+            profile.validate()?;
         }
         validate_agent_settings(&self.default_agent)?;
         let api_protocol = self.default_agent.model.api_protocol.ok_or_else(|| {
@@ -135,6 +223,7 @@ impl SdkHostConfig {
         Ok(PreparedHostConfig {
             framework: self.default_agent,
             llm_client,
+            sdk_profile: self.sdk_profile,
         })
     }
 }
@@ -276,6 +365,7 @@ mod tests {
                 },
             },
             api_key_env: None,
+            sdk_profile: None,
         }
     }
 

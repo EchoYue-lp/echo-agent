@@ -1,0 +1,17 @@
+{
+  "name": "run-terminal-failed-valid",
+  "kind": "valid",
+  "target": "RunTerminal",
+  "description": "A failed terminal carries the lossless framework failure.",
+  "payload": {
+    "status": "failed",
+    "failure": {
+      "category": "llm",
+      "terminal_kind": "failed",
+      "retryable": true,
+      "code": "llm_network",
+      "http_status": 503,
+      "message": "connection reset by peer"
+    }
+  }
+}

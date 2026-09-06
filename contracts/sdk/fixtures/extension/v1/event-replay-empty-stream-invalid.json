@@ -4,7 +4,11 @@
   "target": "ReplayRequest",
   "description": "Replay requests require a stream identity.",
   "payload": {
-    "stream_id": "",
+    "stream": {
+      "id": "",
+      "generation": "3",
+      "kind": "stream"
+    },
     "after_sequence": "0",
     "max_events": "1"
   },
