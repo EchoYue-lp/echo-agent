@@ -494,9 +494,8 @@ pub type SubagentExecutorFn = Arc<
 /// short-circuit semantics as data-driven rules — without echo-execution
 /// depending on any specific host. Mirrors the existing
 /// [`McpExecutorFn`]/[`SubagentExecutorFn`] injection pattern.
-pub type ProgrammaticHookFn = Arc<
-    dyn Fn(HookContext) -> Pin<Box<dyn Future<Output = HookResult> + Send>> + Send + Sync,
->;
+pub type ProgrammaticHookFn =
+    Arc<dyn Fn(HookContext) -> Pin<Box<dyn Future<Output = HookResult> + Send>> + Send + Sync>;
 
 tokio::task_local! {
     static SUBAGENT_HOOK_DEPTH: u8;
@@ -708,7 +707,8 @@ impl HookRegistry {
             Some(existing) => *existing = entry,
             None => {
                 self.programmatic.push(entry);
-                self.programmatic.sort_by(|left, right| left.name.cmp(&right.name));
+                self.programmatic
+                    .sort_by(|left, right| left.name.cmp(&right.name));
             }
         }
     }
