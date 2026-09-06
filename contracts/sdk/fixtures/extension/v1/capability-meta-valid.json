@@ -34,7 +34,12 @@
       "max_outstanding_live_events": "256",
       "max_stream_buffer_bytes": "4194304",
       "max_replay_bytes": "4194304",
-      "max_open_handles": "512"
+      "max_open_handles": "512",
+      "max_registered_extensions": "64",
+      "max_extension_descriptor_bytes": "65536",
+      "max_extension_payload_bytes": "1048576",
+      "max_extension_stream_bytes": "262144",
+      "max_inflight_extension_invocations": "8"
     }
   }
 }

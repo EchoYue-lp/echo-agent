@@ -1,0 +1,40 @@
+{
+  "name": "extension-register-tool-valid",
+  "kind": "valid",
+  "target": "ExtensionRegisterRequest",
+  "description": "A Tool registration carries the full typed descriptor the Host dispatches on.",
+  "payload": {
+    "kind": "tool",
+    "implementation_id": "sdk-tool-1",
+    "descriptor": {
+      "kind": "tool",
+      "descriptor_version": 1,
+      "name": "search_docs",
+      "description": "Search the host-language documentation index.",
+      "parameters": {
+        "kind": "record",
+        "value": {
+          "type_id": "json_schema",
+          "fields": [
+            {
+              "name": "type",
+              "value": {
+                "kind": "string",
+                "value": "object"
+              }
+            }
+          ]
+        }
+      },
+      "schema_revision": "3",
+      "required_input_modalities": [
+        "text"
+      ],
+      "supports_streaming": false
+    },
+    "timeout": {
+      "seconds": "20",
+      "nanos": 0
+    }
+  }
+}

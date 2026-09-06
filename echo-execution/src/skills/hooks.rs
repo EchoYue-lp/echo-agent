@@ -486,6 +486,18 @@ pub type SubagentExecutorFn = Arc<
         + Sync,
 >;
 
+/// Type-erased programmatic hook executor.
+///
+/// Embedders (for example the SDK extension bridge, which forwards hook
+/// events to a host-language implementation) inject closures this way so
+/// programmatic hooks run with the same merging, mutation and
+/// short-circuit semantics as data-driven rules — without echo-execution
+/// depending on any specific host. Mirrors the existing
+/// [`McpExecutorFn`]/[`SubagentExecutorFn`] injection pattern.
+pub type ProgrammaticHookFn = Arc<
+    dyn Fn(HookContext) -> Pin<Box<dyn Future<Output = HookResult> + Send>> + Send + Sync,
+>;
+
 tokio::task_local! {
     static SUBAGENT_HOOK_DEPTH: u8;
 }
@@ -506,6 +518,18 @@ pub struct HookRegistry {
     mcp_executor: Option<McpExecutorFn>,
     /// Optional subagent executor for Subagent hook actions.
     subagent_executor: Option<SubagentExecutorFn>,
+    /// Programmatic (closure) hooks, kept sorted by name for deterministic
+    /// execution order.
+    programmatic: Vec<ProgrammaticHookEntry>,
+}
+
+/// One registered programmatic hook: a named closure plus the events it
+/// subscribes to (empty = every event).
+#[derive(Clone)]
+struct ProgrammaticHookEntry {
+    name: String,
+    events: Vec<HookEvent>,
+    executor: ProgrammaticHookFn,
 }
 
 impl Clone for HookRegistry {
@@ -516,6 +540,7 @@ impl Clone for HookRegistry {
             http_client: self.http_client.clone(),
             mcp_executor: self.mcp_executor.clone(),
             subagent_executor: self.subagent_executor.clone(),
+            programmatic: self.programmatic.clone(),
         }
     }
 }
@@ -658,6 +683,41 @@ impl HookRegistry {
     /// Unregister hooks from a specific source.
     pub fn unregister(&mut self, source: &HookSource) -> bool {
         self.sources.remove(source).is_some()
+    }
+
+    /// Register (or replace) one programmatic hook by name. `events` limits
+    /// the events the executor observes; an empty slice subscribes to every
+    /// event. Programmatic hooks run after data-driven sources in name
+    /// order, with identical merging and short-circuit semantics.
+    pub fn set_programmatic_hook(
+        &mut self,
+        name: &str,
+        events: &[HookEvent],
+        executor: ProgrammaticHookFn,
+    ) {
+        let entry = ProgrammaticHookEntry {
+            name: name.to_string(),
+            events: events.to_vec(),
+            executor,
+        };
+        match self
+            .programmatic
+            .iter_mut()
+            .find(|existing| existing.name == entry.name)
+        {
+            Some(existing) => *existing = entry,
+            None => {
+                self.programmatic.push(entry);
+                self.programmatic.sort_by(|left, right| left.name.cmp(&right.name));
+            }
+        }
+    }
+
+    /// Remove a programmatic hook by name; true when it was registered.
+    pub fn remove_programmatic_hook(&mut self, name: &str) -> bool {
+        let before = self.programmatic.len();
+        self.programmatic.retain(|entry| entry.name != name);
+        before != self.programmatic.len()
     }
 
     /// Clear all user-configured hooks (keeps skill hooks intact).
@@ -839,6 +899,20 @@ impl HookRegistry {
                         return combined;
                     }
                 }
+            }
+        }
+
+        // Programmatic hooks run after every data-driven source, in name
+        // order, with the same merge/short-circuit semantics. An empty
+        // event subscription observes everything.
+        for entry in &self.programmatic {
+            if !entry.events.is_empty() && !entry.events.contains(&event) {
+                continue;
+            }
+            let result = (entry.executor)(context.clone()).await;
+            merge_result(&mut combined, result);
+            if combined.stop_propagation || combined.block {
+                return combined;
             }
         }
 

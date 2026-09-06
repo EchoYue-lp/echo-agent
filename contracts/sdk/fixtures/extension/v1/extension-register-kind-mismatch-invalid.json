@@ -1,0 +1,17 @@
+{
+  "name": "extension-register-kind-mismatch-invalid",
+  "kind": "invalid",
+  "target": "ExtensionRegisterRequest",
+  "description": "The descriptor kind must equal the registration kind.",
+  "payload": {
+    "kind": "tool",
+    "implementation_id": "sdk-tool-1",
+    "descriptor": {
+      "kind": "llm_client",
+      "descriptor_version": 1,
+      "model_name": "fixture-chat",
+      "supports_streaming": false
+    }
+  },
+  "expect_error": "invalid_value"
+}

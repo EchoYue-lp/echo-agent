@@ -1,0 +1,18 @@
+{
+  "name": "extension-register-unknown-version-invalid",
+  "kind": "invalid",
+  "target": "ExtensionRegisterRequest",
+  "description": "Unknown descriptor versions fail closed instead of being partially applied.",
+  "payload": {
+    "kind": "store",
+    "implementation_id": "sdk-store-1",
+    "descriptor": {
+      "kind": "store",
+      "descriptor_version": 99,
+      "search_modes": [
+        "keyword"
+      ]
+    }
+  },
+  "expect_error": "invalid_value"
+}

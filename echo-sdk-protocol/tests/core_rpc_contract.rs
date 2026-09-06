@@ -311,6 +311,11 @@ fn host_capability() -> EchoAgentCapability {
             max_stream_buffer_bytes: WireU64::from_u64(2_097_152),
             max_replay_bytes: WireU64::from_u64(2_097_152),
             max_open_handles: WireU64::from_u64(256),
+            max_registered_extensions: WireU64::from_u64(64),
+            max_extension_descriptor_bytes: WireU64::from_u64(65_536),
+            max_extension_payload_bytes: WireU64::from_u64(1_048_576),
+            max_extension_stream_bytes: WireU64::from_u64(262_144),
+            max_inflight_extension_invocations: WireU64::from_u64(8),
         },
     }
 }

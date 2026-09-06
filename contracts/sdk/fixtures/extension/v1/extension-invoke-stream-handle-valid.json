@@ -1,0 +1,27 @@
+{
+  "name": "extension-invoke-stream-handle-valid",
+  "kind": "valid",
+  "target": "ExtensionInvokeCall",
+  "description": "Streaming operations carry the Host-minted stream handle.",
+  "payload": {
+    "extension": {
+      "id": "extension-2",
+      "generation": "2",
+      "kind": "extension"
+    },
+    "invocation_id": "invocation-42",
+    "operation": "llm_chat_stream",
+    "input": {
+      "kind": "null"
+    },
+    "deadline": {
+      "seconds": "30",
+      "nanos": 0
+    },
+    "stream": {
+      "id": "stream-9",
+      "generation": "2",
+      "kind": "stream"
+    }
+  }
+}

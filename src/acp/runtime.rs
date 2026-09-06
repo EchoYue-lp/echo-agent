@@ -38,6 +38,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 
+use super::extension::ExtensionInvocationAuthority;
 use super::projection::AcpEventProjector;
 use super::session::{AcpSession, ActiveTurnLease, SessionRegistry};
 
@@ -422,6 +423,7 @@ pub struct AcpConnectionServices {
     ledger_limits: AcpLedgerLimits,
     config: Arc<super::adapter::AcpAdapterConfig>,
     admission_open: AtomicBool,
+    extensions: Arc<ExtensionInvocationAuthority>,
 }
 
 impl AcpConnectionServices {
@@ -429,6 +431,18 @@ impl AcpConnectionServices {
         sessions: Arc<SessionRegistry>,
         config: Arc<super::adapter::AcpAdapterConfig>,
     ) -> Self {
+        // The adapter config is validated before the connection spawns, so a
+        // non-positive concurrency cannot reach here; degrade to a single
+        // permit instead of panicking if it ever does.
+        let extensions = ExtensionInvocationAuthority::new(config.max_extension_concurrency)
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "invalid extension concurrency {} ({}), falling back to 1",
+                    config.max_extension_concurrency,
+                    error
+                );
+                ExtensionInvocationAuthority::new_saturating(1)
+            });
         Self {
             mode: RwLock::new(ConnectionMode::Standard),
             sessions,
@@ -436,7 +450,15 @@ impl AcpConnectionServices {
             ledger_limits: AcpLedgerLimits::default(),
             config,
             admission_open: AtomicBool::new(true),
+            extensions,
         }
+    }
+
+    /// The connection-scoped extension invocation authority (design §12.3).
+    /// Shared by every extension proxy on this connection; never carries a
+    /// second run/session/terminal authority.
+    pub fn extensions(&self) -> &Arc<ExtensionInvocationAuthority> {
+        &self.extensions
     }
 
     /// Override the in-memory ledger bounds (extension profiles derive them

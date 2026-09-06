@@ -1,0 +1,38 @@
+{
+  "name": "extension-invoke-tool-valid",
+  "kind": "valid",
+  "target": "ExtensionInvokeCall",
+  "description": "A reverse call carries its own invocation identity, operation and deadline.",
+  "payload": {
+    "extension": {
+      "id": "extension-1",
+      "generation": "2",
+      "kind": "extension"
+    },
+    "invocation_id": "invocation-41",
+    "operation": "tool_execute",
+    "context": {
+      "session_id": "session-9",
+      "run_id": "run-7"
+    },
+    "input": {
+      "kind": "record",
+      "value": {
+        "type_id": "ToolExecuteInput",
+        "fields": [
+          {
+            "name": "query",
+            "value": {
+              "kind": "string",
+              "value": "rust async"
+            }
+          }
+        ]
+      }
+    },
+    "deadline": {
+      "seconds": "20",
+      "nanos": 0
+    }
+  }
+}

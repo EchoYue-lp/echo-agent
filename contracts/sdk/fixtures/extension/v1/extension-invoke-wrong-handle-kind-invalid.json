@@ -1,0 +1,23 @@
+{
+  "name": "extension-invoke-wrong-handle-kind-invalid",
+  "kind": "invalid",
+  "target": "ExtensionInvokeCall",
+  "description": "Reverse calls require an extension-kind handle.",
+  "payload": {
+    "extension": {
+      "id": "run-1",
+      "generation": "2",
+      "kind": "run"
+    },
+    "invocation_id": "invocation-43",
+    "operation": "tool_execute",
+    "input": {
+      "kind": "null"
+    },
+    "deadline": {
+      "seconds": "20",
+      "nanos": 0
+    }
+  },
+  "expect_error": "invalid_value"
+}

@@ -18,6 +18,7 @@ const DEFAULT_MAX_PROMPT_CHARS: usize = 1_000_000;
 const DEFAULT_MAX_UPDATE_CHARS: usize = 1_000_000;
 const DEFAULT_MAX_UPDATES_PER_TURN: usize = 10_000;
 const DEFAULT_MAX_TOTAL_UPDATE_CHARS: usize = 8_000_000;
+const DEFAULT_MAX_EXTENSION_CONCURRENCY: usize = 8;
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ERROR_CHARS: usize = 512;
 
@@ -40,6 +41,9 @@ pub struct AcpAdapterConfig {
     pub max_updates_per_turn: usize,
     /// Maximum cumulative serialized update characters emitted by one Turn.
     pub max_total_update_chars: usize,
+    /// Maximum concurrently in-flight extension (reverse-callback)
+    /// invocations per connection (design §12.3).
+    pub max_extension_concurrency: usize,
     /// Total time allowed for connection-level Agent shutdown.
     pub shutdown_timeout: Duration,
 }
@@ -55,6 +59,7 @@ impl Default for AcpAdapterConfig {
             max_update_chars: DEFAULT_MAX_UPDATE_CHARS,
             max_updates_per_turn: DEFAULT_MAX_UPDATES_PER_TURN,
             max_total_update_chars: DEFAULT_MAX_TOTAL_UPDATE_CHARS,
+            max_extension_concurrency: DEFAULT_MAX_EXTENSION_CONCURRENCY,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         }
     }
@@ -76,6 +81,7 @@ impl AcpAdapterConfig {
             || self.max_update_chars == 0
             || self.max_updates_per_turn == 0
             || self.max_total_update_chars == 0
+            || self.max_extension_concurrency == 0
         {
             return Err(crate::error::ReactError::Other(
                 "ACP adapter resource limits must be positive".to_string(),
@@ -362,6 +368,15 @@ async fn run_connection<P: AcpConnectionProfile>(
             close_services.close_admission();
             tokio::time::timeout(timeout, async {
                 close_services.cancel_and_wait_runs(timeout).await;
+                // Extension teardown order (design §12.3): close admission,
+                // cancel in-flight callbacks, await bounded settlement —
+                // all before profile flush and Session Agent close.
+                close_services.extensions().close_admission();
+                close_services.extensions().cancel_all();
+                let leaked = close_services.extensions().drain(timeout).await;
+                if leaked > 0 {
+                    tracing::warn!("extension teardown left {leaked} unsettled invocations");
+                }
                 close_profile
                     .wait_for_settlements(timeout)
                     .await
@@ -386,6 +401,12 @@ async fn run_connection<P: AcpConnectionProfile>(
     let cleanup_result = tokio::time::timeout(config.shutdown_timeout, async {
         services.close_admission();
         services.cancel_and_wait_runs(config.shutdown_timeout).await;
+        services.extensions().close_admission();
+        services.extensions().cancel_all();
+        let leaked = services.extensions().drain(config.shutdown_timeout).await;
+        if leaked > 0 {
+            tracing::warn!("extension cleanup left {leaked} unsettled invocations");
+        }
         profile
             .wait_for_settlements(config.shutdown_timeout)
             .await

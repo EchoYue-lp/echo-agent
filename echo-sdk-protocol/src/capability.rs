@@ -114,6 +114,18 @@ pub struct EchoLimits {
     /// Maximum simultaneously issued (open) Agent/Session/Run/Stream handles
     /// per connection.
     pub max_open_handles: WireU64,
+    /// Maximum simultaneously registered extension implementations per
+    /// connection. Registration is connection-owned and never persists
+    /// across a Host restart or a reconnect.
+    pub max_registered_extensions: WireU64,
+    /// Maximum serialized bytes of one extension registration descriptor.
+    pub max_extension_descriptor_bytes: WireU64,
+    /// Maximum serialized bytes of one extension invocation input or result.
+    pub max_extension_payload_bytes: WireU64,
+    /// Maximum serialized bytes of one extension stream chunk payload.
+    pub max_extension_stream_bytes: WireU64,
+    /// Maximum simultaneously in-flight reverse invocations per connection.
+    pub max_inflight_extension_invocations: WireU64,
 }
 
 /// The capability object published under `initialize._meta.echo_agent`.
@@ -211,6 +223,26 @@ impl EchoAgentCapability {
             ),
             ("max_replay_bytes", &self.limits.max_replay_bytes),
             ("max_open_handles", &self.limits.max_open_handles),
+            (
+                "max_registered_extensions",
+                &self.limits.max_registered_extensions,
+            ),
+            (
+                "max_extension_descriptor_bytes",
+                &self.limits.max_extension_descriptor_bytes,
+            ),
+            (
+                "max_extension_payload_bytes",
+                &self.limits.max_extension_payload_bytes,
+            ),
+            (
+                "max_extension_stream_bytes",
+                &self.limits.max_extension_stream_bytes,
+            ),
+            (
+                "max_inflight_extension_invocations",
+                &self.limits.max_inflight_extension_invocations,
+            ),
         ] {
             if value.to_u64() == Some(0) {
                 problems.push(format!("{name} must be positive"));
@@ -370,6 +402,11 @@ mod tests {
                 max_stream_buffer_bytes: WireU64::from_u64(4_194_304),
                 max_replay_bytes: WireU64::from_u64(4_194_304),
                 max_open_handles: WireU64::from_u64(512),
+                max_registered_extensions: WireU64::from_u64(64),
+                max_extension_descriptor_bytes: WireU64::from_u64(65_536),
+                max_extension_payload_bytes: WireU64::from_u64(1_048_576),
+                max_extension_stream_bytes: WireU64::from_u64(262_144),
+                max_inflight_extension_invocations: WireU64::from_u64(8),
             },
         }
     }
@@ -461,10 +498,15 @@ mod tests {
                     max_stream_buffer_bytes: WireU64::from_u64(0),
                     max_replay_bytes: WireU64::from_u64(0),
                     max_open_handles: WireU64::from_u64(0),
+                    max_registered_extensions: WireU64::from_u64(0),
+                    max_extension_descriptor_bytes: WireU64::from_u64(0),
+                    max_extension_payload_bytes: WireU64::from_u64(0),
+                    max_extension_stream_bytes: WireU64::from_u64(0),
+                    max_inflight_extension_invocations: WireU64::from_u64(0),
                 },
             });
-        assert_eq!(back, cap);
-        assert!(meta_entry(None).is_none());
+            assert_eq!(back, cap);
+            assert!(meta_entry(None).is_none());
     }
 
     #[test]
@@ -495,6 +537,11 @@ mod tests {
                 max_stream_buffer_bytes: WireU64::from_u64(0),
                 max_replay_bytes: WireU64::from_u64(0),
                 max_open_handles: WireU64::from_u64(0),
+                max_registered_extensions: WireU64::from_u64(0),
+                max_extension_descriptor_bytes: WireU64::from_u64(0),
+                max_extension_payload_bytes: WireU64::from_u64(0),
+                max_extension_stream_bytes: WireU64::from_u64(0),
+                max_inflight_extension_invocations: WireU64::from_u64(0),
             },
         };
         let back: EchoAgentCapability = serde_json::from_str(&json).unwrap_or(fallback);

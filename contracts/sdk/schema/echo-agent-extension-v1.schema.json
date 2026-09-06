@@ -1035,6 +1035,13 @@
           ]
         },
         {
+          "description": "Invocation conflicts with an exclusive in-flight callback of the same registration (re-entrant mutation). Re-entry returns this typed conflict instead of waiting for the holder (design §12.3).",
+          "type": "string",
+          "enum": [
+            "extension_conflict"
+          ]
+        },
+        {
           "description": "Operation was cancelled; framework terminal state remains authoritative.",
           "type": "string",
           "enum": [
@@ -1446,9 +1453,14 @@
       "required": [
         "callback_timeout",
         "max_callback_concurrency",
+        "max_extension_descriptor_bytes",
+        "max_extension_payload_bytes",
+        "max_extension_stream_bytes",
+        "max_inflight_extension_invocations",
         "max_message_bytes",
         "max_open_handles",
         "max_outstanding_live_events",
+        "max_registered_extensions",
         "max_replay_bytes",
         "max_replay_events",
         "max_stream_buffer_bytes",
@@ -1470,6 +1482,38 @@
           "format": "uint32",
           "minimum": 1.0
         },
+        "max_extension_descriptor_bytes": {
+          "description": "Maximum serialized bytes of one extension registration descriptor.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_extension_payload_bytes": {
+          "description": "Maximum serialized bytes of one extension invocation input or result.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_extension_stream_bytes": {
+          "description": "Maximum serialized bytes of one extension stream chunk payload.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_inflight_extension_invocations": {
+          "description": "Maximum simultaneously in-flight reverse invocations per connection.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
         "max_message_bytes": {
           "description": "Maximum serialized request/response payload in bytes.",
           "allOf": [
@@ -1488,6 +1532,14 @@
         },
         "max_outstanding_live_events": {
           "description": "Maximum not-yet-acknowledged live events per stream. Reaching this bound emits one gap notification and pauses live delivery until the Client acknowledges a cursor (`_echo_agent/event/ack`).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_registered_extensions": {
+          "description": "Maximum simultaneously registered extension implementations per connection. Registration is connection-owned and never persists across a Host restart or a reconnect.",
           "allOf": [
             {
               "$ref": "#/definitions/WireU64"
@@ -3311,8 +3363,282 @@
         "accepted"
       ]
     },
+    "ExtensionDescriptor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "description",
+            "descriptor_version",
+            "kind",
+            "name",
+            "parameters",
+            "schema_revision",
+            "supports_streaming"
+          ],
+          "properties": {
+            "description": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "tool"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "parameters": {
+              "description": "JSON Schema of the tool parameters.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireValue"
+                }
+              ]
+            },
+            "required_input_modalities": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ModelModalityWire"
+              }
+            },
+            "schema_revision": {
+              "$ref": "#/definitions/WireU64"
+            },
+            "supports_streaming": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind",
+            "model_name",
+            "supports_streaming"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "llm_client"
+              ]
+            },
+            "model_name": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "supports_streaming": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "store"
+              ]
+            },
+            "search_modes": {
+              "description": "Search modes the implementation actually supports. Semantic or hybrid searches against an implementation that did not declare them are rejected before any callback is sent.",
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/SearchModeWire"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "human_loop_provider"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "events": {
+              "description": "Hook events the implementation subscribes to (framework hook event names). Empty means the implementation decides per context.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "hook"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent_callback"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "intervention_callback"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent_factory"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind",
+            "model_name",
+            "name",
+            "system_prompt"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "custom_agent"
+              ]
+            },
+            "model_name": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "system_prompt": {
+              "type": "string"
+            },
+            "tool_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "ExtensionDescriptor",
+      "description": "Versioned per-kind registration descriptor. Exactly one variant matches the registration's [`ExtensionKind`]; the Host dispatches on this typed snapshot and never guesses trait semantics from free-form JSON (design §12.2). `descriptor_version` gates evolution: unknown versions fail with `invalid_config` instead of being partially applied."
+    },
     "ExtensionKind": {
-      "type": "string",
       "enum": [
         "tool",
         "llm_client",
@@ -3320,21 +3646,55 @@
         "human_loop_provider",
         "hook",
         "agent_callback",
-        "agent_factory"
-      ]
+        "intervention_callback",
+        "agent_factory",
+        "custom_agent"
+      ],
+      "title": "ExtensionKind",
+      "type": "string"
+    },
+    "ModelModalityWire": {
+      "enum": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "title": "ModelModalityWire",
+      "description": "Model input modality a Tool descriptor may require (wire projection of the framework `ModelInputModality`).",
+      "type": "string"
+    },
+    "SearchModeWire": {
+      "enum": [
+        "keyword",
+        "semantic",
+        "hybrid"
+      ],
+      "title": "SearchModeWire",
+      "description": "Search modes a Store descriptor may declare (wire projection of the framework `SearchMode`). Declaring a mode does not downgrade it: the descriptor is a promise the implementation keeps, not a Host-side default.",
+      "type": "string"
     },
     "ExtensionRegisterRequest": {
+      "additionalProperties": false,
+      "title": "ExtensionRegisterRequest",
+      "description": "`_echo_agent/extension/register` request: register a host-language implementation of a public framework trait (Tool, LlmClient, Store, HumanLoopProvider, Hook, AgentCallback, InterventionCallback, AgentFactory, custom Agent). Registration is owned by the current connection generation: it never survives a Host restart or a reconnect.",
+      "type": "object",
+      "required": [
+        "descriptor",
+        "implementation_id",
+        "kind"
+      ],
       "properties": {
         "descriptor": {
-          "description": "Descriptor the Host uses for dispatch: for Tools this covers name, description, JSON Schema parameters, revision and modality.",
+          "description": "Typed per-kind descriptor snapshot the Host dispatches on.",
           "allOf": [
             {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/ExtensionDescriptor"
             }
           ]
         },
         "implementation_id": {
-          "description": "Client-side implementation identity (non-empty).",
+          "description": "Client-side implementation identity (non-empty). Re-registering the same identity with the same descriptor returns the same handle; a different descriptor is a typed conflict.",
           "type": "string",
           "maxLength": 256,
           "minLength": 1
@@ -3348,7 +3708,7 @@
           ]
         },
         "timeout": {
-          "description": "Declared concurrency/timeout contract.",
+          "description": "Per-registration default deadline for reverse invocations.",
           "anyOf": [
             {
               "$ref": "#/definitions/WireDuration"
@@ -3358,44 +3718,39 @@
             }
           ]
         }
-      },
-      "title": "ExtensionRegisterRequest",
-      "description": "`_echo_agent/extension/register` request: register a host-language implementation of a public framework trait (Tool, LlmClient, Store, HumanLoopProvider, Hook, AgentFactory, ...).",
-      "type": "object",
-      "required": [
-        "descriptor",
-        "implementation_id",
-        "kind"
-      ]
+      }
     },
     "ExtensionRegisterResponse": {
-      "properties": {
-        "extension": {
-          "$ref": "#/definitions/WireHandle"
-        }
-      },
+      "additionalProperties": false,
       "title": "ExtensionRegisterResponse",
       "type": "object",
       "required": [
         "extension"
-      ]
-    },
-    "ExtensionUnregisterRequest": {
+      ],
       "properties": {
         "extension": {
           "$ref": "#/definitions/WireHandle"
         }
-      },
+      }
+    },
+    "ExtensionUnregisterRequest": {
+      "additionalProperties": false,
       "title": "ExtensionUnregisterRequest",
       "description": "`_echo_agent/extension/unregister` request/response.",
       "type": "object",
       "required": [
         "extension"
-      ]
+      ],
+      "properties": {
+        "extension": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      }
     },
     "ExtensionUnregisterResponse": {
       "properties": {
         "released": {
+          "description": "True when this call released the extension; false when it was already released (idempotent unregister).",
           "type": "boolean"
         }
       },
@@ -3405,10 +3760,103 @@
         "released"
       ]
     },
-    "ExtensionInvokeCall": {
+    "ExtensionInvocationContext": {
+      "additionalProperties": false,
+      "title": "ExtensionInvocationContext",
+      "description": "Session/run context attached to a reverse invocation, so a language SDK can correlate callbacks with the execution that caused them. Context is diagnostic identity only — it never changes settlement semantics.",
+      "type": "object",
       "properties": {
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "stream_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        }
+      }
+    },
+    "ExtensionOperation": {
+      "enum": [
+        "tool_execute",
+        "tool_execute_stream",
+        "tool_validate_parameters",
+        "llm_chat",
+        "llm_chat_stream",
+        "store_put",
+        "store_get",
+        "store_search",
+        "store_search_with",
+        "store_delete",
+        "store_list_namespaces",
+        "store_list",
+        "store_prune_expired",
+        "store_dedup_by_content",
+        "human_loop_request",
+        "hook_run",
+        "callback_on_think_start",
+        "callback_on_think_end",
+        "callback_on_tool_start",
+        "callback_on_tool_end",
+        "callback_on_tool_error",
+        "callback_on_final_answer",
+        "callback_on_iteration",
+        "intervention_on_tool_call",
+        "intervention_on_think_start",
+        "intervention_on_final_answer",
+        "factory_create_agent",
+        "agent_execute",
+        "agent_execute_stream",
+        "agent_chat",
+        "agent_chat_stream",
+        "agent_close"
+      ],
+      "title": "ExtensionOperation",
+      "description": "Closed operation set of the extension bridge. Every reverse invocation names exactly one operation; `kind()` binds it to its extension family so the Host can reject an operation dispatched to the wrong kind before any callback leaves the process (design §12.2).",
+      "type": "string"
+    },
+    "ExtensionInvokeCall": {
+      "additionalProperties": false,
+      "title": "ExtensionInvokeCall",
+      "description": "`_echo_agent/extension/invoke` reverse request (Host -> SDK): invoke a registered implementation. The invocation identity is an independent string — never the JSON-RPC request id — and settles exactly once. The SDK dispatcher runs the host-language code and replies with exactly one of `result`/`stream`/`error`.",
+      "type": "object",
+      "required": [
+        "deadline",
+        "extension",
+        "input",
+        "invocation_id",
+        "operation"
+      ],
+      "properties": {
+        "context": {
+          "description": "Session/run correlation identity (diagnostic only).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExtensionInvocationContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "deadline": {
-          "description": "Deadline for this invocation.",
+          "description": "Total deadline for this invocation, including stream delivery.",
           "allOf": [
             {
               "$ref": "#/definitions/WireDuration"
@@ -3419,7 +3867,7 @@
           "$ref": "#/definitions/WireHandle"
         },
         "input": {
-          "description": "Typed invocation payload (tool input, chat request, store op, ...).",
+          "description": "Typed invocation payload selected by kind + operation (tool input, chat request, store op, ...). The Host never guesses a payload shape from free-form JSON: it constructs this value from real Rust trait arguments.",
           "allOf": [
             {
               "$ref": "#/definitions/WireValue"
@@ -3427,21 +3875,31 @@
           ]
         },
         "invocation_id": {
-          "description": "Invocation identity; unique per call, used for cancellation.",
+          "description": "Invocation identity; unique per call, used for cancellation. It is a domain identity independent from any JSON-RPC request id.",
           "type": "string",
           "maxLength": 256,
           "minLength": 1
+        },
+        "operation": {
+          "description": "Which trait operation is being invoked.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ExtensionOperation"
+            }
+          ]
+        },
+        "stream": {
+          "description": "For streaming operations: the Host-minted stream handle the SDK must acknowledge and address `_echo_agent/extension/stream` notifications to. The SDK never invents stream identities.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
-      },
-      "title": "ExtensionInvokeCall",
-      "description": "`_echo_agent/extension/invoke` reverse request (Host -> SDK): invoke a registered implementation. The SDK dispatcher runs the host-language code and replies with exactly one of `result`/`stream`/`error`.",
-      "type": "object",
-      "required": [
-        "deadline",
-        "extension",
-        "input",
-        "invocation_id"
-      ]
+      }
     },
     "ExtensionInvokeOutcome": {
       "oneOf": [
@@ -3461,9 +3919,11 @@
             "value": {
               "$ref": "#/definitions/WireValue"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
+          "description": "Streaming acknowledgement: the SDK echoes the Host-minted stream handle and delivers the payload through `_echo_agent/extension/stream` notifications.",
           "type": "object",
           "required": [
             "outcome",
@@ -3479,7 +3939,8 @@
             "stream": {
               "$ref": "#/definitions/WireHandle"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -3497,26 +3958,35 @@
                 "error"
               ]
             }
-          }
+          },
+          "additionalProperties": false
         }
       ],
       "title": "ExtensionInvokeOutcome",
       "description": "One callback outcome. Failures use the typed extension errors; there is no implicit fallback to a built-in implementation (design §12.1)."
     },
     "ExtensionCancelNotice": {
+      "additionalProperties": false,
+      "title": "ExtensionCancelNotice",
+      "description": "`_echo_agent/extension/cancel` reverse notification (Host -> SDK): the framework cancelled an in-flight invocation; the SDK must stop work but still answer the original call with a `cancelled` error or a stream `cancelled` terminal.",
+      "type": "object",
+      "required": [
+        "invocation_id",
+        "reason"
+      ],
       "properties": {
         "invocation_id": {
           "type": "string",
           "maxLength": 256,
           "minLength": 1
+        },
+        "reason": {
+          "description": "Stable diagnostic reason (`cancelled` or `timeout`).",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
         }
-      },
-      "title": "ExtensionCancelNotice",
-      "description": "`_echo_agent/extension/cancel` reverse notification (Host -> SDK): the framework cancelled an in-flight invocation; the SDK must stop work but still answer the original call with a `cancelled` error.",
-      "type": "object",
-      "required": [
-        "invocation_id"
-      ]
+      }
     },
     "ExtensionStreamEvent": {
       "oneOf": [
@@ -3544,7 +4014,8 @@
             "value": {
               "$ref": "#/definitions/WireValue"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -3570,7 +4041,8 @@
             "value": {
               "$ref": "#/definitions/WireValue"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -3596,7 +4068,8 @@
             "stream": {
               "$ref": "#/definitions/WireHandle"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -3618,11 +4091,12 @@
             "stream": {
               "$ref": "#/definitions/WireHandle"
             }
-          }
+          },
+          "additionalProperties": false
         }
       ],
       "title": "ExtensionStreamEvent",
-      "description": "`_echo_agent/extension/stream` event. Sequence is monotonic per stream and exactly one terminal variant may be emitted by the Host."
+      "description": "`_echo_agent/extension/stream` event (SDK -> Host notification): one chunk or the single terminal of a streaming callback. Sequence is monotonic per stream and exactly one terminal variant may be emitted by the SDK; the Host enforces exactly-one-terminal and discards late events after settlement with bounded diagnostics only."
     },
     "FeatureOperationRequest": {
       "properties": {

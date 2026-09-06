@@ -1,0 +1,13 @@
+{
+  "name": "extension-outcome-result-valid",
+  "kind": "valid",
+  "target": "ExtensionInvokeOutcome",
+  "description": "A non-streaming callback settles with exactly one result value.",
+  "payload": {
+    "outcome": "result",
+    "value": {
+      "kind": "string",
+      "value": "3 documents"
+    }
+  }
+}
