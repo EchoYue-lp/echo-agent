@@ -297,3 +297,43 @@ real-process E2E (`echo-sdk-host/tests/core_profile_e2e.rs`):
   server-error code (`-32050`) carries the bounded `EchoSdkError` in
   `error.data`, and the Host embeds only the small generated
   `source-contract.json` digest — never the large inventory artifacts.
+
+
+## Decision: bidirectional extension bridge (plan 06)
+
+The bridge ships as one connection-scoped authority plus thin per-trait
+proxies; both live behind the Host's `sdk-extension-bridge` feature and the
+negotiated `extension_bridge` capability.
+
+- **One invocation authority, no second run authority.**
+  `echo_agent::acp::ExtensionInvocationAuthority` owns only callback
+  lifecycle: admission, bounded concurrency permits, per-invocation
+  cancellation, exclusive-mutation leases and exactly-once settlement. Run
+  terminals, receipts, retries and event sequences stay with the framework.
+- **Typed per-kind descriptors over free-form values.** Registrations carry
+  a versioned `ExtensionDescriptor` bound to the `ExtensionKind`; the
+  closed `ExtensionOperation` set rejects kind/operation mismatches before
+  any callback leaves the process. `InterventionCallback` is its own kind —
+  never an observational-callback alias.
+- **Official transport only.** Reverse calls ride
+  `ConnectionTo::send_request` inside spawned tasks with caller-side
+  deadlines; cancellation sends the official `$/cancel_request` plus the
+  typed `_echo_agent/extension/cancel` notice. Disconnects map to typed
+  `extension_disconnected`; late answers are discarded, never applied.
+- **Host-minted stream identity.** Streaming invocations mint the stream
+  handle Host-side; the SDK echoes it and delivers monotonic chunks with
+  exactly one terminal. The Rust stream ends exactly at the terminal and
+  releases the handle.
+- **No implicit fallback.** A failed, timed-out, cancelled or disconnected
+  callback returns typed errors; the Rust API's own retry/cancel policy
+  decides what happens next.
+- **Connection-owned registrations.** Registrations never survive a Host
+  restart or reconnect, are idempotent per identity + descriptor
+  fingerprint (different descriptor → typed `extension_conflict`), and are
+  released after Session Agents close in the teardown order.
+- **Framework additions kept minimal.** The bridge needed exactly two
+  generic framework primitives that did not exist: a programmatic hook
+  source (`HookRegistry::set_programmatic_hook`, mirroring the existing
+  type-erased executor injections) and exporting the `HumanInLoop` tool for
+  embedders that swap the approval provider. Everything else uses existing
+  public setters.

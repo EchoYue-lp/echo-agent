@@ -813,7 +813,11 @@ agent.set_circuit_breaker(cb_config);
 可从源码构建的 `echo-agent-sdk-host` 已通过官方 Client 与 stdio runtime 的标准
 ACP v1 支持面验证；在 `sdk-core-profile` feature 与显式 state root 下，还支持协商式
 `_echo_agent/*` 核心扩展 Profile（Agent/Session/Run handle、完整事件与 ACK/replay、
-重启恢复）。它复用根 crate 的 `AcpAgentAdapter`，每个 Session 创建一个
+重启恢复）。再叠加 `sdk-extension-bridge` feature 后，还提供协商式双向扩展桥：
+宿主语言实现的 Tool、LlmClient、Store、HumanLoop、Hook、回调/干预、工厂与自定义
+Agent 在同一连接上注册，并由 Host 以租约、截止时间、取消与流终态语义反向调用
+（见 [docs/sdk/sdk-extension-bridge.md](docs/sdk/sdk-extension-bridge.md)）。
+它复用根 crate 的 `AcpAgentAdapter`，每个 Session 创建一个
 独立框架 Agent，并只接受显式、产品无关的 JSON 配置。开发者用
 `cargo build -p echo-sdk-host --features sdk-core-profile --locked` 自行构建；仓库不
 携带 binary 或任何语言 runtime。TypeScript/Python/Java 扩展 Client 尚未实现，

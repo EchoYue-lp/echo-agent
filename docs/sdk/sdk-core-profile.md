@@ -173,3 +173,14 @@ stdin frames are byte-counted before the official JSON-RPC parser sees them;
 a frame larger than `max_frame_bytes` fails the connection with a bounded
 stderr diagnostic and no business side effect. stdout remains the single
 official ACP writer; diagnostics go to stderr and never contain credentials.
+
+
+## Relation to the extension bridge
+
+The extension bridge ([sdk-extension-bridge.md](sdk-extension-bridge.md))
+is a separately compiled, separately advertised capability over this same
+core profile: it registers host-language trait implementations and calls
+them back through the same connection-scoped invocation authority. The
+bridge changes nothing about core profile semantics — standard
+initialize/session/prompt, handle ladders, ACK-gated live delivery and
+replay behave identically with or without it.

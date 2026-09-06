@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
+  Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
+  capability and lets a host language register Tool, LlmClient, Store,
+  HumanLoopProvider, Hook, AgentCallback, InterventionCallback,
+  AgentFactory and custom-Agent implementations. The framework calls them
+  through thin proxies on the same ACP connection: every reverse invocation
+  takes a lease from the connection-scoped
+  `ExtensionInvocationAuthority` (bounded concurrency, exclusive-lease
+  re-entry conflicts, exactly-once settlement), carries its own invocation
+  identity and deadline, settles typed outcomes on timeout / cancellation /
+  disconnect, and discards late answers with bounded diagnostics. Streaming
+  callbacks deliver Host-minted stream handles with monotonic sequences and
+  exactly one terminal. Failure never falls back to a built-in
+  implementation. Real-process E2E covers the tool round trip with
+  callbacks, interventions and hooks, streaming LlmClient, the registration
+  deadline, framework cancellation notices and the plain-client
+  fail-closed ladder.
+
 - **Negotiated `_echo_agent/*` SDK core profile.** The echo-agent SDK Host
   now serves an explicitly negotiated core extension profile over the same
   standard ACP v1 connection: capability hello/advertisement under

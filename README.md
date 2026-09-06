@@ -1108,7 +1108,14 @@ The source-built `echo-agent-sdk-host` passes the supported standard ACP v1
 profile through the official Client and stdio runtime, and — with the
 `sdk-core-profile` feature and an explicit state root — the negotiated
 `_echo_agent/*` core extension profile (Agent/Session/Run handles, full
-events with ACK/replay, restart recovery). It uses the root
+events with ACK/replay, restart recovery). With the additional
+`sdk-extension-bridge` feature it also serves the negotiated bidirectional
+extension bridge: host-language Tool, LlmClient, Store, HumanLoop, Hook,
+callback, intervention, factory and custom-Agent implementations register
+over the same connection and are reverse-invoked with lease, deadline,
+cancellation and stream-terminal semantics (see
+[docs/sdk/sdk-extension-bridge.md](docs/sdk/sdk-extension-bridge.md)). It
+uses the root
 `AcpAgentAdapter`, creates one framework Agent per Session, and accepts an
 explicit product-neutral JSON configuration. Build it with
 `cargo build -p echo-sdk-host --features sdk-core-profile --locked`; no binary

@@ -76,6 +76,9 @@ jobs:
       - name: Test core profile E2E (sdk-host group only)
         if: matrix.group == 'sdk-host'
         run: cargo test -p echo-sdk-host --features sdk-core-profile --lib --tests --locked
+      - name: Test extension bridge E2E (sdk-host group only)
+        if: matrix.group == 'sdk-host'
+        run: cargo test -p echo-sdk-host --features sdk-extension-bridge --tests --locked extension_bridge_e2e
 
   windows-check:
     runs-on: windows-latest
