@@ -38,6 +38,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 
+use super::extension::ExtensionInvocationAuthority;
 use super::projection::AcpEventProjector;
 use super::session::{AcpSession, ActiveTurnLease, SessionRegistry};
 
@@ -422,6 +423,7 @@ pub struct AcpConnectionServices {
     ledger_limits: AcpLedgerLimits,
     config: Arc<super::adapter::AcpAdapterConfig>,
     admission_open: AtomicBool,
+    extensions: Arc<ExtensionInvocationAuthority>,
 }
 
 impl AcpConnectionServices {
@@ -429,6 +431,18 @@ impl AcpConnectionServices {
         sessions: Arc<SessionRegistry>,
         config: Arc<super::adapter::AcpAdapterConfig>,
     ) -> Self {
+        // The adapter config is validated before the connection spawns, so a
+        // non-positive concurrency cannot reach here; degrade to a single
+        // permit instead of panicking if it ever does.
+        let extensions = ExtensionInvocationAuthority::new(config.max_extension_concurrency)
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "invalid extension concurrency {} ({}), falling back to 1",
+                    config.max_extension_concurrency,
+                    error
+                );
+                ExtensionInvocationAuthority::new_saturating(1)
+            });
         Self {
             mode: RwLock::new(ConnectionMode::Standard),
             sessions,
@@ -436,7 +450,15 @@ impl AcpConnectionServices {
             ledger_limits: AcpLedgerLimits::default(),
             config,
             admission_open: AtomicBool::new(true),
+            extensions,
         }
+    }
+
+    /// The connection-scoped extension invocation authority (design §12.3).
+    /// Shared by every extension proxy on this connection; never carries a
+    /// second run/session/terminal authority.
+    pub fn extensions(&self) -> &Arc<ExtensionInvocationAuthority> {
+        &self.extensions
     }
 
     /// Override the in-memory ledger bounds (extension profiles derive them
@@ -474,6 +496,7 @@ impl AcpConnectionServices {
 
     pub fn close_admission(&self) {
         self.admission_open.store(false, Ordering::Release);
+        self.extensions.close_admission();
     }
 
     pub fn ensure_admission(&self) -> Result<()> {
@@ -517,6 +540,22 @@ impl AcpConnectionServices {
     /// Resolve one run by id.
     pub async fn run(&self, run_id: &str) -> Option<Arc<RunEntry>> {
         self.runs.get(run_id).await
+    }
+
+    /// Return the cancellation token of the active run owned by one Session.
+    /// A Session permits at most one active run, so this is an unambiguous
+    /// bridge for trait callbacks whose public method does not carry a token.
+    pub async fn active_run_cancellation(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::agent::CancellationToken> {
+        self.runs
+            .runs
+            .read()
+            .await
+            .values()
+            .find(|entry| entry.session_id.to_string() == session_id && entry.is_running())
+            .map(|entry| entry.cancellation())
     }
 
     /// Remove a prepared run when a later setup or connection spawn fails.
@@ -746,6 +785,11 @@ pub trait AcpConnectionProfile: Send + Sync + 'static {
     fn flush_before_agents(&self) -> std::result::Result<(), String> {
         Ok(())
     }
+
+    /// Release connection-owned profile resources (e.g. extension
+    /// registrations) after Session Agents/MCP closed. Last step of the
+    /// teardown order in design §12.3/§16.
+    fn release_after_agents(&self) {}
 
     fn wait_for_settlements(
         &self,

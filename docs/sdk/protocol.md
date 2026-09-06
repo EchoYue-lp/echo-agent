@@ -4,7 +4,9 @@ This document describes the wire-level contract of the echo-agent SDK: the
 two profiles, the extension namespace, lossless scalar rules, error taxonomy,
 event/replay semantics and versioning. The stable initialize/new/prompt/update/
 cancel subset now has a transport-neutral Rust Agent adapter and a real
-source-built stdio Host; the extension profile and language SDKs remain later deliveries (see
+source-built stdio Host; the core extension profile and the extension bridge are delivered in
+that Host (see [sdk-core-profile.md](sdk-core-profile.md) and
+[sdk-extension-bridge.md](sdk-extension-bridge.md)); language SDKs remain later deliveries (see
 the [status ladder](README.md#status-ladder)).
 
 ## Base protocol: official ACP v1
@@ -213,3 +215,20 @@ terminal or receipt (`run/wait` answers typed `host_exited`).
   reusing an error code is a breaking change: in this development-phase
   repository such a change updates Host, SDKs, fixtures, manifest and docs
   in the same commit — no legacy fallback is kept.
+
+
+## Extension bridge methods
+
+The bridge family lives under `_echo_agent/extension/*` and is advertised
+as the `extension_bridge` capability only when the Host compiles the
+`sdk-extension-bridge` feature. See [sdk-extension-bridge.md](sdk-extension-bridge.md)
+for registration, invocation, stream, cancellation and error semantics, and
+the generated schema for the authoritative wire shapes.
+
+| Method | Direction | Purpose |
+|---|---|---|
+| `_echo_agent/extension/register` | Client → Host | Register a host-language implementation (typed per-kind descriptor). |
+| `_echo_agent/extension/unregister` | Client → Host | Idempotent release of a registration. |
+| `_echo_agent/extension/invoke` | Host → Client | Reverse invocation of one extension operation. |
+| `_echo_agent/extension/cancel` | Host → Client | Cancellation/deadline notice for an in-flight invocation. |
+| `_echo_agent/extension/stream` | Client → Host | Stream chunk or the single terminal of a streaming callback. |

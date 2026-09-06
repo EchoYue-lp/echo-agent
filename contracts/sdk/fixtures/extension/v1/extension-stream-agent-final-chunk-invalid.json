@@ -1,0 +1,25 @@
+{
+  "name": "extension-stream-agent-final-chunk-invalid",
+  "kind": "invalid",
+  "target": "ExtensionStreamEvent",
+  "description": "A CustomAgent final answer must use the outer complete terminal.",
+  "payload": {
+    "event": "chunk",
+    "stream": {
+      "id": "stream-9",
+      "generation": "2",
+      "kind": "stream"
+    },
+    "sequence": "2",
+    "value": {
+      "kind": "agent",
+      "value": {
+        "event": "final_answer",
+        "data": {
+          "text": "done"
+        }
+      }
+    }
+  },
+  "expect_error": "invalid_value"
+}

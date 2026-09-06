@@ -6,11 +6,14 @@ the Rust framework's public facade and TypeScript, Python and Java — without
 rewriting the agent framework in any of those languages.
 
 > **Current status: ACP conformant (standard profile) + core extension profile
-> delivered in the Rust Host.** The source-built `echo-agent-sdk-host` passes
+> + extension bridge delivered in the Rust Host.** The source-built `echo-agent-sdk-host` passes
 > initialize/new/prompt/update/cancel and shutdown scenarios through the
 > official v1 Client, and the negotiated `_echo_agent/*` **core profile**
 > (Agent/Session/Run handles, full events, ACK/replay, restart recovery) passes
-> real-process E2E ([sdk-core-profile.md](sdk-core-profile.md)). Language SDKs
+> real-process E2E ([sdk-core-profile.md](sdk-core-profile.md)), and the negotiated
+> bidirectional **extension bridge** passes real-process E2E for Tool,
+> LlmClient, Store, hooks and callbacks
+> ([sdk-extension-bridge.md](sdk-extension-bridge.md)). Language SDKs
 > do not exist yet, so the program still does not claim **Runnable** or full
 > parity. See [Status ladder](#status-ladder) for the exact claims.
 

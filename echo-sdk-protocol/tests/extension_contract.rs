@@ -12,7 +12,7 @@ use echo_sdk_protocol::catalog::{self, Direction, METHOD_CATALOG, MethodDescript
 use echo_sdk_protocol::error::EchoSdkError;
 use echo_sdk_protocol::event::{GapNotification, ReplayRequest, ReplayResponse, WireEventEnvelope};
 use echo_sdk_protocol::handle::WireHandle;
-use echo_sdk_protocol::methods::{ExtensionInvokeOutcome, ExtensionStreamEvent};
+use echo_sdk_protocol::methods::{ExtensionInvokeOutcome, ExtensionStreamEvent, ToolRiskLevelWire};
 use echo_sdk_protocol::scalar::{WireBytes, WirePath, WireU64, WireValue};
 use echo_sdk_protocol::schema::{
     self, FixtureKind, build_extension_schema_doc, build_extension_validator,
@@ -136,7 +136,232 @@ fn extension_outcome_and_stream_are_tagged() {
             serde_json::from_value(fixture.payload.clone());
         let valid = parsed.as_ref().is_ok_and(|event| event.validate().is_ok());
         assert_eq!(valid, fixture.kind == FixtureKind::Valid);
+        if let Ok(event) = parsed
+            && fixture.kind == FixtureKind::Valid
+            && let Ok(value) = serde_json::to_value(&event)
+        {
+            assert_eq!(
+                value, fixture.payload,
+                "fixture {} is not lossless",
+                fixture.name
+            );
+        }
     }
+}
+
+#[test]
+fn bridge_register_fixtures_enforce_typed_descriptors() {
+    use echo_sdk_protocol::methods::ExtensionRegisterRequest;
+    for fixture in fixtures_of("ExtensionRegisterRequest") {
+        let parsed: Result<ExtensionRegisterRequest, _> =
+            serde_json::from_value(fixture.payload.clone());
+        let valid = parsed
+            .as_ref()
+            .is_ok_and(|request| request.validate().is_ok());
+        assert_eq!(
+            valid,
+            fixture.kind == FixtureKind::Valid,
+            "fixture {} classified incorrectly",
+            fixture.name
+        );
+        if let Ok(request) = parsed
+            && fixture.kind == FixtureKind::Valid
+        {
+            assert_eq!(
+                request.descriptor.kind(),
+                request.kind,
+                "fixture {} descriptor kind must match",
+                fixture.name
+            );
+        }
+    }
+}
+
+#[test]
+fn bridge_invoke_and_cancel_fixtures_enforce_identity_rules() {
+    use echo_sdk_protocol::methods::{ExtensionCancelNotice, ExtensionInvokeCall};
+    for fixture in fixtures_of("ExtensionInvokeCall") {
+        let parsed: Result<ExtensionInvokeCall, _> =
+            serde_json::from_value(fixture.payload.clone());
+        let valid = parsed.as_ref().is_ok_and(|call| call.validate().is_ok());
+        assert_eq!(
+            valid,
+            fixture.kind == FixtureKind::Valid,
+            "fixture {} classified incorrectly",
+            fixture.name
+        );
+    }
+    for fixture in fixtures_of("ExtensionCancelNotice") {
+        let parsed: Result<ExtensionCancelNotice, _> =
+            serde_json::from_value(fixture.payload.clone());
+        let valid = parsed
+            .as_ref()
+            .is_ok_and(|notice| notice.validate().is_ok());
+        assert_eq!(
+            valid,
+            fixture.kind == FixtureKind::Valid,
+            "fixture {} classified incorrectly",
+            fixture.name
+        );
+    }
+}
+
+#[test]
+fn extension_operation_taxonomy_is_closed_and_kind_bound() {
+    use echo_sdk_protocol::methods::{ExtensionDescriptor, ExtensionKind, ExtensionOperation};
+    // Every operation resolves to a kind, and streaming membership is stable.
+    let all = [
+        ExtensionOperation::ToolExecute,
+        ExtensionOperation::ToolExecuteStream,
+        ExtensionOperation::ToolValidateParameters,
+        ExtensionOperation::LlmChat,
+        ExtensionOperation::LlmChatStream,
+        ExtensionOperation::StorePut,
+        ExtensionOperation::StoreGet,
+        ExtensionOperation::StoreSearch,
+        ExtensionOperation::StoreSearchWith,
+        ExtensionOperation::StoreDelete,
+        ExtensionOperation::StoreListNamespaces,
+        ExtensionOperation::StoreList,
+        ExtensionOperation::StorePruneExpired,
+        ExtensionOperation::StoreDedupByContent,
+        ExtensionOperation::HumanLoopRequest,
+        ExtensionOperation::HookRun,
+        ExtensionOperation::CallbackOnThinkStart,
+        ExtensionOperation::CallbackOnThinkEnd,
+        ExtensionOperation::CallbackOnToolStart,
+        ExtensionOperation::CallbackOnToolEnd,
+        ExtensionOperation::CallbackOnToolError,
+        ExtensionOperation::CallbackOnFinalAnswer,
+        ExtensionOperation::CallbackOnIteration,
+        ExtensionOperation::InterventionOnToolCall,
+        ExtensionOperation::InterventionOnThinkStart,
+        ExtensionOperation::InterventionOnFinalAnswer,
+        ExtensionOperation::FactoryCreateAgent,
+        ExtensionOperation::AgentExecute,
+        ExtensionOperation::AgentExecuteStream,
+        ExtensionOperation::AgentChat,
+        ExtensionOperation::AgentChatStream,
+        ExtensionOperation::AgentClose,
+    ];
+    let mut names = std::collections::BTreeSet::new();
+    for operation in all {
+        assert!(names.insert(operation.as_str()), "duplicate operation name");
+        assert!(
+            operation.is_streaming()
+                == matches!(
+                    operation,
+                    ExtensionOperation::ToolExecuteStream
+                        | ExtensionOperation::LlmChatStream
+                        | ExtensionOperation::AgentExecuteStream
+                        | ExtensionOperation::AgentChatStream
+                ),
+            "streaming membership drifted for {}",
+            operation.as_str()
+        );
+    }
+    // Every extension kind owns at least one operation and one descriptor
+    // variant; InterventionCallback is its own kind, not an AgentCallback
+    // spelling.
+    let kinds = [
+        ExtensionKind::Tool,
+        ExtensionKind::LlmClient,
+        ExtensionKind::Store,
+        ExtensionKind::HumanLoopProvider,
+        ExtensionKind::Hook,
+        ExtensionKind::AgentCallback,
+        ExtensionKind::InterventionCallback,
+        ExtensionKind::AgentFactory,
+        ExtensionKind::CustomAgent,
+    ];
+    for kind in kinds {
+        assert!(
+            all.iter().any(|operation| operation.kind() == kind),
+            "kind {} has no operation",
+            kind.as_str()
+        );
+        assert_eq!(
+            ExtensionDescriptor::HumanLoopProvider {
+                descriptor_version: 1
+            }
+            .kind(),
+            ExtensionKind::HumanLoopProvider
+        );
+        assert_ne!(kind.as_str(), "worker");
+    }
+    assert_eq!(
+        ExtensionDescriptor::InterventionCallback {
+            descriptor_version: 1
+        }
+        .kind(),
+        ExtensionKind::InterventionCallback
+    );
+    // Descriptor fingerprints are canonical: same descriptor, same string.
+    let descriptor = ExtensionDescriptor::Tool {
+        descriptor_version: 1,
+        name: "probe".to_string(),
+        description: String::new(),
+        parameters: WireValue::Null,
+        schema_revision: WireU64::from_u64(0),
+        required_input_modalities: Vec::new(),
+        required_permissions: Vec::new(),
+        risk_level: ToolRiskLevelWire::Standard,
+        supports_streaming: false,
+        exempt_from_batch_timeout: false,
+        allows_parallel_batch_execution: true,
+        manages_own_timeout: false,
+    };
+    assert_eq!(descriptor.fingerprint(), descriptor.clone().fingerprint());
+    assert!(descriptor.validate().is_ok());
+    // Unknown descriptor versions fail closed.
+    assert!(
+        ExtensionDescriptor::Hook {
+            descriptor_version: 2,
+            events: Vec::new(),
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
+fn extension_rpc_types_bind_the_official_jsonrpc_surface() {
+    use agent_client_protocol::JsonRpcMessage as _;
+    use echo_sdk_protocol::methods::{
+        ExtensionCancelNotice, ExtensionInvokeCall, ExtensionRegisterRequest, ExtensionStreamEvent,
+        ExtensionUnregisterRequest,
+    };
+    // The typed RPC derives bind each DTO to its catalog method name, so the
+    // official runtime can dispatch and route them without any local parser.
+    type MethodMatcher = fn(&str) -> bool;
+    let registered: [(&str, MethodMatcher); 4] = [
+        (
+            "_echo_agent/extension/register",
+            ExtensionRegisterRequest::matches_method,
+        ),
+        (
+            "_echo_agent/extension/unregister",
+            ExtensionUnregisterRequest::matches_method,
+        ),
+        (
+            "_echo_agent/extension/invoke",
+            ExtensionInvokeCall::matches_method,
+        ),
+        (
+            "_echo_agent/extension/cancel",
+            ExtensionCancelNotice::matches_method,
+        ),
+    ];
+    for (name, matcher) in registered {
+        assert!(matcher(name), "{name} must match its own DTO");
+        assert!(!matcher("_echo_agent/extension/stream"));
+    }
+    assert!(ExtensionStreamEvent::matches_method(
+        "_echo_agent/extension/stream"
+    ));
+    assert!(!ExtensionStreamEvent::matches_method(
+        "_echo_agent/extension/cancel"
+    ));
 }
 
 #[test]
@@ -362,6 +587,34 @@ fn schema_document_is_deterministic_and_within_boundaries() -> Result<(), String
             assert!(definitions.contains_key(error));
         }
     }
+    for reusable in [
+        "ExtensionInvocation",
+        "ExtensionResult",
+        "ExtensionStreamChunkValue",
+        "ExtensionStreamCompleteValue",
+        "AgentEventWire",
+        "AgentStreamChunkWire",
+        "AgentStreamTerminalWire",
+    ] {
+        assert!(
+            definitions.contains_key(reusable),
+            "public extension type {reusable} must have a named schema definition"
+        );
+    }
+    let invocation_ref = definitions
+        .get("ExtensionInvokeCall")
+        .and_then(|schema| schema.pointer("/properties/invocation/$ref"))
+        .or_else(|| {
+            definitions
+                .get("ExtensionInvokeCall")
+                .and_then(|schema| schema.pointer("/properties/invocation/allOf/0/$ref"))
+        })
+        .and_then(|value| value.as_str());
+    assert_eq!(
+        invocation_ref,
+        Some("#/definitions/ExtensionInvocation"),
+        "ExtensionInvokeCall must reference the reusable invocation union"
+    );
     Ok(())
 }
 
@@ -389,7 +642,7 @@ fn schema_rejects_structurally_invalid_fixtures() -> Result<(), String> {
         "event-replay-empty-stream-invalid",
         "event-replay-zero-limit-invalid",
         "extension-outcome-empty-invalid",
-        "extension-outcome-ambiguous-invalid",
+        "extension-cancel-notice-empty-reason-invalid",
         "extension-stream-sequence-zero-invalid",
     ];
     for fixture in schema::all_fixtures()

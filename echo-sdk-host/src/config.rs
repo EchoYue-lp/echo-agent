@@ -1,6 +1,10 @@
 use echo_agent::config::FrameworkConfig;
 use echo_agent::error::ReactError;
 use echo_agent::llm::{LlmClient, LlmConfig};
+#[cfg(feature = "sdk-core-profile")]
+use echo_sdk_protocol::methods::{
+    MAX_EXTENSION_DESCRIPTOR_BYTES, MAX_EXTENSION_PAYLOAD_BYTES, MAX_EXTENSION_STREAM_CHUNK_BYTES,
+};
 use serde::Deserialize;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -68,6 +72,24 @@ pub struct SdkProfileLimits {
     pub max_replay_bytes: usize,
     /// Maximum simultaneously open Agent/Session/Run/Stream handles.
     pub max_open_handles: usize,
+    /// Maximum simultaneously registered extension implementations. Extension
+    /// registrations are connection-owned and never persist across a Host
+    /// restart or reconnect.
+    pub max_registered_extensions: usize,
+    /// Maximum serialized bytes of one extension registration descriptor.
+    pub max_extension_descriptor_bytes: usize,
+    /// Maximum serialized bytes of one extension invocation input/result.
+    pub max_extension_payload_bytes: usize,
+    /// Maximum serialized bytes of one extension stream chunk payload.
+    pub max_extension_stream_bytes: usize,
+    /// Maximum simultaneously in-flight extension reverse invocations.
+    pub max_extension_invocations: usize,
+    /// Maximum concurrently executing extension reverse callbacks (the
+    /// connection-level lease concurrency).
+    pub max_callback_concurrency: usize,
+    /// Default reverse-callback deadline in seconds when a registration does
+    /// not declare its own timeout.
+    pub callback_timeout_secs: u64,
     /// Seconds allowed for the bounded shutdown chain.
     pub shutdown_timeout_secs: u64,
 }
@@ -81,6 +103,13 @@ impl Default for SdkProfileLimits {
             max_replay_events: 512,
             max_replay_bytes: 8 * 1024 * 1024,
             max_open_handles: 512,
+            max_registered_extensions: 64,
+            max_extension_descriptor_bytes: 65_536,
+            max_extension_payload_bytes: 1_048_576,
+            max_extension_stream_bytes: 262_144,
+            max_extension_invocations: 16,
+            max_callback_concurrency: 8,
+            callback_timeout_secs: 30,
             shutdown_timeout_secs: 5,
         }
     }
@@ -94,10 +123,27 @@ impl SdkProfileLimits {
             || self.max_replay_events == 0
             || self.max_replay_bytes == 0
             || self.max_open_handles == 0
+            || self.max_registered_extensions == 0
+            || self.max_extension_descriptor_bytes == 0
+            || self.max_extension_payload_bytes == 0
+            || self.max_extension_stream_bytes == 0
+            || self.max_extension_invocations == 0
+            || self.max_callback_concurrency == 0
+            || self.callback_timeout_secs == 0
             || self.shutdown_timeout_secs == 0
+            || self.max_callback_concurrency > u32::MAX as usize
         {
             return Err(HostError::Config(
                 "sdk_profile.limits values must all be positive".to_string(),
+            ));
+        }
+        #[cfg(feature = "sdk-core-profile")]
+        if self.max_extension_descriptor_bytes > MAX_EXTENSION_DESCRIPTOR_BYTES
+            || self.max_extension_payload_bytes > MAX_EXTENSION_PAYLOAD_BYTES
+            || self.max_extension_stream_bytes > MAX_EXTENSION_STREAM_CHUNK_BYTES
+        {
+            return Err(HostError::Config(
+                "sdk_profile extension limits exceed the protocol bounds".to_string(),
             ));
         }
         Ok(())
@@ -266,12 +312,14 @@ fn validate_agent_settings(config: &FrameworkConfig) -> Result<(), HostError> {
             "default_agent.agent.enable_tools must be true for ACP stdio MCP support".to_string(),
         ));
     }
+    #[cfg(not(feature = "sdk-extension-bridge"))]
     if config.agent.enable_memory {
         return Err(HostError::Config(
             "default_agent.agent.enable_memory is not supported by the standard Host profile"
                 .to_string(),
         ));
     }
+    #[cfg(not(feature = "sdk-extension-bridge"))]
     if config.agent.enable_human_in_loop {
         return Err(HostError::Config(
             "default_agent.agent.enable_human_in_loop requires a later ACP callback profile"
@@ -473,18 +521,27 @@ mod tests {
 
     #[test]
     fn unsupported_profile_settings_fail_before_stdio() {
-        for mutate in [
-            |agent: &mut AgentSettings| agent.enable_tools = false,
-            |agent: &mut AgentSettings| agent.enable_memory = true,
-            |agent: &mut AgentSettings| agent.enable_human_in_loop = true,
-        ] {
-            let mut config = config();
-            mutate(&mut config.default_agent.agent);
-            assert!(
-                config
-                    .validate_with_env(|_| Err("unused".to_string()))
-                    .is_err()
-            );
+        let mut config = config();
+        config.default_agent.agent.enable_tools = false;
+        assert!(
+            config
+                .validate_with_env(|_| Err("unused".to_string()))
+                .is_err()
+        );
+        #[cfg(not(feature = "sdk-extension-bridge"))]
+        {
+            for mutate in [
+                |agent: &mut AgentSettings| agent.enable_memory = true,
+                |agent: &mut AgentSettings| agent.enable_human_in_loop = true,
+            ] {
+                let mut config = config();
+                mutate(&mut config.default_agent.agent);
+                assert!(
+                    config
+                        .validate_with_env(|_| Err("unused".to_string()))
+                        .is_err()
+                );
+            }
         }
     }
 

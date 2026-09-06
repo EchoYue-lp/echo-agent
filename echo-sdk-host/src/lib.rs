@@ -40,7 +40,7 @@ pub use core_profile::SdkCoreProfile;
 #[cfg(feature = "runtime")]
 use agent_client_protocol::{ConnectTo as _, Stdio};
 #[cfg(feature = "runtime")]
-use echo_agent::acp::AcpAgentAdapter;
+use echo_agent::acp::{AcpAdapterConfig, AcpAgentAdapter};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -103,7 +103,19 @@ pub async fn run_stdio(path: impl AsRef<std::path::Path>) -> Result<(), HostErro
             // definition authority.
             let factory = profile.session_factory();
             let transport = bounded_stdio::bounded_stdio(profile_config.limits.max_frame_bytes);
-            AcpAgentAdapter::new(factory)
+            let max_extension_concurrency = profile_config
+                .limits
+                .max_callback_concurrency
+                .min(profile_config.limits.max_extension_invocations);
+            let adapter = AcpAgentAdapter::with_config(
+                factory,
+                AcpAdapterConfig {
+                    max_extension_concurrency,
+                    ..AcpAdapterConfig::default()
+                },
+            )
+            .map_err(|error| HostError::Config(error.to_string()))?;
+            adapter
                 .with_profile(profile)
                 .connect_to(transport)
                 .await

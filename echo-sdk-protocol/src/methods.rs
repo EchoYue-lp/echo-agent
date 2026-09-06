@@ -12,7 +12,7 @@
 //! recompute framework semantics — ready-frontier decisions, terminal
 //! states, retries and recovery belong to the Rust authority (design §10.4).
 
-use agent_client_protocol::{JsonRpcRequest, JsonRpcResponse};
+use agent_client_protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::error::EchoSdkError;
@@ -69,7 +69,25 @@ pub enum ExtensionKind {
     HumanLoopProvider,
     Hook,
     AgentCallback,
+    InterventionCallback,
     AgentFactory,
+    CustomAgent,
+}
+
+impl ExtensionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExtensionKind::Tool => "tool",
+            ExtensionKind::LlmClient => "llm_client",
+            ExtensionKind::Store => "store",
+            ExtensionKind::HumanLoopProvider => "human_loop_provider",
+            ExtensionKind::Hook => "hook",
+            ExtensionKind::AgentCallback => "agent_callback",
+            ExtensionKind::InterventionCallback => "intervention_callback",
+            ExtensionKind::AgentFactory => "agent_factory",
+            ExtensionKind::CustomAgent => "custom_agent",
+        }
+    }
 }
 
 // ── Agent lifecycle ─────────────────────────────────────────────────────────
@@ -884,69 +902,1700 @@ pub struct SubagentControlResponse {
 
 // ── Extension bridge ────────────────────────────────────────────────────────
 
+/// Bound of a client-side implementation identity.
+pub const MAX_EXTENSION_IMPLEMENTATION_ID_CHARS: usize = 256;
+/// Bound of the serialized extension descriptor accepted at registration.
+pub const MAX_EXTENSION_DESCRIPTOR_BYTES: usize = 65_536;
+/// Bound of one serialized extension invocation input or result payload.
+pub const MAX_EXTENSION_PAYLOAD_BYTES: usize = 1_048_576;
+/// Bound of one serialized extension stream chunk payload.
+pub const MAX_EXTENSION_STREAM_CHUNK_BYTES: usize = 262_144;
+
+/// Model input modality a Tool descriptor may require (wire projection of
+/// the framework `ModelInputModality`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelModalityWire {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+/// Search modes a Store descriptor may declare (wire projection of the
+/// framework `SearchMode`). Declaring a mode does not downgrade it: the
+/// descriptor is a promise the implementation keeps, not a Host-side default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchModeWire {
+    Keyword,
+    Semantic,
+    Hybrid,
+}
+
+/// Permission classes declared by a host-language Tool implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPermissionWire {
+    Read,
+    Write,
+    Network,
+    Execute,
+    Sensitive,
+}
+
+/// Coarse risk level declared by a host-language Tool implementation.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRiskLevelWire {
+    ReadOnly,
+    #[default]
+    Standard,
+    Dangerous,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Provider-level LLM capabilities declared by a host-language client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LlmCapabilitiesWire {
+    pub streaming_tool_calls: bool,
+    pub named_sse_events: bool,
+    pub reasoning_content: bool,
+    pub image_input: bool,
+    pub system_as_top_level: bool,
+    pub ndjson_streaming: bool,
+    pub tool_support: bool,
+    pub structured_output: bool,
+    pub requires_version_header: bool,
+    pub supports_parallel_tool_calls: bool,
+    pub supports_tool_choice_none: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenizer_name: Option<String>,
+}
+
+impl Default for LlmCapabilitiesWire {
+    fn default() -> Self {
+        Self {
+            streaming_tool_calls: true,
+            named_sse_events: false,
+            reasoning_content: true,
+            image_input: true,
+            system_as_top_level: false,
+            ndjson_streaming: false,
+            tool_support: true,
+            structured_output: true,
+            requires_version_header: false,
+            supports_parallel_tool_calls: true,
+            supports_tool_choice_none: true,
+            tokenizer_name: None,
+        }
+    }
+}
+
+/// Lossless Tool execution context exposed to host-language implementations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolContextWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<WirePath>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_message: Option<LlmMessageWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_artifacts: Option<ToolOutputArtifactConfigWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutputArtifactConfigWire {
+    pub root_dir: WirePath,
+    pub retention: String,
+    pub threshold_bytes: WireU64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_age_secs: Option<WireU64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolExecuteInput {
+    pub parameters: WireValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ToolContextWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolValidateInput {
+    pub parameters: WireValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolResultKindWire {
+    Text,
+    Json,
+    Image {
+        mime_type: String,
+    },
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    Diff {
+        unified_diff: String,
+    },
+    FileReference {
+        path: String,
+    },
+    CommandOutput {
+        exit_code: Option<i32>,
+    },
+    SkillActivation {
+        name: String,
+    },
+    StructuredError {
+        error_code: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolFailureWire {
+    pub category: String,
+    pub recovery: String,
+    pub side_effect: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<WireU64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub postcondition: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutputArtifactRefWire {
+    pub path: WirePath,
+    pub artifact_bytes: WireU64,
+    pub payload_bytes: WireU64,
+    pub sha256: String,
+    pub retention: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolResultContentWire {
+    ImageUrl {
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolResultWire {
+    pub kind: ToolResultKindWire,
+    pub success: bool,
+    pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ToolFailureWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<WireValue>,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ToolOutputArtifactRefWire>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_content: Vec<ToolResultContentWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)]
+pub enum ToolStreamEventWire {
+    Progress {
+        message: String,
+        percent: Option<u8>,
+    },
+    Output {
+        channel: String,
+        chunk: String,
+    },
+    Complete {
+        result: ToolResultWire,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LlmMessageWire {
+    pub role: String,
+    pub content: WireValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<LlmToolCallWire>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_blocks: Option<Vec<LlmReasoningBlockWire>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LlmToolCallWire {
+    pub id: String,
+    pub call_type: String,
+    pub function_name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LlmReasoningBlockWire {
+    Signed {
+        thinking: String,
+        signature: String,
+    },
+    Redacted {
+        data: String,
+    },
+    Opaque {
+        provider: String,
+        id: String,
+        data: String,
+        summary: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LlmToolDefinitionWire {
+    pub tool_type: String,
+    pub name: String,
+    pub description: String,
+    pub parameters: WireValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LlmChatRequestWire {
+    pub messages: Vec<LlmMessageWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<LlmToolDefinitionWire>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<WireValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<WireValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeouts: Option<WireValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hints: Option<WireValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LlmUsageWire {
+    pub value: WireValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LlmChatResponseWire {
+    pub message: LlmMessageWire,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LlmUsageWire>,
+    pub raw: WireValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LlmChatChunkWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_blocks: Option<Vec<LlmReasoningBlockWire>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<LlmDeltaToolCallWire>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LlmUsageWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LlmDeltaToolCallWire {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<LlmDeltaFunctionWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LlmDeltaFunctionWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoreItemWire {
+    pub namespace: Vec<String>,
+    pub key: String,
+    pub value: WireValue,
+    pub created_at: WireU64,
+    pub updated_at: WireU64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    pub importance: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_accessed: Option<WireU64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<WireU64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StorePutInput {
+    pub namespace: Vec<String>,
+    pub key: String,
+    pub value: WireValue,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoreKeyInput {
+    pub namespace: Vec<String>,
+    pub key: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoreSearchInput {
+    pub namespace: Vec<String>,
+    pub query: String,
+    pub limit: WireU64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoreSearchWithInput {
+    pub namespace: Vec<String>,
+    pub query: StoreSearchQueryWire,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoreSearchQueryWire {
+    pub text: String,
+    pub limit: WireU64,
+    pub mode: StoreSearchModeWire,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreSearchModeWire {
+    Keyword,
+    Semantic,
+    Hybrid { vector_weight: Option<f32> },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoreNamespaceInput {
+    pub namespace: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoreListNamespacesInput {
+    pub prefix: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanLoopKindWire {
+    Approval,
+    Input,
+    Selection,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanRiskLevelWire {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanLoopRequestWire {
+    pub request_id: Option<String>,
+    pub session_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub kind: HumanLoopKindWire,
+    pub prompt: String,
+    pub tool_name: Option<String>,
+    pub args: Option<WireValue>,
+    pub risk_level: Option<HumanRiskLevelWire>,
+    pub approval_context: Option<WireValue>,
+    pub suggestions: Vec<WireValue>,
+    pub timeout: Option<WireDuration>,
+    pub task_id: Option<String>,
+    pub options: Option<Vec<String>>,
+    pub context: Option<WireValue>,
+    pub phase: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalScopeWire {
+    Once,
+    Session,
+    SessionTool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "variant", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HumanLoopResponseWire {
+    Approved,
+    ApprovedWithScope {
+        scope: ApprovalScopeWire,
+    },
+    ModifiedArgs {
+        args: WireValue,
+        scope: ApprovalScopeWire,
+    },
+    Rejected {
+        reason: Option<String>,
+    },
+    Text {
+        text: String,
+    },
+    Timeout,
+    Deferred,
+    Selection {
+        selection: String,
+        instructions: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HookRunInput {
+    pub context: WireValue,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HookResultWire {
+    pub block: bool,
+    pub block_reason: Option<String>,
+    pub updated_input: Option<WireValue>,
+    pub messages: Vec<String>,
+    pub stop_propagation: bool,
+    pub permission_decision: Option<PermissionDecisionWire>,
+    pub permission_mode_override: Option<String>,
+    pub continue_reason: Option<String>,
+    pub injected_context: Option<String>,
+    pub retry: bool,
+    pub metadata: Option<WireValue>,
+    pub activate_skill: Option<ActivateSkillWire>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PermissionDecisionWire {
+    Allow,
+    Deny { reason: String },
+    RequireApproval,
+    Ask { suggestions: Vec<String> },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActivateSkillWire {
+    pub name: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackThinkStartInput {
+    pub agent: String,
+    pub messages: Vec<LlmMessageWire>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackThinkEndInput {
+    pub agent: String,
+    pub steps: Vec<StepTypeWire>,
+    pub prompt_tokens: WireU64,
+    pub completion_tokens: WireU64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StepTypeWire {
+    Thought {
+        text: String,
+    },
+    Call {
+        tool_call_id: String,
+        function_name: String,
+        arguments: WireValue,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackToolStartInput {
+    pub agent: String,
+    pub tool: String,
+    pub args: WireValue,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackToolEndInput {
+    pub agent: String,
+    pub tool: String,
+    pub result: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackToolErrorInput {
+    pub agent: String,
+    pub tool: String,
+    pub error: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackFinalAnswerInput {
+    pub agent: String,
+    pub answer: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackIterationInput {
+    pub agent: String,
+    pub iteration: WireU64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct InterventionResultWire {
+    pub block: bool,
+    pub block_reason: Option<String>,
+    pub injected_context: Option<String>,
+    pub redirect_to: Option<String>,
+    pub cancel: bool,
+    pub modified_args: Option<WireValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentFactoryConfigWire {
+    pub model: String,
+    pub name: String,
+    pub system_prompt: String,
+    pub tool_count: WireU64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomAgentDescriptorWire {
+    pub name: String,
+    pub model_name: String,
+    pub system_prompt: String,
+    pub tool_names: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTaskInput {
+    pub task: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentMessageInput {
+    pub message: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionUnit;
+
+/// Versioned per-kind registration descriptor. Exactly one variant matches
+/// the registration's [`ExtensionKind`]; the Host dispatches on this typed
+/// snapshot and never guesses trait semantics from free-form JSON (design
+/// §12.2). `descriptor_version` gates evolution: unknown versions fail with
+/// `invalid_config` instead of being partially applied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionDescriptor {
+    Tool {
+        descriptor_version: u32,
+        #[schemars(length(min = 1, max = 128))]
+        name: String,
+        #[schemars(length(max = 8192))]
+        description: String,
+        /// JSON Schema of the tool parameters.
+        parameters: WireValue,
+        schema_revision: WireU64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        required_input_modalities: Vec<ModelModalityWire>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        required_permissions: Vec<ToolPermissionWire>,
+        #[serde(default)]
+        risk_level: ToolRiskLevelWire,
+        supports_streaming: bool,
+        #[serde(default)]
+        exempt_from_batch_timeout: bool,
+        #[serde(default = "default_true")]
+        allows_parallel_batch_execution: bool,
+        #[serde(default)]
+        manages_own_timeout: bool,
+    },
+    LlmClient {
+        descriptor_version: u32,
+        #[schemars(length(min = 1, max = 256))]
+        model_name: String,
+        supports_streaming: bool,
+        #[serde(default)]
+        capabilities: LlmCapabilitiesWire,
+    },
+    Store {
+        descriptor_version: u32,
+        /// Search modes the implementation actually supports. Semantic or
+        /// hybrid searches against an implementation that did not declare
+        /// them are rejected before any callback is sent.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        search_modes: Vec<SearchModeWire>,
+    },
+    HumanLoopProvider {
+        descriptor_version: u32,
+    },
+    Hook {
+        descriptor_version: u32,
+        /// Hook events the implementation subscribes to (framework hook
+        /// event names). Empty means the implementation decides per context.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<String>,
+    },
+    AgentCallback {
+        descriptor_version: u32,
+    },
+    InterventionCallback {
+        descriptor_version: u32,
+    },
+    AgentFactory {
+        descriptor_version: u32,
+    },
+    CustomAgent {
+        descriptor_version: u32,
+        #[schemars(length(min = 1, max = 256))]
+        name: String,
+        #[schemars(length(min = 1, max = 256))]
+        model_name: String,
+        system_prompt: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_names: Vec<String>,
+    },
+}
+
+impl ExtensionDescriptor {
+    /// The extension kind this descriptor addresses.
+    pub fn kind(&self) -> ExtensionKind {
+        match self {
+            ExtensionDescriptor::Tool { .. } => ExtensionKind::Tool,
+            ExtensionDescriptor::LlmClient { .. } => ExtensionKind::LlmClient,
+            ExtensionDescriptor::Store { .. } => ExtensionKind::Store,
+            ExtensionDescriptor::HumanLoopProvider { .. } => ExtensionKind::HumanLoopProvider,
+            ExtensionDescriptor::Hook { .. } => ExtensionKind::Hook,
+            ExtensionDescriptor::AgentCallback { .. } => ExtensionKind::AgentCallback,
+            ExtensionDescriptor::InterventionCallback { .. } => ExtensionKind::InterventionCallback,
+            ExtensionDescriptor::AgentFactory { .. } => ExtensionKind::AgentFactory,
+            ExtensionDescriptor::CustomAgent { .. } => ExtensionKind::CustomAgent,
+        }
+    }
+
+    /// Validate the typed shape: known descriptor version, bounded strings
+    /// and a well-formed parameters schema. Unknown versions fail closed.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        const SUPPORTED_DESCRIPTOR_VERSION: u32 = 1;
+        let version = match self {
+            ExtensionDescriptor::Tool {
+                descriptor_version, ..
+            }
+            | ExtensionDescriptor::LlmClient {
+                descriptor_version, ..
+            }
+            | ExtensionDescriptor::Store {
+                descriptor_version, ..
+            }
+            | ExtensionDescriptor::HumanLoopProvider {
+                descriptor_version, ..
+            }
+            | ExtensionDescriptor::Hook {
+                descriptor_version, ..
+            }
+            | ExtensionDescriptor::AgentCallback {
+                descriptor_version, ..
+            }
+            | ExtensionDescriptor::InterventionCallback {
+                descriptor_version, ..
+            }
+            | ExtensionDescriptor::AgentFactory {
+                descriptor_version, ..
+            }
+            | ExtensionDescriptor::CustomAgent {
+                descriptor_version, ..
+            } => *descriptor_version,
+        };
+        if version != SUPPORTED_DESCRIPTOR_VERSION {
+            return Err("unsupported extension descriptor_version");
+        }
+        if let ExtensionDescriptor::Tool {
+            name,
+            description,
+            parameters,
+            ..
+        } = self
+        {
+            if name.trim().is_empty() || name.chars().count() > 128 {
+                return Err("tool descriptor name must be non-empty and bounded");
+            }
+            if description.chars().count() > 8192 {
+                return Err("tool descriptor description exceeds its bound");
+            }
+            parameters
+                .validate()
+                .map_err(|_| "tool descriptor parameters are not a valid wire value")?;
+        }
+        if let ExtensionDescriptor::LlmClient {
+            model_name,
+            capabilities,
+            ..
+        } = self
+        {
+            if model_name.trim().is_empty() || model_name.chars().count() > 256 {
+                return Err("llm client descriptor model_name must be non-empty and bounded");
+            }
+            if capabilities
+                .tokenizer_name
+                .as_deref()
+                .is_some_and(|name| !matches!(name, "cl100k_base" | "o200k_base" | "claude"))
+            {
+                return Err("llm client descriptor tokenizer_name is unsupported by Rust");
+            }
+        }
+        if let ExtensionDescriptor::CustomAgent {
+            name,
+            model_name,
+            system_prompt,
+            tool_names,
+            ..
+        } = self
+        {
+            if name.trim().is_empty() || name.chars().count() > 256 {
+                return Err("custom agent descriptor name must be non-empty and bounded");
+            }
+            if model_name.trim().is_empty() || model_name.chars().count() > 256 {
+                return Err("custom agent descriptor model_name must be non-empty and bounded");
+            }
+            if system_prompt.chars().count() > 65_536 {
+                return Err("custom agent descriptor system_prompt exceeds its bound");
+            }
+            if tool_names.len() > 1024
+                || tool_names
+                    .iter()
+                    .any(|name| name.trim().is_empty() || name.chars().count() > 256)
+            {
+                return Err("custom agent descriptor tool_names are empty or exceed their bound");
+            }
+        }
+        if let ExtensionDescriptor::Hook { events, .. } = self
+            && (events.len() > 128
+                || events
+                    .iter()
+                    .any(|event| echo_core::hooks::HookEvent::from_name(event).is_none()))
+        {
+            return Err("hook descriptor contains an unknown or excessive event name");
+        }
+        Ok(())
+    }
+
+    /// Canonical fingerprint for idempotent registration comparison: the
+    /// canonical JSON of the descriptor. Registration identity plus this
+    /// fingerprint decides same-handle idempotency vs typed conflict.
+    pub fn fingerprint(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "<unencodable>".to_string())
+    }
+}
+
+/// Closed operation set of the extension bridge. Every reverse invocation
+/// names exactly one operation; `kind()` binds it to its extension family so
+/// the Host can reject an operation dispatched to the wrong kind before any
+/// callback leaves the process (design §12.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionOperation {
+    // Tool
+    ToolExecute,
+    ToolExecuteStream,
+    ToolValidateParameters,
+    // LlmClient
+    LlmChat,
+    LlmChatStream,
+    // Store
+    StorePut,
+    StoreGet,
+    StoreSearch,
+    StoreSearchWith,
+    StoreDelete,
+    StoreListNamespaces,
+    StoreList,
+    StorePruneExpired,
+    StoreDedupByContent,
+    // HumanLoopProvider
+    HumanLoopRequest,
+    // Hook
+    HookRun,
+    // AgentCallback
+    CallbackOnThinkStart,
+    CallbackOnThinkEnd,
+    CallbackOnToolStart,
+    CallbackOnToolEnd,
+    CallbackOnToolError,
+    CallbackOnFinalAnswer,
+    CallbackOnIteration,
+    // InterventionCallback
+    InterventionOnToolCall,
+    InterventionOnThinkStart,
+    InterventionOnFinalAnswer,
+    // AgentFactory
+    FactoryCreateAgent,
+    // CustomAgent
+    AgentExecute,
+    AgentExecuteStream,
+    AgentChat,
+    AgentChatStream,
+    AgentClose,
+}
+
+impl ExtensionOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExtensionOperation::ToolExecute => "tool_execute",
+            ExtensionOperation::ToolExecuteStream => "tool_execute_stream",
+            ExtensionOperation::ToolValidateParameters => "tool_validate_parameters",
+            ExtensionOperation::LlmChat => "llm_chat",
+            ExtensionOperation::LlmChatStream => "llm_chat_stream",
+            ExtensionOperation::StorePut => "store_put",
+            ExtensionOperation::StoreGet => "store_get",
+            ExtensionOperation::StoreSearch => "store_search",
+            ExtensionOperation::StoreSearchWith => "store_search_with",
+            ExtensionOperation::StoreDelete => "store_delete",
+            ExtensionOperation::StoreListNamespaces => "store_list_namespaces",
+            ExtensionOperation::StoreList => "store_list",
+            ExtensionOperation::StorePruneExpired => "store_prune_expired",
+            ExtensionOperation::StoreDedupByContent => "store_dedup_by_content",
+            ExtensionOperation::HumanLoopRequest => "human_loop_request",
+            ExtensionOperation::HookRun => "hook_run",
+            ExtensionOperation::CallbackOnThinkStart => "callback_on_think_start",
+            ExtensionOperation::CallbackOnThinkEnd => "callback_on_think_end",
+            ExtensionOperation::CallbackOnToolStart => "callback_on_tool_start",
+            ExtensionOperation::CallbackOnToolEnd => "callback_on_tool_end",
+            ExtensionOperation::CallbackOnToolError => "callback_on_tool_error",
+            ExtensionOperation::CallbackOnFinalAnswer => "callback_on_final_answer",
+            ExtensionOperation::CallbackOnIteration => "callback_on_iteration",
+            ExtensionOperation::InterventionOnToolCall => "intervention_on_tool_call",
+            ExtensionOperation::InterventionOnThinkStart => "intervention_on_think_start",
+            ExtensionOperation::InterventionOnFinalAnswer => "intervention_on_final_answer",
+            ExtensionOperation::FactoryCreateAgent => "factory_create_agent",
+            ExtensionOperation::AgentExecute => "agent_execute",
+            ExtensionOperation::AgentExecuteStream => "agent_execute_stream",
+            ExtensionOperation::AgentChat => "agent_chat",
+            ExtensionOperation::AgentChatStream => "agent_chat_stream",
+            ExtensionOperation::AgentClose => "agent_close",
+        }
+    }
+
+    pub fn kind(&self) -> ExtensionKind {
+        match self {
+            ExtensionOperation::ToolExecute
+            | ExtensionOperation::ToolExecuteStream
+            | ExtensionOperation::ToolValidateParameters => ExtensionKind::Tool,
+            ExtensionOperation::LlmChat | ExtensionOperation::LlmChatStream => {
+                ExtensionKind::LlmClient
+            }
+            ExtensionOperation::StorePut
+            | ExtensionOperation::StoreGet
+            | ExtensionOperation::StoreSearch
+            | ExtensionOperation::StoreSearchWith
+            | ExtensionOperation::StoreDelete
+            | ExtensionOperation::StoreListNamespaces
+            | ExtensionOperation::StoreList
+            | ExtensionOperation::StorePruneExpired
+            | ExtensionOperation::StoreDedupByContent => ExtensionKind::Store,
+            ExtensionOperation::HumanLoopRequest => ExtensionKind::HumanLoopProvider,
+            ExtensionOperation::HookRun => ExtensionKind::Hook,
+            ExtensionOperation::CallbackOnThinkStart
+            | ExtensionOperation::CallbackOnThinkEnd
+            | ExtensionOperation::CallbackOnToolStart
+            | ExtensionOperation::CallbackOnToolEnd
+            | ExtensionOperation::CallbackOnToolError
+            | ExtensionOperation::CallbackOnFinalAnswer
+            | ExtensionOperation::CallbackOnIteration => ExtensionKind::AgentCallback,
+            ExtensionOperation::InterventionOnToolCall
+            | ExtensionOperation::InterventionOnThinkStart
+            | ExtensionOperation::InterventionOnFinalAnswer => ExtensionKind::InterventionCallback,
+            ExtensionOperation::FactoryCreateAgent => ExtensionKind::AgentFactory,
+            ExtensionOperation::AgentExecute
+            | ExtensionOperation::AgentExecuteStream
+            | ExtensionOperation::AgentChat
+            | ExtensionOperation::AgentChatStream
+            | ExtensionOperation::AgentClose => ExtensionKind::CustomAgent,
+        }
+    }
+
+    /// Whether the operation delivers its payload through an
+    /// `_echo_agent/extension/stream` sequence instead of one result value.
+    pub fn is_streaming(&self) -> bool {
+        matches!(
+            self,
+            ExtensionOperation::ToolExecuteStream
+                | ExtensionOperation::LlmChatStream
+                | ExtensionOperation::AgentExecuteStream
+                | ExtensionOperation::AgentChatStream
+        )
+    }
+}
+
+/// Operation-discriminated reverse invocation payload. Every input shape is
+/// named and available to schema/code generators.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "operation",
+    content = "input",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ExtensionInvocation {
+    ToolExecute(ToolExecuteInput),
+    ToolExecuteStream(ToolExecuteInput),
+    ToolValidateParameters(ToolValidateInput),
+    LlmChat(LlmChatRequestWire),
+    LlmChatStream(LlmChatRequestWire),
+    StorePut(StorePutInput),
+    StoreGet(StoreKeyInput),
+    StoreSearch(StoreSearchInput),
+    StoreSearchWith(StoreSearchWithInput),
+    StoreDelete(StoreKeyInput),
+    StoreListNamespaces(StoreListNamespacesInput),
+    StoreList(StoreNamespaceInput),
+    StorePruneExpired(StoreNamespaceInput),
+    StoreDedupByContent(StoreNamespaceInput),
+    HumanLoopRequest(HumanLoopRequestWire),
+    HookRun(HookRunInput),
+    CallbackOnThinkStart(CallbackThinkStartInput),
+    CallbackOnThinkEnd(CallbackThinkEndInput),
+    CallbackOnToolStart(CallbackToolStartInput),
+    CallbackOnToolEnd(CallbackToolEndInput),
+    CallbackOnToolError(CallbackToolErrorInput),
+    CallbackOnFinalAnswer(CallbackFinalAnswerInput),
+    CallbackOnIteration(CallbackIterationInput),
+    InterventionOnToolCall(CallbackToolStartInput),
+    InterventionOnThinkStart(CallbackThinkStartInput),
+    InterventionOnFinalAnswer(CallbackFinalAnswerInput),
+    FactoryCreateAgent(AgentFactoryConfigWire),
+    AgentExecute(AgentTaskInput),
+    AgentExecuteStream(AgentTaskInput),
+    AgentChat(AgentMessageInput),
+    AgentChatStream(AgentMessageInput),
+    AgentClose(ExtensionUnit),
+}
+
+impl ExtensionInvocation {
+    pub fn operation(&self) -> ExtensionOperation {
+        match self {
+            Self::ToolExecute(_) => ExtensionOperation::ToolExecute,
+            Self::ToolExecuteStream(_) => ExtensionOperation::ToolExecuteStream,
+            Self::ToolValidateParameters(_) => ExtensionOperation::ToolValidateParameters,
+            Self::LlmChat(_) => ExtensionOperation::LlmChat,
+            Self::LlmChatStream(_) => ExtensionOperation::LlmChatStream,
+            Self::StorePut(_) => ExtensionOperation::StorePut,
+            Self::StoreGet(_) => ExtensionOperation::StoreGet,
+            Self::StoreSearch(_) => ExtensionOperation::StoreSearch,
+            Self::StoreSearchWith(_) => ExtensionOperation::StoreSearchWith,
+            Self::StoreDelete(_) => ExtensionOperation::StoreDelete,
+            Self::StoreListNamespaces(_) => ExtensionOperation::StoreListNamespaces,
+            Self::StoreList(_) => ExtensionOperation::StoreList,
+            Self::StorePruneExpired(_) => ExtensionOperation::StorePruneExpired,
+            Self::StoreDedupByContent(_) => ExtensionOperation::StoreDedupByContent,
+            Self::HumanLoopRequest(_) => ExtensionOperation::HumanLoopRequest,
+            Self::HookRun(_) => ExtensionOperation::HookRun,
+            Self::CallbackOnThinkStart(_) => ExtensionOperation::CallbackOnThinkStart,
+            Self::CallbackOnThinkEnd(_) => ExtensionOperation::CallbackOnThinkEnd,
+            Self::CallbackOnToolStart(_) => ExtensionOperation::CallbackOnToolStart,
+            Self::CallbackOnToolEnd(_) => ExtensionOperation::CallbackOnToolEnd,
+            Self::CallbackOnToolError(_) => ExtensionOperation::CallbackOnToolError,
+            Self::CallbackOnFinalAnswer(_) => ExtensionOperation::CallbackOnFinalAnswer,
+            Self::CallbackOnIteration(_) => ExtensionOperation::CallbackOnIteration,
+            Self::InterventionOnToolCall(_) => ExtensionOperation::InterventionOnToolCall,
+            Self::InterventionOnThinkStart(_) => ExtensionOperation::InterventionOnThinkStart,
+            Self::InterventionOnFinalAnswer(_) => ExtensionOperation::InterventionOnFinalAnswer,
+            Self::FactoryCreateAgent(_) => ExtensionOperation::FactoryCreateAgent,
+            Self::AgentExecute(_) => ExtensionOperation::AgentExecute,
+            Self::AgentExecuteStream(_) => ExtensionOperation::AgentExecuteStream,
+            Self::AgentChat(_) => ExtensionOperation::AgentChat,
+            Self::AgentChatStream(_) => ExtensionOperation::AgentChatStream,
+            Self::AgentClose(_) => ExtensionOperation::AgentClose,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "operation",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ExtensionResult {
+    ToolExecute(ToolResultWire),
+    ToolValidateParameters(Option<String>),
+    LlmChat(LlmChatResponseWire),
+    StorePut(ExtensionUnit),
+    StoreGet(Option<StoreItemWire>),
+    StoreSearch(Vec<StoreItemWire>),
+    StoreSearchWith(Vec<StoreItemWire>),
+    StoreDelete(bool),
+    StoreListNamespaces(Vec<Vec<String>>),
+    StoreList(Vec<StoreItemWire>),
+    StorePruneExpired(WireU64),
+    StoreDedupByContent(WireU64),
+    HumanLoopRequest(HumanLoopResponseWire),
+    HookRun(HookResultWire),
+    CallbackOnThinkStart(ExtensionUnit),
+    CallbackOnThinkEnd(ExtensionUnit),
+    CallbackOnToolStart(ExtensionUnit),
+    CallbackOnToolEnd(ExtensionUnit),
+    CallbackOnToolError(ExtensionUnit),
+    CallbackOnFinalAnswer(ExtensionUnit),
+    CallbackOnIteration(ExtensionUnit),
+    InterventionOnToolCall(InterventionResultWire),
+    InterventionOnThinkStart(InterventionResultWire),
+    InterventionOnFinalAnswer(InterventionResultWire),
+    FactoryCreateAgent(CustomAgentDescriptorWire),
+    AgentExecute(String),
+    AgentChat(String),
+    AgentClose(ExtensionUnit),
+}
+
+impl ExtensionResult {
+    pub fn operation(&self) -> ExtensionOperation {
+        match self {
+            Self::ToolExecute(_) => ExtensionOperation::ToolExecute,
+            Self::ToolValidateParameters(_) => ExtensionOperation::ToolValidateParameters,
+            Self::LlmChat(_) => ExtensionOperation::LlmChat,
+            Self::StorePut(_) => ExtensionOperation::StorePut,
+            Self::StoreGet(_) => ExtensionOperation::StoreGet,
+            Self::StoreSearch(_) => ExtensionOperation::StoreSearch,
+            Self::StoreSearchWith(_) => ExtensionOperation::StoreSearchWith,
+            Self::StoreDelete(_) => ExtensionOperation::StoreDelete,
+            Self::StoreListNamespaces(_) => ExtensionOperation::StoreListNamespaces,
+            Self::StoreList(_) => ExtensionOperation::StoreList,
+            Self::StorePruneExpired(_) => ExtensionOperation::StorePruneExpired,
+            Self::StoreDedupByContent(_) => ExtensionOperation::StoreDedupByContent,
+            Self::HumanLoopRequest(_) => ExtensionOperation::HumanLoopRequest,
+            Self::HookRun(_) => ExtensionOperation::HookRun,
+            Self::CallbackOnThinkStart(_) => ExtensionOperation::CallbackOnThinkStart,
+            Self::CallbackOnThinkEnd(_) => ExtensionOperation::CallbackOnThinkEnd,
+            Self::CallbackOnToolStart(_) => ExtensionOperation::CallbackOnToolStart,
+            Self::CallbackOnToolEnd(_) => ExtensionOperation::CallbackOnToolEnd,
+            Self::CallbackOnToolError(_) => ExtensionOperation::CallbackOnToolError,
+            Self::CallbackOnFinalAnswer(_) => ExtensionOperation::CallbackOnFinalAnswer,
+            Self::CallbackOnIteration(_) => ExtensionOperation::CallbackOnIteration,
+            Self::InterventionOnToolCall(_) => ExtensionOperation::InterventionOnToolCall,
+            Self::InterventionOnThinkStart(_) => ExtensionOperation::InterventionOnThinkStart,
+            Self::InterventionOnFinalAnswer(_) => ExtensionOperation::InterventionOnFinalAnswer,
+            Self::FactoryCreateAgent(_) => ExtensionOperation::FactoryCreateAgent,
+            Self::AgentExecute(_) => ExtensionOperation::AgentExecute,
+            Self::AgentChat(_) => ExtensionOperation::AgentChat,
+            Self::AgentClose(_) => ExtensionOperation::AgentClose,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[allow(clippy::large_enum_variant)]
+pub enum ExtensionStreamChunkValue {
+    Tool(ToolStreamChunkWire),
+    Llm(LlmStreamChunkWire),
+    Agent(AgentStreamChunkWire),
+}
+
+impl ExtensionStreamChunkValue {
+    pub fn operation_kind(&self) -> ExtensionKind {
+        match self {
+            Self::Tool(_) => ExtensionKind::Tool,
+            Self::Llm(_) => ExtensionKind::LlmClient,
+            Self::Agent(_) => ExtensionKind::CustomAgent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[allow(clippy::large_enum_variant)]
+pub enum ExtensionStreamCompleteValue {
+    Tool(ToolResultWire),
+    Llm(LlmStreamCompleteWire),
+    Agent(AgentStreamTerminalWire),
+}
+
+impl ExtensionStreamCompleteValue {
+    pub fn operation_kind(&self) -> ExtensionKind {
+        match self {
+            Self::Tool(_) => ExtensionKind::Tool,
+            Self::Llm(_) => ExtensionKind::LlmClient,
+            Self::Agent(_) => ExtensionKind::CustomAgent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolStreamChunkWire {
+    Progress {
+        message: String,
+        percent: Option<u8>,
+    },
+    Output {
+        channel: String,
+        chunk: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LlmStreamChunkWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_blocks: Option<Vec<LlmReasoningBlockWire>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<LlmDeltaToolCallWire>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LlmUsageWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LlmStreamCompleteWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_blocks: Option<Vec<LlmReasoningBlockWire>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<LlmDeltaToolCallWire>>,
+    #[schemars(length(min = 1, max = 256))]
+    pub finish_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LlmUsageWire>,
+}
+
+/// Public typed projection of framework `AgentEvent` for CustomAgent streams.
+/// Complex framework-owned leaves retain their own typed wire DTOs or the
+/// closed `WireValue` algebra; the event discriminator and lifecycle fields
+/// are never hidden behind an untagged JSON blob.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "event",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[allow(clippy::large_enum_variant)]
+pub enum AgentEventWire {
+    Token {
+        text: String,
+    },
+    ThinkStart,
+    ThinkEnd {
+        prompt_tokens: WireU64,
+        completion_tokens: WireU64,
+    },
+    LlmUsage {
+        model: String,
+        prompt_tokens: WireU64,
+        completion_tokens: WireU64,
+        total_tokens: WireU64,
+        cached_prompt_tokens: WireU64,
+        cache_creation_prompt_tokens: WireU64,
+        usage_reported: bool,
+    },
+    BudgetDecision {
+        decision: WireValue,
+        reason: String,
+        iteration: WireU64,
+        reported_model_tokens: WireU64,
+        usage_complete: bool,
+    },
+    ToolCall {
+        call_id: String,
+        invocation: WireValue,
+    },
+    ToolResult {
+        call_id: String,
+        name: String,
+        result: ToolResultWire,
+    },
+    ToolStream {
+        call_id: String,
+        name: String,
+        event: ToolStreamEventWire,
+    },
+    ToolBatchStart {
+        tool_count: WireU64,
+    },
+    ToolBatchEnd,
+    GuardTriggered {
+        guard: String,
+        blocked: bool,
+    },
+    MemoryRecalled {
+        count: WireU64,
+    },
+    ContextCompressed {
+        before_count: WireU64,
+        after_count: WireU64,
+        before_tokens: WireU64,
+        after_tokens: WireU64,
+    },
+    Chart {
+        spec: WireValue,
+    },
+    Error {
+        source: String,
+        message: String,
+        failure: WireValue,
+    },
+    SafetyNotice {
+        action: String,
+        reason: String,
+        risk: String,
+        permission: String,
+    },
+    ParameterError {
+        tool: String,
+        parameter: String,
+        expected: String,
+        got: String,
+    },
+    FinalAnswer {
+        text: String,
+    },
+    Cancelled,
+}
+
+/// Non-terminal CustomAgent stream event. Terminal variants intentionally do
+/// not appear here, so generated SDKs cannot emit a framework terminal as an
+/// ordinary chunk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "event",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[allow(clippy::large_enum_variant)]
+pub enum AgentStreamChunkWire {
+    Token {
+        text: String,
+    },
+    ThinkStart,
+    ThinkEnd {
+        prompt_tokens: WireU64,
+        completion_tokens: WireU64,
+    },
+    LlmUsage {
+        model: String,
+        prompt_tokens: WireU64,
+        completion_tokens: WireU64,
+        total_tokens: WireU64,
+        cached_prompt_tokens: WireU64,
+        cache_creation_prompt_tokens: WireU64,
+        usage_reported: bool,
+    },
+    BudgetDecision {
+        decision: WireValue,
+        reason: String,
+        iteration: WireU64,
+        reported_model_tokens: WireU64,
+        usage_complete: bool,
+    },
+    ToolCall {
+        call_id: String,
+        invocation: WireValue,
+    },
+    ToolResult {
+        call_id: String,
+        name: String,
+        result: ToolResultWire,
+    },
+    ToolStream {
+        call_id: String,
+        name: String,
+        event: ToolStreamChunkWire,
+    },
+    ToolBatchStart {
+        tool_count: WireU64,
+    },
+    ToolBatchEnd,
+    GuardTriggered {
+        guard: String,
+        blocked: bool,
+    },
+    MemoryRecalled {
+        count: WireU64,
+    },
+    ContextCompressed {
+        before_count: WireU64,
+        after_count: WireU64,
+        before_tokens: WireU64,
+        after_tokens: WireU64,
+    },
+    Chart {
+        spec: WireValue,
+    },
+    SafetyNotice {
+        action: String,
+        reason: String,
+        risk: String,
+        permission: String,
+    },
+    ParameterError {
+        tool: String,
+        parameter: String,
+        expected: String,
+        got: String,
+    },
+}
+
+/// Terminal CustomAgent stream event. The outer stream `complete` variant
+/// accepts only these framework terminal facts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "event",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum AgentStreamTerminalWire {
+    Error {
+        source: String,
+        message: String,
+        failure: WireValue,
+    },
+    FinalAnswer {
+        text: String,
+    },
+    Cancelled,
+}
+
+/// Session/run context attached to a reverse invocation, so a language SDK
+/// can correlate callbacks with the execution that caused them. Context is
+/// diagnostic identity only — it never changes settlement semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionInvocationContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub stream_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub execution_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub call_id: Option<String>,
+}
+
+impl ExtensionInvocationContext {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        for (name, value) in [
+            ("session_id", &self.session_id),
+            ("run_id", &self.run_id),
+            ("stream_id", &self.stream_id),
+            ("turn_id", &self.turn_id),
+            ("message_id", &self.message_id),
+            ("execution_id", &self.execution_id),
+            ("call_id", &self.call_id),
+        ] {
+            if value
+                .as_deref()
+                .is_some_and(|id| id.trim().is_empty() || id.chars().count() > 256)
+            {
+                return Err(match name {
+                    "session_id" => "session_id is empty or exceeds its bound",
+                    "run_id" => "run_id is empty or exceeds its bound",
+                    "stream_id" => "stream_id is empty or exceeds its bound",
+                    "turn_id" => "turn_id is empty or exceeds its bound",
+                    "message_id" => "message_id is empty or exceeds its bound",
+                    "execution_id" => "execution_id is empty or exceeds its bound",
+                    "call_id" => "call_id is empty or exceeds its bound",
+                    _ => "context identity is empty or exceeds its bound",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `_echo_agent/extension/register` request: register a host-language
 /// implementation of a public framework trait (Tool, LlmClient, Store,
-/// HumanLoopProvider, Hook, AgentFactory, ...).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+/// HumanLoopProvider, Hook, AgentCallback, InterventionCallback,
+/// AgentFactory, custom Agent). Registration is owned by the current
+/// connection generation: it never survives a Host restart or a reconnect.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcRequest)]
+#[request(method = "_echo_agent/extension/register", response = ExtensionRegisterResponse)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionRegisterRequest {
     /// Which extension point is implemented.
     pub kind: ExtensionKind,
-    /// Client-side implementation identity (non-empty).
+    /// Client-side implementation identity (non-empty). Re-registering the
+    /// same identity with the same descriptor and default timeout returns the
+    /// same handle; a different registration snapshot is a typed conflict.
     #[schemars(length(min = 1, max = 256))]
     pub implementation_id: String,
-    /// Descriptor the Host uses for dispatch: for Tools this covers name,
-    /// description, JSON Schema parameters, revision and modality.
-    pub descriptor: WireValue,
-    /// Declared concurrency/timeout contract.
+    /// Typed per-kind descriptor snapshot the Host dispatches on.
+    pub descriptor: ExtensionDescriptor,
+    /// Per-registration default deadline for reverse invocations.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<WireDuration>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+impl ExtensionRegisterRequest {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.implementation_id.trim().is_empty()
+            || self.implementation_id.chars().count() > MAX_EXTENSION_IMPLEMENTATION_ID_CHARS
+        {
+            return Err("implementation_id must be non-empty and bounded");
+        }
+        if self.descriptor.kind() != self.kind {
+            return Err("descriptor kind does not match the registration kind");
+        }
+        self.descriptor.validate()?;
+        let encoded =
+            serde_json::to_vec(&self.descriptor).map_err(|_| "descriptor is not encodable")?;
+        if encoded.len() > MAX_EXTENSION_DESCRIPTOR_BYTES {
+            return Err("descriptor exceeds the serialized descriptor bound");
+        }
+        if let Some(timeout) = &self.timeout {
+            timeout
+                .validate()
+                .map_err(|_| "registration timeout is out of range")?;
+            if timeout.seconds.to_u64() == Some(0) && timeout.nanos == 0 {
+                return Err("registration timeout must be positive");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcResponse,
+)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionRegisterResponse {
     pub extension: WireHandle,
 }
 
 /// `_echo_agent/extension/unregister` request/response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcRequest,
+)]
+#[request(method = "_echo_agent/extension/unregister", response = ExtensionUnregisterResponse)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionUnregisterRequest {
     pub extension: WireHandle,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcResponse,
+)]
 pub struct ExtensionUnregisterResponse {
+    /// True when this call released the extension; false when it was already
+    /// released (idempotent unregister).
     pub released: bool,
 }
 
 /// `_echo_agent/extension/invoke` reverse request (Host -> SDK): invoke a
-/// registered implementation. The SDK dispatcher runs the host-language code
-/// and replies with exactly one of `result`/`stream`/`error`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+/// registered implementation. The invocation identity is an independent
+/// string — never the JSON-RPC request id — and settles exactly once. The
+/// SDK dispatcher runs the host-language code and replies with exactly one
+/// of `result`/`stream`/`error`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcRequest)]
+#[request(method = "_echo_agent/extension/invoke", response = ExtensionInvokeOutcome)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionInvokeCall {
     pub extension: WireHandle,
-    /// Invocation identity; unique per call, used for cancellation.
+    /// Invocation identity; unique per call, used for cancellation. It is a
+    /// domain identity independent from any JSON-RPC request id.
     #[schemars(length(min = 1, max = 256))]
     pub invocation_id: String,
-    /// Typed invocation payload (tool input, chat request, store op, ...).
-    pub input: WireValue,
-    /// Deadline for this invocation.
+    /// Session/run correlation identity (diagnostic only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ExtensionInvocationContext>,
+    /// Operation-discriminated input. Keeping it as a named field makes the
+    /// generated call schema reference `ExtensionInvocation` directly, so
+    /// every language SDK can reuse one stable dispatcher union.
+    pub invocation: ExtensionInvocation,
+    /// Total deadline for this invocation, including stream delivery.
     pub deadline: WireDuration,
+    /// For streaming operations: the Host-minted stream handle the SDK must
+    /// acknowledge and address `_echo_agent/extension/stream` notifications
+    /// to. The SDK never invents stream identities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<WireHandle>,
+}
+
+impl ExtensionInvokeCall {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.invocation_id.trim().is_empty()
+            || self.invocation_id.chars().count() > MAX_EXTENSION_IMPLEMENTATION_ID_CHARS
+        {
+            return Err("invocation_id must be non-empty and bounded");
+        }
+        self.extension
+            .validate()
+            .map_err(|_| "invalid extension handle")?;
+        if self.extension.kind != HandleKind::Extension {
+            return Err("invoke requires an extension handle");
+        }
+        if let Some(context) = &self.context {
+            context.validate()?;
+        }
+        let operation = self.invocation.operation();
+        if !operation.is_streaming() && self.stream.is_some() {
+            return Err("non-streaming operations must not carry a stream handle");
+        }
+        if operation.is_streaming() {
+            let Some(stream) = &self.stream else {
+                return Err("streaming operations require a stream handle");
+            };
+            stream.validate().map_err(|_| "invalid stream handle")?;
+            if stream.kind != HandleKind::Stream {
+                return Err("streaming operations require a stream-kind handle");
+            }
+        }
+        let encoded =
+            serde_json::to_vec(&self.invocation).map_err(|_| "payload is not encodable")?;
+        if encoded.len() > MAX_EXTENSION_PAYLOAD_BYTES {
+            return Err("invocation payload exceeds the serialized bound");
+        }
+        self.deadline
+            .validate()
+            .map_err(|_| "invocation deadline is out of range")?;
+        Ok(())
+    }
 }
 
 /// One callback outcome. Failures use the typed extension errors; there is
 /// no implicit fallback to a built-in implementation (design §12.1).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcResponse,
+)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)]
 pub enum ExtensionInvokeOutcome {
-    Result { value: WireValue },
-    Stream { stream: WireHandle },
-    Error { error: EchoSdkError },
+    Result {
+        result: ExtensionResult,
+    },
+    /// Streaming acknowledgement: the SDK echoes the Host-minted stream
+    /// handle and delivers the payload through
+    /// `_echo_agent/extension/stream` notifications.
+    Stream {
+        stream: WireHandle,
+    },
+    Error {
+        error: EchoSdkError,
+    },
 }
 
 impl ExtensionInvokeOutcome {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
-            Self::Result { value } => value.validate().map_err(|_| "invalid callback result"),
+            Self::Result { result } => {
+                let encoded =
+                    serde_json::to_vec(result).map_err(|_| "callback result is not encodable")?;
+                if encoded.len() > MAX_EXTENSION_PAYLOAD_BYTES {
+                    return Err("callback result exceeds the serialized bound");
+                }
+                Ok(())
+            }
             Self::Stream { stream } => {
                 stream.validate()?;
                 if stream.kind != HandleKind::Stream {
@@ -961,27 +2610,55 @@ impl ExtensionInvokeOutcome {
 
 /// `_echo_agent/extension/cancel` reverse notification (Host -> SDK): the
 /// framework cancelled an in-flight invocation; the SDK must stop work but
-/// still answer the original call with a `cancelled` error.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+/// still answer the original call with a `cancelled` error or a stream
+/// `cancelled` terminal.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcNotification,
+)]
+#[notification(method = "_echo_agent/extension/cancel")]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionCancelNotice {
     #[schemars(length(min = 1, max = 256))]
     pub invocation_id: String,
+    /// Stable diagnostic reason (`cancelled` or `timeout`).
+    #[schemars(length(min = 1, max = 64))]
+    pub reason: String,
 }
 
-/// `_echo_agent/extension/stream` event. Sequence is monotonic per stream and
-/// exactly one terminal variant may be emitted by the Host.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "event", rename_all = "snake_case")]
+impl ExtensionCancelNotice {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.invocation_id.trim().is_empty()
+            || self.invocation_id.chars().count() > MAX_EXTENSION_IMPLEMENTATION_ID_CHARS
+        {
+            return Err("invocation_id must be non-empty and bounded");
+        }
+        if self.reason.trim().is_empty() || self.reason.chars().count() > 64 {
+            return Err("cancel reason must be non-empty and bounded");
+        }
+        Ok(())
+    }
+}
+
+/// `_echo_agent/extension/stream` event (SDK -> Host notification): one
+/// chunk or the single terminal of a streaming callback. Sequence is
+/// contiguous from one per stream and exactly one terminal variant may be emitted by
+/// the SDK; the Host enforces exactly-one-terminal and discards late events
+/// after settlement with bounded diagnostics only.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcNotification,
+)]
+#[notification(method = "_echo_agent/extension/stream")]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionStreamEvent {
     Chunk {
         stream: WireHandle,
         sequence: WireNonZeroU64,
-        value: WireValue,
+        value: ExtensionStreamChunkValue,
     },
     Complete {
         stream: WireHandle,
         sequence: WireNonZeroU64,
-        value: WireValue,
+        value: ExtensionStreamCompleteValue,
     },
     Failed {
         stream: WireHandle,
@@ -995,31 +2672,54 @@ pub enum ExtensionStreamEvent {
 }
 
 impl ExtensionStreamEvent {
+    pub fn stream(&self) -> &WireHandle {
+        match self {
+            Self::Chunk { stream, .. }
+            | Self::Complete { stream, .. }
+            | Self::Failed { stream, .. }
+            | Self::Cancelled { stream, .. } => stream,
+        }
+    }
+
+    pub fn sequence(&self) -> WireNonZeroU64 {
+        match self {
+            Self::Chunk { sequence, .. }
+            | Self::Complete { sequence, .. }
+            | Self::Failed { sequence, .. }
+            | Self::Cancelled { sequence, .. } => sequence.clone(),
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, Self::Chunk { .. })
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
-        let (stream, sequence) = match self {
-            Self::Chunk {
-                stream,
-                sequence,
-                value,
+        let (stream, sequence) = (self.stream().clone(), self.sequence());
+        match self {
+            Self::Chunk { value, .. } => {
+                let encoded =
+                    serde_json::to_vec(value).map_err(|_| "stream value is not encodable")?;
+                if encoded.len() > MAX_EXTENSION_STREAM_CHUNK_BYTES {
+                    return Err("stream value exceeds the chunk bound");
+                }
             }
-            | Self::Complete {
-                stream,
-                sequence,
-                value,
-            } => {
-                value.validate().map_err(|_| "invalid stream value")?;
-                (stream, sequence)
+            Self::Complete { value, .. } => {
+                if let ExtensionStreamCompleteValue::Llm(value) = value
+                    && (value.finish_reason.trim().is_empty()
+                        || value.finish_reason.chars().count() > 256)
+                {
+                    return Err("LLM stream terminal requires a bounded finish reason");
+                }
+                let encoded =
+                    serde_json::to_vec(value).map_err(|_| "stream value is not encodable")?;
+                if encoded.len() > MAX_EXTENSION_STREAM_CHUNK_BYTES {
+                    return Err("stream value exceeds the chunk bound");
+                }
             }
-            Self::Failed {
-                stream,
-                sequence,
-                error,
-            } => {
-                error.validate()?;
-                (stream, sequence)
-            }
-            Self::Cancelled { stream, sequence } => (stream, sequence),
-        };
+            Self::Failed { error, .. } => error.validate()?,
+            Self::Cancelled { .. } => {}
+        }
         stream.validate()?;
         if stream.kind != HandleKind::Stream {
             return Err("stream event requires a stream handle");

@@ -9,6 +9,8 @@
 //! handlers after the standard ones on the same dispatch loop.
 
 pub(crate) mod events;
+#[cfg(feature = "sdk-extension-bridge")]
+pub(crate) mod extension_bridge;
 pub(crate) mod handler;
 pub(crate) mod handles;
 pub(crate) mod persistence;
@@ -53,9 +55,7 @@ impl SdkCoreProfile {
         llm_client: std::sync::Arc<dyn echo_agent::llm::LlmClient>,
     ) -> Result<Self, HostError> {
         let state = CoreProfileState::install(state_root, limits, framework, llm_client)?;
-        Ok(Self {
-            state: Arc::new(state),
-        })
+        Ok(Self { state })
     }
 
     /// Handle generation of this Host incarnation.
@@ -346,7 +346,9 @@ impl AcpConnectionProfile for SdkCoreProfile {
     > {
         self.state.bind_services(services);
         let ack_state = self.state.clone();
-        AcpRole
+        #[cfg(feature = "sdk-extension-bridge")]
+        let stream_state = self.state.clone();
+        let builder = AcpRole
             .builder()
             .on_receive_request(
                 {
@@ -519,7 +521,57 @@ impl AcpConnectionProfile for SdkCoreProfile {
                     })
                 },
                 agent_client_protocol::on_receive_notification!(),
+            );
+        // ── Extension bridge ────────────────────────────────────────────
+        // Compiled only with the feature: without it the typed handlers are
+        // absent and the official dispatch answers method-not-found, which
+        // is exactly the fail-closed contract. Statement-level `let`
+        // rebinding keeps the chain one official builder composition.
+        #[cfg(feature = "sdk-extension-bridge")]
+        let builder = builder
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::ExtensionRegisterRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        handler::extension_register(state.clone(), request, responder, connection)
+                            .await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
             )
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::ExtensionUnregisterRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        handler::extension_unregister(state.clone(), request, responder, connection)
+                            .await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_notification(
+                async move |notification: echo_sdk_protocol::methods::ExtensionStreamEvent,
+                            _connection: ConnectionTo<Client>| {
+                    // Routing is bounded and non-blocking (`try_send` into the
+                    // per-stream mailbox). Keeping it in the notification
+                    // dispatch future preserves wire arrival order; spawning
+                    // one task per chunk could reorder contiguous sequences.
+                    if let Err(error) =
+                        handler::extension_stream(stream_state.clone(), notification).await
+                    {
+                        tracing::warn!("extension stream delivery failed: {error}");
+                    }
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            );
+        #[cfg(not(feature = "sdk-extension-bridge"))]
+        let builder = builder;
+        builder
     }
 
     fn run_journal(
@@ -589,6 +641,16 @@ impl AcpConnectionProfile for SdkCoreProfile {
 
     fn flush_before_agents(&self) -> std::result::Result<(), String> {
         self.state.flush_journals()
+    }
+
+    fn release_after_agents(&self) {
+        // Connection teardown order ends here: extension registrations are
+        // connection-owned and never survive the connection (design §12.1).
+        #[cfg(feature = "sdk-extension-bridge")]
+        {
+            self.state.extension_shared.close_all_streams();
+            self.state.handles.close_all_extensions();
+        }
     }
 
     fn wait_for_settlements(

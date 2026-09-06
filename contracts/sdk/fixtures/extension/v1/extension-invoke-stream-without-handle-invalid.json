@@ -1,0 +1,25 @@
+{
+  "name": "extension-invoke-stream-without-handle-invalid",
+  "kind": "invalid",
+  "target": "ExtensionInvokeCall",
+  "description": "Streaming operations must name the stream handle they deliver to.",
+  "payload": {
+    "extension": {
+      "id": "extension-2",
+      "generation": "2",
+      "kind": "extension"
+    },
+    "invocation_id": "invocation-44",
+    "invocation": {
+      "operation": "llm_chat_stream",
+      "input": {
+        "messages": []
+      }
+    },
+    "deadline": {
+      "seconds": "30",
+      "nanos": 0
+    }
+  },
+  "expect_error": "invalid_value"
+}

@@ -196,9 +196,22 @@ pub fn build_extension_schema_doc() -> serde_json::Value {
     schema_entry!(definitions, ExtensionUnregisterRequest);
     schema_entry!(definitions, ExtensionUnregisterResponse);
     schema_entry!(definitions, ExtensionInvokeCall);
+    schema_entry!(definitions, ExtensionInvocation);
     schema_entry!(definitions, ExtensionInvokeOutcome);
+    schema_entry!(definitions, ExtensionResult);
     schema_entry!(definitions, ExtensionCancelNotice);
     schema_entry!(definitions, ExtensionStreamEvent);
+    schema_entry!(definitions, ExtensionStreamChunkValue);
+    schema_entry!(definitions, ExtensionStreamCompleteValue);
+    schema_entry!(definitions, AgentEventWire);
+    schema_entry!(definitions, AgentStreamChunkWire);
+    schema_entry!(definitions, AgentStreamTerminalWire);
+    schema_entry!(definitions, ExtensionKind);
+    schema_entry!(definitions, ExtensionDescriptor);
+    schema_entry!(definitions, ExtensionOperation);
+    schema_entry!(definitions, ExtensionInvocationContext);
+    schema_entry!(definitions, ModelModalityWire);
+    schema_entry!(definitions, SearchModeWire);
     schema_entry!(definitions, FeatureOperationRequest);
     schema_entry!(definitions, FeatureOperationResponse);
     schema_entry!(definitions, WorkingDirectory);
@@ -818,6 +831,198 @@ fn push_ack_fixtures(fixtures: &mut Vec<Fixture>) {
 
 fn push_bridge_fixtures(fixtures: &mut Vec<Fixture>) {
     fixtures.push(fixture(
+        "extension-register-tool-valid",
+        FixtureKind::Valid,
+        "ExtensionRegisterRequest",
+        "A Tool registration carries the full typed descriptor the Host dispatches on.",
+        serde_json::json!({
+            "kind": "tool",
+            "implementation_id": "sdk-tool-1",
+            "descriptor": {
+                "kind": "tool",
+                "descriptor_version": 1,
+                "name": "search_docs",
+                "description": "Search the host-language documentation index.",
+                "parameters": {
+                    "kind": "record",
+                    "value": {
+                        "type_id": "json_schema",
+                        "fields": [
+                            {"name": "type", "value": {"kind": "string", "value": "object"}}
+                        ]
+                    }
+                },
+                "schema_revision": "3",
+                "required_input_modalities": ["text"],
+                "supports_streaming": false,
+                "exempt_from_batch_timeout": false,
+                "allows_parallel_batch_execution": true,
+                "manages_own_timeout": false
+            },
+            "timeout": {"seconds": "20", "nanos": 0}
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-register-llm-client-valid",
+        FixtureKind::Valid,
+        "ExtensionRegisterRequest",
+        "An LlmClient registration names the model it implements.",
+        serde_json::json!({
+            "kind": "llm_client",
+            "implementation_id": "sdk-llm-1",
+            "descriptor": {
+                "kind": "llm_client",
+                "descriptor_version": 1,
+                "model_name": "fixture-chat",
+                "supports_streaming": true
+            }
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-register-intervention-valid",
+        FixtureKind::Valid,
+        "ExtensionRegisterRequest",
+        "InterventionCallback is an explicit registration kind, never an AgentCallback alias.",
+        serde_json::json!({
+            "kind": "intervention_callback",
+            "implementation_id": "sdk-intervention-1",
+            "descriptor": {
+                "kind": "intervention_callback",
+                "descriptor_version": 1
+            }
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-register-kind-mismatch-invalid",
+        FixtureKind::Invalid,
+        "ExtensionRegisterRequest",
+        "The descriptor kind must equal the registration kind.",
+        serde_json::json!({
+            "kind": "tool",
+            "implementation_id": "sdk-tool-1",
+            "descriptor": {
+                "kind": "llm_client",
+                "descriptor_version": 1,
+                "model_name": "fixture-chat",
+                "supports_streaming": false
+            }
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-register-unknown-version-invalid",
+        FixtureKind::Invalid,
+        "ExtensionRegisterRequest",
+        "Unknown descriptor versions fail closed instead of being partially applied.",
+        serde_json::json!({
+            "kind": "store",
+            "implementation_id": "sdk-store-1",
+            "descriptor": {
+                "kind": "store",
+                "descriptor_version": 99,
+                "search_modes": ["keyword"]
+            }
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-register-empty-identity-invalid",
+        FixtureKind::Invalid,
+        "ExtensionRegisterRequest",
+        "Implementation identities must be non-empty and bounded.",
+        serde_json::json!({
+            "kind": "hook",
+            "implementation_id": "  ",
+            "descriptor": {"kind": "hook", "descriptor_version": 1, "events": ["PreToolUse"]}
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-invoke-tool-valid",
+        FixtureKind::Valid,
+        "ExtensionInvokeCall",
+        "A reverse call carries its own invocation identity, operation and deadline.",
+        serde_json::json!({
+            "extension": {"id": "extension-1", "generation": "2", "kind": "extension"},
+            "invocation_id": "invocation-41",
+            "context": {"session_id": "session-9", "run_id": "run-7"},
+            "invocation": {
+                "operation": "tool_execute",
+                "input": {
+                    "parameters": {
+                        "kind": "record",
+                        "value": {
+                            "type_id": "ToolParameters",
+                            "fields": [
+                                {"name": "query", "value": {"kind": "string", "value": "rust async"}}
+                            ]
+                        }
+                    },
+                    "context": {"conversation_id": "session-9", "run_id": "run-7"}
+                }
+            },
+            "deadline": {"seconds": "20", "nanos": 0}
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-invoke-stream-handle-valid",
+        FixtureKind::Valid,
+        "ExtensionInvokeCall",
+        "Streaming operations carry the Host-minted stream handle.",
+        serde_json::json!({
+            "extension": {"id": "extension-2", "generation": "2", "kind": "extension"},
+            "invocation_id": "invocation-42",
+            "invocation": {"operation": "llm_chat_stream", "input": {"messages": []}},
+            "deadline": {"seconds": "30", "nanos": 0},
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"}
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-invoke-wrong-handle-kind-invalid",
+        FixtureKind::Invalid,
+        "ExtensionInvokeCall",
+        "Reverse calls require an extension-kind handle.",
+        serde_json::json!({
+            "extension": {"id": "run-1", "generation": "2", "kind": "run"},
+            "invocation_id": "invocation-43",
+            "invocation": {
+                "operation": "tool_execute",
+                "input": {"parameters": {"kind": "record", "value": {"type_id": "ToolParameters", "fields": []}}}
+            },
+            "deadline": {"seconds": "20", "nanos": 0}
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-invoke-stream-without-handle-invalid",
+        FixtureKind::Invalid,
+        "ExtensionInvokeCall",
+        "Streaming operations must name the stream handle they deliver to.",
+        serde_json::json!({
+            "extension": {"id": "extension-2", "generation": "2", "kind": "extension"},
+            "invocation_id": "invocation-44",
+            "invocation": {"operation": "llm_chat_stream", "input": {"messages": []}},
+            "deadline": {"seconds": "30", "nanos": 0}
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-outcome-result-valid",
+        FixtureKind::Valid,
+        "ExtensionInvokeOutcome",
+        "A non-streaming callback settles with exactly one result value.",
+        serde_json::json!({
+            "outcome": "result",
+            "result": {"operation": "agent_execute", "value": "3 documents"}
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
         "extension-outcome-stream-valid",
         FixtureKind::Valid,
         "ExtensionInvokeOutcome",
@@ -825,6 +1030,21 @@ fn push_bridge_fixtures(fixtures: &mut Vec<Fixture>) {
         serde_json::json!({
             "outcome": "stream",
             "stream": {"id": "stream-9", "generation": "2", "kind": "stream"}
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-outcome-typed-error-valid",
+        FixtureKind::Valid,
+        "ExtensionInvokeOutcome",
+        "Callback failures use the typed extension error contract without fallback.",
+        serde_json::json!({
+            "outcome": "error",
+            "error": {
+                "code": "extension_failed",
+                "message": "implementation raised before producing a value",
+                "retryable": "never"
+            }
         }),
         None,
     ));
@@ -837,11 +1057,22 @@ fn push_bridge_fixtures(fixtures: &mut Vec<Fixture>) {
         Some("invalid_value"),
     ));
     fixtures.push(fixture(
-        "extension-outcome-ambiguous-invalid",
+        "extension-cancel-notice-valid",
+        FixtureKind::Valid,
+        "ExtensionCancelNotice",
+        "Cancellation names the invocation identity and a stable reason.",
+        serde_json::json!({
+            "invocation_id": "invocation-41",
+            "reason": "cancelled"
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-cancel-notice-empty-reason-invalid",
         FixtureKind::Invalid,
-        "ExtensionInvokeOutcome",
-        "Independent result and error fields cannot be combined.",
-        serde_json::json!({"result": null, "error": null}),
+        "ExtensionCancelNotice",
+        "Cancel reasons are bounded non-empty diagnostics.",
+        serde_json::json!({"invocation_id": "invocation-41", "reason": ""}),
         Some("invalid_value"),
     ));
     fixtures.push(fixture(
@@ -853,7 +1084,20 @@ fn push_bridge_fixtures(fixtures: &mut Vec<Fixture>) {
             "event": "chunk",
             "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
             "sequence": "1",
-            "value": {"kind": "string", "value": "token"}
+            "value": {"kind": "llm", "value": {"content": "token"}}
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "extension-stream-complete-terminal-valid",
+        FixtureKind::Valid,
+        "ExtensionStreamEvent",
+        "A complete terminal carries the final payload of the stream.",
+        serde_json::json!({
+            "event": "complete",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
+            "sequence": "4",
+            "value": {"kind": "llm", "value": {"finish_reason": "stop"}}
         }),
         None,
     ));
@@ -866,7 +1110,95 @@ fn push_bridge_fixtures(fixtures: &mut Vec<Fixture>) {
             "event": "chunk",
             "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
             "sequence": "0",
-            "value": {"kind": "string", "value": "token"}
+            "value": {"kind": "llm", "value": {"content": "token"}}
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-stream-tool-progress-terminal-invalid",
+        FixtureKind::Invalid,
+        "ExtensionStreamEvent",
+        "A Tool progress event cannot masquerade as the outer stream terminal.",
+        serde_json::json!({
+            "event": "complete",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
+            "sequence": "2",
+            "value": {"kind": "tool", "value": {"event": "progress", "message": "halfway", "percent": 50}}
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-stream-tool-complete-chunk-invalid",
+        FixtureKind::Invalid,
+        "ExtensionStreamEvent",
+        "A Tool terminal result cannot be emitted as an ordinary chunk.",
+        serde_json::json!({
+            "event": "chunk",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
+            "sequence": "2",
+            "value": {"kind": "tool", "value": {"event": "complete", "result": {"kind": {"kind": "text"}, "success": true, "output": "done", "truncated": false, "metadata": {}, "model_content": []}}}
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-stream-agent-token-terminal-invalid",
+        FixtureKind::Invalid,
+        "ExtensionStreamEvent",
+        "A CustomAgent token cannot terminate the outer stream.",
+        serde_json::json!({
+            "event": "complete",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
+            "sequence": "2",
+            "value": {"kind": "agent", "value": {"event": "token", "data": {"text": "not terminal"}}}
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-stream-agent-final-chunk-invalid",
+        FixtureKind::Invalid,
+        "ExtensionStreamEvent",
+        "A CustomAgent final answer must use the outer complete terminal.",
+        serde_json::json!({
+            "event": "chunk",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
+            "sequence": "2",
+            "value": {"kind": "agent", "value": {"event": "final_answer", "data": {"text": "done"}}}
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-stream-llm-empty-finish-invalid",
+        FixtureKind::Invalid,
+        "ExtensionStreamEvent",
+        "An LLM completion must carry a non-empty finish reason.",
+        serde_json::json!({
+            "event": "complete",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
+            "sequence": "2",
+            "value": {"kind": "llm", "value": {"finish_reason": ""}}
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "extension-stream-agent-tool-complete-chunk-invalid",
+        FixtureKind::Invalid,
+        "ExtensionStreamEvent",
+        "A CustomAgent ToolStream event cannot hide a Tool complete terminal inside a chunk.",
+        serde_json::json!({
+            "event": "chunk",
+            "stream": {"id": "stream-9", "generation": "2", "kind": "stream"},
+            "sequence": "2",
+            "value": {
+                "kind": "agent",
+                "value": {
+                    "event": "tool_stream",
+                    "data": {
+                        "call_id": "call-1",
+                        "name": "search",
+                        "event": {"event": "complete", "result": {"kind": {"kind": "text"}, "success": true, "output": "done", "truncated": false, "metadata": {}, "model_content": []}}
+                    }
+                }
+            }
         }),
         Some("invalid_value"),
     ));
@@ -897,7 +1229,12 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
                 "max_outstanding_live_events": "256",
                 "max_stream_buffer_bytes": "4194304",
                 "max_replay_bytes": "4194304",
-                "max_open_handles": "512"
+                "max_open_handles": "512",
+                "max_registered_extensions": "64",
+                "max_extension_descriptor_bytes": "65536",
+                "max_extension_payload_bytes": "1048576",
+                "max_extension_stream_bytes": "262144",
+                "max_inflight_extension_invocations": "8"
             }
         }),
         None,
@@ -923,7 +1260,12 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
                 "max_outstanding_live_events": "1",
                 "max_stream_buffer_bytes": "1",
                 "max_replay_bytes": "1",
-                "max_open_handles": "1"
+                "max_open_handles": "1",
+                "max_registered_extensions": "1",
+                "max_extension_descriptor_bytes": "1",
+                "max_extension_payload_bytes": "1",
+                "max_extension_stream_bytes": "1",
+                "max_inflight_extension_invocations": "1"
             }
         }),
         Some("invalid_value"),

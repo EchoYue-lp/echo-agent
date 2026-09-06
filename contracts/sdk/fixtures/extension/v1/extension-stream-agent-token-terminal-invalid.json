@@ -1,0 +1,25 @@
+{
+  "name": "extension-stream-agent-token-terminal-invalid",
+  "kind": "invalid",
+  "target": "ExtensionStreamEvent",
+  "description": "A CustomAgent token cannot terminate the outer stream.",
+  "payload": {
+    "event": "complete",
+    "stream": {
+      "id": "stream-9",
+      "generation": "2",
+      "kind": "stream"
+    },
+    "sequence": "2",
+    "value": {
+      "kind": "agent",
+      "value": {
+        "event": "token",
+        "data": {
+          "text": "not terminal"
+        }
+      }
+    }
+  },
+  "expect_error": "invalid_value"
+}

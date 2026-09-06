@@ -10,7 +10,10 @@
 
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
 use echo_sdk_protocol::handle::{HandleKind, WireHandle};
-use echo_sdk_protocol::methods::AgentConfigWire;
+use echo_sdk_protocol::methods::{
+    AgentConfigWire, ExtensionDescriptor, ExtensionKind, MAX_EXTENSION_DESCRIPTOR_BYTES,
+};
+use echo_sdk_protocol::scalar::WireDuration;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -58,6 +61,25 @@ pub(crate) struct StreamRecord {
     pub run_handle_id: String,
 }
 
+/// One registered extension implementation. The record is connection-owned:
+/// it exists only while the registering connection lives and is never
+/// persisted or restored across a Host restart (design §12.1).
+#[allow(dead_code)]
+pub(crate) struct ExtensionRecord {
+    pub kind: ExtensionKind,
+    pub implementation_id: String,
+    pub descriptor: ExtensionDescriptor,
+    /// Canonical descriptor fingerprint for idempotent re-registration.
+    pub descriptor_fingerprint: String,
+    /// Per-registration default invocation deadline.
+    pub timeout: Option<WireDuration>,
+    /// Monotonic registration order used when a kind has one active winner.
+    pub registration_order: u64,
+    /// Factory-created CustomAgent instances are invocation-scoped and do not
+    /// participate in the direct-registration logical-name namespace.
+    pub factory_instance: bool,
+}
+
 struct HandleInner {
     generation: u64,
     max_handles: usize,
@@ -65,9 +87,15 @@ struct HandleInner {
     sessions: HashMap<String, Arc<SessionRecord>>,
     runs: HashMap<String, Arc<RunRecord>>,
     streams: HashMap<String, Arc<StreamRecord>>,
+    extensions: HashMap<String, Arc<ExtensionRecord>>,
+    /// `(kind, implementation_id)` identity → extension handle id, for
+    /// idempotent re-registration and typed conflicts.
+    #[allow(dead_code)]
+    extension_index: HashMap<String, String>,
     tombstones: VecDeque<(HandleKind, String)>,
     idempotency: HashMap<String, Arc<AgentCreateOutcome>>,
     next_agent_id: u64,
+    next_extension_order: u64,
 }
 
 /// Result of an idempotent `agent/create` invocation.
@@ -94,6 +122,38 @@ pub(crate) struct HandleRegistry {
     inner: Mutex<HandleInner>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ExtensionRegistrationLimits {
+    pub max_extensions: usize,
+    pub max_descriptor_bytes: usize,
+}
+
+fn extension_semantic_identity_conflicts(
+    existing: &ExtensionDescriptor,
+    candidate: &ExtensionDescriptor,
+) -> bool {
+    match (existing, candidate) {
+        (
+            ExtensionDescriptor::Tool { name: existing, .. },
+            ExtensionDescriptor::Tool {
+                name: candidate, ..
+            },
+        )
+        | (
+            ExtensionDescriptor::CustomAgent { name: existing, .. },
+            ExtensionDescriptor::CustomAgent {
+                name: candidate, ..
+            },
+        ) => existing == candidate,
+        (ExtensionDescriptor::Store { .. }, ExtensionDescriptor::Store { .. })
+        | (
+            ExtensionDescriptor::HumanLoopProvider { .. },
+            ExtensionDescriptor::HumanLoopProvider { .. },
+        ) => true,
+        _ => false,
+    }
+}
+
 impl HandleRegistry {
     pub fn new(generation: u64, max_handles: usize) -> Self {
         Self {
@@ -104,9 +164,12 @@ impl HandleRegistry {
                 sessions: HashMap::new(),
                 runs: HashMap::new(),
                 streams: HashMap::new(),
+                extensions: HashMap::new(),
+                extension_index: HashMap::new(),
                 tombstones: VecDeque::new(),
                 idempotency: HashMap::new(),
                 next_agent_id: 0,
+                next_extension_order: 0,
             }),
         }
     }
@@ -129,7 +192,8 @@ impl HandleRegistry {
             .len()
             .saturating_add(inner.sessions.len())
             .saturating_add(inner.runs.len())
-            .saturating_add(inner.streams.len());
+            .saturating_add(inner.streams.len())
+            .saturating_add(inner.extensions.len());
         if open.saturating_add(additional) > inner.max_handles {
             return Err(sdk_error(
                 ExtensionErrorCode::PayloadTooLarge,
@@ -395,6 +459,295 @@ impl HandleRegistry {
             .streams
             .insert(stream_id.clone(), Arc::new(StreamRecord { run_handle_id }));
         self.insert(&mut inner, HandleKind::Stream, stream_id)
+    }
+
+    // ── Extension registrations ─────────────────────────────────────────
+
+    /// Register one extension implementation. Registration is idempotent per
+    /// `(kind, implementation_id)`: the same identity with the same
+    /// registration fingerprint (descriptor plus default timeout) returns the
+    /// same handle; a different snapshot is a typed conflict. Records are
+    /// connection-owned and never persist.
+    #[allow(dead_code)]
+    pub fn register_extension(
+        &self,
+        limits: ExtensionRegistrationLimits,
+        kind: ExtensionKind,
+        implementation_id: &str,
+        descriptor: ExtensionDescriptor,
+        timeout: Option<WireDuration>,
+        factory_instance: bool,
+    ) -> Result<(WireHandle, Arc<ExtensionRecord>), EchoSdkError> {
+        const OPERATION: &str = "_echo_agent/extension/register";
+        if descriptor.kind() != kind {
+            return Err(sdk_error(
+                ExtensionErrorCode::InvalidValue,
+                "descriptor kind does not match the registration kind",
+                Retryability::Never,
+                OPERATION,
+            ));
+        }
+        let fingerprint = serde_json::to_string(&serde_json::json!({
+            "descriptor": &descriptor,
+            "timeout": &timeout,
+        }))
+        .unwrap_or_else(|_| "<unencodable>".to_string());
+        let encoded_len = serde_json::to_vec(&descriptor)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        if encoded_len > limits.max_descriptor_bytes || encoded_len > MAX_EXTENSION_DESCRIPTOR_BYTES
+        {
+            return Err(sdk_error(
+                ExtensionErrorCode::PayloadTooLarge,
+                "extension descriptor exceeds the serialized descriptor bound",
+                Retryability::Never,
+                OPERATION,
+            ));
+        }
+        let identity = format!("{}/{}", kind.as_str(), implementation_id);
+        let mut inner = self.lock();
+        if let Some(existing_id) = inner.extension_index.get(&identity).cloned()
+            && let Some(existing) = inner.extensions.get(&existing_id).cloned()
+        {
+            if existing.descriptor_fingerprint == fingerprint {
+                let generation = inner.generation;
+                return Ok((
+                    handle(existing_id, HandleKind::Extension, generation),
+                    existing,
+                ));
+            }
+            let prior = handle(existing_id, HandleKind::Extension, inner.generation);
+            drop(inner);
+            return Err(handle_error(
+                ExtensionErrorCode::ExtensionConflict,
+                format!(
+                    "implementation {identity} is already registered with a different descriptor"
+                ),
+                OPERATION,
+                &prior,
+            ));
+        }
+        if !factory_instance
+            && let Some((existing_id, existing)) = inner.extensions.iter().find(|(_, existing)| {
+                !existing.factory_instance
+                    && extension_semantic_identity_conflicts(&existing.descriptor, &descriptor)
+            })
+        {
+            let prior = handle(existing_id.clone(), HandleKind::Extension, inner.generation);
+            let existing_identity =
+                format!("{}/{}", existing.kind.as_str(), existing.implementation_id);
+            drop(inner);
+            return Err(handle_error(
+                ExtensionErrorCode::ExtensionConflict,
+                format!("extension semantic identity is already owned by {existing_identity}"),
+                OPERATION,
+                &prior,
+            ));
+        }
+        if inner.extensions.len() >= limits.max_extensions {
+            return Err(sdk_error(
+                ExtensionErrorCode::PayloadTooLarge,
+                format!(
+                    "registered extension limit {} reached",
+                    limits.max_extensions
+                ),
+                Retryability::AfterDelay,
+                OPERATION,
+            ));
+        }
+        self.enforce_budget(&mut inner, 1)?;
+        inner.next_extension_order =
+            inner.next_extension_order.checked_add(1).ok_or_else(|| {
+                sdk_error(
+                    ExtensionErrorCode::PayloadTooLarge,
+                    "extension registration order exhausted",
+                    Retryability::Never,
+                    OPERATION,
+                )
+            })?;
+        let registration_order = inner.next_extension_order;
+        let id = Self::mint_id(&mut inner, HandleKind::Extension)?;
+        let record = Arc::new(ExtensionRecord {
+            kind,
+            implementation_id: implementation_id.to_string(),
+            descriptor,
+            descriptor_fingerprint: fingerprint,
+            timeout,
+            registration_order,
+            factory_instance,
+        });
+        inner.extensions.insert(id.clone(), record.clone());
+        inner.extension_index.insert(identity, id.clone());
+        let extension = handle(id, HandleKind::Extension, inner.generation);
+        Ok((extension, record))
+    }
+
+    /// Resolve one extension registration through the fixed ladder.
+    #[allow(dead_code)]
+    pub fn extension(&self, handle: &WireHandle) -> Result<Arc<ExtensionRecord>, EchoSdkError> {
+        let found = self.lock().extensions.get(&handle.id).cloned();
+        found.ok_or_else(|| {
+            self.resolve_error(handle, HandleKind::Extension, "_echo_agent/extension")
+        })
+    }
+
+    /// Release one extension registration; idempotent. Returns false when it
+    /// was already released, true when this call released it.
+    #[allow(dead_code)]
+    pub fn close_extension(&self, handle: &WireHandle) -> Result<bool, EchoSdkError> {
+        const OPERATION: &str = "_echo_agent/extension/unregister";
+        let removed = {
+            let mut inner = self.lock();
+            let record = inner.extensions.remove(&handle.id);
+            if let Some(record) = &record {
+                let identity = format!("{}/{}", record.kind.as_str(), record.implementation_id);
+                inner.extension_index.remove(&identity);
+                // Cascade: drop callback streams minted for this extension.
+                let stream_ids = inner
+                    .streams
+                    .iter()
+                    .filter(|(_, stream)| stream.run_handle_id == handle.id)
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                for stream_id in stream_ids {
+                    inner.streams.remove(&stream_id);
+                    inner.tombstones.push_back((HandleKind::Stream, stream_id));
+                }
+            }
+            record
+        };
+        let Some(record) = removed else {
+            return if self.is_closed(handle) {
+                Ok(false)
+            } else {
+                Err(self.resolve_error(handle, HandleKind::Extension, OPERATION))
+            };
+        };
+        let _ = record;
+        let mut inner = self.lock();
+        inner
+            .tombstones
+            .push_back((HandleKind::Extension, handle.id.clone()));
+        while inner.tombstones.len() > inner.max_handles {
+            inner.tombstones.pop_front();
+        }
+        Ok(true)
+    }
+
+    /// Release every extension registration (connection teardown).
+    #[allow(dead_code)]
+    pub fn close_all_extensions(&self) {
+        let mut inner = self.lock();
+        let drained: Vec<(String, String)> = inner
+            .extensions
+            .drain()
+            .map(|(id, record)| {
+                (
+                    format!("{}/{}", record.kind.as_str(), record.implementation_id),
+                    id,
+                )
+            })
+            .collect();
+        let extension_ids = drained
+            .iter()
+            .map(|(_, id)| id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for (identity, id) in drained {
+            inner.extension_index.remove(&identity);
+            inner.tombstones.push_back((HandleKind::Extension, id));
+        }
+        let stream_ids = inner
+            .streams
+            .iter()
+            .filter(|(_, stream)| extension_ids.contains(&stream.run_handle_id))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for stream_id in stream_ids {
+            inner.streams.remove(&stream_id);
+            inner.tombstones.push_back((HandleKind::Stream, stream_id));
+        }
+        while inner.tombstones.len() > inner.max_handles {
+            inner.tombstones.pop_front();
+        }
+    }
+
+    /// All live registrations of one kind, ordered by monotonic registration
+    /// order. This remains deterministic even though handle ids are opaque.
+    #[allow(dead_code)]
+    pub fn extensions_of_kind(
+        &self,
+        kind: ExtensionKind,
+    ) -> Vec<(WireHandle, Arc<ExtensionRecord>)> {
+        let inner = self.lock();
+        let mut found: Vec<(WireHandle, Arc<ExtensionRecord>)> = inner
+            .extensions
+            .iter()
+            .filter(|(_, record)| record.kind == kind)
+            .map(|(id, record)| {
+                (
+                    handle(id.clone(), HandleKind::Extension, inner.generation),
+                    record.clone(),
+                )
+            })
+            .collect();
+        found.sort_by_key(|(_, record)| record.registration_order);
+        found
+    }
+
+    /// Registrations eligible for injection into newly constructed Session
+    /// Agents. Factory-created CustomAgent instances are owned by one
+    /// invocation and must never become globally visible to another Session.
+    #[allow(dead_code)]
+    pub fn session_extensions_of_kind(
+        &self,
+        kind: ExtensionKind,
+    ) -> Vec<(WireHandle, Arc<ExtensionRecord>)> {
+        self.extensions_of_kind(kind)
+            .into_iter()
+            .filter(|(_, record)| !record.factory_instance)
+            .collect()
+    }
+
+    /// Mint one callback stream handle owned by an extension registration.
+    /// Used by streaming reverse invocations; the SDK must echo this exact
+    /// handle, so stream identities stay Host-minted and generation-fenced.
+    #[allow(dead_code)]
+    pub fn register_extension_stream(
+        &self,
+        extension_id: &str,
+    ) -> Result<WireHandle, EchoSdkError> {
+        let mut inner = self.lock();
+        if !inner.extensions.contains_key(extension_id) {
+            return Err(sdk_error(
+                ExtensionErrorCode::ClosedHandle,
+                "extension registration is no longer live",
+                Retryability::Never,
+                "_echo_agent/extension/invoke",
+            ));
+        }
+        self.enforce_budget(&mut inner, 1)?;
+        let id = Self::mint_id(&mut inner, HandleKind::Stream)?;
+        inner.streams.insert(
+            id.clone(),
+            Arc::new(StreamRecord {
+                run_handle_id: extension_id.to_string(),
+            }),
+        );
+        Ok(handle(id, HandleKind::Stream, inner.generation))
+    }
+
+    /// Release one callback stream handle after its single terminal.
+    #[allow(dead_code)]
+    pub fn remove_extension_stream(&self, stream_id: &str) {
+        let mut inner = self.lock();
+        if inner.streams.remove(stream_id).is_some() {
+            inner
+                .tombstones
+                .push_back((HandleKind::Stream, stream_id.to_string()));
+            while inner.tombstones.len() > inner.max_handles {
+                inner.tombstones.pop_front();
+            }
+        }
     }
 
     pub fn agent(&self, handle: &WireHandle) -> Result<Arc<AgentRecord>, EchoSdkError> {
@@ -734,6 +1087,145 @@ mod tests {
             generation: WireU64::from_u64(generation),
             kind,
         }
+    }
+
+    fn tool_descriptor(name: &str) -> ExtensionDescriptor {
+        ExtensionDescriptor::Tool {
+            descriptor_version: 1,
+            name: name.to_string(),
+            description: String::new(),
+            parameters: echo_sdk_protocol::scalar::WireValue::Null,
+            schema_revision: WireU64::from_u64(1),
+            required_input_modalities: Vec::new(),
+            required_permissions: Vec::new(),
+            risk_level: echo_sdk_protocol::methods::ToolRiskLevelWire::ReadOnly,
+            supports_streaming: false,
+            exempt_from_batch_timeout: false,
+            allows_parallel_batch_execution: true,
+            manages_own_timeout: false,
+        }
+    }
+
+    #[test]
+    fn semantic_extension_identities_are_unique() {
+        let registry = registry();
+        let register = |kind, implementation_id, descriptor| {
+            registry.register_extension(
+                ExtensionRegistrationLimits {
+                    max_extensions: 16,
+                    max_descriptor_bytes: MAX_EXTENSION_DESCRIPTOR_BYTES,
+                },
+                kind,
+                implementation_id,
+                descriptor,
+                None,
+                false,
+            )
+        };
+
+        assert!(register(ExtensionKind::Tool, "tool-a", tool_descriptor("search")).is_ok());
+        assert!(register(ExtensionKind::Tool, "tool-b", tool_descriptor("search")).is_err());
+
+        let custom_agent = |name: &str| ExtensionDescriptor::CustomAgent {
+            descriptor_version: 1,
+            name: name.to_string(),
+            model_name: "fixture".to_string(),
+            system_prompt: String::new(),
+            tool_names: Vec::new(),
+        };
+        assert!(
+            register(
+                ExtensionKind::CustomAgent,
+                "agent-a",
+                custom_agent("reviewer")
+            )
+            .is_ok()
+        );
+        assert!(
+            register(
+                ExtensionKind::CustomAgent,
+                "agent-b",
+                custom_agent("reviewer")
+            )
+            .is_err()
+        );
+
+        let first_factory_instance = registry.register_extension(
+            ExtensionRegistrationLimits {
+                max_extensions: 16,
+                max_descriptor_bytes: MAX_EXTENSION_DESCRIPTOR_BYTES,
+            },
+            ExtensionKind::CustomAgent,
+            "factory-instance-a",
+            custom_agent("factory-result"),
+            None,
+            true,
+        );
+        let second_factory_instance = registry.register_extension(
+            ExtensionRegistrationLimits {
+                max_extensions: 16,
+                max_descriptor_bytes: MAX_EXTENSION_DESCRIPTOR_BYTES,
+            },
+            ExtensionKind::CustomAgent,
+            "factory-instance-b",
+            custom_agent("factory-result"),
+            None,
+            true,
+        );
+        assert!(first_factory_instance.is_ok());
+        assert!(second_factory_instance.is_ok());
+        let session_custom_agents = registry.session_extensions_of_kind(ExtensionKind::CustomAgent);
+        assert_eq!(session_custom_agents.len(), 1);
+        assert_eq!(
+            session_custom_agents
+                .first()
+                .map(|(_, record)| record.implementation_id.as_str()),
+            Some("agent-a")
+        );
+
+        assert!(
+            register(
+                ExtensionKind::Store,
+                "store-a",
+                ExtensionDescriptor::Store {
+                    descriptor_version: 1,
+                    search_modes: Vec::new(),
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            register(
+                ExtensionKind::Store,
+                "store-b",
+                ExtensionDescriptor::Store {
+                    descriptor_version: 1,
+                    search_modes: Vec::new(),
+                }
+            )
+            .is_err()
+        );
+
+        assert!(
+            register(
+                ExtensionKind::HumanLoopProvider,
+                "human-a",
+                ExtensionDescriptor::HumanLoopProvider {
+                    descriptor_version: 1,
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            register(
+                ExtensionKind::HumanLoopProvider,
+                "human-b",
+                ExtensionDescriptor::HumanLoopProvider {
+                    descriptor_version: 1,
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

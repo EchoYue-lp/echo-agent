@@ -52,6 +52,10 @@ pub enum ExtensionErrorCode {
     ExtensionTimeout,
     /// Extension's SDK connection is gone.
     ExtensionDisconnected,
+    /// Invocation conflicts with an exclusive in-flight callback of the same
+    /// registration (re-entrant mutation). Re-entry returns this typed
+    /// conflict instead of waiting for the holder (design §12.3).
+    ExtensionConflict,
     // ── Cancellation / lifecycle ───────────────────────────────────────────
     /// Operation was cancelled; framework terminal state remains authoritative.
     Cancelled,
@@ -89,6 +93,7 @@ impl ExtensionErrorCode {
             ExtensionErrorCode::ExtensionFailed => "extension_failed",
             ExtensionErrorCode::ExtensionTimeout => "extension_timeout",
             ExtensionErrorCode::ExtensionDisconnected => "extension_disconnected",
+            ExtensionErrorCode::ExtensionConflict => "extension_conflict",
             ExtensionErrorCode::Cancelled => "cancelled",
             ExtensionErrorCode::HostShuttingDown => "host_shutting_down",
             ExtensionErrorCode::HostExited => "host_exited",
@@ -396,6 +401,7 @@ mod tests {
             ExtensionErrorCode::ExtensionFailed,
             ExtensionErrorCode::ExtensionTimeout,
             ExtensionErrorCode::ExtensionDisconnected,
+            ExtensionErrorCode::ExtensionConflict,
             ExtensionErrorCode::Cancelled,
             ExtensionErrorCode::HostShuttingDown,
             ExtensionErrorCode::HostExited,

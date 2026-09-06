@@ -1,0 +1,14 @@
+{
+  "name": "extension-register-intervention-valid",
+  "kind": "valid",
+  "target": "ExtensionRegisterRequest",
+  "description": "InterventionCallback is an explicit registration kind, never an AgentCallback alias.",
+  "payload": {
+    "kind": "intervention_callback",
+    "implementation_id": "sdk-intervention-1",
+    "descriptor": {
+      "kind": "intervention_callback",
+      "descriptor_version": 1
+    }
+  }
+}

@@ -16,12 +16,17 @@
 //! official dispatch loop.
 
 mod adapter;
+mod extension;
 mod projection;
 mod prompt;
 mod runtime;
 mod session;
 
 pub use adapter::{AcpAdapterConfig, AcpAgentAdapter, AcpAgentAdapterWithProfile};
+pub use extension::{
+    ExtensionInvocationAuthority, ExtensionInvocationLease, ExtensionLeaseError,
+    ExtensionSettlement,
+};
 pub use projection::AcpEventProjector;
 pub use runtime::{
     AcpConnectionProfile, AcpConnectionServices, AcpLedgerLimits, ConnectionMode, EventLedger,

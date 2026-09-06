@@ -1035,6 +1035,13 @@
           ]
         },
         {
+          "description": "Invocation conflicts with an exclusive in-flight callback of the same registration (re-entrant mutation). Re-entry returns this typed conflict instead of waiting for the holder (design §12.3).",
+          "type": "string",
+          "enum": [
+            "extension_conflict"
+          ]
+        },
+        {
           "description": "Operation was cancelled; framework terminal state remains authoritative.",
           "type": "string",
           "enum": [
@@ -1446,9 +1453,14 @@
       "required": [
         "callback_timeout",
         "max_callback_concurrency",
+        "max_extension_descriptor_bytes",
+        "max_extension_payload_bytes",
+        "max_extension_stream_bytes",
+        "max_inflight_extension_invocations",
         "max_message_bytes",
         "max_open_handles",
         "max_outstanding_live_events",
+        "max_registered_extensions",
         "max_replay_bytes",
         "max_replay_events",
         "max_stream_buffer_bytes",
@@ -1470,6 +1482,38 @@
           "format": "uint32",
           "minimum": 1.0
         },
+        "max_extension_descriptor_bytes": {
+          "description": "Maximum serialized bytes of one extension registration descriptor.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_extension_payload_bytes": {
+          "description": "Maximum serialized bytes of one extension invocation input or result.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_extension_stream_bytes": {
+          "description": "Maximum serialized bytes of one extension stream chunk payload.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_inflight_extension_invocations": {
+          "description": "Maximum simultaneously in-flight reverse invocations per connection.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
         "max_message_bytes": {
           "description": "Maximum serialized request/response payload in bytes.",
           "allOf": [
@@ -1488,6 +1532,14 @@
         },
         "max_outstanding_live_events": {
           "description": "Maximum not-yet-acknowledged live events per stream. Reaching this bound emits one gap notification and pauses live delivery until the Client acknowledges a cursor (`_echo_agent/event/ack`).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_registered_extensions": {
+          "description": "Maximum simultaneously registered extension implementations per connection. Registration is connection-owned and never persists across a Host restart or a reconnect.",
           "allOf": [
             {
               "$ref": "#/definitions/WireU64"
@@ -3311,8 +3363,328 @@
         "accepted"
       ]
     },
+    "ExtensionDescriptor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "description",
+            "descriptor_version",
+            "kind",
+            "name",
+            "parameters",
+            "schema_revision",
+            "supports_streaming"
+          ],
+          "properties": {
+            "allows_parallel_batch_execution": {
+              "default": true,
+              "type": "boolean"
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "exempt_from_batch_timeout": {
+              "default": false,
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "tool"
+              ]
+            },
+            "manages_own_timeout": {
+              "default": false,
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "parameters": {
+              "description": "JSON Schema of the tool parameters.",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WireValue"
+                }
+              ]
+            },
+            "required_input_modalities": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ModelModalityWire"
+              }
+            },
+            "required_permissions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ToolPermissionWire"
+              }
+            },
+            "risk_level": {
+              "default": "standard",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ToolRiskLevelWire"
+                }
+              ]
+            },
+            "schema_revision": {
+              "$ref": "#/definitions/WireU64"
+            },
+            "supports_streaming": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind",
+            "model_name",
+            "supports_streaming"
+          ],
+          "properties": {
+            "capabilities": {
+              "default": {
+                "streaming_tool_calls": true,
+                "named_sse_events": false,
+                "reasoning_content": true,
+                "image_input": true,
+                "system_as_top_level": false,
+                "ndjson_streaming": false,
+                "tool_support": true,
+                "structured_output": true,
+                "requires_version_header": false,
+                "supports_parallel_tool_calls": true,
+                "supports_tool_choice_none": true
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/LlmCapabilitiesWire"
+                }
+              ]
+            },
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "llm_client"
+              ]
+            },
+            "model_name": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "supports_streaming": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "store"
+              ]
+            },
+            "search_modes": {
+              "description": "Search modes the implementation actually supports. Semantic or hybrid searches against an implementation that did not declare them are rejected before any callback is sent.",
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/SearchModeWire"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "human_loop_provider"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "events": {
+              "description": "Hook events the implementation subscribes to (framework hook event names). Empty means the implementation decides per context.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "hook"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent_callback"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "intervention_callback"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent_factory"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind",
+            "model_name",
+            "name",
+            "system_prompt"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "custom_agent"
+              ]
+            },
+            "model_name": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "system_prompt": {
+              "type": "string"
+            },
+            "tool_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "ExtensionDescriptor",
+      "description": "Versioned per-kind registration descriptor. Exactly one variant matches the registration's [`ExtensionKind`]; the Host dispatches on this typed snapshot and never guesses trait semantics from free-form JSON (design §12.2). `descriptor_version` gates evolution: unknown versions fail with `invalid_config` instead of being partially applied."
+    },
     "ExtensionKind": {
-      "type": "string",
       "enum": [
         "tool",
         "llm_client",
@@ -3320,21 +3692,134 @@
         "human_loop_provider",
         "hook",
         "agent_callback",
-        "agent_factory"
+        "intervention_callback",
+        "agent_factory",
+        "custom_agent"
+      ],
+      "title": "ExtensionKind",
+      "type": "string"
+    },
+    "LlmCapabilitiesWire": {
+      "description": "Provider-level LLM capabilities declared by a host-language client.",
+      "type": "object",
+      "required": [
+        "image_input",
+        "named_sse_events",
+        "ndjson_streaming",
+        "reasoning_content",
+        "requires_version_header",
+        "streaming_tool_calls",
+        "structured_output",
+        "supports_parallel_tool_calls",
+        "supports_tool_choice_none",
+        "system_as_top_level",
+        "tool_support"
+      ],
+      "properties": {
+        "image_input": {
+          "type": "boolean"
+        },
+        "named_sse_events": {
+          "type": "boolean"
+        },
+        "ndjson_streaming": {
+          "type": "boolean"
+        },
+        "reasoning_content": {
+          "type": "boolean"
+        },
+        "requires_version_header": {
+          "type": "boolean"
+        },
+        "streaming_tool_calls": {
+          "type": "boolean"
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "supports_parallel_tool_calls": {
+          "type": "boolean"
+        },
+        "supports_tool_choice_none": {
+          "type": "boolean"
+        },
+        "system_as_top_level": {
+          "type": "boolean"
+        },
+        "tokenizer_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_support": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelModalityWire": {
+      "enum": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "title": "ModelModalityWire",
+      "description": "Model input modality a Tool descriptor may require (wire projection of the framework `ModelInputModality`).",
+      "type": "string"
+    },
+    "SearchModeWire": {
+      "enum": [
+        "keyword",
+        "semantic",
+        "hybrid"
+      ],
+      "title": "SearchModeWire",
+      "description": "Search modes a Store descriptor may declare (wire projection of the framework `SearchMode`). Declaring a mode does not downgrade it: the descriptor is a promise the implementation keeps, not a Host-side default.",
+      "type": "string"
+    },
+    "ToolPermissionWire": {
+      "description": "Permission classes declared by a host-language Tool implementation.",
+      "type": "string",
+      "enum": [
+        "read",
+        "write",
+        "network",
+        "execute",
+        "sensitive"
+      ]
+    },
+    "ToolRiskLevelWire": {
+      "description": "Coarse risk level declared by a host-language Tool implementation.",
+      "type": "string",
+      "enum": [
+        "read_only",
+        "standard",
+        "dangerous"
       ]
     },
     "ExtensionRegisterRequest": {
+      "additionalProperties": false,
+      "title": "ExtensionRegisterRequest",
+      "description": "`_echo_agent/extension/register` request: register a host-language implementation of a public framework trait (Tool, LlmClient, Store, HumanLoopProvider, Hook, AgentCallback, InterventionCallback, AgentFactory, custom Agent). Registration is owned by the current connection generation: it never survives a Host restart or a reconnect.",
+      "type": "object",
+      "required": [
+        "descriptor",
+        "implementation_id",
+        "kind"
+      ],
       "properties": {
         "descriptor": {
-          "description": "Descriptor the Host uses for dispatch: for Tools this covers name, description, JSON Schema parameters, revision and modality.",
+          "description": "Typed per-kind descriptor snapshot the Host dispatches on.",
           "allOf": [
             {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/ExtensionDescriptor"
             }
           ]
         },
         "implementation_id": {
-          "description": "Client-side implementation identity (non-empty).",
+          "description": "Client-side implementation identity (non-empty). Re-registering the same identity with the same descriptor and default timeout returns the same handle; a different registration snapshot is a typed conflict.",
           "type": "string",
           "maxLength": 256,
           "minLength": 1
@@ -3348,7 +3833,7 @@
           ]
         },
         "timeout": {
-          "description": "Declared concurrency/timeout contract.",
+          "description": "Per-registration default deadline for reverse invocations.",
           "anyOf": [
             {
               "$ref": "#/definitions/WireDuration"
@@ -3358,44 +3843,39 @@
             }
           ]
         }
-      },
-      "title": "ExtensionRegisterRequest",
-      "description": "`_echo_agent/extension/register` request: register a host-language implementation of a public framework trait (Tool, LlmClient, Store, HumanLoopProvider, Hook, AgentFactory, ...).",
-      "type": "object",
-      "required": [
-        "descriptor",
-        "implementation_id",
-        "kind"
-      ]
+      }
     },
     "ExtensionRegisterResponse": {
-      "properties": {
-        "extension": {
-          "$ref": "#/definitions/WireHandle"
-        }
-      },
+      "additionalProperties": false,
       "title": "ExtensionRegisterResponse",
       "type": "object",
       "required": [
         "extension"
-      ]
-    },
-    "ExtensionUnregisterRequest": {
+      ],
       "properties": {
         "extension": {
           "$ref": "#/definitions/WireHandle"
         }
-      },
+      }
+    },
+    "ExtensionUnregisterRequest": {
+      "additionalProperties": false,
       "title": "ExtensionUnregisterRequest",
       "description": "`_echo_agent/extension/unregister` request/response.",
       "type": "object",
       "required": [
         "extension"
-      ]
+      ],
+      "properties": {
+        "extension": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      }
     },
     "ExtensionUnregisterResponse": {
       "properties": {
         "released": {
+          "description": "True when this call released the extension; false when it was already released (idempotent unregister).",
           "type": "boolean"
         }
       },
@@ -3405,10 +3885,1693 @@
         "released"
       ]
     },
-    "ExtensionInvokeCall": {
+    "AgentFactoryConfigWire": {
+      "type": "object",
+      "required": [
+        "model",
+        "name",
+        "system_prompt",
+        "tool_count"
+      ],
       "properties": {
+        "model": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "system_prompt": {
+          "type": "string"
+        },
+        "tool_count": {
+          "$ref": "#/definitions/WireU64"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentMessageInput": {
+      "type": "object",
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentTaskInput": {
+      "type": "object",
+      "required": [
+        "task"
+      ],
+      "properties": {
+        "task": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CallbackFinalAnswerInput": {
+      "type": "object",
+      "required": [
+        "agent",
+        "answer"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "answer": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CallbackIterationInput": {
+      "type": "object",
+      "required": [
+        "agent",
+        "iteration"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "iteration": {
+          "$ref": "#/definitions/WireU64"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CallbackThinkEndInput": {
+      "type": "object",
+      "required": [
+        "agent",
+        "completion_tokens",
+        "prompt_tokens",
+        "steps"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "completion_tokens": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "prompt_tokens": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/StepTypeWire"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CallbackThinkStartInput": {
+      "type": "object",
+      "required": [
+        "agent",
+        "messages"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmMessageWire"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CallbackToolEndInput": {
+      "type": "object",
+      "required": [
+        "agent",
+        "result",
+        "tool"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "result": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CallbackToolErrorInput": {
+      "type": "object",
+      "required": [
+        "agent",
+        "error",
+        "tool"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CallbackToolStartInput": {
+      "type": "object",
+      "required": [
+        "agent",
+        "args",
+        "tool"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "args": {
+          "$ref": "#/definitions/WireValue"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExtensionInvocation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ToolExecuteInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "tool_execute"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ToolExecuteInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "tool_execute_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ToolValidateInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "tool_validate_parameters"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/LlmChatRequestWire"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "llm_chat"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/LlmChatRequestWire"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "llm_chat_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/StorePutInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_put"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/StoreKeyInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_get"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/StoreSearchInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_search"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/StoreSearchWithInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_search_with"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/StoreKeyInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_delete"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/StoreListNamespacesInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_list_namespaces"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/StoreNamespaceInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_list"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/StoreNamespaceInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_prune_expired"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/StoreNamespaceInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_dedup_by_content"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/HumanLoopRequestWire"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "human_loop_request"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/HookRunInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "hook_run"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackThinkStartInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_think_start"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackThinkEndInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_think_end"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackToolStartInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_tool_start"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackToolEndInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_tool_end"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackToolErrorInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_tool_error"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackFinalAnswerInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_final_answer"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackIterationInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_iteration"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackToolStartInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "intervention_on_tool_call"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackThinkStartInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "intervention_on_think_start"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CallbackFinalAnswerInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "intervention_on_final_answer"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/AgentFactoryConfigWire"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "factory_create_agent"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/AgentTaskInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_execute"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/AgentTaskInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_execute_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/AgentMessageInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_chat"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/AgentMessageInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_chat_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ExtensionUnit"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_close"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "ExtensionInvocation",
+      "description": "Operation-discriminated reverse invocation payload. Every input shape is named and available to schema/code generators."
+    },
+    "ExtensionInvocationContext": {
+      "additionalProperties": false,
+      "title": "ExtensionInvocationContext",
+      "description": "Session/run context attached to a reverse invocation, so a language SDK can correlate callbacks with the execution that caused them. Context is diagnostic identity only — it never changes settlement semantics.",
+      "type": "object",
+      "properties": {
+        "call_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "execution_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "stream_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256,
+          "minLength": 1
+        }
+      }
+    },
+    "ExtensionUnit": {
+      "type": "null"
+    },
+    "HookRunInput": {
+      "type": "object",
+      "required": [
+        "context"
+      ],
+      "properties": {
+        "context": {
+          "$ref": "#/definitions/WireValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HumanLoopKindWire": {
+      "type": "string",
+      "enum": [
+        "approval",
+        "input",
+        "selection"
+      ]
+    },
+    "HumanLoopRequestWire": {
+      "type": "object",
+      "required": [
+        "kind",
+        "prompt",
+        "suggestions"
+      ],
+      "properties": {
+        "agent_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approval_context": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "args": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/HumanLoopKindWire"
+        },
+        "options": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "risk_level": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HumanRiskLevelWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suggestions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WireValue"
+          }
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "HumanRiskLevelWire": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "LlmChatRequestWire": {
+      "type": "object",
+      "required": [
+        "messages"
+      ],
+      "properties": {
+        "cache_hints": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmMessageWire"
+          }
+        },
+        "response_format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "thinking": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeouts": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_choice": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tools": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LlmToolDefinitionWire"
+          }
+        },
+        "user_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LlmMessageWire": {
+      "type": "object",
+      "required": [
+        "content",
+        "role"
+      ],
+      "properties": {
+        "content": {
+          "$ref": "#/definitions/WireValue"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_blocks": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LlmReasoningBlockWire"
+          }
+        },
+        "reasoning_content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_calls": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LlmToolCallWire"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LlmReasoningBlockWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "signature",
+            "thinking"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "signed"
+              ]
+            },
+            "signature": {
+              "type": "string"
+            },
+            "thinking": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "kind"
+          ],
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "redacted"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "id",
+            "kind",
+            "provider",
+            "summary"
+          ],
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "opaque"
+              ]
+            },
+            "provider": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LlmToolCallWire": {
+      "type": "object",
+      "required": [
+        "arguments",
+        "call_type",
+        "function_name",
+        "id"
+      ],
+      "properties": {
+        "arguments": {
+          "type": "string"
+        },
+        "call_type": {
+          "type": "string"
+        },
+        "function_name": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LlmToolDefinitionWire": {
+      "type": "object",
+      "required": [
+        "description",
+        "name",
+        "parameters",
+        "tool_type"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parameters": {
+          "$ref": "#/definitions/WireValue"
+        },
+        "tool_type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "StepTypeWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "thought"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "arguments",
+            "function_name",
+            "kind",
+            "tool_call_id"
+          ],
+          "properties": {
+            "arguments": {
+              "$ref": "#/definitions/WireValue"
+            },
+            "function_name": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "call"
+              ]
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "StoreKeyInput": {
+      "type": "object",
+      "required": [
+        "key",
+        "namespace"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "StoreListNamespacesInput": {
+      "type": "object",
+      "properties": {
+        "prefix": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "StoreNamespaceInput": {
+      "type": "object",
+      "required": [
+        "namespace"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "StorePutInput": {
+      "type": "object",
+      "required": [
+        "key",
+        "namespace",
+        "value"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "value": {
+          "$ref": "#/definitions/WireValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "StoreSearchInput": {
+      "type": "object",
+      "required": [
+        "limit",
+        "namespace",
+        "query"
+      ],
+      "properties": {
+        "limit": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "namespace": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "StoreSearchModeWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "keyword"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "semantic"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "hybrid"
+              ]
+            },
+            "vector_weight": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "StoreSearchQueryWire": {
+      "type": "object",
+      "required": [
+        "limit",
+        "mode",
+        "text"
+      ],
+      "properties": {
+        "limit": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "mode": {
+          "$ref": "#/definitions/StoreSearchModeWire"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "StoreSearchWithInput": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "query"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "query": {
+          "$ref": "#/definitions/StoreSearchQueryWire"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolContextWire": {
+      "description": "Lossless Tool execution context exposed to host-language implementations.",
+      "type": "object",
+      "properties": {
+        "active_message": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LlmMessageWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "execution_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_artifacts": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ToolOutputArtifactConfigWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "working_dir": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WirePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolExecuteInput": {
+      "type": "object",
+      "required": [
+        "parameters"
+      ],
+      "properties": {
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ToolContextWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parameters": {
+          "$ref": "#/definitions/WireValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolOutputArtifactConfigWire": {
+      "type": "object",
+      "required": [
+        "retention",
+        "root_dir",
+        "threshold_bytes"
+      ],
+      "properties": {
+        "max_age_secs": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retention": {
+          "type": "string"
+        },
+        "root_dir": {
+          "$ref": "#/definitions/WirePath"
+        },
+        "threshold_bytes": {
+          "$ref": "#/definitions/WireU64"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolValidateInput": {
+      "type": "object",
+      "required": [
+        "parameters"
+      ],
+      "properties": {
+        "parameters": {
+          "$ref": "#/definitions/WireValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExtensionInvokeCall": {
+      "additionalProperties": false,
+      "title": "ExtensionInvokeCall",
+      "description": "`_echo_agent/extension/invoke` reverse request (Host -> SDK): invoke a registered implementation. The invocation identity is an independent string — never the JSON-RPC request id — and settles exactly once. The SDK dispatcher runs the host-language code and replies with exactly one of `result`/`stream`/`error`.",
+      "type": "object",
+      "required": [
+        "deadline",
+        "extension",
+        "invocation",
+        "invocation_id"
+      ],
+      "properties": {
+        "context": {
+          "description": "Session/run correlation identity (diagnostic only).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExtensionInvocationContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "deadline": {
-          "description": "Deadline for this invocation.",
+          "description": "Total deadline for this invocation, including stream delivery.",
           "allOf": [
             {
               "$ref": "#/definitions/WireDuration"
@@ -3418,30 +5581,1478 @@
         "extension": {
           "$ref": "#/definitions/WireHandle"
         },
-        "input": {
-          "description": "Typed invocation payload (tool input, chat request, store op, ...).",
+        "invocation": {
+          "description": "Operation-discriminated input. Keeping it as a named field makes the generated call schema reference `ExtensionInvocation` directly, so every language SDK can reuse one stable dispatcher union.",
           "allOf": [
             {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/ExtensionInvocation"
             }
           ]
         },
         "invocation_id": {
-          "description": "Invocation identity; unique per call, used for cancellation.",
+          "description": "Invocation identity; unique per call, used for cancellation. It is a domain identity independent from any JSON-RPC request id.",
           "type": "string",
           "maxLength": 256,
           "minLength": 1
+        },
+        "stream": {
+          "description": "For streaming operations: the Host-minted stream handle the SDK must acknowledge and address `_echo_agent/extension/stream` notifications to. The SDK never invents stream identities.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
-      },
-      "title": "ExtensionInvokeCall",
-      "description": "`_echo_agent/extension/invoke` reverse request (Host -> SDK): invoke a registered implementation. The SDK dispatcher runs the host-language code and replies with exactly one of `result`/`stream`/`error`.",
+      }
+    },
+    "ActivateSkillWire": {
       "type": "object",
       "required": [
-        "deadline",
-        "extension",
-        "input",
-        "invocation_id"
+        "name",
+        "reason"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ApprovalScopeWire": {
+      "type": "string",
+      "enum": [
+        "once",
+        "session",
+        "session_tool"
       ]
+    },
+    "CustomAgentDescriptorWire": {
+      "type": "object",
+      "required": [
+        "model_name",
+        "name",
+        "system_prompt",
+        "tool_names"
+      ],
+      "properties": {
+        "model_name": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "system_prompt": {
+          "type": "string"
+        },
+        "tool_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExtensionResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "tool_execute"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ToolResultWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "tool_validate_parameters"
+              ]
+            },
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "llm_chat"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/LlmChatResponseWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_put"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_get"
+              ]
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/StoreItemWire"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_search"
+              ]
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/StoreItemWire"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_search_with"
+              ]
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/StoreItemWire"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_delete"
+              ]
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_list_namespaces"
+              ]
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_list"
+              ]
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/StoreItemWire"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_prune_expired"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/WireU64"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "store_dedup_by_content"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/WireU64"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "human_loop_request"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/HumanLoopResponseWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "hook_run"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/HookResultWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_think_start"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_think_end"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_tool_start"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_tool_end"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_tool_error"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_final_answer"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "callback_on_iteration"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "intervention_on_tool_call"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/InterventionResultWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "intervention_on_think_start"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/InterventionResultWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "intervention_on_final_answer"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/InterventionResultWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "factory_create_agent"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/CustomAgentDescriptorWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_execute"
+              ]
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_chat"
+              ]
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_close"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "ExtensionResult"
+    },
+    "HookResultWire": {
+      "type": "object",
+      "required": [
+        "block",
+        "messages",
+        "retry",
+        "stop_propagation"
+      ],
+      "properties": {
+        "activate_skill": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ActivateSkillWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "block": {
+          "type": "boolean"
+        },
+        "block_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "continue_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "injected_context": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "permission_decision": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PermissionDecisionWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "permission_mode_override": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retry": {
+          "type": "boolean"
+        },
+        "stop_propagation": {
+          "type": "boolean"
+        },
+        "updated_input": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "HumanLoopResponseWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "variant"
+          ],
+          "properties": {
+            "variant": {
+              "type": "string",
+              "enum": [
+                "approved"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "scope",
+            "variant"
+          ],
+          "properties": {
+            "scope": {
+              "$ref": "#/definitions/ApprovalScopeWire"
+            },
+            "variant": {
+              "type": "string",
+              "enum": [
+                "approved_with_scope"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "args",
+            "scope",
+            "variant"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/WireValue"
+            },
+            "scope": {
+              "$ref": "#/definitions/ApprovalScopeWire"
+            },
+            "variant": {
+              "type": "string",
+              "enum": [
+                "modified_args"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "variant"
+          ],
+          "properties": {
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "variant": {
+              "type": "string",
+              "enum": [
+                "rejected"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "variant"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "variant": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "variant"
+          ],
+          "properties": {
+            "variant": {
+              "type": "string",
+              "enum": [
+                "timeout"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "variant"
+          ],
+          "properties": {
+            "variant": {
+              "type": "string",
+              "enum": [
+                "deferred"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "selection",
+            "variant"
+          ],
+          "properties": {
+            "instructions": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "selection": {
+              "type": "string"
+            },
+            "variant": {
+              "type": "string",
+              "enum": [
+                "selection"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "InterventionResultWire": {
+      "type": "object",
+      "required": [
+        "block",
+        "cancel"
+      ],
+      "properties": {
+        "block": {
+          "type": "boolean"
+        },
+        "block_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cancel": {
+          "type": "boolean"
+        },
+        "injected_context": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modified_args": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redirect_to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LlmChatResponseWire": {
+      "type": "object",
+      "required": [
+        "message",
+        "raw"
+      ],
+      "properties": {
+        "finish_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "$ref": "#/definitions/LlmMessageWire"
+        },
+        "raw": {
+          "$ref": "#/definitions/WireValue"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LlmUsageWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LlmUsageWire": {
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "value": {
+          "$ref": "#/definitions/WireValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PermissionDecisionWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "decision"
+          ],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "allow"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "decision",
+            "reason"
+          ],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "deny"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "decision"
+          ],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "require_approval"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "decision",
+            "suggestions"
+          ],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "ask"
+              ]
+            },
+            "suggestions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "StoreItemWire": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "importance",
+        "key",
+        "namespace",
+        "updated_at",
+        "value"
+      ],
+      "properties": {
+        "created_at": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "importance": {
+          "type": "number",
+          "format": "float"
+        },
+        "key": {
+          "type": "string"
+        },
+        "last_accessed": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "namespace": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "updated_at": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "value": {
+          "$ref": "#/definitions/WireValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolFailureWire": {
+      "type": "object",
+      "required": [
+        "category",
+        "recovery",
+        "side_effect"
+      ],
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "postcondition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovery": {
+          "type": "string"
+        },
+        "retry_after_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "side_effect": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolOutputArtifactRefWire": {
+      "type": "object",
+      "required": [
+        "artifact_bytes",
+        "path",
+        "payload_bytes",
+        "retention",
+        "sha256"
+      ],
+      "properties": {
+        "artifact_bytes": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "path": {
+          "$ref": "#/definitions/WirePath"
+        },
+        "payload_bytes": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "retention": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolResultContentWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "url"
+          ],
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "image_url"
+              ]
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ToolResultKindWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "json"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "mime_type"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "image"
+              ]
+            },
+            "mime_type": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "columns",
+            "kind",
+            "rows"
+          ],
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "table"
+              ]
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "unified_diff"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "diff"
+              ]
+            },
+            "unified_diff": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "path"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "file_reference"
+              ]
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "command_output"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "skill_activation"
+              ]
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "error_code",
+            "kind"
+          ],
+          "properties": {
+            "error_code": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "structured_error"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ToolResultWire": {
+      "type": "object",
+      "required": [
+        "kind",
+        "output",
+        "success",
+        "truncated"
+      ],
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ToolOutputArtifactRefWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ToolFailureWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/ToolResultKindWire"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "mime_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ToolResultContentWire"
+          }
+        },
+        "output": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
     },
     "ExtensionInvokeOutcome": {
       "oneOf": [
@@ -3449,7 +7060,7 @@
           "type": "object",
           "required": [
             "outcome",
-            "value"
+            "result"
           ],
           "properties": {
             "outcome": {
@@ -3458,12 +7069,14 @@
                 "result"
               ]
             },
-            "value": {
-              "$ref": "#/definitions/WireValue"
+            "result": {
+              "$ref": "#/definitions/ExtensionResult"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
+          "description": "Streaming acknowledgement: the SDK echoes the Host-minted stream handle and delivers the payload through `_echo_agent/extension/stream` notifications.",
           "type": "object",
           "required": [
             "outcome",
@@ -3479,7 +7092,8 @@
             "stream": {
               "$ref": "#/definitions/WireHandle"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -3497,25 +7111,995 @@
                 "error"
               ]
             }
-          }
+          },
+          "additionalProperties": false
         }
       ],
       "title": "ExtensionInvokeOutcome",
       "description": "One callback outcome. Failures use the typed extension errors; there is no implicit fallback to a built-in implementation (design §12.1)."
     },
     "ExtensionCancelNotice": {
+      "additionalProperties": false,
+      "title": "ExtensionCancelNotice",
+      "description": "`_echo_agent/extension/cancel` reverse notification (Host -> SDK): the framework cancelled an in-flight invocation; the SDK must stop work but still answer the original call with a `cancelled` error or a stream `cancelled` terminal.",
+      "type": "object",
+      "required": [
+        "invocation_id",
+        "reason"
+      ],
       "properties": {
         "invocation_id": {
           "type": "string",
           "maxLength": 256,
           "minLength": 1
+        },
+        "reason": {
+          "description": "Stable diagnostic reason (`cancelled` or `timeout`).",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        }
+      }
+    },
+    "AgentStreamChunkWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "token"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "event"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "think_start"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "completion_tokens",
+                "prompt_tokens"
+              ],
+              "properties": {
+                "completion_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "prompt_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "think_end"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "cache_creation_prompt_tokens",
+                "cached_prompt_tokens",
+                "completion_tokens",
+                "model",
+                "prompt_tokens",
+                "total_tokens",
+                "usage_reported"
+              ],
+              "properties": {
+                "cache_creation_prompt_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "cached_prompt_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "completion_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "prompt_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "total_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "usage_reported": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "llm_usage"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "decision",
+                "iteration",
+                "reason",
+                "reported_model_tokens",
+                "usage_complete"
+              ],
+              "properties": {
+                "decision": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "iteration": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "reported_model_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "usage_complete": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "budget_decision"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "call_id",
+                "invocation"
+              ],
+              "properties": {
+                "call_id": {
+                  "type": "string"
+                },
+                "invocation": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_call"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "call_id",
+                "name",
+                "result"
+              ],
+              "properties": {
+                "call_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "result": {
+                  "$ref": "#/definitions/ToolResultWire"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_result"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "call_id",
+                "event",
+                "name"
+              ],
+              "properties": {
+                "call_id": {
+                  "type": "string"
+                },
+                "event": {
+                  "$ref": "#/definitions/ToolStreamChunkWire"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "tool_count"
+              ],
+              "properties": {
+                "tool_count": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_batch_start"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "event"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_batch_end"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "blocked",
+                "guard"
+              ],
+              "properties": {
+                "blocked": {
+                  "type": "boolean"
+                },
+                "guard": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "guard_triggered"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "count"
+              ],
+              "properties": {
+                "count": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "memory_recalled"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "after_count",
+                "after_tokens",
+                "before_count",
+                "before_tokens"
+              ],
+              "properties": {
+                "after_count": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "after_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "before_count": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "before_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "context_compressed"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "spec"
+              ],
+              "properties": {
+                "spec": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "chart"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "action",
+                "permission",
+                "reason",
+                "risk"
+              ],
+              "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "permission": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "risk": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "safety_notice"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "expected",
+                "got",
+                "parameter",
+                "tool"
+              ],
+              "properties": {
+                "expected": {
+                  "type": "string"
+                },
+                "got": {
+                  "type": "string"
+                },
+                "parameter": {
+                  "type": "string"
+                },
+                "tool": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "parameter_error"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "AgentStreamChunkWire",
+      "description": "Non-terminal CustomAgent stream event. Terminal variants intentionally do not appear here, so generated SDKs cannot emit a framework terminal as an ordinary chunk."
+    },
+    "AgentStreamTerminalWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "failure",
+                "message",
+                "source"
+              ],
+              "properties": {
+                "failure": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "error"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "final_answer"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "event"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "cancelled"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "AgentStreamTerminalWire",
+      "description": "Terminal CustomAgent stream event. The outer stream `complete` variant accepts only these framework terminal facts."
+    },
+    "ExtensionStreamChunkValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "tool"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ToolStreamChunkWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "llm"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/LlmStreamChunkWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/AgentStreamChunkWire"
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "ExtensionStreamChunkValue"
+    },
+    "ExtensionStreamCompleteValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "tool"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ToolResultWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "llm"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/LlmStreamCompleteWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/AgentStreamTerminalWire"
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "ExtensionStreamCompleteValue"
+    },
+    "LlmDeltaFunctionWire": {
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "title": "ExtensionCancelNotice",
-      "description": "`_echo_agent/extension/cancel` reverse notification (Host -> SDK): the framework cancelled an in-flight invocation; the SDK must stop work but still answer the original call with a `cancelled` error.",
+      "additionalProperties": false
+    },
+    "LlmDeltaToolCallWire": {
       "type": "object",
       "required": [
-        "invocation_id"
+        "index"
+      ],
+      "properties": {
+        "call_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "function": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LlmDeltaFunctionWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "LlmStreamChunkWire": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_blocks": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LlmReasoningBlockWire"
+          }
+        },
+        "reasoning_content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_calls": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LlmDeltaToolCallWire"
+          }
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LlmUsageWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LlmStreamCompleteWire": {
+      "type": "object",
+      "required": [
+        "finish_reason"
+      ],
+      "properties": {
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finish_reason": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "reasoning_blocks": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LlmReasoningBlockWire"
+          }
+        },
+        "reasoning_content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_calls": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LlmDeltaToolCallWire"
+          }
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LlmUsageWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolStreamChunkWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "message"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "progress"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "percent": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint8",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "channel",
+            "chunk",
+            "event"
+          ],
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "chunk": {
+              "type": "string"
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "output"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
       ]
     },
     "ExtensionStreamEvent": {
@@ -3542,9 +8126,10 @@
               "$ref": "#/definitions/WireHandle"
             },
             "value": {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/ExtensionStreamChunkValue"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -3568,9 +8153,10 @@
               "$ref": "#/definitions/WireHandle"
             },
             "value": {
-              "$ref": "#/definitions/WireValue"
+              "$ref": "#/definitions/ExtensionStreamCompleteValue"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -3596,7 +8182,8 @@
             "stream": {
               "$ref": "#/definitions/WireHandle"
             }
-          }
+          },
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -3618,11 +8205,735 @@
             "stream": {
               "$ref": "#/definitions/WireHandle"
             }
-          }
+          },
+          "additionalProperties": false
         }
       ],
       "title": "ExtensionStreamEvent",
-      "description": "`_echo_agent/extension/stream` event. Sequence is monotonic per stream and exactly one terminal variant may be emitted by the Host."
+      "description": "`_echo_agent/extension/stream` event (SDK -> Host notification): one chunk or the single terminal of a streaming callback. Sequence is contiguous from one per stream and exactly one terminal variant may be emitted by the SDK; the Host enforces exactly-one-terminal and discards late events after settlement with bounded diagnostics only."
+    },
+    "ToolStreamEventWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "message"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "progress"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "percent": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint8",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "channel",
+            "chunk",
+            "event"
+          ],
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "chunk": {
+              "type": "string"
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "output"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "result"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "complete"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/ToolResultWire"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AgentEventWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "token"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "event"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "think_start"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "completion_tokens",
+                "prompt_tokens"
+              ],
+              "properties": {
+                "completion_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "prompt_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "think_end"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "cache_creation_prompt_tokens",
+                "cached_prompt_tokens",
+                "completion_tokens",
+                "model",
+                "prompt_tokens",
+                "total_tokens",
+                "usage_reported"
+              ],
+              "properties": {
+                "cache_creation_prompt_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "cached_prompt_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "completion_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "prompt_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "total_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "usage_reported": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "llm_usage"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "decision",
+                "iteration",
+                "reason",
+                "reported_model_tokens",
+                "usage_complete"
+              ],
+              "properties": {
+                "decision": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "iteration": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "reported_model_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "usage_complete": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "budget_decision"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "call_id",
+                "invocation"
+              ],
+              "properties": {
+                "call_id": {
+                  "type": "string"
+                },
+                "invocation": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_call"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "call_id",
+                "name",
+                "result"
+              ],
+              "properties": {
+                "call_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "result": {
+                  "$ref": "#/definitions/ToolResultWire"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_result"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "call_id",
+                "event",
+                "name"
+              ],
+              "properties": {
+                "call_id": {
+                  "type": "string"
+                },
+                "event": {
+                  "$ref": "#/definitions/ToolStreamEventWire"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "tool_count"
+              ],
+              "properties": {
+                "tool_count": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_batch_start"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "event"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "tool_batch_end"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "blocked",
+                "guard"
+              ],
+              "properties": {
+                "blocked": {
+                  "type": "boolean"
+                },
+                "guard": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "guard_triggered"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "count"
+              ],
+              "properties": {
+                "count": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "memory_recalled"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "after_count",
+                "after_tokens",
+                "before_count",
+                "before_tokens"
+              ],
+              "properties": {
+                "after_count": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "after_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "before_count": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "before_tokens": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "context_compressed"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "spec"
+              ],
+              "properties": {
+                "spec": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "chart"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "failure",
+                "message",
+                "source"
+              ],
+              "properties": {
+                "failure": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "error"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "action",
+                "permission",
+                "reason",
+                "risk"
+              ],
+              "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "permission": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "risk": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "safety_notice"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "expected",
+                "got",
+                "parameter",
+                "tool"
+              ],
+              "properties": {
+                "expected": {
+                  "type": "string"
+                },
+                "got": {
+                  "type": "string"
+                },
+                "parameter": {
+                  "type": "string"
+                },
+                "tool": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "parameter_error"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "event"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "final_answer"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "event"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "cancelled"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "title": "AgentEventWire",
+      "description": "Public typed projection of framework `AgentEvent` for CustomAgent streams. Complex framework-owned leaves retain their own typed wire DTOs or the closed `WireValue` algebra; the event discriminator and lifecycle fields are never hidden behind an untagged JSON blob."
+    },
+    "ExtensionOperation": {
+      "enum": [
+        "tool_execute",
+        "tool_execute_stream",
+        "tool_validate_parameters",
+        "llm_chat",
+        "llm_chat_stream",
+        "store_put",
+        "store_get",
+        "store_search",
+        "store_search_with",
+        "store_delete",
+        "store_list_namespaces",
+        "store_list",
+        "store_prune_expired",
+        "store_dedup_by_content",
+        "human_loop_request",
+        "hook_run",
+        "callback_on_think_start",
+        "callback_on_think_end",
+        "callback_on_tool_start",
+        "callback_on_tool_end",
+        "callback_on_tool_error",
+        "callback_on_final_answer",
+        "callback_on_iteration",
+        "intervention_on_tool_call",
+        "intervention_on_think_start",
+        "intervention_on_final_answer",
+        "factory_create_agent",
+        "agent_execute",
+        "agent_execute_stream",
+        "agent_chat",
+        "agent_chat_stream",
+        "agent_close"
+      ],
+      "title": "ExtensionOperation",
+      "description": "Closed operation set of the extension bridge. Every reverse invocation names exactly one operation; `kind()` binds it to its extension family so the Host can reject an operation dispatched to the wrong kind before any callback leaves the process (design §12.2).",
+      "type": "string"
     },
     "FeatureOperationRequest": {
       "properties": {
