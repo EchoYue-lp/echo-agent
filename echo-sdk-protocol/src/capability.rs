@@ -505,8 +505,8 @@ mod tests {
                     max_inflight_extension_invocations: WireU64::from_u64(0),
                 },
             });
-            assert_eq!(back, cap);
-            assert!(meta_entry(None).is_none());
+        assert_eq!(back, cap);
+        assert!(meta_entry(None).is_none());
     }
 
     #[test]

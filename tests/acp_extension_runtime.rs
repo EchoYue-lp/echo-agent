@@ -62,7 +62,7 @@ impl FakeBridge {
         };
         let cancellation = lease.cancellation();
         tokio::select! {
-            answered = async {
+            _answered = async {
                 match behavior {
                     TransportBehavior::AnswerAfter(delay) => {
                         tokio::time::sleep(delay).await;
@@ -72,7 +72,6 @@ impl FakeBridge {
                     }
                 }
             } => {
-                let _ = answered;
                 lease.settle(ExtensionSettlement::Answered);
                 ExtensionSettlement::Answered
             }
@@ -90,9 +89,10 @@ impl FakeBridge {
 }
 
 fn authority(concurrency: usize) -> Arc<ExtensionInvocationAuthority> {
-    ExtensionInvocationAuthority::new(concurrency)
-        .ok()
-        .expect("positive concurrency")
+    match ExtensionInvocationAuthority::new(concurrency) {
+        Ok(authority) => authority,
+        Err(error) => panic!("positive concurrency must build: {error}"),
+    }
 }
 
 #[tokio::test]
@@ -142,11 +142,10 @@ async fn deadline_settles_timeout_and_late_answers_are_discarded() {
         .await;
     assert_eq!(observed, ExtensionSettlement::TimedOut);
     // A late answer arriving after settlement must not overwrite it.
-    let mut lease = bridge
-        .authority
-        .lease(None, CancellationToken::new())
-        .ok()
-        .expect("permit freed after timeout");
+    let mut lease = match bridge.authority.lease(None, CancellationToken::new()) {
+        Ok(lease) => lease,
+        Err(error) => panic!("permit freed after timeout: {error}"),
+    };
     assert!(lease.settle_timeout());
     assert!(!lease.settle(ExtensionSettlement::Answered));
     assert_eq!(lease.settlement(), Some(ExtensionSettlement::TimedOut));
@@ -176,10 +175,10 @@ async fn framework_cancellation_settles_cancelled_before_the_deadline() {
 async fn exclusive_reentry_returns_conflict_without_waiting() {
     let authority = authority(4);
     let key = "extension-1/human_loop_request";
-    let exclusive = authority
-        .lease(Some(key), CancellationToken::new())
-        .ok()
-        .expect("exclusive lease");
+    let exclusive = match authority.lease(Some(key), CancellationToken::new()) {
+        Ok(lease) => lease,
+        Err(error) => panic!("exclusive lease: {error}"),
+    };
     let reentrant = authority.lease(Some(key), CancellationToken::new());
     assert_eq!(
         reentrant.err(),
@@ -288,10 +287,10 @@ async fn connection_services_own_one_extension_authority_and_close_drains_it() -
     let authority = services.extensions();
     assert!(authority.admission_open());
 
-    let held = authority
-        .lease(Some("extension-1/tool_execute"), CancellationToken::new())
-        .ok()
-        .expect("lease");
+    let held = match authority.lease(Some("extension-1/tool_execute"), CancellationToken::new()) {
+        Ok(lease) => lease,
+        Err(error) => panic!("lease: {error}"),
+    };
     assert_eq!(authority.in_flight(), 1);
 
     // The unified close chain: admission first, then in-flight cancellation,

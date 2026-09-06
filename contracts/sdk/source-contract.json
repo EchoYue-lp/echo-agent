@@ -8,14 +8,14 @@
     },
     {
       "path": "contracts/sdk/public-api.txt",
-      "bytes": 16564058,
-      "sha256": "sha256:e58fef294addc83d01e8c980d520162fb2e66fb042726b2d6c6ac66628d63b05"
+      "bytes": 16566490,
+      "sha256": "sha256:7921e7f506c6cad973616fd49b88c236afd27d59dceaef7605c272c185a8b068"
     },
     {
       "path": "contracts/sdk/parity-manifest.json",
-      "bytes": 26331428,
-      "sha256": "sha256:3cec721826e8392399654de8207a17d6e5fa2ae32dd2d677a9d96a67276ba53d"
+      "bytes": 26337082,
+      "sha256": "sha256:87aff8c96b31eeb9a2f4f5b32f55fd8ccca72bb070f76ccf7f1dc705d9f687b7"
     }
   ],
-  "aggregate_digest": "sha256:b30b24ecfcb7966d100a446a91bf1a48d2b1decf586b2f2d2ac5e842491c1e1d"
+  "aggregate_digest": "sha256:09c2a997c651edfb6217659ac32866e28c470351150a66d87dbf33fe62d74d1a"
 }

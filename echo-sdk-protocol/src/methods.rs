@@ -12,7 +12,8 @@
 //! recompute framework semantics — ready-frontier decisions, terminal
 //! states, retries and recovery belong to the Rust authority (design §10.4).
 
-use agent_client_protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};use serde::{Deserialize, Serialize};
+use agent_client_protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use serde::{Deserialize, Serialize};
 
 use crate::error::EchoSdkError;
 use crate::event::WireEventEnvelope;
@@ -1210,9 +1211,7 @@ impl ExtensionOperation {
             | ExtensionOperation::CallbackOnIteration => ExtensionKind::AgentCallback,
             ExtensionOperation::InterventionOnToolCall
             | ExtensionOperation::InterventionOnThinkStart
-            | ExtensionOperation::InterventionOnFinalAnswer => {
-                ExtensionKind::InterventionCallback
-            }
+            | ExtensionOperation::InterventionOnFinalAnswer => ExtensionKind::InterventionCallback,
             ExtensionOperation::FactoryCreateAgent => ExtensionKind::AgentFactory,
             ExtensionOperation::AgentExecute
             | ExtensionOperation::AgentExecuteStream
@@ -1257,9 +1256,7 @@ pub struct ExtensionInvocationContext {
 /// HumanLoopProvider, Hook, AgentCallback, InterventionCallback,
 /// AgentFactory, custom Agent). Registration is owned by the current
 /// connection generation: it never survives a Host restart or a reconnect.
-#[derive(
-    Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcRequest,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcRequest)]
 #[request(method = "_echo_agent/extension/register", response = ExtensionRegisterResponse)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionRegisterRequest {
@@ -1279,10 +1276,7 @@ pub struct ExtensionRegisterRequest {
 
 impl ExtensionRegisterRequest {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self
-            .implementation_id
-            .trim()
-            .is_empty()
+        if self.implementation_id.trim().is_empty()
             || self.implementation_id.chars().count() > MAX_EXTENSION_IMPLEMENTATION_ID_CHARS
         {
             return Err("implementation_id must be non-empty and bounded");
@@ -1291,8 +1285,8 @@ impl ExtensionRegisterRequest {
             return Err("descriptor kind does not match the registration kind");
         }
         self.descriptor.validate()?;
-        let encoded = serde_json::to_vec(&self.descriptor)
-            .map_err(|_| "descriptor is not encodable")?;
+        let encoded =
+            serde_json::to_vec(&self.descriptor).map_err(|_| "descriptor is not encodable")?;
         if encoded.len() > MAX_EXTENSION_DESCRIPTOR_BYTES {
             return Err("descriptor exceeds the serialized descriptor bound");
         }
@@ -1337,9 +1331,7 @@ pub struct ExtensionUnregisterResponse {
 /// string — never the JSON-RPC request id — and settles exactly once. The
 /// SDK dispatcher runs the host-language code and replies with exactly one
 /// of `result`/`stream`/`error`.
-#[derive(
-    Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcRequest,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcRequest)]
 #[request(method = "_echo_agent/extension/invoke", response = ExtensionInvokeOutcome)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionInvokeCall {
@@ -1413,12 +1405,18 @@ impl ExtensionInvokeCall {
 )]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionInvokeOutcome {
-    Result { value: WireValue },
+    Result {
+        value: WireValue,
+    },
     /// Streaming acknowledgement: the SDK echoes the Host-minted stream
     /// handle and delivers the payload through
     /// `_echo_agent/extension/stream` notifications.
-    Stream { stream: WireHandle },
-    Error { error: EchoSdkError },
+    Stream {
+        stream: WireHandle,
+    },
+    Error {
+        error: EchoSdkError,
+    },
 }
 
 impl ExtensionInvokeOutcome {

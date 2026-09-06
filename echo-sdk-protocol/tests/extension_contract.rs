@@ -183,9 +183,7 @@ fn bridge_invoke_and_cancel_fixtures_enforce_identity_rules() {
     for fixture in fixtures_of("ExtensionInvokeCall") {
         let parsed: Result<ExtensionInvokeCall, _> =
             serde_json::from_value(fixture.payload.clone());
-        let valid = parsed
-            .as_ref()
-            .is_ok_and(|call| call.validate().is_ok());
+        let valid = parsed.as_ref().is_ok_and(|call| call.validate().is_ok());
         assert_eq!(
             valid,
             fixture.kind == FixtureKind::Valid,
@@ -196,7 +194,9 @@ fn bridge_invoke_and_cancel_fixtures_enforce_identity_rules() {
     for fixture in fixtures_of("ExtensionCancelNotice") {
         let parsed: Result<ExtensionCancelNotice, _> =
             serde_json::from_value(fixture.payload.clone());
-        let valid = parsed.as_ref().is_ok_and(|notice| notice.validate().is_ok());
+        let valid = parsed
+            .as_ref()
+            .is_ok_and(|notice| notice.validate().is_ok());
         assert_eq!(
             valid,
             fixture.kind == FixtureKind::Valid,
@@ -280,11 +280,20 @@ fn extension_operation_taxonomy_is_closed_and_kind_bound() {
             "kind {} has no operation",
             kind.as_str()
         );
-        assert_eq!(ExtensionDescriptor::HumanLoopProvider { descriptor_version: 1 }.kind(), ExtensionKind::HumanLoopProvider);
+        assert_eq!(
+            ExtensionDescriptor::HumanLoopProvider {
+                descriptor_version: 1
+            }
+            .kind(),
+            ExtensionKind::HumanLoopProvider
+        );
         assert_ne!(kind.as_str(), "worker");
     }
     assert_eq!(
-        ExtensionDescriptor::InterventionCallback { descriptor_version: 1 }.kind(),
+        ExtensionDescriptor::InterventionCallback {
+            descriptor_version: 1
+        }
+        .kind(),
         ExtensionKind::InterventionCallback
     );
     // Descriptor fingerprints are canonical: same descriptor, same string.
@@ -314,12 +323,13 @@ fn extension_operation_taxonomy_is_closed_and_kind_bound() {
 fn extension_rpc_types_bind_the_official_jsonrpc_surface() {
     use agent_client_protocol::JsonRpcMessage as _;
     use echo_sdk_protocol::methods::{
-        ExtensionCancelNotice, ExtensionInvokeCall, ExtensionRegisterRequest,
-        ExtensionStreamEvent, ExtensionUnregisterRequest,
+        ExtensionCancelNotice, ExtensionInvokeCall, ExtensionRegisterRequest, ExtensionStreamEvent,
+        ExtensionUnregisterRequest,
     };
     // The typed RPC derives bind each DTO to its catalog method name, so the
     // official runtime can dispatch and route them without any local parser.
-    let registered: [(&str, fn(&str) -> bool); 4] = [
+    type MethodMatcher = fn(&str) -> bool;
+    let registered: [(&str, MethodMatcher); 4] = [
         (
             "_echo_agent/extension/register",
             ExtensionRegisterRequest::matches_method,
