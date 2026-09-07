@@ -19,6 +19,7 @@ use echo_sdk_protocol::event::{
     ReplayRequest, ReplayResponse, WireEventEnvelope, WireEventPayload,
 };
 use echo_sdk_protocol::handle::{HandleKind, WireHandle};
+use echo_sdk_protocol::methods::FeatureOperationRequest;
 use echo_sdk_protocol::methods::{
     AgentCloseRequest, AgentCloseResponse, AgentConfigExplicitWire, AgentConfigWire,
     AgentCreateRequest, AgentCreateResponse, AgentDescribeRequest, AgentDescribeResponse,
@@ -316,6 +317,10 @@ fn host_capability() -> EchoAgentCapability {
             max_extension_payload_bytes: WireU64::from_u64(1_048_576),
             max_extension_stream_bytes: WireU64::from_u64(262_144),
             max_inflight_extension_invocations: WireU64::from_u64(8),
+            max_facade_resources: WireU64::from_u64(256),
+            max_facade_streams: WireU64::from_u64(128),
+            max_facade_page_items: WireU64::from_u64(512),
+            max_facade_operation_args: WireU64::from_u64(64),
         },
     }
 }
@@ -762,4 +767,123 @@ fn source_contract_digest_is_order_and_length_sensitive() {
     );
     assert_eq!(doc["inputs"].as_array().map(Vec::len), Some(3));
     assert_eq!(doc["algorithm"], "sha256-length-prefixed-v1");
+}
+
+// ── Facade feature-operation RPC (plan 07 todo 1) ───────────────────────────
+
+fn feature_request(operation: &str, signature: &str) -> FeatureOperationRequest {
+    FeatureOperationRequest {
+        operation: operation.to_string(),
+        signature_digest: signature.to_string(),
+        handle: None,
+        arguments: Vec::new(),
+    }
+}
+
+const VALID_DIGEST: &str =
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[test]
+fn feature_operations_validate_shape_and_fail_closed() {
+    let valid = feature_request("echo_agent::evolution::review::ReviewEngine", VALID_DIGEST);
+    assert!(valid.validate().is_ok());
+
+    // Unknown/empty operation, malformed signature digest and wildcard
+    // operations are all rejected before any handler runs.
+    let empty = FeatureOperationRequest {
+        operation: "   ".to_string(),
+        signature_digest: VALID_DIGEST.to_string(),
+        handle: None,
+        arguments: Vec::new(),
+    };
+    assert!(empty.validate().is_err());
+    let bad_digest = feature_request("some::op", "sha256:zz");
+    assert!(bad_digest.validate().is_err());
+    let no_digest = feature_request("some::op", "");
+    assert!(no_digest.validate().is_err());
+}
+
+#[test]
+fn family_methods_are_bound_to_the_facade_route_table() {
+    use echo_sdk_protocol::catalog::METHOD_CATALOG;
+    use echo_sdk_protocol::facade::{FacadeFamily, validate_facade_route_table};
+
+    assert!(validate_facade_route_table().is_empty());
+    // Every family method exists in the frozen catalog exactly once and
+    // carries the feature-surfaces capability; the generic invoke method
+    // stays a member of the Invoke family.
+    for family in [
+        FacadeFamily::Memory,
+        FacadeFamily::Workflow,
+        FacadeFamily::State,
+        FacadeFamily::Delivery,
+        FacadeFamily::Trace,
+        FacadeFamily::Eval,
+        FacadeFamily::Improve,
+        FacadeFamily::Mcp,
+        FacadeFamily::A2a,
+        FacadeFamily::Lsp,
+        FacadeFamily::Channels,
+        FacadeFamily::Telemetry,
+        FacadeFamily::Topology,
+        FacadeFamily::Web,
+        FacadeFamily::Files,
+        FacadeFamily::Shell,
+        FacadeFamily::Git,
+        FacadeFamily::Database,
+        FacadeFamily::Rag,
+        FacadeFamily::Chart,
+        FacadeFamily::Media,
+        FacadeFamily::Data,
+        FacadeFamily::Statistics,
+        FacadeFamily::Research,
+        FacadeFamily::ContentGuard,
+        FacadeFamily::ProjectRules,
+        FacadeFamily::Testing,
+    ] {
+        assert!(
+            !family.methods().is_empty(),
+            "family {} lost its methods",
+            family.as_str()
+        );
+        for method in family.methods() {
+            let descriptor = METHOD_CATALOG
+                .iter()
+                .find(|descriptor| descriptor.name == *method)
+                .unwrap_or_else(|| panic!("method {method} missing from METHOD_CATALOG"));
+            assert_eq!(
+                descriptor.capability,
+                echo_sdk_protocol::capability::ExtensionCapability::FeatureSurfaces,
+                "method {method} must bind the feature_surfaces capability"
+            );
+        }
+        if let Some(feature) = family.required_feature() {
+            assert!(
+                !feature.is_empty(),
+                "family {} declares an empty feature",
+                family.as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn facade_failure_details_are_typed_and_bounded() {
+    use echo_sdk_protocol::error::FacadeFailureDetail;
+
+    let detail = FacadeFailureDetail {
+        operation: Some("echo_agent::evolution::review::ReviewEngine".to_string()),
+        signature_digest: Some(VALID_DIGEST.to_string()),
+        receiver_kind: Some("task_run".to_string()),
+        expected_type: Some("WireValue::u64".to_string()),
+        required_feature: Some("mcp".to_string()),
+        resource: Some("memory/ns-1".to_string()),
+    };
+    assert!(detail.validate().is_ok());
+    let mut bad_digest = detail.clone();
+    bad_digest.signature_digest = Some("not-a-digest".to_string());
+    assert!(bad_digest.validate().is_err());
+    let mut blank = detail.clone();
+    blank.operation = Some("   ".to_string());
+    assert!(blank.validate().is_err());
 }

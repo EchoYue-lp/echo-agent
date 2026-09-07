@@ -439,7 +439,7 @@ fn task_patch_schema(service: &TaskRevisionService) -> serde_json::Value {
     })
 }
 
-fn parse_task_create_input(
+pub fn parse_task_create_input(
     params: &ToolParameters,
     extension_schemas: &serde_json::Map<String, serde_json::Value>,
 ) -> std::result::Result<TaskCreateInput, String> {
@@ -478,7 +478,7 @@ fn parse_task_create_input(
     })
 }
 
-fn parse_task_update_input(
+pub fn parse_task_update_input(
     params: &ToolParameters,
     extension_schemas: &serde_json::Map<String, serde_json::Value>,
     allow_manual_progress_updates: bool,

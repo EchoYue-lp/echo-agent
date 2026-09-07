@@ -131,6 +131,70 @@ pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 16))]
     pub fields: Option<Vec<DetailField>>,
+    /// Typed facade-operation failure facts (unknown operation, signature
+    /// mismatch, wrong receiver/type, missing feature, resource bound).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facade: Option<FacadeFailureDetail>,
+}
+
+/// Typed facts for facade-operation admission failures. Every field is a
+/// bounded identity — never a raw payload — so language SDKs can map the
+/// failure precisely without parsing the message (design §10.6).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FacadeFailureDetail {
+    /// Exact operation identity the request named (e.g. the canonical
+    /// source identity of a facade invocation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1024))]
+    pub operation: Option<String>,
+    /// Signature digest the request claimed, when a digest was supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = "^sha256:[0-9a-fA-F]{64}$"))]
+    pub signature_digest: Option<String>,
+    /// Expected receiver handle kind (e.g. `task_run`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
+    pub receiver_kind: Option<String>,
+    /// Expected wire type of the offending value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub expected_type: Option<String>,
+    /// Root leaf feature the operation requires.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 128))]
+    pub required_feature: Option<String>,
+    /// Facade resource identity the failure refers to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub resource: Option<String>,
+}
+
+impl FacadeFailureDetail {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        for bounded in [
+            self.operation.as_deref(),
+            self.receiver_kind.as_deref(),
+            self.expected_type.as_deref(),
+            self.required_feature.as_deref(),
+            self.resource.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if bounded.trim().is_empty() {
+                return Err("facade failure identity must be non-empty when present");
+            }
+        }
+        if let Some(digest) = &self.signature_digest {
+            let valid = digest.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.chars().count() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())
+            });
+            if !valid {
+                return Err("facade failure signature digest must be sha256");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -482,6 +546,7 @@ mod tests {
         }
         oversized.details = Some(ErrorDetails {
             fields: Some(fields),
+            facade: None,
         });
         assert!(oversized.validate().is_err());
         // Unbounded payloads are replaced by the bounded fallback, never forwarded.

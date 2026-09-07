@@ -775,42 +775,71 @@ pub struct RunReceiptWire {
 
 // ── Task graph (TaskRun / PlanTask) ────────────────────────────────────────
 
-/// `_echo_agent/task/create` request.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+/// `_echo_agent/task/create` request: one atomic graph creation through
+/// the session's TaskRevisionService. The spec is the framework task_create
+/// payload (`tasks`, `base_revision`, `reason`, `assumptions`, `risks`,
+/// `execution_mode`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcRequest, schemars::JsonSchema)]
+#[request(method = "_echo_agent/task/create", response = TaskCreateResponse)]
 pub struct TaskCreateRequest {
+    /// TaskRun handle; the id is the session-scoped graph identity.
     pub task_run: WireHandle,
-    /// TaskSpec payload.
+    /// TaskCreateInput payload (the exact grammar the in-conversation
+    /// `task_create` tool accepts).
     pub spec: WireValue,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+impl TaskCreateRequest {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.task_run.validate()?;
+        if self.task_run.kind != crate::handle::HandleKind::TaskRun {
+            return Err("task create requires a task_run handle");
+        }
+        Ok(())
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcResponse, schemars::JsonSchema,
+)]
 pub struct TaskCreateResponse {
-    pub task: WireHandle,
+    /// PlanTask handles of every task in the committed graph.
+    pub tasks: Vec<WireHandle>,
     pub revision: WireU64,
 }
 
-/// `_echo_agent/task/update` request.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+/// `_echo_agent/task/update` request: revision-checked patch through the
+/// same TaskRevisionService the in-conversation `task_update` tool uses.
+/// The patch is the framework `task_update` payload (`base_revision`,
+/// `reason`, `operations`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcRequest, schemars::JsonSchema)]
+#[request(method = "_echo_agent/task/update", response = TaskUpdateResponse)]
 pub struct TaskUpdateRequest {
-    pub task: WireHandle,
-    /// Expected revision for optimistic concurrency; the framework rejects
-    /// stale writers.
-    pub expected_revision: WireU64,
+    /// TaskRun handle addressing the graph.
+    pub task_run: WireHandle,
     pub patch: WireValue,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcResponse, schemars::JsonSchema,
+)]
 pub struct TaskUpdateResponse {
     pub revision: WireU64,
+    pub updated: Vec<WireHandle>,
 }
 
 /// `_echo_agent/task/list` request/response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonRpcRequest, schemars::JsonSchema,
+)]
+#[request(method = "_echo_agent/task/list", response = TaskListResponse)]
 pub struct TaskListRequest {
     pub task_run: WireHandle,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcResponse, schemars::JsonSchema,
+)]
 pub struct TaskListResponse {
     pub tasks: Vec<TaskSummary>,
 }
@@ -824,31 +853,40 @@ pub struct TaskSummary {
     pub revision: WireU64,
 }
 
-/// `_echo_agent/task/execute` request: drive one PlanTask through the
-/// framework executor (single authority for scheduling/retry/cancel).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+/// `_echo_agent/task/execute` request: drive one task graph through the
+/// framework RuntimeTaskService (single authority for scheduling, waves,
+/// retry and terminals). The run continues after the response; terminals
+/// are observed through `task/list`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcRequest, schemars::JsonSchema)]
+#[request(method = "_echo_agent/task/execute", response = TaskExecuteResponse)]
 pub struct TaskExecuteRequest {
-    pub task: WireHandle,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 256))]
-    pub idempotency_id: Option<String>,
+    /// TaskRun handle addressing the graph to drive.
+    pub task_run: WireHandle,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcResponse, schemars::JsonSchema,
+)]
 pub struct TaskExecuteResponse {
+    /// The driven TaskRun handle.
     pub run: WireHandle,
 }
 
-/// `_echo_agent/task/control` request: pause/resume/cancel routed to the
-/// framework service.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+/// `_echo_agent/task/control` request: pause/resume/cancel one exact task
+/// through the framework store (claim-settling semantics).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcRequest, schemars::JsonSchema)]
+#[request(method = "_echo_agent/task/control", response = TaskControlResponse)]
 pub struct TaskControlRequest {
+    pub task_run: WireHandle,
+    /// PlanTask handle of the controlled task.
     pub task: WireHandle,
     /// One of the framework control verbs (`pause`, `resume`, `cancel`).
     pub action: ControlAction,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcResponse, schemars::JsonSchema,
+)]
 pub struct TaskControlResponse {
     pub accepted: bool,
     pub status: WireTaskStatus,
@@ -858,29 +896,38 @@ pub struct TaskControlResponse {
 
 /// `_echo_agent/subagent/dispatch` request. The framework executor remains
 /// the only scheduler.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcRequest, schemars::JsonSchema)]
+#[request(method = "_echo_agent/subagent/dispatch", response = SubagentDispatchResponse)]
 pub struct SubagentDispatchRequest {
     pub session: WireHandle,
+    /// DispatchRequest payload for the session's SubagentExecutor.
     pub request: WireValue,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 256))]
     pub idempotency_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcResponse, schemars::JsonSchema,
+)]
 pub struct SubagentDispatchResponse {
     pub subagent: WireHandle,
 }
 
 /// `_echo_agent/subagent/await` request/response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonRpcRequest, schemars::JsonSchema,
+)]
+#[request(method = "_echo_agent/subagent/await", response = SubagentAwaitResponse)]
 pub struct SubagentAwaitRequest {
     pub subagent: WireHandle,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<WireDuration>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcResponse, schemars::JsonSchema,
+)]
 pub struct SubagentAwaitResponse {
     pub settled: bool,
     /// SubagentResult payload.
@@ -888,14 +935,37 @@ pub struct SubagentAwaitResponse {
     pub result: Option<WireValue>,
 }
 
-/// `_echo_agent/subagent/control` request/response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SubagentControlRequest {
-    pub subagent: WireHandle,
-    pub action: ControlAction,
+/// Control verbs of `_echo_agent/subagent/control`. These are exactly the
+/// SubagentExecutor's real control semantics — there is deliberately no
+/// pause/resume: a subagent is not a task graph node (design §10.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentControlAction {
+    /// Deliver one tracked message into the running attempt.
+    Message,
+    /// Queue guidance for the attempt's next planning step.
+    Guidance,
+    /// Interrupt the running attempt (cooperative, settles as interrupted).
+    Interrupt,
+    /// Cancel the running attempt and settle its outcome.
+    Cancel,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+/// `_echo_agent/subagent/control` request/response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcRequest, schemars::JsonSchema)]
+#[request(method = "_echo_agent/subagent/control", response = SubagentControlResponse)]
+pub struct SubagentControlRequest {
+    pub subagent: WireHandle,
+    pub action: SubagentControlAction,
+    /// Message/guidance text for the message and guidance verbs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 8192))]
+    pub payload: Option<String>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcResponse, schemars::JsonSchema,
+)]
 pub struct SubagentControlResponse {
     pub accepted: bool,
 }
@@ -2751,6 +2821,9 @@ impl FeatureOperationRequest {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.operation.trim().is_empty() {
             return Err("facade operation must be non-empty");
+        }
+        if self.operation.contains('*') {
+            return Err("facade operation must be an exact identity, not a wildcard");
         }
         let digest_is_valid = self
             .signature_digest

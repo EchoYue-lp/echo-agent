@@ -69,6 +69,13 @@ pub struct WorkflowDefinition {
     /// List of finish node names
     #[serde(default)]
     pub finish: Vec<String>,
+    /// Pause before entering these nodes (`*` = all); enables
+    /// `run_until_interrupt` + `resume` over the built graph.
+    #[serde(default)]
+    pub interrupt_before: Vec<String>,
+    /// Pause after these nodes execute (`*` = all).
+    #[serde(default)]
+    pub interrupt_after: Vec<String>,
     /// Maximum execution steps (optional, default 100)
     #[serde(default)]
     pub max_steps: Option<usize>,
@@ -182,6 +189,24 @@ impl WorkflowDefinition {
 
     /// Build Graph (optional LLM configuration injection)
     pub fn build_graph_with_llm_config(self, llm_config: Option<&LlmConfig>) -> Result<Graph> {
+        self.build_graph_with(llm_config, None)
+    }
+
+    /// Build Graph with an explicit [`LlmClient`] injection: agent nodes
+    /// reuse a caller-owned client (for example the Session Agent's own
+    /// provider) instead of constructing one from configuration.
+    pub fn build_graph_with_client(
+        self,
+        llm_client: Option<std::sync::Arc<dyn crate::llm::LlmClient>>,
+    ) -> Result<Graph> {
+        self.build_graph_with(None, llm_client)
+    }
+
+    fn build_graph_with(
+        self,
+        llm_config: Option<&LlmConfig>,
+        llm_client: Option<std::sync::Arc<dyn crate::llm::LlmClient>>,
+    ) -> Result<Graph> {
         let mut builder = GraphBuilder::new(&self.name);
 
         for node_def in &self.nodes {
@@ -198,7 +223,9 @@ impl WorkflowDefinition {
                         .model(model)
                         .system_prompt(prompt);
 
-                    if let Some(config) = llm_config {
+                    if let Some(client) = &llm_client {
+                        agent_builder = agent_builder.llm_client(client.clone());
+                    } else if let Some(config) = llm_config {
                         agent_builder = agent_builder.llm_config(config.clone());
                     }
 
@@ -270,6 +297,14 @@ impl WorkflowDefinition {
         for finish in &self.finish {
             builder = builder.set_finish(finish);
         }
+        if !self.interrupt_before.is_empty() {
+            let nodes: Vec<&str> = self.interrupt_before.iter().map(String::as_str).collect();
+            builder = builder.interrupt_before(nodes);
+        }
+        if !self.interrupt_after.is_empty() {
+            let nodes: Vec<&str> = self.interrupt_after.iter().map(String::as_str).collect();
+            builder = builder.interrupt_after(nodes);
+        }
 
         let mut graph = builder.build()?;
         if let Some(max) = self.max_steps {
@@ -314,6 +349,35 @@ pub fn load_graph_from_json_str(json: &str) -> Result<crate::workflow::Graph> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_interrupt_definition() {
+        let json = r#"{
+            "name": "gated_flow",
+            "nodes": [
+                { "name": "a", "type": "router" },
+                { "name": "b", "type": "router" }
+            ],
+            "edges": [ { "from": "a", "to": "b" } ],
+            "entry": "a",
+            "finish": ["b"],
+            "interrupt_before": ["b"]
+        }"#;
+        let def = WorkflowDefinition::from_json_str(json).unwrap();
+        assert_eq!(def.interrupt_before, vec!["b".to_string()]);
+        assert!(def.interrupt_after.is_empty());
+        let graph = def.build_graph().unwrap();
+        // The interrupt reaches the compiled graph: the run suspends before b.
+        let state = SharedState::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(graph.run_until_interrupt(state)).unwrap();
+        assert!(matches!(
+            outcome,
+            echo_orchestration::workflow::RunUntilInterruptResult::Interrupted(_)
+        ));
+    }
 
     #[test]
     fn test_parse_yaml_definition() {

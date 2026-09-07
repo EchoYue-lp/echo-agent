@@ -462,7 +462,7 @@ impl ReactAgent {
             Arc::new(echo_orchestration::tasks::DefaultTaskToolPolicy::default()),
         ));
         tool_manager.register_tools(echo_orchestration::tasks::build_task_tools(
-            task_revision_service,
+            task_revision_service.clone(),
         ));
 
         // ── Subsystem initialization ──────────────────────────────
@@ -622,6 +622,7 @@ impl ReactAgent {
             config,
             tools: ToolExecutionSubsystem {
                 tool_manager: tool_manager.clone(),
+                task_revision_service,
                 #[cfg(feature = "subagent")]
                 subagent_registry,
                 #[cfg(feature = "subagent")]
@@ -1572,6 +1573,23 @@ impl ReactAgent {
     /// Replace the tool manager with a shared instance (for AgentPool).
     pub fn set_tool_manager(&mut self, tm: Arc<echo_execution::tools::ToolManager>) {
         self.tools.tool_manager = tm;
+    }
+
+    /// Task revision authority shared by the in-conversation task tools and
+    /// host-side surfaces (SDK task RPC). Replacing the service through
+    /// [`crate::tasks::register_task_tools`] keeps this accessor in sync.
+    pub fn task_revision_service(&self) -> &Arc<echo_orchestration::tasks::TaskRevisionService> {
+        &self.tools.task_revision_service
+    }
+
+    /// Replace the retained task revision authority (called by
+    /// [`crate::tasks::register_task_tools`]); the registered tools are
+    /// swapped by the same caller.
+    pub fn set_task_revision_service(
+        &mut self,
+        service: Arc<echo_orchestration::tasks::TaskRevisionService>,
+    ) {
+        self.tools.task_revision_service = service;
     }
 
     /// Get the subagent registry (for the Tauri subagent-event bridge to

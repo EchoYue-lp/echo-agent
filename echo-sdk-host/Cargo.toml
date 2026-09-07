@@ -18,7 +18,34 @@ required-features = ["runtime"]
 
 [features]
 default = ["runtime"]
-runtime = ["dep:agent-client-protocol", "dep:uuid", "echo_agent/acp", "echo_agent/mcp"]
+runtime = ["framework-acp", "framework-mcp"]
+# Root `echo_agent` leaf feature passthroughs. These are the advertisement
+# authority (see `src/features.rs`): the initialize `_meta` feature list is
+# derived from this compiled set, never from runtime config.
+framework-acp = ["dep:agent-client-protocol", "dep:uuid", "echo_agent/acp"]
+framework-mcp = ["echo_agent/mcp"]
+framework-human-loop = ["echo_agent/human-loop"]
+framework-subagent = ["echo_agent/subagent"]
+framework-eval = ["echo_agent/eval"]
+framework-improve = ["echo_agent/improve"]
+# Root tool-leaf passthroughs (plan 07 todo 5); each advertises the exact
+# framework capability its family binds to.
+framework-web = ["echo_agent/web"]
+framework-files = ["echo_agent/files"]
+framework-shell = ["echo_agent/shell"]
+framework-git = ["echo_agent/git"]
+framework-database = ["echo_agent/database"]
+framework-rag = ["echo_agent/rag"]
+framework-chart = ["echo_agent/chart"]
+framework-media = ["echo_agent/media"]
+framework-data = ["echo_agent/data"]
+framework-statistics = ["echo_agent/statistics"]
+framework-research = ["echo_agent/research"]
+framework-content-guard = ["echo_agent/content-guard"]
+framework-project-rules = ["echo_agent/project-rules"]
+framework-a2a = ["echo_agent/a2a"]
+framework-lsp = ["echo_agent/lsp"]
+framework-topology = ["echo_agent/topology"]
 # Negotiated `_echo_agent/*` core profile: explicit state root, handle
 # registry, typed handlers, durable replay and bounded stdio. Isolated from
 # `runtime` so standard-only consumers never compile the extension surface.
@@ -38,9 +65,14 @@ sdk-core-profile = [
 # semantics. Requires the framework surfaces those proxies inject into.
 sdk-extension-bridge = [
     "sdk-core-profile",
-    "echo_agent/human-loop",
-    "echo_agent/subagent",
+    "framework-human-loop",
+    "framework-subagent",
 ]
+# Facade adapter runtime (plan 07 todo 2): connection-level adapter
+# registry, facade resource/stream lifecycle and the admission ladder over
+# the canonical route catalog. Family handlers land in todos 3-5; a family
+# is advertised only once its handler family compiles in.
+sdk-facade-adapters = ["sdk-core-profile", "dep:jsonschema", "dep:chrono"]
 
 [dependencies]
 echo_agent = { version = "0.2.0", path = "..", default-features = false }
@@ -53,6 +85,8 @@ tokio-util = { version = "0.7", features = ["compat"], optional = true }
 tracing = { version = "0.1", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 sha2 = { version = "0.10", optional = true }
+jsonschema = { version = "0.49.9", default-features = false, optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }

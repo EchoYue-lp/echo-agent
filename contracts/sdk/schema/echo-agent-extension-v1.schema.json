@@ -271,8 +271,8 @@
     {
       "name": "_echo_agent/memory/op",
       "direction": "request",
-      "capability": "runs",
-      "summary": "Memory store operations encoded with manifest-identified wire values.",
+      "capability": "feature_surfaces",
+      "summary": "Memory/conversation/compression operations over the Store authority.",
       "params_schema": "#/definitions/FeatureOperationRequest",
       "result_schema": "#/definitions/FeatureOperationResponse",
       "error_schema": "#/definitions/EchoSdkError"
@@ -280,8 +280,8 @@
     {
       "name": "_echo_agent/workflow/op",
       "direction": "request",
-      "capability": "runs",
-      "summary": "Workflow definition/execution operations.",
+      "capability": "feature_surfaces",
+      "summary": "Workflow definition/execution/checkpoint operations.",
       "params_schema": "#/definitions/FeatureOperationRequest",
       "result_schema": "#/definitions/FeatureOperationResponse",
       "error_schema": "#/definitions/EchoSdkError"
@@ -289,8 +289,224 @@
     {
       "name": "_echo_agent/state/op",
       "direction": "request",
-      "capability": "runs",
-      "summary": "State/delivery/trace operations over framework stores.",
+      "capability": "feature_surfaces",
+      "summary": "RuntimeStateStore/EventJournal operations (checkpoint/sequence/recovery).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/delivery/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "DeliveryLedger claim/settlement/recovery operations.",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/trace/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "RunStore/TraceAnalyzer query and analysis operations.",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/eval/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Eval runner/report/comparator operations (feature: eval).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/improve/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Improvement loop trajectory/critique operations (feature: improve).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/mcp/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "MCP manager lifecycle/request operations (feature: mcp).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/a2a/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "A2A client/server lifecycle operations (feature: a2a).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/lsp/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "LSP manager/client operations (feature: lsp).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/channels/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Channel manager/session operations (feature: channels).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/telemetry/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Telemetry/skill-telemetry operations (feature: telemetry).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/topology/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Topology tracker operations (feature: topology).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/web/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Web tool family operations (feature: web).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/files/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "File tool family operations (feature: files).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/shell/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Shell tool family operations (feature: shell).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/git/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Git tool family operations (feature: git).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/database/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Database tool family operations (feature: database).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/rag/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "RAG tool family operations (feature: rag).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/chart/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Chart tool family operations (feature: chart).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/media/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Media tool family operations (feature: media).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/data/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Data tool family operations (feature: data).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/statistics/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Statistics tool family operations (feature: statistics).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/research/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Research tool family operations (feature: research).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/content-guard/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Content guard operations (feature: content-guard).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/project-rules/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Project rules resolution operations (feature: project-rules).",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
+      "name": "_echo_agent/testing/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Testing mock/fixture operations (feature: testing).",
       "params_schema": "#/definitions/FeatureOperationRequest",
       "result_schema": "#/definitions/FeatureOperationResponse",
       "error_schema": "#/definitions/EchoSdkError"
@@ -298,7 +514,7 @@
     {
       "name": "_echo_agent/facade/invoke",
       "direction": "request",
-      "capability": "runs",
+      "capability": "feature_surfaces",
       "summary": "Invoke one manifest-identified facade operation with typed wire values.",
       "params_schema": "#/definitions/FeatureOperationRequest",
       "result_schema": "#/definitions/FeatureOperationResponse",
@@ -459,19 +675,30 @@
       ]
     },
     "HandleKind": {
-      "enum": [
-        "agent",
-        "session",
-        "run",
-        "stream",
-        "task_run",
-        "plan_task",
-        "subagent",
-        "extension"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "agent",
+            "session",
+            "run",
+            "stream",
+            "task_run",
+            "plan_task",
+            "subagent",
+            "extension"
+          ]
+        },
+        {
+          "description": "Stateful facade resource opened through a feature-family surface: memory namespaces, workflows, journals, delivery ledgers, run stores, MCP/A2A clients, … The owning Rust service keeps the business state; the handle only carries addressing and lifecycle.",
+          "type": "string",
+          "enum": [
+            "facade_resource"
+          ]
+        }
       ],
       "title": "HandleKind",
-      "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire.",
-      "type": "string"
+      "description": "What kind of framework object a handle refers to. Typed kinds keep stale errors diagnosable across the wire."
     },
     "WireField": {
       "properties": {
@@ -912,6 +1139,17 @@
     },
     "ErrorDetails": {
       "properties": {
+        "facade": {
+          "description": "Typed facade-operation failure facts (unknown operation, signature mismatch, wrong receiver/type, missing feature, resource bound).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FacadeFailureDetail"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "fields": {
           "description": "Bounded key/value facts; values are strings, never raw payloads.",
           "type": [
@@ -1093,6 +1331,61 @@
       ],
       "title": "ExtensionErrorCode",
       "description": "Stable extension error codes. Codes are closed: reusing a retired code for a different meaning is a breaking protocol change (design §18)."
+    },
+    "FacadeFailureDetail": {
+      "properties": {
+        "expected_type": {
+          "description": "Expected wire type of the offending value.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "operation": {
+          "description": "Exact operation identity the request named (e.g. the canonical source identity of a facade invocation).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024
+        },
+        "receiver_kind": {
+          "description": "Expected receiver handle kind (e.g. `task_run`).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "required_feature": {
+          "description": "Root leaf feature the operation requires.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "resource": {
+          "description": "Facade resource identity the failure refers to.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "signature_digest": {
+          "description": "Signature digest the request claimed, when a digest was supplied.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-fA-F]{64}$"
+        }
+      },
+      "title": "FacadeFailureDetail",
+      "description": "Typed facts for facade-operation admission failures. Every field is a bounded identity — never a raw payload — so language SDKs can map the failure precisely without parsing the message (design §10.6).",
+      "type": "object"
     },
     "Retryability": {
       "enum": [
@@ -1456,6 +1749,10 @@
         "max_extension_descriptor_bytes",
         "max_extension_payload_bytes",
         "max_extension_stream_bytes",
+        "max_facade_operation_args",
+        "max_facade_page_items",
+        "max_facade_resources",
+        "max_facade_streams",
         "max_inflight_extension_invocations",
         "max_message_bytes",
         "max_open_handles",
@@ -1500,6 +1797,38 @@
         },
         "max_extension_stream_bytes": {
           "description": "Maximum serialized bytes of one extension stream chunk payload.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_facade_operation_args": {
+          "description": "Maximum typed arguments accepted by one facade family operation.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_facade_page_items": {
+          "description": "Maximum items returned by one paginated facade query.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_facade_resources": {
+          "description": "Maximum simultaneously open facade resources (memory namespaces, workflows, journals, ledgers, run stores, …) per connection.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            }
+          ]
+        },
+        "max_facade_streams": {
+          "description": "Maximum simultaneously open facade event/data streams per connection.",
           "allOf": [
             {
               "$ref": "#/definitions/WireU64"
@@ -1645,6 +1974,13 @@
           "type": "string",
           "enum": [
             "structured_output"
+          ]
+        },
+        {
+          "description": "Feature-family operation surfaces (`<family>/op` and the generic `facade/invoke`): memory, workflow, state, delivery, trace, eval, improve, MCP, A2A, LSP, channels, telemetry, topology and the tool families. Availability of an individual family is gated by the compiled root leaf features advertised in [`EchoAgentCapability::features`], not by this capability.",
+          "type": "string",
+          "enum": [
+            "feature_surfaces"
           ]
         }
       ]
@@ -2880,7 +3216,7 @@
     "TaskCreateRequest": {
       "properties": {
         "spec": {
-          "description": "TaskSpec payload.",
+          "description": "TaskCreateInput payload (the exact grammar the in-conversation `task_create` tool accepts).",
           "allOf": [
             {
               "$ref": "#/definitions/WireValue"
@@ -2888,11 +3224,16 @@
           ]
         },
         "task_run": {
-          "$ref": "#/definitions/WireHandle"
+          "description": "TaskRun handle; the id is the session-scoped graph identity.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
         }
       },
       "title": "TaskCreateRequest",
-      "description": "`_echo_agent/task/create` request.",
+      "description": "`_echo_agent/task/create` request: one atomic graph creation through the session's TaskRevisionService. The spec is the framework task_create payload (`tasks`, `base_revision`, `reason`, `assumptions`, `risks`, `execution_mode`).",
       "type": "object",
       "required": [
         "spec",
@@ -2904,53 +3245,60 @@
         "revision": {
           "$ref": "#/definitions/WireU64"
         },
-        "task": {
-          "$ref": "#/definitions/WireHandle"
+        "tasks": {
+          "description": "PlanTask handles of every task in the committed graph.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WireHandle"
+          }
         }
       },
       "title": "TaskCreateResponse",
       "type": "object",
       "required": [
         "revision",
-        "task"
+        "tasks"
       ]
     },
     "TaskUpdateRequest": {
       "properties": {
-        "expected_revision": {
-          "description": "Expected revision for optimistic concurrency; the framework rejects stale writers.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/WireU64"
-            }
-          ]
-        },
         "patch": {
           "$ref": "#/definitions/WireValue"
         },
-        "task": {
-          "$ref": "#/definitions/WireHandle"
+        "task_run": {
+          "description": "TaskRun handle addressing the graph.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
         }
       },
       "title": "TaskUpdateRequest",
-      "description": "`_echo_agent/task/update` request.",
+      "description": "`_echo_agent/task/update` request: revision-checked patch through the same TaskRevisionService the in-conversation `task_update` tool uses. The patch is the framework `task_update` payload (`base_revision`, `reason`, `operations`).",
       "type": "object",
       "required": [
-        "expected_revision",
         "patch",
-        "task"
+        "task_run"
       ]
     },
     "TaskUpdateResponse": {
       "properties": {
         "revision": {
           "$ref": "#/definitions/WireU64"
+        },
+        "updated": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WireHandle"
+          }
         }
       },
       "title": "TaskUpdateResponse",
       "type": "object",
       "required": [
-        "revision"
+        "revision",
+        "updated"
       ]
     },
     "TaskListRequest": {
@@ -3262,7 +3610,12 @@
           "minLength": 1
         },
         "request": {
-          "$ref": "#/definitions/WireValue"
+          "description": "DispatchRequest payload for the session's SubagentExecutor.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            }
+          ]
         },
         "session": {
           "$ref": "#/definitions/WireHandle"
@@ -3334,10 +3687,52 @@
         "settled"
       ]
     },
+    "SubagentControlAction": {
+      "description": "Control verbs of `_echo_agent/subagent/control`. These are exactly the SubagentExecutor's real control semantics — there is deliberately no pause/resume: a subagent is not a task graph node (design §10.4).",
+      "oneOf": [
+        {
+          "description": "Deliver one tracked message into the running attempt.",
+          "type": "string",
+          "enum": [
+            "message"
+          ]
+        },
+        {
+          "description": "Queue guidance for the attempt's next planning step.",
+          "type": "string",
+          "enum": [
+            "guidance"
+          ]
+        },
+        {
+          "description": "Interrupt the running attempt (cooperative, settles as interrupted).",
+          "type": "string",
+          "enum": [
+            "interrupt"
+          ]
+        },
+        {
+          "description": "Cancel the running attempt and settle its outcome.",
+          "type": "string",
+          "enum": [
+            "cancel"
+          ]
+        }
+      ]
+    },
     "SubagentControlRequest": {
       "properties": {
         "action": {
-          "$ref": "#/definitions/ControlAction"
+          "$ref": "#/definitions/SubagentControlAction"
+        },
+        "payload": {
+          "description": "Message/guidance text for the message and guidance verbs.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 8192,
+          "minLength": 1
         },
         "subagent": {
           "$ref": "#/definitions/WireHandle"

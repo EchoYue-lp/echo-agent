@@ -63,7 +63,11 @@ pub(crate) fn framework_error(error: &ReactError, operation: &str) -> EchoSdkErr
     )
 }
 
-fn bounded_message(message: &str) -> String {
+pub(crate) fn bounded_framework_message(message: &str) -> String {
+    bounded_message(message)
+}
+
+pub(crate) fn bounded_message(message: &str) -> String {
     const MAX_MESSAGE_CHARS: usize = 2048;
     message.chars().take(MAX_MESSAGE_CHARS).collect()
 }

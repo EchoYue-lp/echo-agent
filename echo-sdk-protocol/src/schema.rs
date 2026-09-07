@@ -17,7 +17,8 @@ use sha2::{Digest as _, Sha256};
 use crate::capability::{EchoAgentCapability, EchoAgentClientHello};
 use crate::catalog::METHOD_CATALOG;
 use crate::error::{
-    AgentFailureWire, EchoSdkError, ErrorDetails, ExtensionErrorCode, Retryability,
+    AgentFailureWire, EchoSdkError, ErrorDetails, ExtensionErrorCode, FacadeFailureDetail,
+    Retryability,
 };
 use crate::event::{
     EventCursor, EventGap, EventNotification, GapNotification, ReplayRequest, ReplayResponse,
@@ -215,6 +216,8 @@ pub fn build_extension_schema_doc() -> serde_json::Value {
     schema_entry!(definitions, FeatureOperationRequest);
     schema_entry!(definitions, FeatureOperationResponse);
     schema_entry!(definitions, WorkingDirectory);
+    // Facade adapter catalog types (plan 07 todo 1).
+    schema_entry!(definitions, FacadeFailureDetail);
 
     let catalog: Vec<serde_json::Value> = METHOD_CATALOG
         .iter()
@@ -282,6 +285,7 @@ pub const SOURCE_CONTRACT_INPUTS: &[&str] = &[
     "Cargo.lock",
     "contracts/sdk/public-api.txt",
     "contracts/sdk/parity-manifest.json",
+    "contracts/sdk/facade-operation-catalog.json",
 ];
 
 /// Aggregate digest over the source-contract inputs: for every entry in the
@@ -403,6 +407,7 @@ pub fn all_fixtures() -> Vec<Fixture> {
     push_hello_fixtures(&mut fixtures);
     push_agent_config_fixtures(&mut fixtures);
     push_run_fixtures(&mut fixtures);
+    push_facade_fixtures(&mut fixtures);
     push_boundary_fixtures(&mut fixtures);
     fixtures
 }
@@ -1234,7 +1239,11 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
                 "max_extension_descriptor_bytes": "65536",
                 "max_extension_payload_bytes": "1048576",
                 "max_extension_stream_bytes": "262144",
-                "max_inflight_extension_invocations": "8"
+                "max_inflight_extension_invocations": "8",
+                "max_facade_resources": "256",
+                "max_facade_streams": "128",
+                "max_facade_page_items": "512",
+                "max_facade_operation_args": "64"
             }
         }),
         None,
@@ -1265,7 +1274,11 @@ fn push_capability_fixtures(fixtures: &mut Vec<Fixture>) {
                 "max_extension_descriptor_bytes": "1",
                 "max_extension_payload_bytes": "1",
                 "max_extension_stream_bytes": "1",
-                "max_inflight_extension_invocations": "1"
+                "max_inflight_extension_invocations": "1",
+                "max_facade_resources": "1",
+                "max_facade_streams": "1",
+                "max_facade_page_items": "1",
+                "max_facade_operation_args": "1"
             }
         }),
         Some("invalid_value"),
@@ -1447,6 +1460,98 @@ fn push_run_fixtures(fixtures: &mut Vec<Fixture>) {
             "stream": {"id": "stream-9", "generation": "4", "kind": "stream"},
             "status": "interrupted",
             "last_sequence": "21"
+        }),
+        None,
+    ));
+}
+
+fn push_facade_fixtures(fixtures: &mut Vec<Fixture>) {
+    fixtures.push(fixture(
+        "facade-operation-request-valid",
+        FixtureKind::Valid,
+        "FeatureOperationRequest",
+        "Exact facade identity plus matching sha256 signature digest, an optional receiver handle and typed wire arguments.",
+        serde_json::json!({
+            "operation": "echo_agent::evolution::review::ReviewEngine",
+            "signature_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "handle": {
+                "id": "facade-memory-ns-1",
+                "generation": "1",
+                "kind": "facade_resource"
+            },
+            "arguments": [
+                {"kind": "string", "value": "namespace-a"},
+                {"kind": "u64", "value": "42"}
+            ]
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "facade-operation-empty-invalid",
+        FixtureKind::Invalid,
+        "FeatureOperationRequest",
+        "Blank operation identities are rejected before any handler runs.",
+        serde_json::json!({
+            "operation": "   ",
+            "signature_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "facade-operation-wildcard-invalid",
+        FixtureKind::Invalid,
+        "FeatureOperationRequest",
+        "Wildcard operations are never executable routes; the catalog only freezes exact identities.",
+        serde_json::json!({
+            "operation": "_echo_agent/task/*",
+            "signature_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "facade-operation-signature-invalid",
+        FixtureKind::Invalid,
+        "FeatureOperationRequest",
+        "Signature digests must be sha256 plus 64 hex characters.",
+        serde_json::json!({
+            "operation": "echo_agent::evolution::review::ReviewEngine",
+            "signature_digest": "sha256:zz"
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "facade-failure-detail-valid",
+        FixtureKind::Valid,
+        "FacadeFailureDetail",
+        "Typed admission-failure facts: operation identity, expected receiver kind and the missing feature.",
+        serde_json::json!({
+            "operation": "echo_agent::eval::runner::EvalRunner",
+            "signature_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "receiver_kind": "facade_resource",
+            "required_feature": "eval"
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "facade-failure-detail-digest-invalid",
+        FixtureKind::Invalid,
+        "FacadeFailureDetail",
+        "A claimed digest inside failure details must still be a sha256 digest.",
+        serde_json::json!({
+            "operation": "echo_agent::eval::runner::EvalRunner",
+            "signature_digest": "not-a-digest"
+        }),
+        Some("invalid_value"),
+    ));
+    fixtures.push(fixture(
+        "facade-resource-handle-valid",
+        FixtureKind::Valid,
+        "WireHandle",
+        "A facade resource handle (memory namespace, workflow, journal, ledger, ...).",
+        serde_json::json!({
+            "id": "facade-workflow-wf-7",
+            "generation": "3",
+            "kind": "facade_resource"
         }),
         None,
     ));

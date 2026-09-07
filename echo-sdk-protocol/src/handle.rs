@@ -27,6 +27,11 @@ pub enum HandleKind {
     PlanTask,
     Subagent,
     Extension,
+    /// Stateful facade resource opened through a feature-family surface:
+    /// memory namespaces, workflows, journals, delivery ledgers, run
+    /// stores, MCP/A2A clients, … The owning Rust service keeps the
+    /// business state; the handle only carries addressing and lifecycle.
+    FacadeResource,
 }
 
 impl HandleKind {
@@ -40,6 +45,7 @@ impl HandleKind {
             HandleKind::PlanTask => "plan_task",
             HandleKind::Subagent => "subagent",
             HandleKind::Extension => "extension",
+            HandleKind::FacadeResource => "facade_resource",
         }
     }
 }

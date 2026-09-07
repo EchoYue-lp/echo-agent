@@ -19,9 +19,10 @@ use echo_sdk_protocol::capability::{
 use echo_sdk_protocol::event::{EventAck, EventAckNotification, EventNotification, ReplayRequest};
 use echo_sdk_protocol::handle::HandleKind;
 use echo_sdk_protocol::methods::{
-    AgentCloseRequest, AgentConfigWire, AgentCreateRequest, AgentDescribeRequest, RunGetRequest,
-    RunInput, RunStartRequest, RunStatus, RunWaitRequest, SessionCloseRequest,
-    SessionCreateRequest, SessionLoadRequest,
+    AgentCloseRequest, AgentConfigWire, AgentCreateRequest, AgentDescribeRequest, ControlAction,
+    RunGetRequest, RunInput, RunStartRequest, RunStatus, RunWaitRequest, SessionCloseRequest,
+    SessionCreateRequest, SessionLoadRequest, SubagentDispatchRequest, TaskControlRequest,
+    TaskCreateRequest, TaskExecuteRequest, TaskListRequest, TaskUpdateRequest,
 };
 use echo_sdk_protocol::scalar::{WireNonZeroU64, WireU64};
 use std::fs::OpenOptions;
@@ -100,7 +101,11 @@ fn write_config(
                 "name": "fixture-agent",
                 "system_prompt": "Answer the user directly.",
                 "max_iterations": 4,
-                "enable_tools": true
+                "enable_tools": true,
+                // The memory family e2e needs a live store behind the
+                // session agent; the path stays inside the temp work dir.
+                "enable_memory": true,
+                "memory_path": directory.join("memstore.json").display().to_string()
             }
         },
         "sdk_profile": {
@@ -226,6 +231,11 @@ async fn spawn_host(config: &Path) -> Result<HostProcess, Box<dyn std::error::Er
     let mut child = tokio::process::Command::new(binary())
         .arg("--config")
         .arg(config)
+        // The fixture model servers are loopback by design; reqwest follows
+        // the developer's system proxy otherwise and the model request never
+        // reaches the fixture. Loopback is always excluded from proxies.
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1299,3 +1309,2240 @@ async fn oversized_input_frame_fails_without_side_effects() -> Result<(), Box<dy
 
 #[allow(dead_code)]
 fn direction_marker(_: LineDirection) {}
+
+// ── Facade admission ladder (plan 07 todo 2) ────────────────────────────────
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn first_catalog_invoke_operation() -> Result<String, Box<dyn std::error::Error>> {
+    let catalog_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../contracts/sdk/facade-operation-catalog.json");
+    let catalog: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(catalog_path)?)?;
+    let mut operations: Vec<String> = catalog
+        .get("routes")
+        .and_then(|routes| routes.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|route| route.get("surface").and_then(|v| v.as_str()) == Some("invoke"))
+        .filter_map(|route| {
+            route
+                .get("operation")
+                .and_then(|operation| operation.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    operations.sort();
+    operations
+        .first()
+        .cloned()
+        .ok_or_else(|| "catalog carries no invoke identities".into())
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn decoded_facade_response(
+    value: serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let response: echo_sdk_protocol::methods::FeatureOperationResponse =
+        serde_json::from_value(value)?;
+    response
+        .value
+        .into_json()
+        .map_err(|error| -> Box<dyn std::error::Error> { error.to_string().into() })
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn typed_facade_error(
+    error: &agent_client_protocol::Error,
+) -> Result<echo_sdk_protocol::error::EchoSdkError, Box<dyn std::error::Error>> {
+    echo_sdk_protocol::error::EchoSdkError::from_jsonrpc_data(error.data.as_ref())
+        .map_err(|message| -> Box<dyn std::error::Error> { message.into() })
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+#[tokio::test]
+async fn plain_clients_get_method_not_found_for_facade_methods()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            use agent_client_protocol::UntypedMessage;
+            connection
+                .send_request(initialize_request(None))
+                .block_task()
+                .await?;
+            let invoke = serde_json::json!({
+                "operation": "echo_agent::evolution::review::ReviewEngine",
+                "signature_digest":
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "arguments": [],
+            });
+            let forced = connection
+                .send_request(UntypedMessage::new("_echo_agent/facade/invoke", &invoke)?)
+                .block_task()
+                .await
+                .expect_err("facade invoke must fail on a plain connection");
+            assert!(matches!(
+                forced.code,
+                agent_client_protocol::ErrorCode::MethodNotFound
+            ));
+            let family = connection
+                .send_request(UntypedMessage::new("_echo_agent/memory/op", &invoke)?)
+                .block_task()
+                .await
+                .expect_err("family method must fail on a plain connection");
+            assert!(matches!(
+                family.code,
+                agent_client_protocol::ErrorCode::MethodNotFound
+            ));
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+#[tokio::test]
+async fn negotiated_facade_admission_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+    let known_operation = first_catalog_invoke_operation()?;
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        let known_operation = known_operation.clone();
+        Box::pin(async move {
+            use agent_client_protocol::UntypedMessage;
+            use echo_sdk_protocol::error::ExtensionErrorCode;
+            let initialized = connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            // The facade runtime advertises the feature-surfaces capability.
+            let advertisement = initialized
+                .agent_capabilities
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("echo_agent"))
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no advertisement")
+                })?;
+            let advertisement: EchoAgentCapability = serde_json::from_value(advertisement.clone())
+                .map_err(|error| {
+                    agent_client_protocol::Error::invalid_params().data(error.to_string())
+                })?;
+            assert!(advertisement.declares(ExtensionCapability::FeatureSurfaces));
+
+            let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            // Unknown operation identities fail closed as invalid_value with
+            // the typed facade detail carrying the rejected identity.
+            let unknown = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": "totally::unknown::operation",
+                        "signature_digest": digest,
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await
+                .expect_err("unknown operation must fail");
+            let typed = typed_facade_error(&unknown).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
+            let detail = typed
+                .details
+                .and_then(|details| details.facade)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no facade detail")
+                })?;
+            assert_eq!(
+                detail.operation.as_deref(),
+                Some("totally::unknown::operation")
+            );
+
+            // A canonical operation resolves through the embedded catalog but
+            // no family dispatcher is compiled yet: typed feature_unavailable,
+            // never a simulated result.
+            let known = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": known_operation,
+                        "signature_digest": digest,
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await
+                .expect_err("family dispatch is not compiled yet");
+            let typed = typed_facade_error(&known).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::FeatureUnavailable);
+
+            // The structured-output contract validation ships with the
+            // facade runtime: a broken schema is a typed invalid value and
+            // a valid schema with a conforming sample validates.
+            let arguments =
+                |schema: serde_json::Value,
+                 instance: Option<serde_json::Value>|
+                 -> Result<serde_json::Value, agent_client_protocol::Error> {
+                    let mut arguments = vec![
+                        echo_sdk_protocol::scalar::WireValue::from_json(schema).map_err(
+                            |error| {
+                                agent_client_protocol::Error::invalid_params()
+                                    .data(error.to_string())
+                            },
+                        )?,
+                    ];
+                    if let Some(instance) = instance {
+                        arguments.push(
+                            echo_sdk_protocol::scalar::WireValue::from_json(instance).map_err(
+                                |error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                },
+                            )?,
+                        );
+                    }
+                    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+                        operation: "structured_output.validate".to_string(),
+                        signature_digest: digest.to_string(),
+                        handle: None,
+                        arguments,
+                    };
+                    serde_json::to_value(&request).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })
+                };
+            let valid = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/structured_output/validate",
+                    arguments(
+                        serde_json::json!({"type": "object"}),
+                        Some(serde_json::json!({})),
+                    )?,
+                )?)
+                .block_task()
+                .await?;
+            let decoded: echo_sdk_protocol::methods::FeatureOperationResponse =
+                serde_json::from_value(valid).map_err(|error| {
+                    agent_client_protocol::Error::invalid_params().data(error.to_string())
+                })?;
+            let decoded = decoded.value.into_json().map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(decoded.get("valid"), Some(&serde_json::Value::Bool(true)));
+            let broken = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/structured_output/validate",
+                    arguments(serde_json::json!("not-a-schema"), None)?,
+                )?)
+                .block_task()
+                .await
+                .expect_err("a non-object schema must fail");
+            let typed = typed_facade_error(&broken).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
+
+            // The memory family routes the closed store-operation set onto
+            // the session's own store authority (todo 4).
+            let memory_request =
+                |operation: &str,
+                 handle: echo_sdk_protocol::handle::WireHandle,
+                 arguments: Vec<serde_json::Value>|
+                 -> Result<serde_json::Value, agent_client_protocol::Error> {
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|value| {
+                            echo_sdk_protocol::scalar::WireValue::from_json(value).map_err(
+                                |error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest: digest.to_string(),
+                        handle: Some(handle),
+                        arguments,
+                    };
+                    serde_json::to_value(&request).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })
+                };
+            // Create a session whose store backs the family operations.
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let memory_session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let put = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/memory/op",
+                    memory_request(
+                        "memory.store.put",
+                        memory_session.session.clone(),
+                        vec![
+                            serde_json::json!(["memories"]),
+                            serde_json::json!("m-1"),
+                            serde_json::json!({"text": "hello memory"}),
+                        ],
+                    )?,
+                )?)
+                .block_task()
+                .await?;
+            let put = decoded_facade_response(put).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(put.get("ok"), Some(&serde_json::Value::Bool(true)));
+            let got = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/memory/op",
+                    memory_request(
+                        "memory.store.get",
+                        memory_session.session.clone(),
+                        vec![serde_json::json!(["memories"]), serde_json::json!("m-1")],
+                    )?,
+                )?)
+                .block_task()
+                .await?;
+            let got = decoded_facade_response(got).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(
+                got.get("value").and_then(|value| value.get("text")),
+                Some(&serde_json::json!("hello memory"))
+            );
+            let deleted = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/memory/op",
+                    memory_request(
+                        "memory.store.delete",
+                        memory_session.session.clone(),
+                        vec![serde_json::json!(["memories"]), serde_json::json!("m-1")],
+                    )?,
+                )?)
+                .block_task()
+                .await?;
+            let deleted = decoded_facade_response(deleted).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(deleted.get("deleted"), Some(&serde_json::Value::Bool(true)));
+            let unknown_op = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/memory/op",
+                    memory_request(
+                        "memory.store.vacuum",
+                        memory_session.session.clone(),
+                        vec![serde_json::json!(["memories"])],
+                    )?,
+                )?)
+                .block_task()
+                .await
+                .expect_err("closed family surface rejects unknown operations");
+            let typed = typed_facade_error(&unknown_op).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
+
+            // A family method whose handler family did not compile stays the
+            // official method-not-found even on a negotiated connection
+            // (memory is compiled now; channels needs a host-language
+            // handler factory and stays unbound by design).
+            let family = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/channels/op",
+                    serde_json::json!({
+                        "operation": "channels.start",
+                        "signature_digest": digest,
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await
+                .expect_err("uncompiled family method must fail");
+            assert!(matches!(
+                family.code,
+                agent_client_protocol::ErrorCode::MethodNotFound
+            ));
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+// ── Workflow family over the framework graph engine (plan 07 todo 4) ───────
+
+#[cfg(feature = "sdk-facade-adapters")]
+#[tokio::test]
+async fn workflow_family_runs_declarative_graphs_over_the_framework_engine()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("agent-node-done").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            use agent_client_protocol::UntypedMessage;
+            use echo_sdk_protocol::error::ExtensionErrorCode;
+            let digest =
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
+                decoded_facade_response(value).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            let typed_error = |error: &agent_client_protocol::Error| -> Result<echo_sdk_protocol::error::EchoSdkError, agent_client_protocol::Error> {
+                typed_facade_error(error).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let workflow_request =
+                |operation: &str,
+                 handle: echo_sdk_protocol::handle::WireHandle,
+                 arguments: Vec<serde_json::Value>|
+                 -> Result<serde_json::Value, agent_client_protocol::Error> {
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|value| {
+                            echo_sdk_protocol::scalar::WireValue::from_json(value).map_err(
+                                |error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest: digest.to_string(),
+                        handle: Some(handle),
+                        arguments,
+                    };
+                    serde_json::to_value(&request).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })
+                };
+            let workflow_op =
+                |operation: &str,
+                 handle: echo_sdk_protocol::handle::WireHandle,
+                 arguments: Vec<serde_json::Value>|
+                 -> Result<UntypedMessage, agent_client_protocol::Error> {
+                    UntypedMessage::new(
+                        "_echo_agent/workflow/op",
+                        workflow_request(operation, handle, arguments)?,
+                    )
+                };
+
+            // Build a declarative graph with a real agent node (backed by
+            // the Session's LLM configuration), a conditional edge and an
+            // interrupt before the finish node.
+            let definition = serde_json::json!({
+                "name": "facade_flow",
+                "nodes": [
+                    {"name": "agent_step", "type": "agent", "system_prompt": "echo the task",
+                     "input_key": "task", "output_key": "agent_out"},
+                    {"name": "check", "type": "router"},
+                    {"name": "yes", "type": "router"},
+                    {"name": "no", "type": "router"},
+                    {"name": "end", "type": "router"}
+                ],
+                "edges": [
+                    {"from": "agent_step", "to": "check"},
+                    {"from": "check", "condition":
+                        {"key": "approved", "equals": true, "then": "yes", "else": "no"}},
+                    {"from": "yes", "to": "end"},
+                    {"from": "no", "to": "end"}
+                ],
+                "entry": "agent_step",
+                "finish": ["end"],
+                "interrupt_before": ["end"]
+            })
+            .to_string();
+            let built = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.graph.build",
+                        session.session.clone(),
+                        vec![serde_json::json!(definition)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let graph_id = built
+                .get("graph_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no graph_id")
+                })?
+                .to_string();
+            assert_eq!(built.get("nodes"), Some(&serde_json::json!(5)));
+            assert_eq!(built.get("edges"), Some(&serde_json::json!(4)));
+
+            // The first run suspends before `end`; the agent node already
+            // executed against the fixture model server.
+            let first = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.graph.run_until_interrupt",
+                        session.session.clone(),
+                        vec![
+                            serde_json::json!(graph_id),
+                            serde_json::json!({"task": "summarize", "approved": true}),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                first.get("outcome"),
+                Some(&serde_json::json!("interrupted"))
+            );
+            assert_eq!(first.get("pending_node"), Some(&serde_json::json!("end")));
+            let checkpoint = first
+                .get("checkpoint")
+                .and_then(|value| value.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no checkpoint id")
+                })?
+                .to_string();
+
+            let checkpoints = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.graph.list_checkpoints",
+                        session.session.clone(),
+                        vec![serde_json::json!(graph_id)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                checkpoints
+                    .get("checkpoints")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len),
+                Some(1)
+            );
+
+            // Approving the checkpoint resumes to completion through the
+            // `yes` branch; the agent node's mock answer landed in state.
+            let resumed = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.graph.resume",
+                        session.session.clone(),
+                        vec![
+                            serde_json::json!(graph_id),
+                            serde_json::json!(checkpoint),
+                            serde_json::json!("approve"),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                resumed.get("outcome"),
+                Some(&serde_json::json!("completed"))
+            );
+            let path = resumed
+                .get("path")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no path")
+                })?;
+            assert!(path.contains(&serde_json::json!("yes")));
+            assert!(!path.contains(&serde_json::json!("no")));
+            assert_eq!(
+                resumed
+                    .get("state")
+                    .and_then(|value| value.get("values"))
+                    .and_then(|value| value.get("agent_out")),
+                Some(&serde_json::json!("agent-node-done"))
+            );
+
+            // A plain run with approved=false takes the `no` branch to the
+            // finish node without interrupting again.
+            let second = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.graph.run",
+                        session.session.clone(),
+                        vec![
+                            serde_json::json!(graph_id),
+                            serde_json::json!({"task": "summarize", "approved": false}),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                second.get("outcome"),
+                Some(&serde_json::json!("completed"))
+            );
+            let second_path = second
+                .get("path")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no path")
+                })?;
+            assert!(second_path.contains(&serde_json::json!("no")));
+            assert!(!second_path.contains(&serde_json::json!("yes")));
+
+            // Standalone SharedState resources keep framework state
+            // semantics: set/get/keys/snapshot round-trip.
+            let state_new = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.state.new",
+                        session.session.clone(),
+                        vec![serde_json::json!({"seed": 7})],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let state_id = state_new
+                .get("state_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no state_id")
+                })?
+                .to_string();
+            let got = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.state.get",
+                        session.session.clone(),
+                        vec![serde_json::json!(state_id), serde_json::json!("seed")],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(got.get("value"), Some(&serde_json::json!(7)));
+            let set = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.state.set",
+                        session.session.clone(),
+                        vec![
+                            serde_json::json!(state_id),
+                            serde_json::json!("extra"),
+                            serde_json::json!("value-2"),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(set.get("ok"), Some(&serde_json::json!(true)));
+            let keys = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.state.keys",
+                        session.session.clone(),
+                        vec![serde_json::json!(state_id)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let keys = keys
+                .get("keys")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no keys")
+                })?;
+            assert!(keys.contains(&serde_json::json!("seed")));
+            assert!(keys.contains(&serde_json::json!("extra")));
+
+            // Cancelling a graph resource makes the next run fail with the
+            // framework's cancellation error — the token is real.
+            let cancelled_graph = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.graph.build",
+                        session.session.clone(),
+                        vec![serde_json::json!(
+                            serde_json::json!({
+                                "name": "cancel_me",
+                                "nodes": [
+                                    {"name": "a", "type": "router"},
+                                    {"name": "b", "type": "router"}
+                                ],
+                                "edges": [{"from": "a", "to": "b"}],
+                                "entry": "a",
+                                "finish": ["b"]
+                            })
+                            .to_string()
+                        )],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let cancelled_id = cancelled_graph
+                .get("graph_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no graph_id")
+                })?
+                .to_string();
+            let cancelled = decode(
+                connection
+                    .send_request(workflow_op(
+                        "workflow.graph.cancel",
+                        session.session.clone(),
+                        vec![serde_json::json!(cancelled_id)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(cancelled.get("cancelled"), Some(&serde_json::json!(true)));
+            let refused = connection
+                .send_request(workflow_op(
+                    "workflow.graph.run",
+                    session.session.clone(),
+                    vec![serde_json::json!(cancelled_id), serde_json::json!({})],
+                )?)
+                .block_task()
+                .await
+                .expect_err("a cancelled graph must refuse further runs");
+            let typed = typed_error(&refused)?;
+            assert_eq!(typed.code, ExtensionErrorCode::FrameworkError);
+
+            // The family surface is closed: unknown operations and unknown
+            // resources fail with typed invalid-value errors.
+            let unknown_op = connection
+                .send_request(workflow_op(
+                    "workflow.graph.teleport",
+                    session.session.clone(),
+                    vec![serde_json::json!(graph_id)],
+                )?)
+                .block_task()
+                .await
+                .expect_err("unknown workflow operation must fail");
+            assert_eq!(
+                typed_error(&unknown_op)?.code,
+                ExtensionErrorCode::InvalidValue
+            );
+            let unknown_graph = connection
+                .send_request(workflow_op(
+                    "workflow.graph.run",
+                    session.session.clone(),
+                    vec![serde_json::json!("wfg-does-not-exist"), serde_json::json!({})],
+                )?)
+                .block_task()
+                .await
+                .expect_err("unknown graph resource must fail");
+            assert_eq!(
+                typed_error(&unknown_graph)?.code,
+                ExtensionErrorCode::InvalidValue
+            );
+
+            // Graph resources are owner-bound: a second session of the same
+            // connection cannot reach the first session's graph.
+            let second_agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let second_session = connection
+                .send_request(SessionCreateRequest {
+                    agent: second_agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let cross = connection
+                .send_request(workflow_op(
+                    "workflow.graph.run",
+                    second_session.session.clone(),
+                    vec![serde_json::json!(graph_id), serde_json::json!({})],
+                )?)
+                .block_task()
+                .await
+                .expect_err("cross-session graph access must fail");
+            let cross = typed_error(&cross)?;
+            assert_eq!(cross.code, ExtensionErrorCode::InvalidValue);
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+// ── State, delivery and trace families (plan 07 todo 4 step 3) ──────────────
+
+#[cfg(feature = "sdk-facade-adapters")]
+#[tokio::test]
+async fn state_delivery_and_trace_families_use_framework_services()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            use agent_client_protocol::UntypedMessage;
+            use echo_sdk_protocol::error::ExtensionErrorCode;
+            let digest =
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
+                decoded_facade_response(value).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            let typed_error = |error: &agent_client_protocol::Error| -> Result<echo_sdk_protocol::error::EchoSdkError, agent_client_protocol::Error> {
+                typed_facade_error(error).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let family_request =
+                |method: &str,
+                 operation: &str,
+                 arguments: Vec<serde_json::Value>|
+                 -> Result<UntypedMessage, agent_client_protocol::Error> {
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|value| {
+                            echo_sdk_protocol::scalar::WireValue::from_json(value).map_err(
+                                |error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest: digest.to_string(),
+                        handle: Some(session.session.clone()),
+                        arguments,
+                    };
+                    serde_json::to_value(&request)
+                        .map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })
+                        .and_then(|value| UntypedMessage::new(method, value))
+                };
+
+            // The state family shares the Host's runtime-state store: save
+            // a checkpoint, observe the runtime id, read it back, clear it.
+            let checkpoint = serde_json::json!({
+                "conversation_id": "scope-e2e",
+                "messages_json": "[]",
+                "current_plan": null,
+                "active_skills": [],
+                "blocked_reason": null,
+                "timestamp": "2026-09-08T00:00:00Z",
+            });
+            let saved = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/state/op",
+                        "state.checkpoint.save",
+                        vec![serde_json::json!("scope-e2e"), checkpoint],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(saved.get("ok"), Some(&serde_json::json!(true)));
+            let ids = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/state/op",
+                        "state.runtime.list",
+                        vec![serde_json::json!("scope-e2e")],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let runtime_ids = ids
+                .get("runtime_state_ids")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no runtime ids")
+                })?;
+            assert_eq!(runtime_ids.len(), 1);
+            let read_back = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/state/op",
+                        "state.checkpoint.get",
+                        vec![serde_json::json!("scope-e2e")],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                read_back
+                    .get("checkpoint")
+                    .and_then(|value| value.get("conversation_id")),
+                Some(&serde_json::json!("scope-e2e"))
+            );
+            let cleared = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/state/op",
+                        "state.runtime.clear",
+                        vec![
+                            serde_json::json!("scope-e2e"),
+                            serde_json::json!(runtime_ids[0]),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                cleared.get("checkpoint_removed"),
+                Some(&serde_json::json!(true))
+            );
+
+            // The delivery family drives the framework ledger through its
+            // real lifecycle: enqueue, claim, effect, settle, recover.
+            let ledger = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/delivery/op",
+                        "delivery.ledger.open",
+                        vec![],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let ledger_id = ledger
+                .get("ledger_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no ledger id")
+                })?
+                .to_string();
+            let enqueued = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/delivery/op",
+                        "delivery.enqueue",
+                        vec![
+                            serde_json::json!(ledger_id),
+                            serde_json::json!("m-1"),
+                            serde_json::json!("channel/primary"),
+                            serde_json::json!({"text": "hello"}),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(enqueued.get("ok"), Some(&serde_json::json!(true)));
+            let claim = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/delivery/op",
+                        "delivery.claim_next",
+                        vec![serde_json::json!(ledger_id)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                claim.get("claim").and_then(|value| value.get("message_id")),
+                Some(&serde_json::json!("m-1"))
+            );
+            let transitioned = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/delivery/op",
+                        "delivery.transition",
+                        vec![
+                            serde_json::json!(ledger_id),
+                            serde_json::json!("m-1"),
+                            serde_json::json!("effect_started"),
+                            serde_json::json!("turn-1"),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(transitioned.get("ok"), Some(&serde_json::json!(true)));
+            let settled = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/delivery/op",
+                        "delivery.settle",
+                        vec![
+                            serde_json::json!(ledger_id),
+                            serde_json::json!("m-1"),
+                            serde_json::json!("completed"),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(settled.get("ok"), Some(&serde_json::json!(true)));
+            let snapshot = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/delivery/op",
+                        "delivery.snapshot",
+                        vec![serde_json::json!(ledger_id)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let records = snapshot
+                .get("records")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no records")
+                })?;
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                records[0].get("outcome"),
+                Some(&serde_json::json!("completed"))
+            );
+            let recovered = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/delivery/op",
+                        "delivery.recover",
+                        vec![serde_json::json!(ledger_id)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert!(
+                recovered
+                    .get("last_applied_sequence")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|sequence| sequence >= 3)
+            );
+
+            // The trace family resource-izes the framework RunStore.
+            let store = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/trace/op",
+                        "trace.store.open",
+                        vec![serde_json::json!("memory")],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let store_id = store
+                .get("store_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no store id")
+                })?
+                .to_string();
+            let run = serde_json::json!({
+                "run_id": "run-e2e-1",
+                "session_id": "session-e2e",
+                "status": "completed",
+                "input": "hello trace",
+                "events": [],
+                "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "timings": {"total_duration_ms": 0, "llm_duration_ms": 0, "tool_duration_ms": 0},
+                "started_at": "2026-09-08T00:00:00Z",
+                "finished_at": "2026-09-08T00:00:01Z",
+            });
+            let saved_run = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/trace/op",
+                        "trace.run.save",
+                        vec![serde_json::json!(store_id), run],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(saved_run.get("ok"), Some(&serde_json::json!(true)));
+            let loaded = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/trace/op",
+                        "trace.run.load",
+                        vec![serde_json::json!(store_id), serde_json::json!("run-e2e-1")],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                loaded.get("run").and_then(|value| value.get("input")),
+                Some(&serde_json::json!("hello trace"))
+            );
+            let recent = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/trace/op",
+                        "trace.run.list_recent",
+                        vec![serde_json::json!(store_id), serde_json::json!(10)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                recent
+                    .get("summaries")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len),
+                Some(1)
+            );
+
+            // Closed surfaces: unknown operations fail with typed
+            // invalid-value errors.
+            let unknown = connection
+                .send_request(family_request(
+                    "_echo_agent/state/op",
+                    "state.checkpoint.vacuum",
+                    vec![serde_json::json!("scope-e2e")],
+                )?)
+                .block_task()
+                .await
+                .expect_err("unknown state operation must fail");
+            assert_eq!(typed_error(&unknown)?.code, ExtensionErrorCode::InvalidValue);
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+// ── Eval and improve families (plan 07 todo 4 step 3, feature-gated) ────────
+
+#[cfg(all(
+    feature = "sdk-facade-adapters",
+    feature = "framework-eval",
+    feature = "framework-improve"
+))]
+#[tokio::test]
+async fn eval_and_improve_families_use_the_framework_analyzers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            use agent_client_protocol::UntypedMessage;
+            use echo_sdk_protocol::error::ExtensionErrorCode;
+            let digest =
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
+                decoded_facade_response(value).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            let typed_error = |error: &agent_client_protocol::Error| -> Result<echo_sdk_protocol::error::EchoSdkError, agent_client_protocol::Error> {
+                typed_facade_error(error).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let family_request =
+                |method: &str,
+                 operation: &str,
+                 arguments: Vec<serde_json::Value>|
+                 -> Result<UntypedMessage, agent_client_protocol::Error> {
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|value| {
+                            echo_sdk_protocol::scalar::WireValue::from_json(value).map_err(
+                                |error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest: digest.to_string(),
+                        handle: Some(session.session.clone()),
+                        arguments,
+                    };
+                    serde_json::to_value(&request)
+                        .map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })
+                        .and_then(|value| UntypedMessage::new(method, value))
+                };
+
+            let run = serde_json::json!({
+                "run_id": "run-eval-1",
+                "session_id": "session-eval",
+                "status": "completed",
+                "input": "analyze me",
+                "events": [],
+                "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "timings": {"total_duration_ms": 0, "llm_duration_ms": 0, "tool_duration_ms": 0},
+                "started_at": "2026-09-08T00:00:00Z",
+                "finished_at": "2026-09-08T00:00:01Z",
+            });
+
+            // Constraint evaluation is the framework's own runner over
+            // the run trace; an empty constraint set yields no violations.
+            let constraints = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/eval/op",
+                        "eval.constraints.run",
+                        vec![serde_json::json!({}), run.clone()],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                constraints
+                    .get("violations")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len),
+                Some(0)
+            );
+
+            // Reports aggregate results with the framework's own shape.
+            let report = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/eval/op",
+                        "eval.report.build",
+                        vec![serde_json::json!([
+                            {"case_id": "c-1", "success": true, "score": 1.0,
+                             "metrics": [], "violations": [], "duration_ms": 10},
+                            {"case_id": "c-2", "success": false, "score": 0.0,
+                             "metrics": [], "violations": [], "duration_ms": 5},
+                        ])],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(report.get("total"), Some(&serde_json::json!(2)));
+            assert_eq!(report.get("passed"), Some(&serde_json::json!(1)));
+            assert_eq!(report.get("failed"), Some(&serde_json::json!(1)));
+
+            // The improve family exports ShareGPT trajectories and runs the
+            // real analyzer over the trace.
+            let trajectory = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/improve/op",
+                        "improve.trajectory.sharegpt",
+                        vec![run.clone()],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert!(
+                trajectory
+                    .get("messages")
+                    .and_then(|value| value.as_array())
+                    .is_some()
+            );
+            let critique = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/improve/op",
+                        "improve.run.analyze",
+                        vec![run],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(critique.get("run_id"), Some(&serde_json::json!("run-eval-1")));
+            assert_eq!(critique.get("success"), Some(&serde_json::json!(true)));
+
+            // Unknown operations stay closed.
+            let unknown = connection
+                .send_request(family_request(
+                    "_echo_agent/eval/op",
+                    "eval.magic.optimize",
+                    vec![],
+                )?)
+                .block_task()
+                .await
+                .expect_err("unknown eval operation must fail");
+            assert_eq!(typed_error(&unknown)?.code, ExtensionErrorCode::InvalidValue);
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+// ── Tool families over the framework tools (plan 07 todo 5) ─────────────────
+
+#[cfg(all(
+    feature = "sdk-facade-adapters",
+    feature = "framework-files",
+    feature = "framework-shell",
+    feature = "framework-git",
+    feature = "framework-data",
+    feature = "framework-web",
+    feature = "framework-content-guard",
+    feature = "framework-project-rules"
+))]
+#[tokio::test]
+async fn tool_families_execute_framework_tools_with_the_session_cwd()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            use agent_client_protocol::UntypedMessage;
+            use echo_sdk_protocol::error::ExtensionErrorCode;
+            let digest =
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
+                decoded_facade_response(value).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            let typed_error = |error: &agent_client_protocol::Error| -> Result<echo_sdk_protocol::error::EchoSdkError, agent_client_protocol::Error> {
+                typed_facade_error(error).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            // The session's working directory is the tool workspace.
+            let work_dir = work.path().display().to_string();
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: Some(echo_sdk_protocol::scalar::WirePath::Utf8 {
+                        path: work_dir,
+                    }),
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let tool_request =
+                |method: &str,
+                 operation: &str,
+                 arguments: Vec<serde_json::Value>|
+                 -> Result<UntypedMessage, agent_client_protocol::Error> {
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|value| {
+                            echo_sdk_protocol::scalar::WireValue::from_json(value).map_err(
+                                |error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest: digest.to_string(),
+                        handle: Some(session.session.clone()),
+                        arguments,
+                    };
+                    serde_json::to_value(&request)
+                        .map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })
+                        .and_then(|value| UntypedMessage::new(method, value))
+                };
+
+            // files: write then read a file relative to the session cwd.
+            let written = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/files/op",
+                        "files.write_file",
+                        vec![
+                            serde_json::json!("notes/tool-family.txt"),
+                            serde_json::json!("written by the facade tool family"),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(written.get("success"), Some(&serde_json::json!(true)));
+            let read = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/files/op",
+                        "files.read_file",
+                        vec![serde_json::json!("notes/tool-family.txt")],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(read.get("success"), Some(&serde_json::json!(true)));
+            assert!(
+                read.get("output")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.contains("written by the facade tool family"))
+            );
+
+            // shell: run echo through the framework ShellTool.
+            let shell = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/shell/op",
+                        "shell.shell",
+                        vec![serde_json::json!("printf facade-shell-ok")],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(shell.get("success"), Some(&serde_json::json!(true)));
+            assert!(
+                shell
+                    .get("output")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.contains("facade-shell-ok"))
+            );
+
+            // web: extract structured text from HTML without any network.
+            let extracted = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/web/op",
+                        "web.web_extract",
+                        vec![serde_json::json!("<html><body><h1>Facade Head</h1><p>Body text</p></body></html>")],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(extracted.get("success"), Some(&serde_json::json!(true)));
+
+            // content-guard: the framework PII detector finds an email.
+            let pii = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/content-guard/op",
+                        "content-guard.detect",
+                        vec![serde_json::json!("contact me at alice@example.com please")],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert!(
+                pii.get("matches")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|matches| !matches.is_empty())
+            );
+
+            // project-rules: an empty temp workspace resolves no instruction
+            // sources — the framework resolver's own answer.
+            let resolved = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/project-rules/op",
+                        "project-rules.resolve",
+                        vec![],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                resolved.get("is_empty"),
+                Some(&serde_json::json!(true))
+            );
+
+            // Unknown tools stay closed with typed invalid-value errors.
+            let unknown = connection
+                .send_request(tool_request(
+                    "_echo_agent/files/op",
+                    "files.magic_teleport",
+                    vec![],
+                )?)
+                .block_task()
+                .await
+                .expect_err("unknown tool must fail");
+            assert_eq!(typed_error(&unknown)?.code, ExtensionErrorCode::InvalidValue);
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+// ── Integration families (plan 07 todo 5) ───────────────────────────────────
+
+#[cfg(all(
+    feature = "sdk-facade-adapters",
+    feature = "framework-a2a",
+    feature = "framework-lsp",
+    feature = "framework-topology"
+))]
+#[tokio::test]
+async fn integration_families_use_framework_managers_and_clients()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            use agent_client_protocol::UntypedMessage;
+            use echo_sdk_protocol::error::ExtensionErrorCode;
+            let digest =
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
+                decoded_facade_response(value).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            let typed_error = |error: &agent_client_protocol::Error| -> Result<echo_sdk_protocol::error::EchoSdkError, agent_client_protocol::Error> {
+                typed_facade_error(error).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let family_request =
+                |method: &str,
+                 operation: &str,
+                 arguments: Vec<serde_json::Value>|
+                 -> Result<UntypedMessage, agent_client_protocol::Error> {
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|value| {
+                            echo_sdk_protocol::scalar::WireValue::from_json(value).map_err(
+                                |error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest: digest.to_string(),
+                        handle: Some(session.session.clone()),
+                        arguments,
+                    };
+                    serde_json::to_value(&request)
+                        .map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })
+                        .and_then(|value| UntypedMessage::new(method, value))
+                };
+
+            // MCP: a fresh manager reports no servers; connecting to a
+            // command that cannot start is the framework's own failure.
+            let manager = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/mcp/op",
+                        "mcp.manager.open",
+                        vec![],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let manager_id = manager
+                .get("manager_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no manager id")
+                })?
+                .to_string();
+            let servers = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/mcp/op",
+                        "mcp.server.list",
+                        vec![serde_json::json!(manager_id)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                servers
+                    .get("servers")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len),
+                Some(0)
+            );
+            let refused = connection
+                .send_request(family_request(
+                    "_echo_agent/mcp/op",
+                    "mcp.server.connect",
+                    vec![
+                        serde_json::json!(manager_id),
+                        serde_json::json!("broken"),
+                        serde_json::json!("stdio"),
+                        serde_json::json!("/nonexistent/definitely-not-a-binary"),
+                        serde_json::json!([]),
+                    ],
+                )?)
+                .block_task()
+                .await
+                .expect_err("a broken MCP server must fail with the framework error");
+            assert_eq!(
+                typed_error(&refused)?.code,
+                ExtensionErrorCode::FrameworkError
+            );
+
+            // A2A: discovery against a closed loopback port surfaces the
+            // framework client's real connection failure.
+            let client = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/a2a/op",
+                        "a2a.client.open",
+                        vec![],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let client_id = client
+                .get("client_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no client id")
+                })?
+                .to_string();
+            let discovery = connection
+                .send_request(family_request(
+                    "_echo_agent/a2a/op",
+                    "a2a.discover",
+                    vec![
+                        serde_json::json!(client_id),
+                        serde_json::json!("http://127.0.0.1:9/.well-known/agent.json"),
+                    ],
+                )?)
+                .block_task()
+                .await
+                .expect_err("a closed port must fail discovery");
+            assert_eq!(
+                typed_error(&discovery)?.code,
+                ExtensionErrorCode::FrameworkError
+            );
+
+            // LSP: a fresh manager reports no running servers.
+            let lsp = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/lsp/op",
+                        "lsp.manager.open",
+                        vec![],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let lsp_id = lsp
+                .get("manager_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no lsp manager id")
+                })?
+                .to_string();
+            let statuses = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/lsp/op",
+                        "lsp.server.status",
+                        vec![serde_json::json!(lsp_id)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                statuses
+                    .get("servers")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len),
+                Some(0)
+            );
+
+            // Topology: full round trip through the framework tracker.
+            let tracker = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/topology/op",
+                        "topology.tracker.open",
+                        vec![],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            let tracker_id = tracker
+                .get("tracker_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no tracker id")
+                })?
+                .to_string();
+            for (node, kind) in [("orchestrator", "orchestrator"), ("researcher", "subagent")] {
+                let added = decode(
+                    connection
+                        .send_request(family_request(
+                            "_echo_agent/topology/op",
+                            "topology.node.add",
+                            vec![
+                                serde_json::json!(tracker_id),
+                                serde_json::json!(node),
+                                serde_json::json!(kind),
+                            ],
+                        )?)
+                        .block_task()
+                        .await?,
+                )?;
+                assert_eq!(added.get("ok"), Some(&serde_json::json!(true)));
+            }
+            let recorded = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/topology/op",
+                        "topology.call.record",
+                        vec![
+                            serde_json::json!(tracker_id),
+                            serde_json::json!("orchestrator"),
+                            serde_json::json!("researcher"),
+                            serde_json::json!("dispatch"),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(recorded.get("ok"), Some(&serde_json::json!(true)));
+            let snapshot = decode(
+                connection
+                    .send_request(family_request(
+                        "_echo_agent/topology/op",
+                        "topology.snapshot",
+                        vec![serde_json::json!(tracker_id)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                snapshot
+                    .get("nodes")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len),
+                Some(2)
+            );
+            assert_eq!(
+                snapshot
+                    .get("edges")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len),
+                Some(1)
+            );
+
+            // Owner isolation: a second session cannot reach the tracker.
+            let second_agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let second_session = connection
+                .send_request(SessionCreateRequest {
+                    agent: second_agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let request_for_other = |session: echo_sdk_protocol::handle::WireHandle,
+                                     arguments: Vec<serde_json::Value>|
+                 -> Result<UntypedMessage, agent_client_protocol::Error> {
+                let arguments = arguments
+                    .into_iter()
+                    .map(|value| {
+                        echo_sdk_protocol::scalar::WireValue::from_json(value).map_err(|error| {
+                            agent_client_protocol::Error::invalid_params().data(error.to_string())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+                    operation: "topology.snapshot".to_string(),
+                    signature_digest: digest.to_string(),
+                    handle: Some(session),
+                    arguments,
+                };
+                serde_json::to_value(&request)
+                    .map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })
+                    .and_then(|value| UntypedMessage::new("_echo_agent/topology/op", value))
+            };
+            let cross = connection
+                .send_request(request_for_other(
+                    second_session.session.clone(),
+                    vec![serde_json::json!(tracker_id)],
+                )?)
+                .block_task()
+                .await
+                .expect_err("cross-session topology access must fail");
+            assert_eq!(typed_error(&cross)?.code, ExtensionErrorCode::InvalidValue);
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+// ── Task graph RPC over the Session's own authority (plan 07 todo 3) ────────
+
+#[cfg(feature = "sdk-facade-adapters")]
+#[tokio::test]
+async fn task_rpc_shares_the_session_task_authority() -> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            use echo_sdk_protocol::handle::HandleKind;
+            use echo_sdk_protocol::scalar::WireU64;
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+
+            // The TaskRun handle id is the session-scoped graph identity.
+            let task_run = echo_sdk_protocol::handle::WireHandle {
+                id: session.acp_session_id.clone(),
+                generation: session.session.generation.clone(),
+                kind: HandleKind::TaskRun,
+            };
+            let created = connection
+                .send_request(TaskCreateRequest {
+                    task_run: task_run.clone(),
+                    spec: echo_sdk_protocol::scalar::WireValue::from_json(serde_json::json!({
+                        "tasks": [
+                            {"id": "plan", "title": "Plan", "description": "plan the work"},
+                            {"id": "execute", "title": "Execute", "description": "do the work",
+                             "depends_on": ["plan"]}
+                        ]
+                    }))
+                    .map_err(|error| {
+                        agent_client_protocol::Error::invalid_params().data(error.to_string())
+                    })?,
+                })
+                .block_task()
+                .await?;
+            assert_eq!(created.tasks.len(), 2);
+            assert_eq!(created.tasks[0].id, "plan");
+            assert_eq!(created.tasks[0].kind, HandleKind::PlanTask);
+            let revision_one = created.revision.to_u64().unwrap_or_default();
+            assert!(revision_one >= 1);
+
+            // List observes the same authority: both tasks pending at the
+            // committed revision.
+            let listed = connection
+                .send_request(TaskListRequest {
+                    task_run: task_run.clone(),
+                })
+                .block_task()
+                .await?;
+            assert_eq!(listed.tasks.len(), 2);
+            assert!(listed.tasks.iter().all(|summary| {
+                summary.status == echo_sdk_protocol::methods::WireTaskStatus::Pending
+                    && summary.revision.to_u64() == Some(revision_one)
+            }));
+
+            // A revision-checked patch moves through the same CAS: updating
+            // the title at the committed revision succeeds and advances it.
+            let updated = connection
+                .send_request(TaskUpdateRequest {
+                    task_run: task_run.clone(),
+                    patch: echo_sdk_protocol::scalar::WireValue::from_json(serde_json::json!({
+                        "base_revision": revision_one,
+                        "reason": "rpc rename",
+                        "operations": [
+                            {"op": "update", "task_id": "plan",
+                             "patch": {"title": "Plan v2"}}
+                        ]
+                    }))
+                    .map_err(|error| {
+                        agent_client_protocol::Error::invalid_params().data(error.to_string())
+                    })?,
+                })
+                .block_task()
+                .await?;
+            let revision_two = updated.revision.to_u64().unwrap_or_default();
+            assert!(revision_two > revision_one);
+            let listed = connection
+                .send_request(TaskListRequest {
+                    task_run: task_run.clone(),
+                })
+                .block_task()
+                .await?;
+            assert!(
+                listed
+                    .tasks
+                    .iter()
+                    .all(|summary| { summary.revision.to_u64() == Some(revision_two) })
+            );
+
+            // A stale writer is rejected by the framework CAS, not by the
+            // Host duplicating revision rules.
+            let stale = connection
+                .send_request(TaskUpdateRequest {
+                    task_run: task_run.clone(),
+                    patch: echo_sdk_protocol::scalar::WireValue::from_json(serde_json::json!({
+                        "base_revision": revision_one,
+                        "reason": "stale writer",
+                        "operations": [
+                            {"op": "update", "task_id": "plan",
+                             "patch": {"title": "stale"}}
+                        ]
+                    }))
+                    .map_err(|error| {
+                        agent_client_protocol::Error::invalid_params().data(error.to_string())
+                    })?,
+                })
+                .block_task()
+                .await
+                .expect_err("stale revision must be rejected");
+            let typed = typed_facade_error(&stale).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(
+                typed.code,
+                echo_sdk_protocol::error::ExtensionErrorCode::FrameworkError
+            );
+
+            // A closed session fails the authority ladder, not the framework.
+            connection
+                .send_request(SessionCloseRequest {
+                    session: session.session.clone(),
+                })
+                .block_task()
+                .await?;
+            let after_close = connection
+                .send_request(TaskListRequest {
+                    task_run: task_run.clone(),
+                })
+                .block_task()
+                .await
+                .expect_err("closed session must fail task rpc");
+            assert!(matches!(
+                after_close.code,
+                agent_client_protocol::ErrorCode::Other(_)
+            ));
+            let _ = WireU64::from_u64(0);
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+#[cfg(all(feature = "sdk-facade-adapters", feature = "framework-subagent"))]
+#[tokio::test]
+async fn task_execute_and_control_settle_through_the_runtime()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            use echo_sdk_protocol::handle::HandleKind;
+            use echo_sdk_protocol::methods::WireTaskStatus;
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let task_run = echo_sdk_protocol::handle::WireHandle {
+                id: session.acp_session_id.clone(),
+                generation: session.session.generation.clone(),
+                kind: HandleKind::TaskRun,
+            };
+            // Two sequential tasks: the first dispatches to a missing
+            // subagent (the runtime records the framework failure); the
+            // dependent sibling never starts.
+            let created = connection
+                .send_request(TaskCreateRequest {
+                    task_run: task_run.clone(),
+                    spec: echo_sdk_protocol::scalar::WireValue::from_json(serde_json::json!({
+                        "execution_mode": "sequential",
+                        "tasks": [
+                            {"id": "work", "title": "Work", "description": "do work",
+                             "extension": {"subagent": "missing-subagent"}},
+                            {"id": "later", "title": "Later", "description": "later work",
+                             "depends_on": ["work"]}
+                        ]
+                    }))
+                    .map_err(|error| {
+                        agent_client_protocol::Error::invalid_params().data(error.to_string())
+                    })?,
+                })
+                .block_task()
+                .await?;
+            assert_eq!(created.tasks.len(), 2);
+
+            // Drive the graph through the RuntimeTaskService; the missing
+            // subagent settles the dispatch as a framework failure.
+            let started = connection
+                .send_request(TaskExecuteRequest {
+                    task_run: task_run.clone(),
+                })
+                .block_task()
+                .await?;
+            assert_eq!(started.run.kind, HandleKind::TaskRun);
+
+            let mut settled = false;
+            for _ in 0..100 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let listed = connection
+                    .send_request(TaskListRequest {
+                        task_run: task_run.clone(),
+                    })
+                    .block_task()
+                    .await?;
+                let work = listed
+                    .tasks
+                    .iter()
+                    .find(|summary| summary.task.id == "work")
+                    .cloned()
+                    .ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error().data("work task missing")
+                    })?;
+                if matches!(work.status, WireTaskStatus::Failed { .. }) {
+                    settled = true;
+                    break;
+                }
+            }
+            assert!(settled, "missing subagent must settle the task as failed");
+
+            // Cancelling a task that never started has no live claim to
+            // settle: the control reports not-accepted with the unchanged
+            // status (claim-settling semantics, no fake transitions).
+            let cancelled = connection
+                .send_request(TaskControlRequest {
+                    task_run: task_run.clone(),
+                    task: echo_sdk_protocol::handle::WireHandle {
+                        id: "later".to_string(),
+                        generation: task_run.generation.clone(),
+                        kind: HandleKind::PlanTask,
+                    },
+                    action: ControlAction::Cancel,
+                })
+                .block_task()
+                .await?;
+            assert!(!cancelled.accepted);
+            assert_eq!(cancelled.status, WireTaskStatus::Pending);
+
+            // Subagent RPC over the shared control plane: an unknown
+            // subagent fails fast through the executor's own registry.
+            let dispatch = connection
+                .send_request(SubagentDispatchRequest {
+                    session: session.session.clone(),
+                    request: echo_sdk_protocol::scalar::WireValue::from_json(serde_json::json!({
+                        "agent_name": "ghost",
+                        "task": "anything"
+                    }))
+                    .map_err(|error| {
+                        agent_client_protocol::Error::invalid_params().data(error.to_string())
+                    })?,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await
+                .expect_err("unknown subagent must fail");
+            let typed = typed_facade_error(&dispatch).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(
+                typed.code,
+                echo_sdk_protocol::error::ExtensionErrorCode::FrameworkError
+            );
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}

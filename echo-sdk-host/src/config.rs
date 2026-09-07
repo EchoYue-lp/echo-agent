@@ -92,6 +92,15 @@ pub struct SdkProfileLimits {
     pub callback_timeout_secs: u64,
     /// Seconds allowed for the bounded shutdown chain.
     pub shutdown_timeout_secs: u64,
+    /// Maximum simultaneously open facade resources (memory namespaces,
+    /// workflows, journals, ledgers, run stores, MCP/A2A clients, …).
+    pub max_facade_resources: usize,
+    /// Maximum simultaneously open facade event/data streams.
+    pub max_facade_streams: usize,
+    /// Maximum items returned by one paginated facade query.
+    pub max_facade_page_items: usize,
+    /// Maximum typed arguments accepted by one facade family operation.
+    pub max_facade_operation_args: usize,
 }
 
 impl Default for SdkProfileLimits {
@@ -111,6 +120,10 @@ impl Default for SdkProfileLimits {
             max_callback_concurrency: 8,
             callback_timeout_secs: 30,
             shutdown_timeout_secs: 5,
+            max_facade_resources: 256,
+            max_facade_streams: 128,
+            max_facade_page_items: 512,
+            max_facade_operation_args: 64,
         }
     }
 }
@@ -131,6 +144,10 @@ impl SdkProfileLimits {
             || self.max_callback_concurrency == 0
             || self.callback_timeout_secs == 0
             || self.shutdown_timeout_secs == 0
+            || self.max_facade_resources == 0
+            || self.max_facade_streams == 0
+            || self.max_facade_page_items == 0
+            || self.max_facade_operation_args == 0
             || self.max_callback_concurrency > u32::MAX as usize
         {
             return Err(HostError::Config(
@@ -312,13 +329,10 @@ fn validate_agent_settings(config: &FrameworkConfig) -> Result<(), HostError> {
             "default_agent.agent.enable_tools must be true for ACP stdio MCP support".to_string(),
         ));
     }
-    #[cfg(not(feature = "sdk-extension-bridge"))]
-    if config.agent.enable_memory {
-        return Err(HostError::Config(
-            "default_agent.agent.enable_memory is not supported by the standard Host profile"
-                .to_string(),
-        ));
-    }
+    // `enable_memory` needs no Host-side gate: the framework's AgentConfig
+    // serves it with a plain store in every build (the facade memory family
+    // captures that same store); rejecting it per profile only made the
+    // config contract drift across feature combinations.
     #[cfg(not(feature = "sdk-extension-bridge"))]
     if config.agent.enable_human_in_loop {
         return Err(HostError::Config(
@@ -521,27 +535,31 @@ mod tests {
 
     #[test]
     fn unsupported_profile_settings_fail_before_stdio() {
-        let mut config = config();
-        config.default_agent.agent.enable_tools = false;
+        let mut no_tools = config();
+        no_tools.default_agent.agent.enable_tools = false;
         assert!(
-            config
+            no_tools
                 .validate_with_env(|_| Err("unused".to_string()))
                 .is_err()
         );
+        // `enable_memory` is served by the framework in every build (see
+        // validate_agent_settings); only human-in-loop stays profile-bound.
+        let mut with_memory = config();
+        with_memory.default_agent.agent.enable_memory = true;
+        assert!(
+            with_memory
+                .validate_with_env(|_| Err("unused".to_string()))
+                .is_ok()
+        );
         #[cfg(not(feature = "sdk-extension-bridge"))]
         {
-            for mutate in [
-                |agent: &mut AgentSettings| agent.enable_memory = true,
-                |agent: &mut AgentSettings| agent.enable_human_in_loop = true,
-            ] {
-                let mut config = config();
-                mutate(&mut config.default_agent.agent);
-                assert!(
-                    config
-                        .validate_with_env(|_| Err("unused".to_string()))
-                        .is_err()
-                );
-            }
+            let mut human_loop = config();
+            human_loop.default_agent.agent.enable_human_in_loop = true;
+            assert!(
+                human_loop
+                    .validate_with_env(|_| Err("unused".to_string()))
+                    .is_err()
+            );
         }
     }
 

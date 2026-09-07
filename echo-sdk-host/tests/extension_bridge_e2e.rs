@@ -237,6 +237,10 @@ async fn spawn_host(config: &Path) -> Result<HostProcess, Box<dyn std::error::Er
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "echo_sdk_host=debug".to_string()),
         )
+        // Fixture model servers are loopback; never route them through a
+        // developer proxy (reqwest follows the system proxy otherwise).
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

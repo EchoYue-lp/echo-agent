@@ -88,11 +88,32 @@ fn main() -> ExitCode {
         }
     };
     let snapshot = inv::render_public_api_snapshot(&profiles, &merged);
+    let manifest_document = inv::manifest_document(EXTENSION_PROTOCOL_VERSION, &profiles, &merged);
     let manifest = inv::render_parity_manifest(EXTENSION_PROTOCOL_VERSION, &profiles, &merged);
     let manifest_schema = inv::render_parity_manifest_schema();
 
+    // Canonical facade adapter catalog: one aggregate entry per route id,
+    // built from the same manifest obligations that freeze the route table.
+    let route_problems = echo_sdk_protocol::facade::validate_facade_route_table();
+    if !route_problems.is_empty() {
+        for problem in &route_problems {
+            eprintln!("facade route table violation: {problem}");
+        }
+        return ExitCode::FAILURE;
+    }
+    let route_obligations: Vec<&inv::RouteObligation> = manifest_document
+        .entries
+        .iter()
+        .map(|entry| &entry.route)
+        .collect();
+    let facade_catalog = echo_sdk_protocol::facade::build_facade_operation_catalog(
+        EXTENSION_PROTOCOL_VERSION,
+        &route_obligations,
+    );
+    let facade_catalog_json = echo_sdk_protocol::schema::canonical_json(&facade_catalog);
+
     // Source-compatibility digest over the fixed inputs: Cargo.lock plus the
-    // two freshly generated inventory artifacts. The Host embeds only this
+    // freshly generated inventory artifacts. The Host embeds only this
     // small document (design §17/§18); it never embeds the inventory.
     let cargo_lock_bytes = match std::fs::read(repo_root.join("Cargo.lock")) {
         Ok(bytes) => bytes,
@@ -114,12 +135,20 @@ fn main() -> ExitCode {
             echo_sdk_protocol::schema::SOURCE_CONTRACT_INPUTS[2],
             manifest.as_bytes(),
         ),
+        (
+            echo_sdk_protocol::schema::SOURCE_CONTRACT_INPUTS[3],
+            facade_catalog_json.as_bytes(),
+        ),
     ]);
 
     let mut artifacts: Vec<(PathBuf, String)> = vec![
         (repo_root.join(PUBLIC_API_TXT), snapshot),
         (repo_root.join(PARITY_MANIFEST_SCHEMA_JSON), manifest_schema),
         (repo_root.join(PARITY_MANIFEST_JSON), manifest),
+        (
+            repo_root.join("contracts/sdk/facade-operation-catalog.json"),
+            facade_catalog_json,
+        ),
         (
             repo_root.join("contracts/sdk/source-contract.json"),
             echo_sdk_protocol::schema::canonical_json(&source_contract),

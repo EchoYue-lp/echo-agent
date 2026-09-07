@@ -61,6 +61,19 @@ pub(crate) struct StreamRecord {
     pub run_handle_id: String,
 }
 
+/// One open facade resource (memory namespace, workflow, journal, ledger,
+/// run store, MCP/A2A client, …). The record carries addressing only —
+/// the business object stays with the owning Rust service (plan 07 todo 2).
+#[allow(dead_code)]
+pub(crate) struct FacadeResourceRecord {
+    /// Family the resource was opened through.
+    pub family: String,
+    /// Family-defined canonical resource type (e.g. `memory.namespace`).
+    pub resource_type: String,
+    /// Owning session handle id, when the resource is session-scoped.
+    pub owner_session: Option<String>,
+}
+
 /// One registered extension implementation. The record is connection-owned:
 /// it exists only while the registering connection lives and is never
 /// persisted or restored across a Host restart (design §12.1).
@@ -88,6 +101,7 @@ struct HandleInner {
     runs: HashMap<String, Arc<RunRecord>>,
     streams: HashMap<String, Arc<StreamRecord>>,
     extensions: HashMap<String, Arc<ExtensionRecord>>,
+    facade_resources: HashMap<String, Arc<FacadeResourceRecord>>,
     /// `(kind, implementation_id)` identity → extension handle id, for
     /// idempotent re-registration and typed conflicts.
     #[allow(dead_code)]
@@ -165,6 +179,7 @@ impl HandleRegistry {
                 runs: HashMap::new(),
                 streams: HashMap::new(),
                 extensions: HashMap::new(),
+                facade_resources: HashMap::new(),
                 extension_index: HashMap::new(),
                 tombstones: VecDeque::new(),
                 idempotency: HashMap::new(),
@@ -748,6 +763,91 @@ impl HandleRegistry {
                 inner.tombstones.pop_front();
             }
         }
+    }
+
+    // ── Facade resources ───────────────────────────────────────────────
+    // Staged with the facade runtime (plan 07 todo 2): family handlers
+    // (todos 3-5) open and close resources through this ladder; the
+    // admission ladder itself never allocates resources.
+    /// Open one facade resource handle (memory namespace, workflow,
+    /// journal, …). The id is minted once, generation-fenced and never
+    /// rebound; the business object stays with the owning service.
+    #[allow(dead_code)]
+    pub fn register_facade_resource(
+        &self,
+        max_facade_resources: usize,
+        family: &str,
+        resource_type: &str,
+        owner_session: Option<&str>,
+        operation: &str,
+    ) -> Result<(WireHandle, Arc<FacadeResourceRecord>), EchoSdkError> {
+        let mut inner = self.lock();
+        if inner.facade_resources.len() >= max_facade_resources {
+            return Err(sdk_error(
+                ExtensionErrorCode::PayloadTooLarge,
+                format!("open facade resource limit {max_facade_resources} reached"),
+                Retryability::AfterDelay,
+                operation,
+            ));
+        }
+        if let Some(owner) = owner_session
+            && !inner.sessions.contains_key(owner)
+        {
+            let session = handle(owner.to_string(), HandleKind::Session, inner.generation);
+            drop(inner);
+            return Err(self.resolve_error(&session, HandleKind::Session, operation));
+        }
+        self.enforce_budget(&mut inner, 1)?;
+        let id = Self::mint_id(&mut inner, HandleKind::FacadeResource)?;
+        let record = Arc::new(FacadeResourceRecord {
+            family: family.to_string(),
+            resource_type: resource_type.to_string(),
+            owner_session: owner_session.map(str::to_string),
+        });
+        inner.facade_resources.insert(id.clone(), record.clone());
+        Ok((
+            handle(id, HandleKind::FacadeResource, inner.generation),
+            record,
+        ))
+    }
+
+    /// Resolve one facade resource through the fixed ladder.
+    #[allow(dead_code)]
+    pub fn facade_resource(
+        &self,
+        handle: &WireHandle,
+        operation: &str,
+    ) -> Result<Arc<FacadeResourceRecord>, EchoSdkError> {
+        let found = self.lock().facade_resources.get(&handle.id).cloned();
+        found.ok_or_else(|| self.resolve_error(handle, HandleKind::FacadeResource, operation))
+    }
+
+    /// Close one facade resource; idempotent (`false` when already
+    /// closed). Stream cascade is the caller's job (the facade runtime
+    /// owns stream bookkeeping).
+    #[allow(dead_code)]
+    pub fn close_facade_resource(&self, handle: &WireHandle) -> Result<bool, EchoSdkError> {
+        const OPERATION: &str = "_echo_agent/facade/invoke";
+        let removed = {
+            let mut inner = self.lock();
+            inner.facade_resources.remove(&handle.id)
+        };
+        let Some(record) = removed else {
+            return if self.is_closed(handle) {
+                Ok(false)
+            } else {
+                Err(self.resolve_error(handle, HandleKind::FacadeResource, OPERATION))
+            };
+        };
+        drop(record);
+        let mut inner = self.lock();
+        inner
+            .tombstones
+            .push_back((HandleKind::FacadeResource, handle.id.clone()));
+        while inner.tombstones.len() > inner.max_handles {
+            inner.tombstones.pop_front();
+        }
+        Ok(true)
     }
 
     pub fn agent(&self, handle: &WireHandle) -> Result<Arc<AgentRecord>, EchoSdkError> {

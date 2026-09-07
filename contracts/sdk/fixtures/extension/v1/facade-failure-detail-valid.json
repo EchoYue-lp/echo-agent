@@ -1,0 +1,12 @@
+{
+  "name": "facade-failure-detail-valid",
+  "kind": "valid",
+  "target": "FacadeFailureDetail",
+  "description": "Typed admission-failure facts: operation identity, expected receiver kind and the missing feature.",
+  "payload": {
+    "operation": "echo_agent::eval::runner::EvalRunner",
+    "signature_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "receiver_kind": "facade_resource",
+    "required_feature": "eval"
+  }
+}

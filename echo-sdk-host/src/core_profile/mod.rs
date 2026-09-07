@@ -11,6 +11,8 @@
 pub(crate) mod events;
 #[cfg(feature = "sdk-extension-bridge")]
 pub(crate) mod extension_bridge;
+#[cfg(feature = "sdk-facade-adapters")]
+pub(crate) mod facade;
 pub(crate) mod handler;
 pub(crate) mod handles;
 pub(crate) mod persistence;
@@ -570,6 +572,149 @@ impl AcpConnectionProfile for SdkCoreProfile {
                 agent_client_protocol::on_receive_notification!(),
             );
         #[cfg(not(feature = "sdk-extension-bridge"))]
+        let builder = builder;
+        // ── Facade adapter runtime ─────────────────────────────────────
+        // Typed task handlers (todo 3) bind to the Session's own
+        // TaskRevisionService; the raw dispatcher claims the generic invoke
+        // surface and compiled family methods, everything else falls
+        // through to the official method-not-found (fail closed).
+        // Task execution and control share the session's DAG runtime and
+        // dispatch through the SubagentExecutor; compiled only with the
+        // framework subagent feature (todo 3).
+        #[cfg(all(feature = "sdk-facade-adapters", feature = "framework-subagent"))]
+        let builder = builder
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::TaskExecuteRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        facade::task_runtime::task_execute(
+                            state.clone(),
+                            request,
+                            responder,
+                            connection,
+                        )
+                        .await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::TaskControlRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        facade::task_runtime::task_control(
+                            state.clone(),
+                            request,
+                            responder,
+                            connection,
+                        )
+                        .await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        #[cfg(not(all(feature = "sdk-facade-adapters", feature = "framework-subagent")))]
+        let builder = builder;
+        #[cfg(feature = "sdk-facade-adapters")]
+        let builder = builder
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::TaskCreateRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        facade::task::task_create(state.clone(), request, responder, connection)
+                            .await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::TaskUpdateRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        facade::task::task_update(state.clone(), request, responder, connection)
+                            .await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::TaskListRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        facade::task::task_list(state.clone(), request, responder, connection).await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .with_handler(facade::FacadeDispatcher::new(self.state.clone()));
+        // Subagent handlers (todo 3) share the Session Agent's executor;
+        // compiled only with the framework subagent feature.
+        #[cfg(all(feature = "sdk-facade-adapters", feature = "framework-subagent"))]
+        let builder = builder
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::SubagentDispatchRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        facade::subagent::subagent_dispatch(
+                            state.clone(),
+                            request,
+                            responder,
+                            connection,
+                        )
+                        .await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::SubagentAwaitRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        facade::subagent::subagent_await(
+                            state.clone(),
+                            request,
+                            responder,
+                            connection,
+                        )
+                        .await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let state = self.state.clone();
+                    async move |request: echo_sdk_protocol::methods::SubagentControlRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                        facade::subagent::subagent_control(
+                            state.clone(),
+                            request,
+                            responder,
+                            connection,
+                        )
+                        .await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        #[cfg(not(all(feature = "sdk-facade-adapters", feature = "framework-subagent")))]
+        let builder = builder;
+        #[cfg(not(feature = "sdk-facade-adapters"))]
         let builder = builder;
         builder
     }

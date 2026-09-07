@@ -25,6 +25,7 @@ pub mod capability;
 pub mod catalog;
 pub mod error;
 pub mod event;
+pub mod facade;
 pub mod handle;
 pub mod inventory;
 pub mod methods;

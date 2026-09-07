@@ -59,5 +59,5 @@ pub use runtime_service::{
 };
 pub use task_tools::{
     TaskCreateTool, TaskListTool, TaskUpdateTool, build_task_create_tool, build_task_list_tool,
-    build_task_tools, build_task_update_tool,
+    build_task_tools, build_task_update_tool, parse_task_create_input, parse_task_update_input,
 };

@@ -21,6 +21,9 @@
 mod config;
 #[cfg(feature = "runtime")]
 mod factory;
+/// Compiled feature authority: the initialize advertisement derives from
+/// this table, never from runtime config (design §13).
+pub mod features;
 #[cfg(feature = "runtime")]
 mod mcp;
 

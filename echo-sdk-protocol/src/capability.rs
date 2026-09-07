@@ -67,6 +67,13 @@ pub enum ExtensionCapability {
     ExtensionBridge,
     /// Structured output contracts on runs.
     StructuredOutput,
+    /// Feature-family operation surfaces (`<family>/op` and the generic
+    /// `facade/invoke`): memory, workflow, state, delivery, trace, eval,
+    /// improve, MCP, A2A, LSP, channels, telemetry, topology and the tool
+    /// families. Availability of an individual family is gated by the
+    /// compiled root leaf features advertised in
+    /// [`EchoAgentCapability::features`], not by this capability.
+    FeatureSurfaces,
 }
 
 impl ExtensionCapability {
@@ -80,6 +87,7 @@ impl ExtensionCapability {
             ExtensionCapability::Subagents => "subagents",
             ExtensionCapability::ExtensionBridge => "extension_bridge",
             ExtensionCapability::StructuredOutput => "structured_output",
+            ExtensionCapability::FeatureSurfaces => "feature_surfaces",
         }
     }
 }
@@ -126,6 +134,16 @@ pub struct EchoLimits {
     pub max_extension_stream_bytes: WireU64,
     /// Maximum simultaneously in-flight reverse invocations per connection.
     pub max_inflight_extension_invocations: WireU64,
+    /// Maximum simultaneously open facade resources (memory namespaces,
+    /// workflows, journals, ledgers, run stores, …) per connection.
+    pub max_facade_resources: WireU64,
+    /// Maximum simultaneously open facade event/data streams per
+    /// connection.
+    pub max_facade_streams: WireU64,
+    /// Maximum items returned by one paginated facade query.
+    pub max_facade_page_items: WireU64,
+    /// Maximum typed arguments accepted by one facade family operation.
+    pub max_facade_operation_args: WireU64,
 }
 
 /// The capability object published under `initialize._meta.echo_agent`.
@@ -242,6 +260,13 @@ impl EchoAgentCapability {
             (
                 "max_inflight_extension_invocations",
                 &self.limits.max_inflight_extension_invocations,
+            ),
+            ("max_facade_resources", &self.limits.max_facade_resources),
+            ("max_facade_streams", &self.limits.max_facade_streams),
+            ("max_facade_page_items", &self.limits.max_facade_page_items),
+            (
+                "max_facade_operation_args",
+                &self.limits.max_facade_operation_args,
             ),
         ] {
             if value.to_u64() == Some(0) {
@@ -407,6 +432,10 @@ mod tests {
                 max_extension_payload_bytes: WireU64::from_u64(1_048_576),
                 max_extension_stream_bytes: WireU64::from_u64(262_144),
                 max_inflight_extension_invocations: WireU64::from_u64(8),
+                max_facade_resources: WireU64::from_u64(256),
+                max_facade_streams: WireU64::from_u64(128),
+                max_facade_page_items: WireU64::from_u64(512),
+                max_facade_operation_args: WireU64::from_u64(64),
             },
         }
     }
@@ -503,6 +532,10 @@ mod tests {
                     max_extension_payload_bytes: WireU64::from_u64(0),
                     max_extension_stream_bytes: WireU64::from_u64(0),
                     max_inflight_extension_invocations: WireU64::from_u64(0),
+                    max_facade_resources: WireU64::from_u64(0),
+                    max_facade_streams: WireU64::from_u64(0),
+                    max_facade_page_items: WireU64::from_u64(0),
+                    max_facade_operation_args: WireU64::from_u64(0),
                 },
             });
         assert_eq!(back, cap);
@@ -542,6 +575,10 @@ mod tests {
                 max_extension_payload_bytes: WireU64::from_u64(0),
                 max_extension_stream_bytes: WireU64::from_u64(0),
                 max_inflight_extension_invocations: WireU64::from_u64(0),
+                max_facade_resources: WireU64::from_u64(0),
+                max_facade_streams: WireU64::from_u64(0),
+                max_facade_page_items: WireU64::from_u64(0),
+                max_facade_operation_args: WireU64::from_u64(0),
             },
         };
         let back: EchoAgentCapability = serde_json::from_str(&json).unwrap_or(fallback);

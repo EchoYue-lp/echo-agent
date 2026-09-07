@@ -16,7 +16,7 @@ use crate::error::Result;
 use regex::Regex;
 
 /// PII 类型
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PiiType {
     /// 中国手机号（1xx-xxxx-xxxx）
     PhoneCn,
@@ -43,7 +43,7 @@ impl std::fmt::Display for PiiType {
 }
 
 /// 检测到的敏感信息实例
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PiiMatch {
     pub pii_type: PiiType,
     /// 起始字节位置

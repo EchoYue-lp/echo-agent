@@ -24,6 +24,11 @@ use std::sync::Arc;
 pub(crate) struct ToolExecutionSubsystem {
     /// Tool registry (Arc for sharing with StreamRunner).
     pub(crate) tool_manager: Arc<ToolManager>,
+    /// Task revision authority this agent's task tools operate through.
+    /// Retained so host-side surfaces (SDK task RPC, EKO TUI/GUI) share the
+    /// exact service the in-conversation `task_*` tools use instead of
+    /// constructing a second, divergent store.
+    pub(crate) task_revision_service: Arc<echo_orchestration::tasks::TaskRevisionService>,
     #[cfg(feature = "subagent")]
     pub(crate) subagent_registry: Arc<SubagentRegistry>,
     /// Shared subagent executor (with hook configuration) — reused by

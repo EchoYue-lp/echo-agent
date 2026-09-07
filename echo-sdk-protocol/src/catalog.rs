@@ -91,6 +91,30 @@ impl MethodDescriptor {
             | "_echo_agent/memory/op"
             | "_echo_agent/workflow/op"
             | "_echo_agent/state/op"
+            | "_echo_agent/delivery/op"
+            | "_echo_agent/trace/op"
+            | "_echo_agent/eval/op"
+            | "_echo_agent/improve/op"
+            | "_echo_agent/mcp/op"
+            | "_echo_agent/a2a/op"
+            | "_echo_agent/lsp/op"
+            | "_echo_agent/channels/op"
+            | "_echo_agent/telemetry/op"
+            | "_echo_agent/topology/op"
+            | "_echo_agent/web/op"
+            | "_echo_agent/files/op"
+            | "_echo_agent/shell/op"
+            | "_echo_agent/git/op"
+            | "_echo_agent/database/op"
+            | "_echo_agent/rag/op"
+            | "_echo_agent/chart/op"
+            | "_echo_agent/media/op"
+            | "_echo_agent/data/op"
+            | "_echo_agent/statistics/op"
+            | "_echo_agent/research/op"
+            | "_echo_agent/content-guard/op"
+            | "_echo_agent/project-rules/op"
+            | "_echo_agent/testing/op"
             | "_echo_agent/facade/invoke" => "FeatureOperationRequest",
             _ => "",
         }
@@ -126,6 +150,30 @@ impl MethodDescriptor {
             | "_echo_agent/memory/op"
             | "_echo_agent/workflow/op"
             | "_echo_agent/state/op"
+            | "_echo_agent/delivery/op"
+            | "_echo_agent/trace/op"
+            | "_echo_agent/eval/op"
+            | "_echo_agent/improve/op"
+            | "_echo_agent/mcp/op"
+            | "_echo_agent/a2a/op"
+            | "_echo_agent/lsp/op"
+            | "_echo_agent/channels/op"
+            | "_echo_agent/telemetry/op"
+            | "_echo_agent/topology/op"
+            | "_echo_agent/web/op"
+            | "_echo_agent/files/op"
+            | "_echo_agent/shell/op"
+            | "_echo_agent/git/op"
+            | "_echo_agent/database/op"
+            | "_echo_agent/rag/op"
+            | "_echo_agent/chart/op"
+            | "_echo_agent/media/op"
+            | "_echo_agent/data/op"
+            | "_echo_agent/statistics/op"
+            | "_echo_agent/research/op"
+            | "_echo_agent/content-guard/op"
+            | "_echo_agent/project-rules/op"
+            | "_echo_agent/testing/op"
             | "_echo_agent/facade/invoke" => Some("FeatureOperationResponse"),
             "_echo_agent/event"
             | "_echo_agent/gap"
@@ -367,28 +415,175 @@ pub const METHOD_CATALOG: &[MethodDescriptor] = &[
         summary: "Validate a structured-output contract against the facade schema.",
     },
     // ── Feature surfaces ──────────────────────────────────────────────
+    // One method per canonical facade family (see `facade.rs`): the family
+    // table owns the binding, individual family availability is gated by
+    // the compiled root leaf features advertised in `initialize` `_meta`.
     MethodDescriptor {
         name: "_echo_agent/memory/op",
         direction: Direction::Request,
-        capability: ExtensionCapability::Runs,
-        summary: "Memory store operations encoded with manifest-identified wire values.",
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Memory/conversation/compression operations over the Store authority.",
     },
     MethodDescriptor {
         name: "_echo_agent/workflow/op",
         direction: Direction::Request,
-        capability: ExtensionCapability::Runs,
-        summary: "Workflow definition/execution operations.",
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Workflow definition/execution/checkpoint operations.",
     },
     MethodDescriptor {
         name: "_echo_agent/state/op",
         direction: Direction::Request,
-        capability: ExtensionCapability::Runs,
-        summary: "State/delivery/trace operations over framework stores.",
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "RuntimeStateStore/EventJournal operations (checkpoint/sequence/recovery).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/delivery/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "DeliveryLedger claim/settlement/recovery operations.",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/trace/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "RunStore/TraceAnalyzer query and analysis operations.",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/eval/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Eval runner/report/comparator operations (feature: eval).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/improve/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Improvement loop trajectory/critique operations (feature: improve).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/mcp/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "MCP manager lifecycle/request operations (feature: mcp).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/a2a/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "A2A client/server lifecycle operations (feature: a2a).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/lsp/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "LSP manager/client operations (feature: lsp).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/channels/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Channel manager/session operations (feature: channels).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/telemetry/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Telemetry/skill-telemetry operations (feature: telemetry).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/topology/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Topology tracker operations (feature: topology).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/web/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Web tool family operations (feature: web).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/files/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "File tool family operations (feature: files).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/shell/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Shell tool family operations (feature: shell).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/git/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Git tool family operations (feature: git).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/database/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Database tool family operations (feature: database).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/rag/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "RAG tool family operations (feature: rag).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/chart/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Chart tool family operations (feature: chart).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/media/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Media tool family operations (feature: media).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/data/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Data tool family operations (feature: data).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/statistics/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Statistics tool family operations (feature: statistics).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/research/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Research tool family operations (feature: research).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/content-guard/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Content guard operations (feature: content-guard).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/project-rules/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Project rules resolution operations (feature: project-rules).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/testing/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Testing mock/fixture operations (feature: testing).",
     },
     MethodDescriptor {
         name: "_echo_agent/facade/invoke",
         direction: Direction::Request,
-        capability: ExtensionCapability::Runs,
+        capability: ExtensionCapability::FeatureSurfaces,
         summary: "Invoke one manifest-identified facade operation with typed wire values.",
     },
 ];

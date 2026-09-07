@@ -16,7 +16,11 @@ pub fn register_task_tools(
     agent: &mut crate::agent::ReactAgent,
     service: std::sync::Arc<TaskRevisionService>,
 ) {
-    for tool in build_task_tools(service) {
+    // The retained authority must follow the tools: host-side surfaces
+    // read `ReactAgent::task_revision_service()` and must observe exactly
+    // the service the registered tools operate through.
+    agent.set_task_revision_service(service);
+    for tool in build_task_tools(agent.task_revision_service().clone()) {
         agent.replace_tool(tool);
     }
 }

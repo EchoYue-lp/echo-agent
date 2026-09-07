@@ -39,7 +39,11 @@
       "max_extension_descriptor_bytes": "65536",
       "max_extension_payload_bytes": "1048576",
       "max_extension_stream_bytes": "262144",
-      "max_inflight_extension_invocations": "8"
+      "max_inflight_extension_invocations": "8",
+      "max_facade_resources": "256",
+      "max_facade_streams": "128",
+      "max_facade_page_items": "512",
+      "max_facade_operation_args": "64"
     }
   }
 }

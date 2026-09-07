@@ -714,3 +714,60 @@ fn catalog_helper_detects_violations() {
     assert!(problems.iter().any(|p| p.contains("underscore")));
     assert!(problems.iter().any(|p| p.contains("standard ACP method")));
 }
+
+// ── Facade operation fixtures (plan 07 todo 1) ──────────────────────────────
+
+#[test]
+fn facade_operation_fixtures_round_trip_and_reject() {
+    use echo_sdk_protocol::error::FacadeFailureDetail;
+    use echo_sdk_protocol::methods::FeatureOperationRequest;
+
+    for fixture in fixtures_of("FeatureOperationRequest") {
+        match fixture.kind {
+            FixtureKind::Valid => {
+                let parsed: FeatureOperationRequest =
+                    parse_fixture(&fixture).unwrap_or_else(|error| panic!("{error}"));
+                assert!(parsed.validate().is_ok(), "fixture {}", fixture.name);
+                let back = serde_json::to_value(&parsed).unwrap_or(serde_json::Value::Null);
+                assert_eq!(back, fixture.payload, "fixture {}", fixture.name);
+            }
+            FixtureKind::Invalid => {
+                let parsed: Result<FeatureOperationRequest, _> =
+                    serde_json::from_value(fixture.payload.clone());
+                let rejected = match parsed {
+                    Err(_) => true,
+                    Ok(request) => request.validate().is_err(),
+                };
+                assert!(rejected, "fixture {} must be rejected", fixture.name);
+            }
+        }
+    }
+    for fixture in fixtures_of("FacadeFailureDetail") {
+        match fixture.kind {
+            FixtureKind::Valid => {
+                let parsed: FacadeFailureDetail =
+                    parse_fixture(&fixture).unwrap_or_else(|error| panic!("{error}"));
+                assert!(parsed.validate().is_ok(), "fixture {}", fixture.name);
+            }
+            FixtureKind::Invalid => {
+                let parsed: Result<FacadeFailureDetail, _> =
+                    serde_json::from_value(fixture.payload.clone());
+                let rejected = match parsed {
+                    Err(_) => true,
+                    Ok(detail) => detail.validate().is_err(),
+                };
+                assert!(rejected, "fixture {} must be rejected", fixture.name);
+            }
+        }
+    }
+    // Wildcards are never executable identities: even a well-formed request
+    // carrying one fails closed.
+    let wildcard = FeatureOperationRequest {
+        operation: "_echo_agent/task/*".to_string(),
+        signature_digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        handle: None,
+        arguments: Vec::new(),
+    };
+    assert!(wildcard.validate().is_err());
+}

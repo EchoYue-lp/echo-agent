@@ -35,7 +35,11 @@
       "max_extension_descriptor_bytes": "1",
       "max_extension_payload_bytes": "1",
       "max_extension_stream_bytes": "1",
-      "max_inflight_extension_invocations": "1"
+      "max_inflight_extension_invocations": "1",
+      "max_facade_resources": "1",
+      "max_facade_streams": "1",
+      "max_facade_page_items": "1",
+      "max_facade_operation_args": "1"
     }
   },
   "expect_error": "invalid_value"

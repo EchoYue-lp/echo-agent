@@ -1,0 +1,25 @@
+{
+  "name": "facade-operation-request-valid",
+  "kind": "valid",
+  "target": "FeatureOperationRequest",
+  "description": "Exact facade identity plus matching sha256 signature digest, an optional receiver handle and typed wire arguments.",
+  "payload": {
+    "operation": "echo_agent::evolution::review::ReviewEngine",
+    "signature_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "handle": {
+      "id": "facade-memory-ns-1",
+      "generation": "1",
+      "kind": "facade_resource"
+    },
+    "arguments": [
+      {
+        "kind": "string",
+        "value": "namespace-a"
+      },
+      {
+        "kind": "u64",
+        "value": "42"
+      }
+    ]
+  }
+}

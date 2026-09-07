@@ -40,29 +40,6 @@
         "language_intrinsic"
       ]
     },
-    "AdapterObligation": {
-      "type": "object",
-      "required": [
-        "mapping",
-        "operation",
-        "validation"
-      ],
-      "properties": {
-        "mapping": {
-          "type": "string"
-        },
-        "operation": {
-          "type": "string"
-        },
-        "validation": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "additionalProperties": false
-    },
     "FeatureSemantics": {
       "type": "string",
       "enum": [
@@ -126,7 +103,7 @@
       "type": "object",
       "required": [
         "acp_relationship",
-        "adapter",
+        "canonical",
         "classification",
         "derived_traits",
         "feature_semantics",
@@ -135,6 +112,7 @@
         "kind",
         "languages",
         "path",
+        "route",
         "semantic_rule",
         "signatures",
         "source_paths"
@@ -143,8 +121,16 @@
         "acp_relationship": {
           "$ref": "#/definitions/AcpRelationship"
         },
-        "adapter": {
-          "$ref": "#/definitions/AdapterObligation"
+        "alias_of": {
+          "description": "Canonical facade path this entry re-exports; aliases share the source identity, signature, feature and handler of the canonical member, so the Host registers exactly one handler per route.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "canonical": {
+          "description": "Whether this facade path is the canonical member of its alias group (same canonical source identity). Aliases carry `alias_of` instead.",
+          "type": "boolean"
         },
         "classification": {
           "$ref": "#/definitions/SemanticClass"
@@ -180,6 +166,9 @@
         },
         "path": {
           "type": "string"
+        },
+        "route": {
+          "$ref": "#/definitions/RouteObligation"
         },
         "semantic_rule": {
           "type": "string"
@@ -233,6 +222,64 @@
       "properties": {
         "digest": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RouteObligation": {
+      "description": "Canonical adapter obligation of one facade item: exactly one route from `facade.rs`, the wire surface it rides, and the real validation references. Route ids never contain wildcards; re-export aliases share the source identity and therefore the same route (see `ManifestEntry::alias_of`).",
+      "type": "object",
+      "required": [
+        "mapping",
+        "route",
+        "surface",
+        "validation"
+      ],
+      "properties": {
+        "family": {
+          "description": "Adapter family name, when the route belongs to one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mapping": {
+          "type": "string"
+        },
+        "method": {
+          "description": "Primary wire method owned by the route, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "description": "Exact operation identity (generic invoke routes only).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_feature": {
+          "description": "Root leaf feature required by the route's family.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "description": "Canonical route id (`family:memory`, `core:task`, `invoke:<source identity>`, `bridge:tool`, `value`, `intrinsic:<reason>`, `standard:<acp method>`).",
+          "type": "string"
+        },
+        "surface": {
+          "description": "Wire surface kind: standard/core/family/bridge/invoke/value/intrinsic.",
+          "type": "string"
+        },
+        "validation": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

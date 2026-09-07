@@ -1,0 +1,11 @@
+{
+  "name": "facade-operation-empty-invalid",
+  "kind": "invalid",
+  "target": "FeatureOperationRequest",
+  "description": "Blank operation identities are rejected before any handler runs.",
+  "payload": {
+    "operation": "   ",
+    "signature_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "expect_error": "invalid_value"
+}

@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use echo_sdk_protocol::facade::{FACADE_FAMILIES, validate_facade_route_table};
 use echo_sdk_protocol::inventory::{
     AcpRelationship, FeatureSemantics, ItemKind, ManifestEntry, ParityManifest, SemanticClass,
 };
@@ -90,6 +91,12 @@ fn entries_have_complete_mapping_and_language_obligations() -> TestResult {
     let expected_languages: BTreeSet<&str> = ["typescript", "python", "java"].into_iter().collect();
     let mut classes = BTreeSet::new();
     let mut relationships = BTreeSet::new();
+    let paths: BTreeSet<&str> = manifest.entries.iter().map(|e| e.path.as_str()).collect();
+    let route_by_path: std::collections::BTreeMap<&str, &str> = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.route.route.as_str()))
+        .collect();
     for entry in &manifest.entries {
         assert!(
             !entry.path.ends_with("::*"),
@@ -102,9 +109,15 @@ fn entries_have_complete_mapping_and_language_obligations() -> TestResult {
             entry.path
         );
         assert!(
-            !entry.adapter.operation.is_empty(),
-            "missing adapter: {}",
+            !entry.route.route.is_empty(),
+            "missing canonical route: {}",
             entry.path
+        );
+        assert!(
+            !entry.route.route.contains('*'),
+            "wildcard route on {}: {}",
+            entry.path,
+            entry.route.route
         );
         assert!(
             !entry.semantic_rule.is_empty(),
@@ -112,10 +125,28 @@ fn entries_have_complete_mapping_and_language_obligations() -> TestResult {
             entry.path
         );
         assert!(
-            !entry.adapter.validation.is_empty(),
+            !entry.route.validation.is_empty(),
             "missing validation: {}",
             entry.path
         );
+        if let Some(alias_of) = &entry.alias_of {
+            assert!(!entry.canonical, "alias marked canonical: {}", entry.path);
+            assert!(
+                paths.contains(alias_of.as_str()),
+                "alias {} points at missing canonical {alias_of}",
+                entry.path
+            );
+            let canonical_route = route_by_path
+                .get(alias_of.as_str())
+                .copied()
+                .unwrap_or_default();
+            assert_eq!(
+                canonical_route,
+                entry.route.route.as_str(),
+                "alias {} and canonical {alias_of} must share one route",
+                entry.path
+            );
+        }
         let languages: BTreeSet<&str> = entry.languages.keys().map(String::as_str).collect();
         assert_eq!(
             languages, expected_languages,
@@ -253,7 +284,12 @@ fn known_facade_semantics_are_classified_correctly() -> TestResult {
         prelude_resource.acp_relationship,
         AcpRelationship::StandardProjection
     );
-    assert_eq!(prelude_resource.adapter, canonical_resource.adapter);
+    assert_eq!(prelude_resource.route, canonical_resource.route);
+    assert_eq!(
+        prelude_resource.alias_of.as_deref(),
+        Some("echo_agent::llm::types::LinkedResource")
+    );
+    assert!(canonical_resource.canonical);
     for field in [
         "annotations",
         "description",
@@ -273,7 +309,7 @@ fn known_facade_semantics_are_classified_correctly() -> TestResult {
             &format!("echo_agent::prelude::LinkedResource::{field}"),
         )?;
         assert_eq!(prelude.acp_relationship, canonical.acp_relationship);
-        assert_eq!(prelude.adapter, canonical.adapter);
+        assert_eq!(prelude.route, canonical.route);
     }
     assert_eq!(
         find_entry(&manifest, "echo_agent::acp::AcpAgentAdapter")?.acp_relationship,
@@ -340,5 +376,96 @@ fn manifest_and_snapshot_agree_on_profiles() -> TestResult {
         manifest()?.generated.profiles.join(", "),
         "profile lists diverged"
     );
+    Ok(())
+}
+
+#[test]
+fn facade_route_table_is_mechanically_closed() -> TestResult {
+    assert!(
+        validate_facade_route_table().is_empty(),
+        "route table violations: {:?}",
+        validate_facade_route_table()
+    );
+    // Every source-routed family must own at least one canonical manifest
+    // item (aliases do not count — one handler per route needs one real
+    // item to serve).
+    let manifest = manifest()?;
+    let mut items_by_family: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    // One operation identity may legitimately carry several signature
+    // variants (cfg-shaped re-exports); the exact (operation, signature)
+    // pair is what a request must match, so that pair must be unique.
+    let mut invoke_signatures: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for entry in &manifest.entries {
+        if let Some(family) = entry.route.family.as_deref()
+            && entry.canonical
+        {
+            *items_by_family.entry(family).or_insert(0) += 1;
+        }
+        if let Some(operation) = entry.route.operation.as_deref()
+            && entry.alias_of.is_none()
+        {
+            for signature in &entry.signatures {
+                assert!(
+                    invoke_signatures.insert((operation, signature.digest.as_str())),
+                    "duplicate invoke operation signature {operation} {}",
+                    signature.digest
+                );
+            }
+        }
+    }
+    for descriptor in FACADE_FAMILIES {
+        if !descriptor.family.is_source_routed() {
+            continue;
+        }
+        let family = descriptor.family.as_str();
+        let items = items_by_family.get(family).copied().unwrap_or(0);
+        assert!(
+            items > 0,
+            "source-routed family {family} has no canonical manifest item"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn facade_operation_catalog_artifact_matches_manifest() -> TestResult {
+    let manifest = manifest()?;
+    let catalog: serde_json::Value =
+        serde_json::from_str(&read("contracts/sdk/facade-operation-catalog.json")?)?;
+    let total_items = catalog
+        .get("total_items")
+        .and_then(|v| v.as_u64())
+        .ok_or("facade catalog missing total_items")?;
+    assert_eq!(
+        total_items,
+        manifest.entries.len() as u64,
+        "facade catalog item total drifted from the parity manifest"
+    );
+    let routes = catalog
+        .get("routes")
+        .and_then(|v| v.as_array())
+        .ok_or("facade catalog missing routes")?;
+    let mut route_ids: Vec<&str> = routes
+        .iter()
+        .filter_map(|route| route.get("route").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        route_ids.iter().all(|id| !id.contains('*')),
+        "wildcard route in the generated catalog"
+    );
+    route_ids.sort_unstable();
+    route_ids.dedup();
+    let manifest_routes: BTreeSet<&str> = manifest
+        .entries
+        .iter()
+        .map(|e| e.route.route.as_str())
+        .collect();
+    for id in route_ids {
+        assert!(
+            manifest_routes.contains(id),
+            "generated catalog route {id} is absent from the manifest"
+        );
+    }
     Ok(())
 }

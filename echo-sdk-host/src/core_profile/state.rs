@@ -51,6 +51,9 @@ pub(crate) struct CoreProfileState {
     deliveries: Mutex<HashMap<String, Arc<StreamDelivery>>>,
     #[cfg(feature = "sdk-extension-bridge")]
     pub extension_shared: Arc<super::extension_bridge::ExtensionBridgeShared>,
+    #[cfg(feature = "sdk-facade-adapters")]
+    #[allow(dead_code)]
+    pub facade: super::facade::SessionFacadeRuntime,
     pending_settlements: AtomicUsize,
     settlement_notify: Notify,
     settlement_error: Mutex<Option<String>>,
@@ -125,6 +128,8 @@ impl CoreProfileState {
             default_definition.clone(),
             limits.max_open_handles,
         );
+        #[cfg(feature = "sdk-facade-adapters")]
+        let facade = super::facade::SessionFacadeRuntime::new(&limits);
         let state = Arc::new(Self {
             services: OnceLock::new(),
             handles,
@@ -140,6 +145,8 @@ impl CoreProfileState {
             deliveries: Mutex::new(HashMap::new()),
             #[cfg(feature = "sdk-extension-bridge")]
             extension_shared,
+            #[cfg(feature = "sdk-facade-adapters")]
+            facade,
             pending_settlements: AtomicUsize::new(0),
             settlement_notify: Notify::new(),
             settlement_error: Mutex::new(None),
@@ -344,11 +351,35 @@ fn build_advertisement(
         capability: ExtensionCapability::ExtensionBridge,
         required: false,
     });
+    // The facade runtime compiles the generic invoke surface and the
+    // admission ladder; family capabilities land with their handlers
+    // (todos 3-5) — never before. The typed task handlers (todo 3) bind to
+    // the Session's own TaskRevisionService.
+    #[cfg(feature = "sdk-facade-adapters")]
+    capabilities.push(CapabilityDeclaration {
+        capability: ExtensionCapability::FeatureSurfaces,
+        required: false,
+    });
+    #[cfg(feature = "sdk-facade-adapters")]
+    capabilities.push(CapabilityDeclaration {
+        capability: ExtensionCapability::TaskGraph,
+        required: false,
+    });
+    #[cfg(all(feature = "sdk-facade-adapters", feature = "framework-subagent"))]
+    capabilities.push(CapabilityDeclaration {
+        capability: ExtensionCapability::Subagents,
+        required: false,
+    });
+    #[cfg(feature = "sdk-facade-adapters")]
+    capabilities.push(CapabilityDeclaration {
+        capability: ExtensionCapability::StructuredOutput,
+        required: false,
+    });
     let advertisement = EchoAgentCapability {
         extension_protocol_version: echo_sdk_protocol::EXTENSION_PROTOCOL_VERSION,
         contract_digest,
         source_contract_digest: source_digest,
-        features: compiled_leaf_features(),
+        features: crate::features::compiled_leaf_features(),
         capabilities,
         limits: EchoLimits {
             max_message_bytes: WireU64::from_u64(limits.max_frame_bytes),
@@ -398,6 +429,18 @@ fn build_advertisement(
             max_inflight_extension_invocations: WireU64::from_u64(
                 u64::try_from(limits.max_extension_invocations).unwrap_or(u64::MAX),
             ),
+            max_facade_resources: WireU64::from_u64(
+                u64::try_from(limits.max_facade_resources).unwrap_or(u64::MAX),
+            ),
+            max_facade_streams: WireU64::from_u64(
+                u64::try_from(limits.max_facade_streams).unwrap_or(u64::MAX),
+            ),
+            max_facade_page_items: WireU64::from_u64(
+                u64::try_from(limits.max_facade_page_items).unwrap_or(u64::MAX),
+            ),
+            max_facade_operation_args: WireU64::from_u64(
+                u64::try_from(limits.max_facade_operation_args).unwrap_or(u64::MAX),
+            ),
         },
     };
     let problems = advertisement.validate_shape();
@@ -410,22 +453,8 @@ fn build_advertisement(
     Ok(advertisement)
 }
 
-/// Leaf `echo_agent` features compiled into this Host binary. The core
-/// profile enables `acp` (via `runtime`) and `mcp`; future host features
-/// extend this list, and the advertisement is validated against it.
-fn compiled_leaf_features() -> Vec<String> {
-    let mut features = vec!["acp".to_string(), "mcp".to_string()];
-    // The bridge compiles the framework surfaces its proxies inject into;
-    // the advertisement must name them so capability checks stay honest.
-    #[cfg(feature = "sdk-extension-bridge")]
-    {
-        features.push("human-loop".to_string());
-        features.push("subagent".to_string());
-    }
-    features.sort();
-    features.dedup();
-    features
-}
+// The advertisement feature list is derived from the compiled Cargo
+// feature set (`crate::features`), never duplicated here or in config.
 
 pub(crate) fn advertisement_meta(
     advertisement: &EchoAgentCapability,

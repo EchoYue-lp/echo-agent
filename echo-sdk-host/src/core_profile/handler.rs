@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::events::StreamDelivery;
-use super::handles::{ExtensionRegistrationLimits, RunRecord};
+use super::handles::RunRecord;
 use super::persistence::recovered_receipt_wire;
 use super::state::CoreProfileState;
 use super::wire;
@@ -44,7 +44,7 @@ use crate::factory::PreparedAgentDefinition;
 
 /// Admission step 1: un-negotiated connections get the official
 /// method-not-found, never a typed extension error.
-async fn require_extended(
+pub(crate) async fn require_extended(
     state: &CoreProfileState,
     method: &str,
 ) -> std::result::Result<Arc<echo_agent::acp::AcpConnectionServices>, agent_client_protocol::Error>
@@ -67,7 +67,7 @@ async fn require_extended(
 }
 
 /// Admission step 2: capability gate with typed mismatch errors.
-fn require_capability(
+pub(crate) fn require_capability(
     state: &CoreProfileState,
     capability: ExtensionCapability,
     method: &str,
@@ -734,6 +734,15 @@ pub(crate) async fn session_close(
         state.handles.remove_run(&run_id);
         state.remove_delivery_for_run(&run_id);
     }
+    // Drop the Session's captured authority services with the Session: the
+    // task/subagent RPC surfaces can no longer resolve them afterwards.
+    state
+        .session_factory
+        .remove_session_services(&acp_session_id);
+    // Workflow graph/state resources are owner-bound; cancel and drop them
+    // with their session instead of leaking compiled graphs.
+    #[cfg(feature = "sdk-facade-adapters")]
+    state.facade.drop_workflow_resources_of(&acp_session_id);
     responder.respond(SessionCloseResponse { released })
 }
 
@@ -1533,7 +1542,7 @@ mod extension_handlers {
         // of this connection goes through this single handle.
         state.extension_shared.bind_connection(connection.clone());
         match state.handles.register_extension(
-            ExtensionRegistrationLimits {
+            crate::core_profile::handles::ExtensionRegistrationLimits {
                 max_extensions: state.limits.max_registered_extensions,
                 max_descriptor_bytes: state.limits.max_extension_descriptor_bytes,
             },

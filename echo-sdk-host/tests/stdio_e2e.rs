@@ -148,7 +148,11 @@ fn host_agent(
     AcpAgent::new(
         AcpAgentConfig::new(binary())
             .arg("--config")
-            .arg(config_path),
+            .arg(config_path)
+            // Fixture model servers are loopback; never route them through
+            // a developer proxy (reqwest follows the system proxy otherwise).
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost"),
     )
     .with_debug(move |line, direction| {
         let target = match direction {
@@ -337,6 +341,10 @@ async fn stdin_eof_exits_cleanly_without_stdout_noise() -> Result<(), Box<dyn st
     let mut child = tokio::process::Command::new(binary())
         .arg("--config")
         .arg(config)
+        // Fixture model servers are loopback; never route them through a
+        // developer proxy (reqwest follows the system proxy otherwise).
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

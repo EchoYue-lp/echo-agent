@@ -1389,16 +1389,34 @@ pub struct LanguageStatusRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct AdapterObligation {
-    pub operation: String,
-    pub mapping: String,
-    pub validation: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ManifestSignature {
     pub digest: String,
+}
+
+/// Canonical adapter obligation of one facade item: exactly one route from
+/// `facade.rs`, the wire surface it rides, and the real validation
+/// references. Route ids never contain wildcards; re-export aliases share
+/// the source identity and therefore the same route (see
+/// `ManifestEntry::alias_of`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteObligation {
+    /// Canonical route id (`family:memory`, `core:task`,
+    /// `invoke:<source identity>`, `bridge:tool`, `value`,
+    /// `intrinsic:<reason>`, `standard:<acp method>`).
+    pub route: String,
+    /// Wire surface kind: standard/core/family/bridge/invoke/value/intrinsic.
+    pub surface: String,
+    /// Adapter family name, when the route belongs to one.
+    pub family: Option<String>,
+    /// Primary wire method owned by the route, when applicable.
+    pub method: Option<String>,
+    /// Exact operation identity (generic invoke routes only).
+    pub operation: Option<String>,
+    /// Root leaf feature required by the route's family.
+    pub required_feature: Option<String>,
+    pub mapping: String,
+    pub validation: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1415,7 +1433,14 @@ pub struct ManifestEntry {
     pub acp_relationship: AcpRelationship,
     pub semantic_rule: String,
     pub derived_traits: BTreeSet<String>,
-    pub adapter: AdapterObligation,
+    pub route: RouteObligation,
+    /// Whether this facade path is the canonical member of its alias group
+    /// (same canonical source identity). Aliases carry `alias_of` instead.
+    pub canonical: bool,
+    /// Canonical facade path this entry re-exports; aliases share the
+    /// source identity, signature, feature and handler of the canonical
+    /// member, so the Host registers exactly one handler per route.
+    pub alias_of: Option<String>,
     pub languages: BTreeMap<String, LanguageStatusRecord>,
 }
 
@@ -1610,75 +1635,45 @@ fn shape_is_process_local(shape: &str) -> bool {
     .any(|marker| shape.contains(marker))
 }
 
-fn adapter_for(
+fn route_obligation_for(
     entry: &InventoryEntry,
     class: SemanticClass,
     relationship: AcpRelationship,
-    semantic_rule: &str,
-) -> AdapterObligation {
-    let linked_resource_family = entry.source_paths.iter().any(|source| {
-        source == "echo_core::llm::types::LinkedResource"
-            || source
-                .strip_prefix("echo_core::llm::types::LinkedResource::")
-                .is_some_and(|rest| !rest.is_empty())
-    });
-    let operation = if relationship == AcpRelationship::LanguageIntrinsic {
-        "language:facade".to_string()
-    } else if linked_resource_family {
-        "acp:v1/session/prompt".to_string()
-    } else if entry.path == "echo_agent::acp::AcpSessionContext"
-        || entry
-            .path
-            .strip_prefix("echo_agent::acp::AcpSessionContext::")
-            .is_some_and(|rest| !rest.is_empty())
-    {
-        "acp:v1/initialize+session/new".to_string()
-    } else if relationship == AcpRelationship::Standard {
-        "acp:v1".to_string()
-    } else if relationship == AcpRelationship::StandardProjection {
-        "acp:v1+_echo_agent/facade/invoke".to_string()
-    } else if class == SemanticClass::Extension {
-        "_echo_agent/extension/register+invoke".to_string()
-    } else if entry.path.contains("::tasks::") {
-        "_echo_agent/task/*".to_string()
-    } else if entry.path.contains("::subagent::") {
-        "_echo_agent/subagent/*".to_string()
-    } else if entry.path.contains("::memory::") || entry.path.contains("::compression::") {
-        "_echo_agent/memory/op".to_string()
-    } else if entry.path.contains("::workflow::") {
-        "_echo_agent/workflow/op".to_string()
-    } else if class == SemanticClass::Handle {
-        "_echo_agent/agent/*".to_string()
-    } else {
-        "_echo_agent/facade/invoke".to_string()
-    };
-    let validation = if relationship == AcpRelationship::Standard
-        || linked_resource_family
-        || entry.path == "echo_agent::acp::AcpSessionContext"
-        || entry
-            .path
-            .strip_prefix("echo_agent::acp::AcpSessionContext::")
-            .is_some_and(|rest| !rest.is_empty())
-    {
-        vec![
-            "tests/acp_agent_adapter.rs".to_string(),
-            "echo-sdk-protocol/tests/acp_baseline.rs".to_string(),
-        ]
-    } else {
-        vec![
-            "echo-sdk-protocol/tests/facade_inventory.rs#known_facade_semantics_are_classified_correctly".to_string(),
-            "echo-sdk-protocol/tests/extension_contract.rs".to_string(),
-        ]
-    };
-    AdapterObligation {
-        operation,
+    semantic_rule: &'static str,
+) -> RouteObligation {
+    let route = crate::facade::resolve_route(entry, class, relationship, semantic_rule);
+    let family = route.family();
+    RouteObligation {
+        route: route.route_id(),
+        surface: route.surface().to_string(),
+        family: family.map(|family| family.as_str().to_string()),
+        method: route.method().map(str::to_string),
+        operation: route.operation().map(str::to_string),
+        required_feature: family
+            .and_then(|family| family.required_feature())
+            .map(str::to_string),
         mapping: format!(
             "{} via {}; Rust remains authoritative",
             relationship.as_str(),
             semantic_rule
         ),
-        validation,
+        validation: family
+            .map(|family| {
+                family
+                    .validation()
+                    .iter()
+                    .map(|reference| reference.to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
+}
+
+/// Facade namespaces that only re-export items defined elsewhere; when an
+/// alias group has members outside them, the canonical member never comes
+/// from a re-export namespace.
+fn is_reexport_namespace(path: &str) -> bool {
+    path.starts_with("echo_agent::prelude::") || path.starts_with("echo_agent::advanced::")
 }
 
 fn language_target(class: SemanticClass) -> &'static str {
@@ -1756,6 +1751,39 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
             current = parent;
         }
     }
+    // Alias groups: facade paths sharing one canonical source identity (and
+    // one signature shape) are re-exports of the same item. Each group has
+    // exactly one canonical member — never from a re-export-only namespace
+    // when an alternative exists — and every other member records it.
+    let mut alias_groups: BTreeMap<(String, Vec<String>), Vec<String>> = BTreeMap::new();
+    for entry in merged
+        .iter()
+        .filter(|entry| !(entry.kind == ItemKind::TraitImpl && entry.automatically_derived))
+    {
+        let identity = crate::facade::canonical_source_identity(entry);
+        let signatures: Vec<String> = entry.signatures.keys().cloned().collect();
+        alias_groups
+            .entry((identity, signatures))
+            .or_default()
+            .push(entry.path.clone());
+    }
+    let mut canonical_member_of: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for paths in alias_groups.values() {
+        let mut sorted = paths.clone();
+        sorted.sort();
+        let canonical = sorted
+            .iter()
+            .find(|path| !is_reexport_namespace(path))
+            .or_else(|| sorted.first())
+            .cloned();
+        for path in &sorted {
+            let alias_of = match &canonical {
+                Some(canonical) if canonical != path => Some(canonical.clone()),
+                _ => None,
+            };
+            canonical_member_of.insert(path.clone(), alias_of);
+        }
+    }
     merged
         .iter()
         .filter(|entry| !(entry.kind == ItemKind::TraitImpl && entry.automatically_derived))
@@ -1780,6 +1808,9 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
             } else {
                 FeatureSemantics::AnyOf
             };
+            let alias_of = canonical_member_of
+                .get(&entry.path)
+                .and_then(|alias| alias.clone());
             ManifestEntry {
                 path: entry.path.clone(),
                 kind: entry.kind,
@@ -1801,7 +1832,9 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
                     .get(&entry.path)
                     .cloned()
                     .unwrap_or_default(),
-                adapter: adapter_for(entry, classification, acp_relationship, semantic_rule),
+                route: route_obligation_for(entry, classification, acp_relationship, semantic_rule),
+                canonical: alias_of.is_none(),
+                alias_of,
                 languages: LANGUAGES
                     .iter()
                     .map(|language| {
