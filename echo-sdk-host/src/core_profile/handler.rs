@@ -326,7 +326,7 @@ pub(crate) async fn session_create(
                 request.agent.id.clone(),
                 cwd,
             ) {
-                Ok((session, session_record)) => {
+                Ok((session, task_run, session_record)) => {
                     let cwd_wire = match services
                         .sessions()
                         .get(&agent_client_protocol::schema::v1::SessionId::new(
@@ -396,6 +396,7 @@ pub(crate) async fn session_create(
                     }
                     responder.respond(SessionCreateResponse {
                         session,
+                        task_run,
                         acp_session_id,
                     })
                 }
@@ -639,7 +640,7 @@ pub(crate) async fn session_load(
             .await
             .map(|session| session.context.cwd.clone()),
     ) {
-        Ok((session, session_record)) => {
+        Ok((session, task_run, session_record)) => {
             let cwd_wire = services
                 .sessions()
                 .get(&agent_client_protocol::schema::v1::SessionId::new(
@@ -666,6 +667,7 @@ pub(crate) async fn session_load(
                 })?;
             responder.respond(SessionLoadResponse {
                 session,
+                task_run,
                 acp_session_id,
                 recovered_sequence: (recovered_sequence > 0)
                     .then(|| WireU64::from_u64(recovered_sequence)),
@@ -739,10 +741,18 @@ pub(crate) async fn session_close(
     state
         .session_factory
         .remove_session_services(&acp_session_id);
-    // Workflow graph/state resources are owner-bound; cancel and drop them
-    // with their session instead of leaking compiled graphs.
+    // Facade resources are owner-bound: close their handles in the unified
+    // authority first, then cancel task executions and subagent dispatches
+    // of this session and drop workflow/state/delivery/trace/integration
+    // business records with their session instead of leaking them.
     #[cfg(feature = "sdk-facade-adapters")]
-    state.facade.drop_workflow_resources_of(&acp_session_id);
+    {
+        let closed = state.handles.close_facade_resources_of(&acp_session_id);
+        state
+            .facade
+            .drop_session_resources_of(&acp_session_id, &closed)
+            .await;
+    }
     responder.respond(SessionCloseResponse { released })
 }
 
@@ -825,6 +835,40 @@ pub(crate) async fn run_start(
     let stream_id = identity.stream_id.as_str().to_string();
     let turn = match &request.input {
         RunInput::Chat { text } => TurnRequest::new(identity, text.clone()),
+        RunInput::ChatMessage { message } => {
+            let message = wire::message_from_wire(message.clone()).map_err(|error| {
+                wire::sdk_error(
+                    ExtensionErrorCode::InvalidValue,
+                    error,
+                    Retryability::Never,
+                    method,
+                )
+            });
+            let message = match message {
+                Ok(message) => message,
+                Err(error) => {
+                    return respond_error(|error| responder.respond_with_error(error), error);
+                }
+            };
+            TurnRequest::from_message(identity, message)
+        }
+        RunInput::ExecuteMessage { message } => {
+            let message = wire::message_from_wire(message.clone()).map_err(|error| {
+                wire::sdk_error(
+                    ExtensionErrorCode::InvalidValue,
+                    error,
+                    Retryability::Never,
+                    method,
+                )
+            });
+            let message = match message {
+                Ok(message) => message,
+                Err(error) => {
+                    return respond_error(|error| responder.respond_with_error(error), error);
+                }
+            };
+            TurnRequest::from_message(identity, message).mode(TurnMode::Execute)
+        }
         RunInput::Execute { task } => {
             TurnRequest::new(identity, task.clone()).mode(TurnMode::Execute)
         }
@@ -1007,8 +1051,8 @@ pub(crate) async fn run_start(
 
 fn input_kind(input: &RunInput) -> &'static str {
     match input {
-        RunInput::Chat { .. } => "chat",
-        RunInput::Execute { .. } => "execute",
+        RunInput::Chat { .. } | RunInput::ChatMessage { .. } => "chat",
+        RunInput::ExecuteMessage { .. } | RunInput::Execute { .. } => "execute",
     }
 }
 
@@ -1533,6 +1577,22 @@ mod extension_handlers {
                 wire::sdk_error(
                     ExtensionErrorCode::InvalidConfig,
                     reason,
+                    Retryability::Never,
+                    method,
+                ),
+            );
+        }
+        #[cfg(not(feature = "framework-channels"))]
+        if matches!(
+            request.kind,
+            echo_sdk_protocol::methods::ExtensionKind::ChannelPlugin
+                | echo_sdk_protocol::methods::ExtensionKind::ChannelMessageHandler
+        ) {
+            return respond_error(
+                |error| responder.respond_with_error(error),
+                wire::sdk_error(
+                    ExtensionErrorCode::FeatureUnavailable,
+                    "channel extensions require the framework-channels Host feature",
                     Retryability::Never,
                     method,
                 ),

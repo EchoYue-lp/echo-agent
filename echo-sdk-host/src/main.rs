@@ -38,15 +38,11 @@ async fn main() -> ExitCode {
 fn init_tracing() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            // The official runtime's "Handler errored" warn formats the whole handler
-            // chain as Debug; that nested-generic string grows exponentially with every
-            // registered handler (minutes of formatting past ~30 handlers) and a plain
-            // client's method-not-found fires it on every forced extension call. The
-            // typed error still reaches the client through the responder; the log line
-            // is pure diagnostics, so the Host pins that target to .
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new("warn,agent_client_protocol::jsonrpc::incoming_actor=error")
-            }),
+            // The official runtime can format an entire nested handler chain
+            // for every expected method-not-found during plain-client
+            // negotiation. Keep the source-built Host quiet by default; a
+            // caller can opt into diagnostics with RUST_LOG explicitly.
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error")),
         )
         .with_writer(std::io::stderr)
         .try_init()

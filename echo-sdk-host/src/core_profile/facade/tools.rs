@@ -16,10 +16,17 @@
 use echo_agent::tools::{Tool, ToolContext, ToolParameters};
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
 use echo_sdk_protocol::methods::FeatureOperationRequest;
+#[cfg(feature = "framework-content-guard")]
+use echo_sdk_protocol::scalar::WireField;
 use echo_sdk_protocol::scalar::WireValue;
+#[cfg(feature = "framework-project-rules")]
 use std::path::Path;
+use std::sync::Arc;
+
+use crate::factory::SessionAuthorityServices;
 
 use super::super::wire;
+use super::SessionFacadeRuntime;
 
 /// The tool families this module serves; one entry per family method the
 /// catalog owns. `testing` is deliberately absent: that module is mock
@@ -55,7 +62,150 @@ fn invalid(operation: &str, message: impl Into<String>) -> EchoSdkError {
 /// like the `StandardToolPack` constructs them; the only difference is
 /// that the file-write tools are included so the facade surface matches
 /// the framework's actual capability menu.
-fn family_tools(family: &str) -> Vec<(String, std::sync::Arc<dyn Tool>)> {
+struct FamilyTools {
+    tools: Vec<(String, Arc<dyn Tool>)>,
+    unavailable: Vec<(String, String)>,
+}
+
+/// Session-owned RAG dependencies. The vector store must be shared by the
+/// index and search tools of one ACP session, while remaining isolated from
+/// every other session on the same Host connection.
+#[cfg(feature = "framework-rag")]
+pub(crate) struct RagToolSet {
+    store: echo_agent::tools::rag::RagStore,
+    embedder: Arc<dyn echo_agent::memory::Embedder>,
+}
+
+#[cfg(feature = "framework-rag")]
+pub(crate) struct RagToolSetError {
+    code: ExtensionErrorCode,
+    message: String,
+}
+
+#[cfg(feature = "framework-rag")]
+impl RagToolSetError {
+    fn feature_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: ExtensionErrorCode::FeatureUnavailable,
+            message: message.into(),
+        }
+    }
+
+    fn invalid_config(message: impl Into<String>) -> Self {
+        Self {
+            code: ExtensionErrorCode::InvalidConfig,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn into_sdk_error(self, operation: &str) -> EchoSdkError {
+        wire::sdk_error(
+            self.code,
+            self.message,
+            Retryability::Never,
+            "_echo_agent/tool/op",
+        )
+        .with_operation(operation)
+    }
+}
+
+#[cfg(feature = "framework-rag")]
+impl RagToolSet {
+    pub(crate) fn from_env() -> Result<Self, RagToolSetError> {
+        let api_key = ["EMBEDDING_APIKEY", "EMBEDDING_API_KEY", "OPENAI_API_KEY"]
+            .into_iter()
+            .find_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .ok_or_else(|| {
+                RagToolSetError::feature_unavailable(
+                    "RAG embedding is unavailable: configure EMBEDDING_APIKEY, EMBEDDING_API_KEY, or OPENAI_API_KEY",
+                )
+            })?;
+        let model = std::env::var("EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "text-embedding-3-small".to_string());
+        if model.trim().is_empty() {
+            return Err(RagToolSetError::invalid_config(
+                "RAG embedding configuration has an empty EMBEDDING_MODEL",
+            ));
+        }
+        if let Ok(endpoint) = std::env::var("EMBEDDING_BASEURL")
+            && endpoint.trim().is_empty()
+        {
+            return Err(RagToolSetError::invalid_config(
+                "RAG embedding configuration has an empty EMBEDDING_BASEURL",
+            ));
+        }
+        if let Ok(endpoint) = std::env::var("EMBEDDING_API_URL")
+            && endpoint.trim().is_empty()
+        {
+            return Err(RagToolSetError::invalid_config(
+                "RAG embedding configuration has an empty EMBEDDING_API_URL",
+            ));
+        }
+
+        // `HttpEmbedder` reads the same validated environment. The key is
+        // intentionally not retained in this set by value; the embedder owns
+        // its request client and each Session gets its own instance.
+        let _ = api_key;
+        Ok(Self {
+            store: echo_agent::tools::rag::RagStore::new(),
+            embedder: Arc::new(echo_agent::memory::HttpEmbedder::from_env()),
+        })
+    }
+
+    fn tools(&self) -> Vec<(String, Arc<dyn Tool>)> {
+        vec![
+            (
+                "rag_index".to_string(),
+                Arc::new(echo_agent::tools::rag::RagIndexTool::new(
+                    self.embedder.clone(),
+                    self.store.clone(),
+                )),
+            ),
+            (
+                "rag_search".to_string(),
+                Arc::new(echo_agent::tools::rag::RagSearchTool::new(
+                    self.embedder.clone(),
+                    self.store.clone(),
+                )),
+            ),
+        ]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            store: echo_agent::tools::rag::RagStore::new(),
+            embedder: Arc::new(TestEmbedder),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "framework-rag"))]
+struct TestEmbedder;
+
+#[cfg(all(test, feature = "framework-rag"))]
+impl echo_agent::memory::Embedder for TestEmbedder {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<Vec<f32>>> {
+        Box::pin(async move {
+            if text.contains("alpha") {
+                Ok(vec![1.0, 0.0])
+            } else {
+                Ok(vec![0.0, 1.0])
+            }
+        })
+    }
+}
+
+fn family_tools(family: &str) -> FamilyTools {
+    #[allow(unused_mut)]
+    let mut unavailable = Vec::new();
     let tools: Vec<Box<dyn Tool>> = match family {
         #[cfg(feature = "framework-files")]
         "files" => vec![
@@ -159,8 +309,9 @@ fn family_tools(family: &str) -> Vec<(String, std::sync::Arc<dyn Tool>)> {
                 Box::new(echo_agent::tools::media::text::TextProcessTool),
                 Box::new(echo_agent::tools::media::text::TextExportTool),
             ];
-            if let Ok(fetch) = echo_agent::tools::media::ImageFetchTool::new() {
-                tools.push(Box::new(fetch));
+            match echo_agent::tools::media::ImageFetchTool::new() {
+                Ok(fetch) => tools.push(Box::new(fetch)),
+                Err(error) => unavailable.push(("image_fetch".to_string(), error.to_string())),
             }
             #[cfg(feature = "framework-data")]
             tools.push(Box::new(echo_agent::tools::media::excel::ExcelLoadTool));
@@ -168,13 +319,16 @@ fn family_tools(family: &str) -> Vec<(String, std::sync::Arc<dyn Tool>)> {
         }
         _ => Vec::new(),
     };
-    tools
-        .into_iter()
-        .map(|tool| {
-            let name = tool.name().to_string();
-            (name, std::sync::Arc::from(tool))
-        })
-        .collect()
+    FamilyTools {
+        tools: tools
+            .into_iter()
+            .map(|tool| {
+                let name = tool.name().to_string();
+                (name, Arc::from(tool))
+            })
+            .collect(),
+        unavailable,
+    }
 }
 
 /// Bind positional wire arguments onto the tool's own JSON Schema
@@ -208,19 +362,21 @@ fn bind_parameters(
 
 /// Dispatch one tool-family operation. `working_dir` is the session's
 /// cwd; tools resolve relative paths and sandboxes through it.
+#[allow(unused_variables)]
 pub(crate) async fn dispatch_tool(
     family: &str,
-    working_dir: &Path,
+    authorities: &SessionAuthorityServices,
+    owner: &str,
+    facade: &SessionFacadeRuntime,
     request: &FeatureOperationRequest,
 ) -> Result<WireValue, EchoSdkError> {
     let operation = request.operation.as_str();
     let prefix = format!("{family}.");
-    let tool_name = operation.strip_prefix(&prefix).ok_or_else(|| {
-        invalid(
-            operation,
-            format!("operation must be prefixed with the family name ({prefix})"),
-        )
-    })?;
+    // The canonical catalog uses the framework tool name (`git_status`),
+    // while accepting the older family-qualified spelling (`git.git_status`)
+    // would be a harmless source-compatible alias. Both resolve to the same
+    // single framework Tool instance.
+    let tool_name = operation.strip_prefix(&prefix).unwrap_or(operation);
     let arguments: Vec<serde_json::Value> = request
         .arguments
         .iter()
@@ -234,7 +390,28 @@ pub(crate) async fn dispatch_tool(
             })
         })
         .collect::<Result<_, _>>()?;
-    let tool = family_tools(family)
+    #[allow(unused_mut)]
+    let mut family_tools = family_tools(family);
+    #[cfg(feature = "framework-rag")]
+    if family == "rag" && matches!(tool_name, "rag_index" | "rag_search") {
+        let rag_tools = facade.rag_tools_for_session(owner, operation)?;
+        family_tools.tools.extend(rag_tools.tools());
+    }
+    if let Some((_, reason)) = family_tools
+        .unavailable
+        .iter()
+        .find(|(name, _)| name == tool_name)
+    {
+        return Err(wire::sdk_error(
+            ExtensionErrorCode::FeatureUnavailable,
+            format!("tool {family}.{tool_name} is unavailable: {reason}"),
+            Retryability::Never,
+            "_echo_agent/tool/op",
+        )
+        .with_operation(operation));
+    }
+    let tool = family_tools
+        .tools
         .into_iter()
         .find(|(name, _)| name == tool_name)
         .map(|(_, tool)| tool)
@@ -246,7 +423,7 @@ pub(crate) async fn dispatch_tool(
         })?;
     let parameters = bind_parameters(operation, tool.as_ref(), &arguments)?;
     let context = ToolContext {
-        working_dir: Some(working_dir.to_path_buf()),
+        working_dir: Some(authorities.working_dir.clone()),
         ..ToolContext::default()
     };
     let result = tool
@@ -309,6 +486,78 @@ pub(crate) fn dispatch_content_guard(
             let content = text(0)?;
             serde_json::json!({"clean": guard.is_clean(&content)})
         }
+        "content-guard.detect_exact" => {
+            let content = text(0)?;
+            return WireValue::from_json(
+                serde_json::to_value(guard.detect(&content))
+                    .map_err(|error| invalid(operation, error.to_string()))?,
+            )
+            .map_err(|error| invalid(operation, error.to_string()));
+        }
+        "content-guard.redact_exact" => {
+            return Ok(WireValue::String(guard.redact(&text(0)?)));
+        }
+        "content-guard.is_clean_exact" => {
+            return Ok(WireValue::Bool(guard.is_clean(&text(0)?)));
+        }
+        "content-guard.check" => {
+            if request.arguments.len() != 2 {
+                return Err(invalid(
+                    operation,
+                    "content-guard.check accepts [mode, content]",
+                ));
+            }
+            let mode = match text(0)?.as_str() {
+                "detect" => ContentGuardMode::Detect,
+                "reject" => ContentGuardMode::Reject,
+                "redact" => ContentGuardMode::Redact,
+                _ => return Err(invalid(operation, "content guard mode is invalid")),
+            };
+            let checked = ContentGuard::new(mode)
+                .check(&text(1)?)
+                .map_err(|error| invalid(operation, error.to_string()))?;
+            return Ok(match checked {
+                echo_agent::guard::content::ContentGuardResult::Pass => WireValue::Variant {
+                    type_id: "echo_core::guard::content::ContentGuardResult".to_string(),
+                    variant: "pass".to_string(),
+                    fields: Vec::new(),
+                },
+                echo_agent::guard::content::ContentGuardResult::Detected { pii_types } => {
+                    WireValue::Variant {
+                        type_id: "echo_core::guard::content::ContentGuardResult".to_string(),
+                        variant: "detected".to_string(),
+                        fields: vec![WireField {
+                            name: "pii_types".to_string(),
+                            value: WireValue::List(
+                                pii_types.into_iter().map(WireValue::String).collect(),
+                            ),
+                        }],
+                    }
+                }
+                echo_agent::guard::content::ContentGuardResult::Rejected { pii_types } => {
+                    WireValue::Variant {
+                        type_id: "echo_core::guard::content::ContentGuardResult".to_string(),
+                        variant: "rejected".to_string(),
+                        fields: vec![WireField {
+                            name: "pii_types".to_string(),
+                            value: WireValue::List(
+                                pii_types.into_iter().map(WireValue::String).collect(),
+                            ),
+                        }],
+                    }
+                }
+                echo_agent::guard::content::ContentGuardResult::Redacted(content) => {
+                    WireValue::Variant {
+                        type_id: "echo_core::guard::content::ContentGuardResult".to_string(),
+                        variant: "redacted".to_string(),
+                        fields: vec![WireField {
+                            name: "content".to_string(),
+                            value: WireValue::String(content),
+                        }],
+                    }
+                }
+            });
+        }
         other => {
             return Err(invalid(
                 other,
@@ -338,9 +587,79 @@ pub(crate) fn dispatch_project_rules(
             });
             WireValue::from_json(value).map_err(|error| invalid(operation, error.to_string()))
         }
+        "project-rules.load" => match echo_agent::project_rules::load_project_rules(working_dir) {
+            Some((path, content)) => Ok(WireValue::Variant {
+                type_id: "core::option::Option<(Path,String)>".to_string(),
+                variant: "some".to_string(),
+                fields: vec![
+                    WireField {
+                        name: "path".to_string(),
+                        value: WireValue::Path(
+                            wire::path_to_wire(&path).map_err(|error| invalid(operation, error))?,
+                        ),
+                    },
+                    WireField {
+                        name: "content".to_string(),
+                        value: WireValue::String(content),
+                    },
+                ],
+            }),
+            None => Ok(WireValue::Variant {
+                type_id: "core::option::Option<(Path,String)>".to_string(),
+                variant: "none".to_string(),
+                fields: Vec::new(),
+            }),
+        },
         other => Err(invalid(
             other,
             "unknown project-rules operation; the family surface is closed",
         )),
+    }
+}
+
+#[cfg(all(test, feature = "framework-rag"))]
+mod tests {
+    use super::*;
+
+    fn tool(set: &RagToolSet, name: &str) -> Result<Arc<dyn Tool>, Box<dyn std::error::Error>> {
+        set.tools()
+            .into_iter()
+            .find(|(tool_name, _)| tool_name == name)
+            .map(|(_, tool)| tool)
+            .ok_or_else(|| format!("missing RAG tool {name}").into())
+    }
+
+    #[tokio::test]
+    async fn rag_index_and_search_share_one_session_store() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let first = RagToolSet::for_test();
+        let index = tool(&first, "rag_index")?;
+        let index_parameters: ToolParameters = serde_json::from_value(serde_json::json!({
+            "content": "alpha session document",
+            "source": "first",
+        }))?;
+        let indexed = index.execute(index_parameters).await?;
+        assert!(indexed.success, "index failed: {}", indexed.output);
+
+        let search = tool(&first, "rag_search")?;
+        let search_parameters: ToolParameters = serde_json::from_value(serde_json::json!({
+            "query": "alpha",
+            "top_k": 1,
+        }))?;
+        let found = search.execute(search_parameters).await?;
+        assert!(found.success, "search failed: {}", found.output);
+        assert!(found.output.contains("session document"));
+
+        let second = RagToolSet::for_test();
+        let isolated_parameters: ToolParameters = serde_json::from_value(serde_json::json!({
+            "query": "alpha",
+            "top_k": 1,
+        }))?;
+        let isolated = tool(&second, "rag_search")?
+            .execute(isolated_parameters)
+            .await?;
+        assert!(isolated.success);
+        assert!(isolated.output.contains("No relevant documents"));
+        Ok(())
     }
 }

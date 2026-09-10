@@ -16,11 +16,13 @@
 //! ExtensionBridge.
 
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
+use echo_sdk_protocol::handle::WireHandle;
 use echo_sdk_protocol::methods::FeatureOperationRequest;
 use echo_sdk_protocol::scalar::WireValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::super::handles::HandleRegistry;
 use super::super::wire;
 
 const TRACE_METHOD: &str = "_echo_agent/trace/op";
@@ -28,13 +30,10 @@ const TRACE_METHOD: &str = "_echo_agent/trace/op";
 const EVAL_METHOD: &str = "_echo_agent/eval/op";
 #[cfg(feature = "framework-improve")]
 const IMPROVE_METHOD: &str = "_echo_agent/improve/op";
-/// Upper bound on run-store resources per connection.
-const MAX_STORES: usize = 64;
 
 /// One run-store resource: the framework store plus the owning session.
 pub(crate) struct TraceStoreRecord {
     pub store: Arc<dyn echo_agent::trace::RunStore>,
-    pub owner: String,
 }
 
 fn invalid(method: &'static str, message: impl Into<String>) -> EchoSdkError {
@@ -102,36 +101,32 @@ fn arguments_of(
 // ── Trace family ────────────────────────────────────────────────────────────
 
 fn store_record(
+    handles: &HandleRegistry,
     stores: &std::sync::Mutex<HashMap<String, Arc<TraceStoreRecord>>>,
-    store_id: &str,
+    resource: &WireHandle,
     owner: &str,
 ) -> Result<Arc<TraceStoreRecord>, EchoSdkError> {
-    let record = stores
+    super::owned_resource(handles, resource, owner, TRACE_METHOD)?;
+    stores
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .get(store_id)
+        .get(&resource.id)
         .cloned()
         .ok_or_else(|| {
             invalid(
                 TRACE_METHOD,
-                format!("unknown trace store resource {store_id}"),
+                format!("unknown trace store resource {}", resource.id),
             )
-        })?;
-    if record.owner != owner {
-        return Err(invalid(
-            TRACE_METHOD,
-            format!("trace store {store_id} belongs to another session"),
-        ));
-    }
-    Ok(record)
+        })
 }
 
 /// Dispatch one trace family operation.
 pub(crate) async fn dispatch_trace(
+    handles: &HandleRegistry,
     stores: &std::sync::Mutex<HashMap<String, Arc<TraceStoreRecord>>>,
     owner: &str,
     request: &FeatureOperationRequest,
-    page_limit: usize,
+    limits: super::FacadeFamilyLimits,
 ) -> Result<WireValue, EchoSdkError> {
     let wire = |value: serde_json::Value| {
         WireValue::from_json(value).map_err(|error| invalid(TRACE_METHOD, error.to_string()))
@@ -141,7 +136,13 @@ pub(crate) async fn dispatch_trace(
         "trace.store.open" => {
             let mode = string_at(TRACE_METHOD, &arguments, 0, "a store mode (memory|jsonl)")?;
             let path = arguments.get(1).and_then(serde_json::Value::as_str);
-            let store_id = format!("trc-{}", uuid::Uuid::new_v4());
+            let (resource, _record) = handles.register_facade_resource(
+                limits.max_resources,
+                "trace",
+                "trace.store",
+                Some(owner),
+                TRACE_METHOD,
+            )?;
             let store: Arc<dyn echo_agent::trace::RunStore> = match (mode.as_str(), path) {
                 ("memory", _) => Arc::new(echo_agent::trace::InMemoryRunStore::new()),
                 ("jsonl", Some(path)) => {
@@ -162,24 +163,15 @@ pub(crate) async fn dispatch_trace(
                     ));
                 }
             };
-            let mut stores = stores.lock().unwrap_or_else(|error| error.into_inner());
-            if stores.len() >= MAX_STORES {
-                return Err(invalid(
-                    TRACE_METHOD,
-                    format!("trace store resource limit {MAX_STORES} reached"),
-                ));
-            }
-            stores.insert(
-                store_id.clone(),
-                Arc::new(TraceStoreRecord {
-                    store,
-                    owner: owner.to_string(),
-                }),
-            );
-            wire(serde_json::json!({"store_id": store_id}))
+            stores
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(resource.id.clone(), Arc::new(TraceStoreRecord { store }));
+            wire(serde_json::json!({"resource": resource}))
         }
         "trace.run.save" => {
-            let store_id = string_at(TRACE_METHOD, &arguments, 0, "a store id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a trace store resource", TRACE_METHOD)?;
             let run_json = arguments.get(1).ok_or_else(|| {
                 invalid(TRACE_METHOD, "trace.run.save requires a run at argument 1")
             })?;
@@ -187,7 +179,7 @@ pub(crate) async fn dispatch_trace(
                 serde_json::from_value(run_json.clone()).map_err(|error| {
                     invalid(TRACE_METHOD, format!("run payload malformed: {error}"))
                 })?;
-            let record = store_record(stores, &store_id, owner)?;
+            let record = store_record(handles, stores, &resource, owner)?;
             record
                 .store
                 .save(run)
@@ -196,9 +188,10 @@ pub(crate) async fn dispatch_trace(
             wire(serde_json::json!({"ok": true}))
         }
         "trace.run.load" => {
-            let store_id = string_at(TRACE_METHOD, &arguments, 0, "a store id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a trace store resource", TRACE_METHOD)?;
             let run_id = string_at(TRACE_METHOD, &arguments, 1, "a run id")?;
-            let record = store_record(stores, &store_id, owner)?;
+            let record = store_record(handles, stores, &resource, owner)?;
             let run = record
                 .store
                 .load(&run_id)
@@ -210,9 +203,10 @@ pub(crate) async fn dispatch_trace(
             wire(serde_json::json!({"run": run}))
         }
         "trace.run.list_session" => {
-            let store_id = string_at(TRACE_METHOD, &arguments, 0, "a store id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a trace store resource", TRACE_METHOD)?;
             let session_id = string_at(TRACE_METHOD, &arguments, 1, "a session id")?;
-            let record = store_record(stores, &store_id, owner)?;
+            let record = store_record(handles, stores, &resource, owner)?;
             let summaries = record
                 .store
                 .list_by_session(&session_id)
@@ -220,19 +214,20 @@ pub(crate) async fn dispatch_trace(
                 .map_err(|error| framework(TRACE_METHOD, error))?;
             let page: Vec<serde_json::Value> = summaries
                 .iter()
-                .take(page_limit)
+                .take(limits.page)
                 .map(|summary| serde_json::to_value(summary).unwrap_or_default())
                 .collect();
             wire(serde_json::json!({"summaries": page}))
         }
         "trace.run.list_recent" => {
-            let store_id = string_at(TRACE_METHOD, &arguments, 0, "a store id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a trace store resource", TRACE_METHOD)?;
             let limit = arguments
                 .get(1)
                 .and_then(serde_json::Value::as_u64)
-                .map(|limit| limit.min(page_limit as u64) as usize)
-                .unwrap_or(page_limit);
-            let record = store_record(stores, &store_id, owner)?;
+                .map(|limit| limit.min(limits.page as u64) as usize)
+                .unwrap_or(limits.page);
+            let record = store_record(handles, stores, &resource, owner)?;
             let summaries = record
                 .store
                 .list_all(limit)
@@ -378,10 +373,10 @@ pub(crate) async fn dispatch_improve(
 /// Drop every trace store owned by one session (session close).
 pub(crate) fn drop_session_stores(
     stores: &std::sync::Mutex<HashMap<String, Arc<TraceStoreRecord>>>,
-    owner: &str,
+    closed: &[String],
 ) {
     stores
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .retain(|_, record| record.owner != owner);
+        .retain(|id, _| !closed.iter().any(|closed_id| closed_id == id));
 }

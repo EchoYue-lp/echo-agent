@@ -1398,6 +1398,20 @@ fn push_run_fixtures(fixtures: &mut Vec<Fixture>) {
         None,
     ));
     fixtures.push(fixture(
+        "run-input-execute-message-valid",
+        FixtureKind::Valid,
+        "RunInput",
+        "Execute runs can carry the lossless provider-neutral message shape.",
+        serde_json::json!({
+            "kind": "execute_message",
+            "message": {
+                "role": "user",
+                "content": {"kind": "string", "value": "run the benchmark"}
+            }
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
         "run-input-empty-text-invalid",
         FixtureKind::Invalid,
         "RunInput",

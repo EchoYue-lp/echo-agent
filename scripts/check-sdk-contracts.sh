@@ -24,6 +24,7 @@ if ! rustup which --toolchain "$toolchain" rustdoc >/dev/null 2>&1; then
 fi
 
 cargo run -q -p echo-sdk-protocol --bin export_schema --locked -- --check
+scripts/export-language-sdk-catalog.sh --check
 
 cargo test -q -p echo-sdk-protocol \
   --test facade_inventory \

@@ -27,7 +27,7 @@ use std::time::Duration;
 use regex::Regex;
 use tracing::warn;
 
-use crate::sandbox::{SandboxCommand, SandboxManager};
+use crate::sandbox::{SandboxCommand, SandboxExecutor};
 use crate::skills::minimal_env;
 
 const DEFAULT_CMD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,7 +61,7 @@ pub enum SkillSource {
 }
 
 /// Context for variable substitution and command execution.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PromptContext {
     /// Absolute path to the skill's directory.
     pub skill_dir: String,
@@ -77,7 +77,7 @@ pub struct PromptContext {
     pub source: SkillSource,
     /// Optional sandbox manager for command execution.
     /// When Some, commands are routed through the sandbox.
-    pub sandbox: Option<Arc<SandboxManager>>,
+    pub sandbox: Option<Arc<dyn SandboxExecutor>>,
 }
 
 impl Default for PromptContext {
@@ -342,7 +342,7 @@ async fn execute_inline_commands(content: &str, ctx: &PromptContext) -> String {
 async fn run_command(command: &str, ctx: &PromptContext) -> String {
     // Sandbox execution path
     if let Some(ref manager) = ctx.sandbox {
-        return run_command_sandboxed(command, ctx, manager).await;
+        return run_command_sandboxed(command, ctx, manager.as_ref()).await;
     }
 
     // Fallback: direct process execution with minimal env and proper kill
@@ -353,7 +353,7 @@ async fn run_command(command: &str, ctx: &PromptContext) -> String {
 async fn run_command_sandboxed(
     command: &str,
     ctx: &PromptContext,
-    manager: &SandboxManager,
+    manager: &dyn SandboxExecutor,
 ) -> String {
     // Use minimal environment
     let env = minimal_env(&ctx.skill_dir, &ctx.session_id, HashMap::new());

@@ -10,7 +10,10 @@ use crate::agent::EventIdentity;
 use crate::runtime::{TurnMode, TurnOutcome, TurnRequest};
 use agent_client_protocol::schema::{ProtocolVersion, v1};
 use agent_client_protocol::{Agent as AcpRole, Client, ConnectTo, ConnectionTo, Error, Responder};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 const DEFAULT_MAX_SESSIONS: usize = 128;
@@ -228,6 +231,8 @@ async fn run_connection<P: AcpConnectionProfile>(
     let close_services = services.clone();
     let close_config = config.clone();
     let close_profile = profile.clone();
+    let cleanup_claim = Arc::new(AtomicBool::new(false));
+    let close_cleanup_claim = cleanup_claim.clone();
 
     let connection_result = AcpRole
         .builder()
@@ -364,19 +369,22 @@ async fn run_connection<P: AcpConnectionProfile>(
             agent_client_protocol::on_receive_notification!(),
         )
         .on_close(async move |_connection: ConnectionTo<Client>| {
+            if close_cleanup_claim.swap(true, Ordering::AcqRel) {
+                return Ok(());
+            }
             let timeout = close_config.shutdown_timeout;
             close_services.close_admission();
             tokio::time::timeout(timeout, async {
-                close_services.cancel_and_wait_runs(timeout).await;
                 // Extension teardown order (design §12.3): close admission,
                 // cancel in-flight callbacks, await bounded settlement —
-                // all before profile flush and Session Agent close.
+                // before waiting for runs that may be blocked on a callback.
                 close_services.extensions().close_admission();
                 close_services.extensions().cancel_all();
                 let leaked = close_services.extensions().drain(timeout).await;
                 if leaked > 0 {
                     tracing::warn!("extension teardown left {leaked} unsettled invocations");
                 }
+                close_services.cancel_and_wait_runs(timeout).await;
                 close_profile
                     .wait_for_settlements(timeout)
                     .await
@@ -400,29 +408,33 @@ async fn run_connection<P: AcpConnectionProfile>(
         .with_connection_builder(profile.attach(services.clone()))
         .connect_to(client)
         .await;
-    let cleanup_result = tokio::time::timeout(config.shutdown_timeout, async {
-        services.close_admission();
-        services.cancel_and_wait_runs(config.shutdown_timeout).await;
-        services.extensions().close_admission();
-        services.extensions().cancel_all();
-        let leaked = services.extensions().drain(config.shutdown_timeout).await;
-        if leaked > 0 {
-            tracing::warn!("extension cleanup left {leaked} unsettled invocations");
-        }
-        profile
-            .wait_for_settlements(config.shutdown_timeout)
-            .await
-            .map_err(framework_error)?;
-        profile.flush_before_agents().map_err(framework_error)?;
-        services.close_sessions().await.map_err(framework_error)?;
-        profile.release_after_agents();
+    let cleanup_result = if cleanup_claim.swap(true, Ordering::AcqRel) {
         Ok(())
-    })
-    .await
-    .map_err(|_| {
-        agent_client_protocol::Error::internal_error()
-            .data("ACP Session shutdown timed out".to_string())
-    })?;
+    } else {
+        tokio::time::timeout(config.shutdown_timeout, async {
+            services.close_admission();
+            services.extensions().close_admission();
+            services.extensions().cancel_all();
+            let leaked = services.extensions().drain(config.shutdown_timeout).await;
+            if leaked > 0 {
+                tracing::warn!("extension cleanup left {leaked} unsettled invocations");
+            }
+            services.cancel_and_wait_runs(config.shutdown_timeout).await;
+            profile
+                .wait_for_settlements(config.shutdown_timeout)
+                .await
+                .map_err(framework_error)?;
+            profile.flush_before_agents().map_err(framework_error)?;
+            services.close_sessions().await.map_err(framework_error)?;
+            profile.release_after_agents();
+            Ok(())
+        })
+        .await
+        .map_err(|_| {
+            agent_client_protocol::Error::internal_error()
+                .data("ACP Session shutdown timed out".to_string())
+        })?
+    };
     match (connection_result, cleanup_result) {
         (Err(error), _) => Err(error),
         (Ok(()), result) => result,

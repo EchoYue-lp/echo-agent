@@ -481,7 +481,7 @@ pub trait ContextCompressor: Send + Sync {
 
     /// Human-readable name of this compressor, used for metrics tracking.
     /// Override in implementations for a descriptive name.
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "custom"
     }
 }
@@ -493,7 +493,7 @@ impl ContextCompressor for Box<dyn ContextCompressor> {
         (**self).compress(input)
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         (**self).name()
     }
 }

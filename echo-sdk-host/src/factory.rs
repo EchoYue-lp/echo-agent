@@ -1,7 +1,7 @@
 use crate::mcp::translate_mcp_servers;
 use agent_client_protocol::BoxFuture;
 use echo_agent::acp::{AcpSessionContext, AcpSessionFactory};
-use echo_agent::agent::{Agent, AgentConfig, ReactAgent};
+use echo_agent::agent::{Agent, AgentConfig, AgentHandle, ReactAgent};
 use echo_agent::config::FrameworkConfig;
 use echo_agent::error::{ReactError, Result};
 use echo_agent::llm::LlmClient;
@@ -122,6 +122,8 @@ impl PreparedAgentDefinition {
             .conversation_id(&session_id)
             .working_dir(Some(context.cwd.clone()));
         let mut agent = ReactAgent::new(agent_config).with_llm_client(self.llm_client.clone());
+        #[cfg(feature = "framework-human-loop")]
+        agent.build_permission_service();
         #[cfg(feature = "sdk-facade-adapters")]
         let injected_store = {
             let store = Arc::new(echo_agent::tasks::InMemoryRevisionedTaskStore::new());
@@ -190,6 +192,10 @@ pub(crate) const DEFINITION_META_KEY: &str = "echo_agent_definition_id";
 /// exact instances the in-conversation tools use — never a second store or
 /// executor.
 pub(crate) struct SessionAuthorityServices {
+    /// The concrete Session Agent shared by ACP's boxed wrapper and facade
+    /// source operations; this is one authority, not a second Agent state.
+    pub agent_handle: AgentHandle,
+    #[allow(dead_code)]
     pub task_revision_service: Arc<echo_agent::tasks::TaskRevisionService>,
     /// Concrete store behind the injected service; present when this build
     /// injected a Host-owned store (sdk-facade-adapters), enabling the DAG
@@ -205,6 +211,9 @@ pub(crate) struct SessionAuthorityServices {
     // second capture pass.
     #[allow(dead_code)]
     pub subagent_executor: Arc<echo_agent::agent::subagent::SubagentExecutor>,
+    #[cfg(feature = "framework-subagent")]
+    #[allow(dead_code)]
+    pub subagent_registry: Arc<echo_agent::agent::subagent::SubagentRegistry>,
     /// The Session Agent's long-term memory store (todo 4 memory family).
     #[cfg(feature = "sdk-facade-adapters")]
     pub memory_store: Option<Arc<dyn echo_agent::memory::Store>>,
@@ -228,11 +237,13 @@ impl SessionAuthorityServices {
     /// downcast-free accessors stay on the framework type.
     #[allow(unused_variables)]
     pub fn of(
+        agent_handle: AgentHandle,
         agent: &ReactAgent,
         task_store: Option<&Arc<echo_agent::tasks::InMemoryRevisionedTaskStore>>,
         working_dir: std::path::PathBuf,
     ) -> Self {
         Self {
+            agent_handle,
             #[cfg(feature = "sdk-facade-adapters")]
             working_dir,
             task_revision_service: agent.task_revision_service().clone(),
@@ -240,6 +251,8 @@ impl SessionAuthorityServices {
             task_store: task_store.cloned(),
             #[cfg(feature = "framework-subagent")]
             subagent_executor: agent.subagent_executor().clone(),
+            #[cfg(feature = "framework-subagent")]
+            subagent_registry: agent.subagent_registry().clone(),
             #[cfg(feature = "sdk-facade-adapters")]
             memory_store: agent.store().cloned(),
             #[cfg(feature = "sdk-facade-adapters")]
@@ -264,6 +277,7 @@ impl CoreProfileSessionFactory {
     }
 
     /// Authority services of one Session, if it is still open.
+    #[allow(dead_code)]
     pub fn session_services(&self, session_id: &str) -> Option<Arc<SessionAuthorityServices>> {
         self.session_services
             .lock()
@@ -342,20 +356,25 @@ impl AcpSessionFactory for CoreProfileSessionFactory {
                 None => default,
             };
             let (agent, task_store) = definition.create_agent_with_task_store(&context).await?;
+            let agent_handle = AgentHandle::new(agent);
             // Capture the framework authorities before the concrete agent
             // is boxed, so the RPC surface shares them with the tools.
+            let authorities = agent_handle
+                .read(|agent| {
+                    SessionAuthorityServices::of(
+                        agent_handle.clone(),
+                        agent,
+                        task_store.as_ref(),
+                        context.cwd.clone(),
+                    )
+                })
+                .await;
+            let boxed_agent = agent_handle.to_boxed_agent().await;
             session_services
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .insert(
-                    session_id,
-                    Arc::new(SessionAuthorityServices::of(
-                        &agent,
-                        task_store.as_ref(),
-                        context.cwd.clone(),
-                    )),
-                );
-            Ok(Box::new(agent) as Box<dyn Agent>)
+                .insert(session_id, Arc::new(authorities));
+            Ok(boxed_agent)
         })
     }
 }

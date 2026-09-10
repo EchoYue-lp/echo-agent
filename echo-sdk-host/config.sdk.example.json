@@ -23,7 +23,18 @@
       "max_replay_events": 512,
       "max_replay_bytes": 8388608,
       "max_open_handles": 512,
-      "shutdown_timeout_secs": 5
+      "max_registered_extensions": 64,
+      "max_extension_descriptor_bytes": 65536,
+      "max_extension_payload_bytes": 1048576,
+      "max_extension_stream_bytes": 262144,
+      "max_extension_invocations": 16,
+      "max_callback_concurrency": 8,
+      "callback_timeout_secs": 30,
+      "shutdown_timeout_secs": 5,
+      "max_facade_resources": 256,
+      "max_facade_streams": 128,
+      "max_facade_page_items": 512,
+      "max_facade_operation_args": 64
     }
   }
 }

@@ -51,8 +51,10 @@ pub(crate) struct CoreProfileState {
     deliveries: Mutex<HashMap<String, Arc<StreamDelivery>>>,
     #[cfg(feature = "sdk-extension-bridge")]
     pub extension_shared: Arc<super::extension_bridge::ExtensionBridgeShared>,
-    #[cfg(feature = "sdk-facade-adapters")]
+    #[cfg(feature = "sdk-extension-bridge")]
     #[allow(dead_code)]
+    pub extension_bridge: Arc<super::extension_bridge::ExtensionBridge>,
+    #[cfg(feature = "sdk-facade-adapters")]
     pub facade: super::facade::SessionFacadeRuntime,
     pending_settlements: AtomicUsize,
     settlement_notify: Notify,
@@ -145,6 +147,10 @@ impl CoreProfileState {
             deliveries: Mutex::new(HashMap::new()),
             #[cfg(feature = "sdk-extension-bridge")]
             extension_shared,
+            #[cfg(feature = "sdk-extension-bridge")]
+            extension_bridge: extension_bridge.clone().ok_or_else(|| {
+                HostError::Config("extension bridge was not constructed".to_string())
+            })?,
             #[cfg(feature = "sdk-facade-adapters")]
             facade,
             pending_settlements: AtomicUsize::new(0),
@@ -353,7 +359,7 @@ fn build_advertisement(
     });
     // The facade runtime compiles the generic invoke surface and the
     // admission ladder; family capabilities land with their handlers
-    // (todos 3-5) — never before. The typed task handlers (todo 3) bind to
+    // (family adapters) — never before. The typed task handlers bind to
     // the Session's own TaskRevisionService.
     #[cfg(feature = "sdk-facade-adapters")]
     capabilities.push(CapabilityDeclaration {

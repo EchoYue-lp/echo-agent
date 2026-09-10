@@ -1402,7 +1402,7 @@ pub struct ManifestSignature {
 #[serde(deny_unknown_fields)]
 pub struct RouteObligation {
     /// Canonical route id (`family:memory`, `core:task`,
-    /// `invoke:<source identity>`, `bridge:tool`, `value`,
+    /// `source:<source identity>`, `bridge:tool`, `value`,
     /// `intrinsic:<reason>`, `standard:<acp method>`).
     pub route: String,
     /// Wire surface kind: standard/core/family/bridge/invoke/value/intrinsic.
@@ -1413,8 +1413,21 @@ pub struct RouteObligation {
     pub method: Option<String>,
     /// Exact operation identity (generic invoke routes only).
     pub operation: Option<String>,
+    /// Closed family operation the Host executes after admitting an exact
+    /// source identity. Present only for operation-level family adapters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handler_operation: Option<String>,
     /// Root leaf feature required by the route's family.
     pub required_feature: Option<String>,
+    /// Complete feature requirement inherited from the canonical inventory
+    /// item. `AllOf` is used for root `full` entries; `AnyOf` is used when an
+    /// item exists in one of several feature profiles.
+    pub required_features: Vec<String>,
+    pub feature_semantics: FeatureSemantics,
+    /// Exact signature digests accepted for an executable invoke route.
+    /// Family/value routes may legitimately carry no operation signature.
+    #[serde(default)]
+    pub signatures: Vec<ManifestSignature>,
     pub mapping: String,
     pub validation: Vec<String>,
 }
@@ -1643,20 +1656,39 @@ fn route_obligation_for(
 ) -> RouteObligation {
     let route = crate::facade::resolve_route(entry, class, relationship, semantic_rule);
     let family = route.family();
+    let mapping = if route.surface() == "intrinsic" {
+        format!(
+            "{} via {}; Rust remains authoritative",
+            relationship.as_str(),
+            route.route_id()
+        )
+    } else {
+        format!(
+            "{} via {}; Rust remains authoritative",
+            relationship.as_str(),
+            semantic_rule
+        )
+    };
     RouteObligation {
         route: route.route_id(),
         surface: route.surface().to_string(),
         family: family.map(|family| family.as_str().to_string()),
         method: route.method().map(str::to_string),
         operation: route.operation().map(str::to_string),
+        handler_operation: route.handler_operation().map(str::to_string),
         required_feature: family
             .and_then(|family| family.required_feature())
             .map(str::to_string),
-        mapping: format!(
-            "{} via {}; Rust remains authoritative",
-            relationship.as_str(),
-            semantic_rule
-        ),
+        required_features: features_of_entry(entry).into_iter().collect(),
+        feature_semantics: entry_feature_semantics(entry),
+        signatures: entry
+            .signatures
+            .values()
+            .map(|signature| ManifestSignature {
+                digest: signature.digest.clone(),
+            })
+            .collect(),
+        mapping,
         validation: family
             .map(|family| {
                 family
@@ -1666,6 +1698,21 @@ fn route_obligation_for(
                     .collect()
             })
             .unwrap_or_default(),
+    }
+}
+
+fn entry_feature_semantics(entry: &InventoryEntry) -> FeatureSemantics {
+    if entry.profiles.contains("default") {
+        FeatureSemantics::Default
+    } else if entry.profiles.contains("full")
+        && entry
+            .profiles
+            .iter()
+            .all(|profile| !profile.starts_with("feature:"))
+    {
+        FeatureSemantics::AllOf
+    } else {
+        FeatureSemantics::AnyOf
     }
 }
 
@@ -1684,6 +1731,29 @@ fn language_target(class: SemanticClass) -> &'static str {
         SemanticClass::Stream => "native_async_stream",
         SemanticClass::Extension => "callback_interface",
         SemanticClass::LanguageIntrinsic => "native_language_construct",
+    }
+}
+
+fn language_status_for(identity: &str) -> (LanguageImplementationStatus, &'static str) {
+    match identity {
+        "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {
+            (LanguageImplementationStatus::Done, "turn_outcome")
+        }
+        "echo_orchestration::runtime::turn_driver::TurnOutcome::status"
+        | "echo_orchestration::runtime::turn_driver::TurnReceipt::status"
+        | "echo_orchestration::runtime::turn_driver::TurnReceipt::usage" => {
+            (LanguageImplementationStatus::Done, "run_receipt")
+        }
+        "echo_core::utils::json_parse::clean_json"
+        | "echo_core::utils::json_parse::extract_json_from_markdown"
+        | "echo_core::utils::utf8::IncrementalUtf8Decoder"
+        | "echo_core::utils::utf8::IncrementalUtf8Decoder::new"
+        | "echo_core::utils::utf8::IncrementalUtf8Decoder::push"
+        | "echo_core::utils::utf8::IncrementalUtf8Decoder::finish"
+        | "echo_core::utils::utf8::split_utf8_chunks" => {
+            (LanguageImplementationStatus::Done, "local_helpers")
+        }
+        _ => (LanguageImplementationStatus::NotImplemented, "operation"),
     }
 }
 
@@ -1811,6 +1881,8 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
             let alias_of = canonical_member_of
                 .get(&entry.path)
                 .and_then(|alias| alias.clone());
+            let (language_status, language_contract_suffix) =
+                language_status_for(&crate::facade::canonical_source_identity(entry));
             ManifestEntry {
                 path: entry.path.clone(),
                 kind: entry.kind,
@@ -1841,11 +1913,10 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
                         (
                             (*language).to_string(),
                             LanguageStatusRecord {
-                                status: LanguageImplementationStatus::NotImplemented,
+                                status: language_status,
                                 target: language_target(classification).to_string(),
                                 contract_test: format!(
-                                    "sdk-parity/{language}/{}",
-                                    classification.as_str()
+                                    "sdk-parity/{language}/{language_contract_suffix}"
                                 ),
                             },
                         )

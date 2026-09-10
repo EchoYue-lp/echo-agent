@@ -74,7 +74,7 @@ impl SdkCoreProfile {
         session_id: &str,
         cwd: &std::path::Path,
     ) -> Result<(), String> {
-        let (session_handle, session_record) = self
+        let (session_handle, _task_run_handle, session_record) = self
             .state
             .handles
             .register_session_with_cwd(
@@ -684,13 +684,19 @@ impl AcpConnectionProfile for SdkCoreProfile {
                     async move |request: echo_sdk_protocol::methods::SubagentAwaitRequest,
                                 responder,
                                 connection: ConnectionTo<Client>| {
-                        facade::subagent::subagent_await(
-                            state.clone(),
-                            request,
-                            responder,
-                            connection,
-                        )
-                        .await
+                        // Await joins a live attempt (bounded by its timeout)
+                        // and must not block the dispatch loop: the same
+                        // connection carries reverse extension invocations
+                        // and stream events while it waits (run/wait uses
+                        // the identical official-connection-task pattern).
+                        let task_connection = connection.clone();
+                        let task_state = state.clone();
+                        task_connection.spawn(async move {
+                            facade::subagent::subagent_await(
+                                task_state, request, responder, connection,
+                            )
+                            .await
+                        })
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -701,13 +707,16 @@ impl AcpConnectionProfile for SdkCoreProfile {
                     async move |request: echo_sdk_protocol::methods::SubagentControlRequest,
                                 responder,
                                 connection: ConnectionTo<Client>| {
-                        facade::subagent::subagent_control(
-                            state.clone(),
-                            request,
-                            responder,
-                            connection,
-                        )
-                        .await
+                        // Interrupt awaits the attempt's settlement, so
+                        // control rides the official connection task too.
+                        let task_connection = connection.clone();
+                        let task_state = state.clone();
+                        task_connection.spawn(async move {
+                            facade::subagent::subagent_control(
+                                task_state, request, responder, connection,
+                            )
+                            .await
+                        })
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -803,6 +812,18 @@ impl AcpConnectionProfile for SdkCoreProfile {
         timeout: std::time::Duration,
     ) -> futures::future::BoxFuture<'static, std::result::Result<(), String>> {
         let state = self.state.clone();
-        Box::pin(async move { state.wait_settlements(timeout).await })
+        Box::pin(async move {
+            let settled = state.wait_settlements(timeout).await;
+            // Facade teardown rides the same bounded shutdown chain (design
+            // §20.4): cancel task executions and subagent dispatches, await
+            // MCP manager close and release the remaining resource maps.
+            #[cfg(feature = "sdk-facade-adapters")]
+            {
+                tokio::time::timeout(timeout, state.facade.close_all(&state.handles))
+                    .await
+                    .map_err(|_| "facade teardown timed out".to_string())?;
+            }
+            settled
+        })
     }
 }

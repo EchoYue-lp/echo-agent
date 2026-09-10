@@ -39,7 +39,7 @@ pub struct HybridCompressor {
 }
 
 impl ContextCompressor for HybridCompressor {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "Hybrid"
     }
 

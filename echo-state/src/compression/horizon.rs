@@ -417,7 +417,7 @@ impl ContextCompressor for VisibilityHorizonCompressor {
         })
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "VisibilityHorizon"
     }
 }

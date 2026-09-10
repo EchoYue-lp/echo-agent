@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::EchoSdkError;
 use crate::event::WireEventEnvelope;
 use crate::handle::{HandleKind, WireHandle};
-use crate::scalar::{WireDuration, WireNonZeroU64, WirePath, WireU64, WireValue};
+use crate::scalar::{
+    WireDuration, WireField, WireI64, WireNonZeroU64, WirePath, WireU64, WireValue,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +74,11 @@ pub enum ExtensionKind {
     InterventionCallback,
     AgentFactory,
     CustomAgent,
+    Critic,
+    ChannelPlugin,
+    ChannelMessageHandler,
+    ContextCompressor,
+    AgentComponent,
 }
 
 impl ExtensionKind {
@@ -86,6 +93,11 @@ impl ExtensionKind {
             ExtensionKind::InterventionCallback => "intervention_callback",
             ExtensionKind::AgentFactory => "agent_factory",
             ExtensionKind::CustomAgent => "custom_agent",
+            ExtensionKind::Critic => "critic",
+            ExtensionKind::ChannelPlugin => "channel_plugin",
+            ExtensionKind::ChannelMessageHandler => "channel_message_handler",
+            ExtensionKind::ContextCompressor => "context_compressor",
+            ExtensionKind::AgentComponent => "agent_component",
         }
     }
 }
@@ -378,6 +390,10 @@ impl SessionCreateRequest {
 #[serde(deny_unknown_fields)]
 pub struct SessionCreateResponse {
     pub session: WireHandle,
+    /// Opaque TaskRun handle for this Session's revisioned task graph.
+    /// It is issued by the Host and cannot be reconstructed from the ACP
+    /// Session identity.
+    pub task_run: WireHandle,
     /// ACP Session identity of the same Session object, so the SDK Client
     /// can address the standard `session/prompt` / `session/cancel` methods
     /// on it without a second creation step.
@@ -421,6 +437,8 @@ impl SessionLoadRequest {
 #[serde(deny_unknown_fields)]
 pub struct SessionLoadResponse {
     pub session: WireHandle,
+    /// Fresh-generation TaskRun handle for the resumed Session.
+    pub task_run: WireHandle,
     /// ACP Session identity of the resumed Session (see
     /// [`SessionCreateResponse::acp_session_id`]).
     #[schemars(length(min = 1, max = 256))]
@@ -478,6 +496,14 @@ pub enum RunInput {
         #[schemars(length(min = 1, max = 1_048_576))]
         text: String,
     },
+    /// Interactive chat turn carrying the lossless provider-neutral Message
+    /// shape used by the framework's multimodal and tool-call paths.
+    ChatMessage { message: LlmMessageWire },
+    /// Non-interactive execution carrying the lossless provider-neutral
+    /// Message shape. This preserves the concrete ReactAgent
+    /// `execute_stream_message` mode without smuggling an execute flag into a
+    /// chat payload.
+    ExecuteMessage { message: LlmMessageWire },
     /// Non-interactive execution directive.
     Execute {
         #[schemars(length(min = 1, max = 1_048_576))]
@@ -489,6 +515,20 @@ impl RunInput {
     pub fn validate(&self) -> Result<(), &'static str> {
         let (empty, over_limit) = match self {
             RunInput::Chat { text } => (text.trim().is_empty(), text.chars().count() > 1_048_576),
+            RunInput::ChatMessage { message } => {
+                let encoded = serde_json::to_vec(message).unwrap_or_default();
+                (
+                    message.role.trim().is_empty(),
+                    encoded.len() > 4 * 1024 * 1024,
+                )
+            }
+            RunInput::ExecuteMessage { message } => {
+                let encoded = serde_json::to_vec(message).unwrap_or_default();
+                (
+                    message.role.trim().is_empty(),
+                    encoded.len() > 4 * 1024 * 1024,
+                )
+            }
             RunInput::Execute { task } => {
                 (task.trim().is_empty(), task.chars().count() > 1_048_576)
             }
@@ -1625,6 +1665,829 @@ pub struct AgentMessageInput {
 #[serde(deny_unknown_fields)]
 pub struct ExtensionUnit;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelChatTypeWire {
+    Direct,
+    Group,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelCapabilitiesWire {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chat_types: Vec<ChannelChatTypeWire>,
+    pub supports_media: bool,
+    pub supports_threads: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelPluginDescriptorWire {
+    pub descriptor_version: u32,
+    pub channel_id: String,
+    pub label: String,
+    pub capabilities: ChannelCapabilitiesWire,
+    pub handler_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelMessageHandlerDescriptorWire {
+    pub descriptor_version: u32,
+    pub handler_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelAttachmentWire {
+    pub kind: String,
+    pub data_base64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelInboundMessageWire {
+    pub channel_id: String,
+    pub sender_id: String,
+    pub chat_id: String,
+    pub chat_type: ChannelChatTypeWire,
+    pub text: String,
+    pub message_id: String,
+    pub timestamp: WireU64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ChannelAttachmentWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelOutboundMessageWire {
+    pub channel_id: String,
+    pub to: String,
+    pub chat_type: ChannelChatTypeWire,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ChannelAttachmentWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelStartInput {
+    pub handler_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelSendInput {
+    pub message: ChannelOutboundMessageWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelHandleInput {
+    pub message: ChannelInboundMessageWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelReplyInput {
+    pub message: ChannelOutboundMessageWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompressionInputWire {
+    pub messages: Vec<LlmMessageWire>,
+    pub token_limit: WireU64,
+    pub current_query: Option<String>,
+    pub focus_instructions: Option<String>,
+    /// Host-owned tokenizer for this compression pass. SDK implementations
+    /// call the canonical `Tokenizer::count_tokens` source operation through
+    /// this temporary resource instead of substituting a language heuristic.
+    pub tokenizer: TokenizerReferenceWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TokenizerReferenceWire {
+    pub resource: WireHandle,
+    pub owner_session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompressionOutputWire {
+    pub messages: Vec<LlmMessageWire>,
+    pub evicted: Vec<LlmMessageWire>,
+    pub checkpoint: Option<WireValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentComponentKindWire {
+    ConversationStore,
+    RunStore,
+    RuntimeStateStore,
+    AuditLogger,
+    ContextProjector,
+    MemoryTriggerSink,
+    Guard,
+    SearchProvider,
+    WorkflowCheckpointStore,
+    RevisionedTaskStore,
+    SandboxExecutor,
+    McpTransport,
+    Embedder,
+    MemoryPromoter,
+    Workflow,
+    IntentClassifier,
+    SkillLoadPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentComponentOperationWire {
+    ConversationCreate,
+    ConversationGet,
+    ConversationList,
+    ConversationUpdate,
+    ConversationDelete,
+    ConversationSaveMessages,
+    ConversationGetMessages,
+    ConversationCountMessages,
+    ConversationEnsure,
+    ConversationSearch,
+    RunSave,
+    RunLoad,
+    RunListBySession,
+    RunListAll,
+    RunAppendEvent,
+    RunListByParent,
+    RuntimeGetCheckpoint,
+    RuntimeSaveCheckpoint,
+    RuntimeSaveCheckpointForScope,
+    RuntimeStateIds,
+    RuntimeClearState,
+    RuntimeClearScope,
+    RuntimeClearConversation,
+    AuditLog,
+    AuditQuery,
+    ContextProject,
+    MemoryTrigger,
+    GuardCheck,
+    SearchProviderSearch,
+    WorkflowCheckpointSave,
+    WorkflowCheckpointLoad,
+    WorkflowCheckpointClaim,
+    WorkflowCheckpointList,
+    WorkflowCheckpointListByGraph,
+    WorkflowCheckpointListFiltered,
+    WorkflowCheckpointDelete,
+    WorkflowCheckpointClear,
+    RevisionedTaskLoad,
+    RevisionedTaskCompareAndCommit,
+    SandboxIsAvailable,
+    SandboxExecute,
+    SandboxExecuteStream,
+    SandboxExecuteWithLimits,
+    SandboxExecuteWithLimitsAndCancel,
+    SandboxCleanup,
+    McpTransportSend,
+    McpTransportNotify,
+    McpTransportClose,
+    McpTransportTryNotification,
+    EmbedderEmbed,
+    MemoryPromoterPromote,
+    WorkflowRun,
+    WorkflowRunStream,
+    IntentClassify,
+    SkillLoadAllows,
+}
+
+impl AgentComponentOperationWire {
+    pub fn component(self) -> AgentComponentKindWire {
+        match self {
+            Self::ConversationCreate
+            | Self::ConversationGet
+            | Self::ConversationList
+            | Self::ConversationUpdate
+            | Self::ConversationDelete
+            | Self::ConversationSaveMessages
+            | Self::ConversationGetMessages
+            | Self::ConversationCountMessages
+            | Self::ConversationEnsure
+            | Self::ConversationSearch => AgentComponentKindWire::ConversationStore,
+            Self::RunSave
+            | Self::RunLoad
+            | Self::RunListBySession
+            | Self::RunListAll
+            | Self::RunAppendEvent
+            | Self::RunListByParent => AgentComponentKindWire::RunStore,
+            Self::RuntimeGetCheckpoint
+            | Self::RuntimeSaveCheckpoint
+            | Self::RuntimeSaveCheckpointForScope
+            | Self::RuntimeStateIds
+            | Self::RuntimeClearState
+            | Self::RuntimeClearScope
+            | Self::RuntimeClearConversation => AgentComponentKindWire::RuntimeStateStore,
+            Self::AuditLog | Self::AuditQuery => AgentComponentKindWire::AuditLogger,
+            Self::ContextProject => AgentComponentKindWire::ContextProjector,
+            Self::MemoryTrigger => AgentComponentKindWire::MemoryTriggerSink,
+            Self::GuardCheck => AgentComponentKindWire::Guard,
+            Self::SearchProviderSearch => AgentComponentKindWire::SearchProvider,
+            Self::WorkflowCheckpointSave
+            | Self::WorkflowCheckpointLoad
+            | Self::WorkflowCheckpointClaim
+            | Self::WorkflowCheckpointList
+            | Self::WorkflowCheckpointListByGraph
+            | Self::WorkflowCheckpointListFiltered
+            | Self::WorkflowCheckpointDelete
+            | Self::WorkflowCheckpointClear => AgentComponentKindWire::WorkflowCheckpointStore,
+            Self::RevisionedTaskLoad | Self::RevisionedTaskCompareAndCommit => {
+                AgentComponentKindWire::RevisionedTaskStore
+            }
+            Self::SandboxIsAvailable
+            | Self::SandboxExecute
+            | Self::SandboxExecuteStream
+            | Self::SandboxExecuteWithLimits
+            | Self::SandboxExecuteWithLimitsAndCancel
+            | Self::SandboxCleanup => AgentComponentKindWire::SandboxExecutor,
+            Self::McpTransportSend
+            | Self::McpTransportNotify
+            | Self::McpTransportClose
+            | Self::McpTransportTryNotification => AgentComponentKindWire::McpTransport,
+            Self::EmbedderEmbed => AgentComponentKindWire::Embedder,
+            Self::MemoryPromoterPromote => AgentComponentKindWire::MemoryPromoter,
+            Self::WorkflowRun | Self::WorkflowRunStream => AgentComponentKindWire::Workflow,
+            Self::IntentClassify => AgentComponentKindWire::IntentClassifier,
+            Self::SkillLoadAllows => AgentComponentKindWire::SkillLoadPolicy,
+        }
+    }
+}
+
+/// Lossless public projection passed to a host-language [`SkillLoadPolicy`].
+/// Fields skipped by the framework's persistence serde remain explicit here
+/// because a live policy may legitimately inspect their runtime values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SkillDescriptorPolicyWire {
+    pub name: String,
+    pub description: String,
+    pub location: WirePath,
+    pub license: Option<String>,
+    pub compatibility: Option<String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
+    pub source: Option<String>,
+    pub allowed_tools: Vec<String>,
+    pub shell: Option<String>,
+    pub paths: Vec<String>,
+    pub triggers: Vec<String>,
+    pub hooks: Option<WireValue>,
+    pub sandbox: Option<WireValue>,
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "operation",
+    content = "input",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum AgentComponentCallInputWire {
+    ConversationCreate {
+        conversation: WireValue,
+    },
+    ConversationGet {
+        conversation_id: String,
+    },
+    ConversationList {
+        user_id: Option<String>,
+        agent_type: Option<String>,
+        limit: Option<WireU64>,
+        offset: Option<WireU64>,
+    },
+    ConversationUpdate {
+        conversation_id: String,
+        title: Option<String>,
+        summary: Option<String>,
+        compressed_before_id: Option<WireI64>,
+    },
+    ConversationDelete {
+        conversation_id: String,
+    },
+    ConversationSaveMessages {
+        conversation_id: String,
+        messages: Vec<WireValue>,
+    },
+    ConversationGetMessages {
+        conversation_id: String,
+    },
+    ConversationCountMessages {
+        conversation_id: String,
+    },
+    ConversationEnsure {
+        conversation: WireValue,
+    },
+    ConversationSearch {
+        query: String,
+        limit: WireU64,
+    },
+    RunSave {
+        run: WireValue,
+    },
+    RunLoad {
+        run_id: String,
+    },
+    RunListBySession {
+        session_id: String,
+    },
+    RunListAll {
+        limit: WireU64,
+    },
+    RunAppendEvent {
+        run_id: String,
+        event: WireValue,
+    },
+    RunListByParent {
+        parent_run_id: String,
+    },
+    RuntimeGetCheckpoint {
+        conversation_id: String,
+    },
+    RuntimeSaveCheckpoint {
+        checkpoint: WireValue,
+    },
+    RuntimeSaveCheckpointForScope {
+        scope_id: String,
+        checkpoint: WireValue,
+    },
+    RuntimeStateIds {
+        scope_id: String,
+    },
+    RuntimeClearState {
+        scope_id: String,
+        runtime_state_id: String,
+    },
+    RuntimeClearScope {
+        scope_id: String,
+    },
+    RuntimeClearConversation {
+        conversation_id: String,
+    },
+    AuditLog {
+        event: WireValue,
+    },
+    AuditQuery {
+        session_id: Option<String>,
+        agent_name: Option<String>,
+        from: Option<String>,
+        to: Option<String>,
+        limit: Option<WireU64>,
+    },
+    ContextProject {
+        iteration: WireU64,
+        agent_name: String,
+        session_id: Option<String>,
+        conversation_id: Option<String>,
+        run_id: Option<String>,
+        turn_id: Option<String>,
+    },
+    MemoryTrigger {
+        trigger: WireValue,
+    },
+    GuardCheck {
+        content: String,
+        direction: String,
+    },
+    SearchProviderSearch {
+        query: String,
+        max_results: WireU64,
+    },
+    WorkflowCheckpointSave {
+        checkpoint: WireValue,
+    },
+    WorkflowCheckpointLoad {
+        checkpoint_id: String,
+    },
+    WorkflowCheckpointClaim {
+        checkpoint_id: String,
+    },
+    WorkflowCheckpointList,
+    WorkflowCheckpointListByGraph {
+        graph_name: String,
+    },
+    WorkflowCheckpointListFiltered {
+        filter: WireValue,
+    },
+    WorkflowCheckpointDelete {
+        checkpoint_id: String,
+    },
+    WorkflowCheckpointClear,
+    RevisionedTaskLoad {
+        scope_id: String,
+    },
+    RevisionedTaskCompareAndCommit {
+        scope_id: String,
+        commit: WireValue,
+    },
+    SandboxIsAvailable,
+    SandboxExecute {
+        command: WireValue,
+    },
+    SandboxExecuteStream {
+        command: WireValue,
+    },
+    SandboxExecuteWithLimits {
+        command: WireValue,
+        limits: WireValue,
+    },
+    SandboxExecuteWithLimitsAndCancel {
+        command: WireValue,
+        limits: WireValue,
+    },
+    SandboxCleanup,
+    McpTransportSend {
+        request: WireValue,
+    },
+    McpTransportNotify {
+        notification: WireValue,
+    },
+    McpTransportClose,
+    McpTransportTryNotification,
+    EmbedderEmbed {
+        text: String,
+    },
+    MemoryPromoterPromote {
+        evicted: Vec<LlmMessageWire>,
+    },
+    WorkflowRun {
+        input: String,
+    },
+    WorkflowRunStream {
+        input: String,
+    },
+    IntentClassify {
+        user_input: String,
+        context: Vec<LlmMessageWire>,
+    },
+    SkillLoadAllows {
+        descriptor: Box<SkillDescriptorPolicyWire>,
+    },
+}
+
+impl AgentComponentCallInputWire {
+    pub fn operation(&self) -> AgentComponentOperationWire {
+        match self {
+            Self::ConversationCreate { .. } => AgentComponentOperationWire::ConversationCreate,
+            Self::ConversationGet { .. } => AgentComponentOperationWire::ConversationGet,
+            Self::ConversationList { .. } => AgentComponentOperationWire::ConversationList,
+            Self::ConversationUpdate { .. } => AgentComponentOperationWire::ConversationUpdate,
+            Self::ConversationDelete { .. } => AgentComponentOperationWire::ConversationDelete,
+            Self::ConversationSaveMessages { .. } => {
+                AgentComponentOperationWire::ConversationSaveMessages
+            }
+            Self::ConversationGetMessages { .. } => {
+                AgentComponentOperationWire::ConversationGetMessages
+            }
+            Self::ConversationCountMessages { .. } => {
+                AgentComponentOperationWire::ConversationCountMessages
+            }
+            Self::ConversationEnsure { .. } => AgentComponentOperationWire::ConversationEnsure,
+            Self::ConversationSearch { .. } => AgentComponentOperationWire::ConversationSearch,
+            Self::RunSave { .. } => AgentComponentOperationWire::RunSave,
+            Self::RunLoad { .. } => AgentComponentOperationWire::RunLoad,
+            Self::RunListBySession { .. } => AgentComponentOperationWire::RunListBySession,
+            Self::RunListAll { .. } => AgentComponentOperationWire::RunListAll,
+            Self::RunAppendEvent { .. } => AgentComponentOperationWire::RunAppendEvent,
+            Self::RunListByParent { .. } => AgentComponentOperationWire::RunListByParent,
+            Self::RuntimeGetCheckpoint { .. } => AgentComponentOperationWire::RuntimeGetCheckpoint,
+            Self::RuntimeSaveCheckpoint { .. } => {
+                AgentComponentOperationWire::RuntimeSaveCheckpoint
+            }
+            Self::RuntimeSaveCheckpointForScope { .. } => {
+                AgentComponentOperationWire::RuntimeSaveCheckpointForScope
+            }
+            Self::RuntimeStateIds { .. } => AgentComponentOperationWire::RuntimeStateIds,
+            Self::RuntimeClearState { .. } => AgentComponentOperationWire::RuntimeClearState,
+            Self::RuntimeClearScope { .. } => AgentComponentOperationWire::RuntimeClearScope,
+            Self::RuntimeClearConversation { .. } => {
+                AgentComponentOperationWire::RuntimeClearConversation
+            }
+            Self::AuditLog { .. } => AgentComponentOperationWire::AuditLog,
+            Self::AuditQuery { .. } => AgentComponentOperationWire::AuditQuery,
+            Self::ContextProject { .. } => AgentComponentOperationWire::ContextProject,
+            Self::MemoryTrigger { .. } => AgentComponentOperationWire::MemoryTrigger,
+            Self::GuardCheck { .. } => AgentComponentOperationWire::GuardCheck,
+            Self::SearchProviderSearch { .. } => AgentComponentOperationWire::SearchProviderSearch,
+            Self::WorkflowCheckpointSave { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointSave
+            }
+            Self::WorkflowCheckpointLoad { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointLoad
+            }
+            Self::WorkflowCheckpointClaim { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointClaim
+            }
+            Self::WorkflowCheckpointList => AgentComponentOperationWire::WorkflowCheckpointList,
+            Self::WorkflowCheckpointListByGraph { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointListByGraph
+            }
+            Self::WorkflowCheckpointListFiltered { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointListFiltered
+            }
+            Self::WorkflowCheckpointDelete { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointDelete
+            }
+            Self::WorkflowCheckpointClear => AgentComponentOperationWire::WorkflowCheckpointClear,
+            Self::RevisionedTaskLoad { .. } => AgentComponentOperationWire::RevisionedTaskLoad,
+            Self::RevisionedTaskCompareAndCommit { .. } => {
+                AgentComponentOperationWire::RevisionedTaskCompareAndCommit
+            }
+            Self::SandboxIsAvailable => AgentComponentOperationWire::SandboxIsAvailable,
+            Self::SandboxExecute { .. } => AgentComponentOperationWire::SandboxExecute,
+            Self::SandboxExecuteStream { .. } => AgentComponentOperationWire::SandboxExecuteStream,
+            Self::SandboxExecuteWithLimits { .. } => {
+                AgentComponentOperationWire::SandboxExecuteWithLimits
+            }
+            Self::SandboxExecuteWithLimitsAndCancel { .. } => {
+                AgentComponentOperationWire::SandboxExecuteWithLimitsAndCancel
+            }
+            Self::SandboxCleanup => AgentComponentOperationWire::SandboxCleanup,
+            Self::McpTransportSend { .. } => AgentComponentOperationWire::McpTransportSend,
+            Self::McpTransportNotify { .. } => AgentComponentOperationWire::McpTransportNotify,
+            Self::McpTransportClose => AgentComponentOperationWire::McpTransportClose,
+            Self::McpTransportTryNotification => {
+                AgentComponentOperationWire::McpTransportTryNotification
+            }
+            Self::EmbedderEmbed { .. } => AgentComponentOperationWire::EmbedderEmbed,
+            Self::MemoryPromoterPromote { .. } => {
+                AgentComponentOperationWire::MemoryPromoterPromote
+            }
+            Self::WorkflowRun { .. } => AgentComponentOperationWire::WorkflowRun,
+            Self::WorkflowRunStream { .. } => AgentComponentOperationWire::WorkflowRunStream,
+            Self::IntentClassify { .. } => AgentComponentOperationWire::IntentClassify,
+            Self::SkillLoadAllows { .. } => AgentComponentOperationWire::SkillLoadAllows,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "operation",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum AgentComponentCallResultWire {
+    ConversationCreate {
+        conversation: WireValue,
+    },
+    ConversationGet {
+        conversation: Option<WireValue>,
+    },
+    ConversationList {
+        conversations: Vec<WireValue>,
+    },
+    ConversationUpdate,
+    ConversationDelete,
+    ConversationSaveMessages,
+    ConversationGetMessages {
+        messages: Vec<WireValue>,
+    },
+    ConversationCountMessages {
+        count: WireU64,
+    },
+    ConversationEnsure {
+        conversation: WireValue,
+    },
+    ConversationSearch {
+        conversations: Vec<WireValue>,
+    },
+    RunSave,
+    RunLoad {
+        run: Option<WireValue>,
+    },
+    RunListBySession {
+        runs: Vec<WireValue>,
+    },
+    RunListAll {
+        runs: Vec<WireValue>,
+    },
+    RunAppendEvent,
+    RunListByParent {
+        runs: Vec<WireValue>,
+    },
+    RuntimeGetCheckpoint {
+        checkpoint: Option<WireValue>,
+    },
+    RuntimeSaveCheckpoint,
+    RuntimeSaveCheckpointForScope,
+    RuntimeStateIds {
+        state_ids: Vec<String>,
+    },
+    RuntimeClearState {
+        receipt: WireValue,
+    },
+    RuntimeClearScope {
+        receipt: WireValue,
+    },
+    RuntimeClearConversation,
+    AuditLog,
+    AuditQuery {
+        events: Vec<WireValue>,
+    },
+    ContextProject {
+        projections: Vec<WireValue>,
+    },
+    MemoryTrigger {
+        disposition: String,
+    },
+    GuardCheck {
+        result: WireValue,
+    },
+    SearchProviderSearch {
+        results: Vec<WireValue>,
+    },
+    WorkflowCheckpointSave,
+    WorkflowCheckpointLoad {
+        checkpoint: Option<WireValue>,
+    },
+    WorkflowCheckpointClaim {
+        checkpoint: Option<WireValue>,
+    },
+    WorkflowCheckpointList {
+        checkpoints: Vec<WireValue>,
+    },
+    WorkflowCheckpointListByGraph {
+        checkpoints: Vec<WireValue>,
+    },
+    WorkflowCheckpointListFiltered {
+        checkpoints: Vec<WireValue>,
+    },
+    WorkflowCheckpointDelete,
+    WorkflowCheckpointClear,
+    RevisionedTaskLoad {
+        graph: Option<WireValue>,
+    },
+    RevisionedTaskCompareAndCommit {
+        graph: WireValue,
+    },
+    SandboxIsAvailable {
+        available: bool,
+    },
+    SandboxExecute {
+        result: WireValue,
+    },
+    SandboxExecuteWithLimits {
+        result: WireValue,
+    },
+    SandboxExecuteWithLimitsAndCancel {
+        result: WireValue,
+    },
+    SandboxCleanup,
+    McpTransportSend {
+        response: WireValue,
+    },
+    McpTransportNotify,
+    McpTransportClose,
+    McpTransportTryNotification {
+        notification: Option<WireValue>,
+    },
+    EmbedderEmbed {
+        vector: Vec<f32>,
+    },
+    MemoryPromoterPromote {
+        submitted: WireU64,
+        promoted: WireU64,
+        deduplicated: WireU64,
+    },
+    WorkflowRun {
+        output: WireValue,
+    },
+    IntentClassify {
+        intent: WireValue,
+    },
+    SkillLoadAllows {
+        allowed: bool,
+    },
+}
+
+impl AgentComponentCallResultWire {
+    pub fn operation(&self) -> AgentComponentOperationWire {
+        match self {
+            Self::ConversationCreate { .. } => AgentComponentOperationWire::ConversationCreate,
+            Self::ConversationGet { .. } => AgentComponentOperationWire::ConversationGet,
+            Self::ConversationList { .. } => AgentComponentOperationWire::ConversationList,
+            Self::ConversationUpdate => AgentComponentOperationWire::ConversationUpdate,
+            Self::ConversationDelete => AgentComponentOperationWire::ConversationDelete,
+            Self::ConversationSaveMessages => AgentComponentOperationWire::ConversationSaveMessages,
+            Self::ConversationGetMessages { .. } => {
+                AgentComponentOperationWire::ConversationGetMessages
+            }
+            Self::ConversationCountMessages { .. } => {
+                AgentComponentOperationWire::ConversationCountMessages
+            }
+            Self::ConversationEnsure { .. } => AgentComponentOperationWire::ConversationEnsure,
+            Self::ConversationSearch { .. } => AgentComponentOperationWire::ConversationSearch,
+            Self::RunSave => AgentComponentOperationWire::RunSave,
+            Self::RunLoad { .. } => AgentComponentOperationWire::RunLoad,
+            Self::RunListBySession { .. } => AgentComponentOperationWire::RunListBySession,
+            Self::RunListAll { .. } => AgentComponentOperationWire::RunListAll,
+            Self::RunAppendEvent => AgentComponentOperationWire::RunAppendEvent,
+            Self::RunListByParent { .. } => AgentComponentOperationWire::RunListByParent,
+            Self::RuntimeGetCheckpoint { .. } => AgentComponentOperationWire::RuntimeGetCheckpoint,
+            Self::RuntimeSaveCheckpoint => AgentComponentOperationWire::RuntimeSaveCheckpoint,
+            Self::RuntimeSaveCheckpointForScope => {
+                AgentComponentOperationWire::RuntimeSaveCheckpointForScope
+            }
+            Self::RuntimeStateIds { .. } => AgentComponentOperationWire::RuntimeStateIds,
+            Self::RuntimeClearState { .. } => AgentComponentOperationWire::RuntimeClearState,
+            Self::RuntimeClearScope { .. } => AgentComponentOperationWire::RuntimeClearScope,
+            Self::RuntimeClearConversation => AgentComponentOperationWire::RuntimeClearConversation,
+            Self::AuditLog => AgentComponentOperationWire::AuditLog,
+            Self::AuditQuery { .. } => AgentComponentOperationWire::AuditQuery,
+            Self::ContextProject { .. } => AgentComponentOperationWire::ContextProject,
+            Self::MemoryTrigger { .. } => AgentComponentOperationWire::MemoryTrigger,
+            Self::GuardCheck { .. } => AgentComponentOperationWire::GuardCheck,
+            Self::SearchProviderSearch { .. } => AgentComponentOperationWire::SearchProviderSearch,
+            Self::WorkflowCheckpointSave => AgentComponentOperationWire::WorkflowCheckpointSave,
+            Self::WorkflowCheckpointLoad { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointLoad
+            }
+            Self::WorkflowCheckpointClaim { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointClaim
+            }
+            Self::WorkflowCheckpointList { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointList
+            }
+            Self::WorkflowCheckpointListByGraph { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointListByGraph
+            }
+            Self::WorkflowCheckpointListFiltered { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointListFiltered
+            }
+            Self::WorkflowCheckpointDelete => AgentComponentOperationWire::WorkflowCheckpointDelete,
+            Self::WorkflowCheckpointClear => AgentComponentOperationWire::WorkflowCheckpointClear,
+            Self::RevisionedTaskLoad { .. } => AgentComponentOperationWire::RevisionedTaskLoad,
+            Self::RevisionedTaskCompareAndCommit { .. } => {
+                AgentComponentOperationWire::RevisionedTaskCompareAndCommit
+            }
+            Self::SandboxIsAvailable { .. } => AgentComponentOperationWire::SandboxIsAvailable,
+            Self::SandboxExecute { .. } => AgentComponentOperationWire::SandboxExecute,
+            Self::SandboxExecuteWithLimits { .. } => {
+                AgentComponentOperationWire::SandboxExecuteWithLimits
+            }
+            Self::SandboxExecuteWithLimitsAndCancel { .. } => {
+                AgentComponentOperationWire::SandboxExecuteWithLimitsAndCancel
+            }
+            Self::SandboxCleanup => AgentComponentOperationWire::SandboxCleanup,
+            Self::McpTransportSend { .. } => AgentComponentOperationWire::McpTransportSend,
+            Self::McpTransportNotify => AgentComponentOperationWire::McpTransportNotify,
+            Self::McpTransportClose => AgentComponentOperationWire::McpTransportClose,
+            Self::McpTransportTryNotification { .. } => {
+                AgentComponentOperationWire::McpTransportTryNotification
+            }
+            Self::EmbedderEmbed { .. } => AgentComponentOperationWire::EmbedderEmbed,
+            Self::MemoryPromoterPromote { .. } => {
+                AgentComponentOperationWire::MemoryPromoterPromote
+            }
+            Self::WorkflowRun { .. } => AgentComponentOperationWire::WorkflowRun,
+            Self::IntentClassify { .. } => AgentComponentOperationWire::IntentClassify,
+            Self::SkillLoadAllows { .. } => AgentComponentOperationWire::SkillLoadAllows,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentComponentCallWire {
+    pub component: AgentComponentKindWire,
+    pub call: AgentComponentCallInputWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentComponentResultWire {
+    pub component: AgentComponentKindWire,
+    pub result: AgentComponentCallResultWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentComponentCapabilitiesWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_level: Option<String>,
+    #[serde(default)]
+    pub supports_streaming: bool,
+    #[serde(default)]
+    pub supports_notifications: bool,
+}
+
 /// Versioned per-kind registration descriptor. Exactly one variant matches
 /// the registration's [`ExtensionKind`]; the Host dispatches on this typed
 /// snapshot and never guesses trait semantics from free-form JSON (design
@@ -1701,6 +2564,26 @@ pub enum ExtensionDescriptor {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_names: Vec<String>,
     },
+    Critic {
+        descriptor_version: u32,
+        #[schemars(length(min = 1, max = 256))]
+        name: String,
+    },
+    ChannelPlugin(ChannelPluginDescriptorWire),
+    ChannelMessageHandler(ChannelMessageHandlerDescriptorWire),
+    ContextCompressor {
+        descriptor_version: u32,
+        #[schemars(length(min = 1, max = 256))]
+        name: String,
+    },
+    AgentComponent {
+        descriptor_version: u32,
+        component: AgentComponentKindWire,
+        #[schemars(length(min = 1, max = 256))]
+        name: String,
+        #[serde(default)]
+        capabilities: AgentComponentCapabilitiesWire,
+    },
 }
 
 impl ExtensionDescriptor {
@@ -1716,6 +2599,11 @@ impl ExtensionDescriptor {
             ExtensionDescriptor::InterventionCallback { .. } => ExtensionKind::InterventionCallback,
             ExtensionDescriptor::AgentFactory { .. } => ExtensionKind::AgentFactory,
             ExtensionDescriptor::CustomAgent { .. } => ExtensionKind::CustomAgent,
+            ExtensionDescriptor::Critic { .. } => ExtensionKind::Critic,
+            ExtensionDescriptor::ChannelPlugin(_) => ExtensionKind::ChannelPlugin,
+            ExtensionDescriptor::ChannelMessageHandler(_) => ExtensionKind::ChannelMessageHandler,
+            ExtensionDescriptor::ContextCompressor { .. } => ExtensionKind::ContextCompressor,
+            ExtensionDescriptor::AgentComponent { .. } => ExtensionKind::AgentComponent,
         }
     }
 
@@ -1750,7 +2638,18 @@ impl ExtensionDescriptor {
             }
             | ExtensionDescriptor::CustomAgent {
                 descriptor_version, ..
+            }
+            | ExtensionDescriptor::ContextCompressor {
+                descriptor_version, ..
+            }
+            | ExtensionDescriptor::AgentComponent {
+                descriptor_version, ..
             } => *descriptor_version,
+            ExtensionDescriptor::Critic {
+                descriptor_version, ..
+            } => *descriptor_version,
+            ExtensionDescriptor::ChannelPlugin(value) => value.descriptor_version,
+            ExtensionDescriptor::ChannelMessageHandler(value) => value.descriptor_version,
         };
         if version != SUPPORTED_DESCRIPTOR_VERSION {
             return Err("unsupported extension descriptor_version");
@@ -1814,6 +2713,76 @@ impl ExtensionDescriptor {
                 return Err("custom agent descriptor tool_names are empty or exceed their bound");
             }
         }
+        if let ExtensionDescriptor::Critic { name, .. } = self
+            && (name.trim().is_empty() || name.chars().count() > 256)
+        {
+            return Err("critic descriptor name is empty or exceeds its bound");
+        }
+        if let ExtensionDescriptor::ContextCompressor { name, .. } = self
+            && (name.trim().is_empty() || name.chars().count() > 256)
+        {
+            return Err("context compressor descriptor name is empty or exceeds its bound");
+        }
+        if let ExtensionDescriptor::AgentComponent { name, .. } = self
+            && (name.trim().is_empty() || name.chars().count() > 256)
+        {
+            return Err("agent component descriptor name is empty or exceeds its bound");
+        }
+        if let ExtensionDescriptor::AgentComponent {
+            component,
+            capabilities,
+            ..
+        } = self
+        {
+            if capabilities
+                .isolation_level
+                .as_deref()
+                .is_some_and(|level| {
+                    !matches!(
+                        level,
+                        "none" | "process" | "os-sandbox" | "container" | "orchestrated"
+                    )
+                })
+            {
+                return Err("agent component isolation_level is invalid");
+            }
+            if capabilities.supports_streaming
+                && !matches!(
+                    component,
+                    AgentComponentKindWire::SandboxExecutor | AgentComponentKindWire::Workflow
+                )
+            {
+                return Err("streaming is only valid for sandbox and workflow components");
+            }
+            if *component != AgentComponentKindWire::SandboxExecutor
+                && capabilities.isolation_level.is_some()
+            {
+                return Err("isolation_level is only valid for sandbox components");
+            }
+            if *component != AgentComponentKindWire::McpTransport
+                && capabilities.supports_notifications
+            {
+                return Err("notifications are only valid for MCP transport components");
+            }
+        }
+        if let ExtensionDescriptor::ChannelPlugin(value) = self {
+            if value.channel_id.trim().is_empty()
+                || value.channel_id.chars().count() > 256
+                || value.label.chars().count() > 256
+                || value.handler_id.trim().is_empty()
+                || value.handler_id.chars().count() > 256
+            {
+                return Err("channel plugin descriptor identity is empty or exceeds its bound");
+            }
+            if value.capabilities.chat_types.is_empty() {
+                return Err("channel plugin descriptor must declare a chat type");
+            }
+        }
+        if let ExtensionDescriptor::ChannelMessageHandler(value) = self
+            && (value.handler_id.trim().is_empty() || value.handler_id.chars().count() > 256)
+        {
+            return Err("channel message handler descriptor identity is empty or bounded");
+        }
         if let ExtensionDescriptor::Hook { events, .. } = self
             && (events.len() > 128
                 || events
@@ -1830,6 +2799,67 @@ impl ExtensionDescriptor {
     /// fingerprint decides same-handle idempotency vs typed conflict.
     pub fn fingerprint(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "<unencodable>".to_string())
+    }
+}
+
+/// Inputs for one non-streaming Critic callback. The three strings mirror the
+/// framework `Critic::critique` contract without exposing any Host-owned
+/// runtime state or a second verifier authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CritiqueInput {
+    #[schemars(length(max = 65_536))]
+    pub task: String,
+    #[schemars(length(max = 65_536))]
+    pub answer: String,
+    #[schemars(length(max = 65_536))]
+    pub context: String,
+}
+
+impl CritiqueInput {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.task.chars().count() > 65_536
+            || self.answer.chars().count() > 65_536
+            || self.context.chars().count() > 65_536
+        {
+            return Err("critic input exceeds its text bound");
+        }
+        Ok(())
+    }
+}
+
+/// Typed Critic callback result. `score` follows the framework's documented
+/// 0..=10 scale and the remaining fields preserve the framework `Critique`
+/// value losslessly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CritiqueWire {
+    pub score: f64,
+    pub passed: bool,
+    #[schemars(length(max = 65_536))]
+    pub feedback: String,
+    #[serde(default)]
+    #[schemars(length(max = 128))]
+    pub suggestions: Vec<String>,
+}
+
+impl CritiqueWire {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.score.is_finite() || !(0.0..=10.0).contains(&self.score) {
+            return Err("critic score must be finite and within 0..=10");
+        }
+        if self.feedback.chars().count() > 65_536 {
+            return Err("critic feedback exceeds its text bound");
+        }
+        if self.suggestions.len() > 128
+            || self
+                .suggestions
+                .iter()
+                .any(|suggestion| suggestion.chars().count() > 4096)
+        {
+            return Err("critic suggestions are empty or exceed their bound");
+        }
+        Ok(())
     }
 }
 
@@ -1881,6 +2911,19 @@ pub enum ExtensionOperation {
     AgentChat,
     AgentChatStream,
     AgentClose,
+    // Critic
+    CriticCritique,
+    // ChannelPlugin / MessageHandler
+    ChannelStart,
+    ChannelStop,
+    ChannelSend,
+    ChannelHealth,
+    ChannelHandle,
+    ChannelHandleStream,
+    ChannelReply,
+    CompressorCompress,
+    AgentComponentCall,
+    AgentComponentCallStream,
 }
 
 impl ExtensionOperation {
@@ -1918,6 +2961,17 @@ impl ExtensionOperation {
             ExtensionOperation::AgentChat => "agent_chat",
             ExtensionOperation::AgentChatStream => "agent_chat_stream",
             ExtensionOperation::AgentClose => "agent_close",
+            ExtensionOperation::CriticCritique => "critic_critique",
+            ExtensionOperation::ChannelStart => "channel_start",
+            ExtensionOperation::ChannelStop => "channel_stop",
+            ExtensionOperation::ChannelSend => "channel_send",
+            ExtensionOperation::ChannelHealth => "channel_health",
+            ExtensionOperation::ChannelHandle => "channel_handle",
+            ExtensionOperation::ChannelHandleStream => "channel_handle_stream",
+            ExtensionOperation::ChannelReply => "channel_reply",
+            ExtensionOperation::CompressorCompress => "compressor_compress",
+            ExtensionOperation::AgentComponentCall => "agent_component_call",
+            ExtensionOperation::AgentComponentCallStream => "agent_component_call_stream",
         }
     }
 
@@ -1956,6 +3010,17 @@ impl ExtensionOperation {
             | ExtensionOperation::AgentChat
             | ExtensionOperation::AgentChatStream
             | ExtensionOperation::AgentClose => ExtensionKind::CustomAgent,
+            ExtensionOperation::CriticCritique => ExtensionKind::Critic,
+            ExtensionOperation::ChannelStart
+            | ExtensionOperation::ChannelStop
+            | ExtensionOperation::ChannelSend
+            | ExtensionOperation::ChannelHealth => ExtensionKind::ChannelPlugin,
+            ExtensionOperation::ChannelHandle
+            | ExtensionOperation::ChannelHandleStream
+            | ExtensionOperation::ChannelReply => ExtensionKind::ChannelMessageHandler,
+            ExtensionOperation::CompressorCompress => ExtensionKind::ContextCompressor,
+            ExtensionOperation::AgentComponentCall
+            | ExtensionOperation::AgentComponentCallStream => ExtensionKind::AgentComponent,
         }
     }
 
@@ -1968,6 +3033,8 @@ impl ExtensionOperation {
                 | ExtensionOperation::LlmChatStream
                 | ExtensionOperation::AgentExecuteStream
                 | ExtensionOperation::AgentChatStream
+                | ExtensionOperation::ChannelHandleStream
+                | ExtensionOperation::AgentComponentCallStream
         )
     }
 }
@@ -2014,6 +3081,17 @@ pub enum ExtensionInvocation {
     AgentChat(AgentMessageInput),
     AgentChatStream(AgentMessageInput),
     AgentClose(ExtensionUnit),
+    CriticCritique(CritiqueInput),
+    ChannelStart(ChannelStartInput),
+    ChannelStop(ExtensionUnit),
+    ChannelSend(ChannelSendInput),
+    ChannelHealth(ExtensionUnit),
+    ChannelHandle(ChannelHandleInput),
+    ChannelHandleStream(ChannelHandleInput),
+    ChannelReply(ChannelReplyInput),
+    CompressorCompress(CompressionInputWire),
+    AgentComponentCall(AgentComponentCallWire),
+    AgentComponentCallStream(AgentComponentCallWire),
 }
 
 impl ExtensionInvocation {
@@ -2051,6 +3129,17 @@ impl ExtensionInvocation {
             Self::AgentChat(_) => ExtensionOperation::AgentChat,
             Self::AgentChatStream(_) => ExtensionOperation::AgentChatStream,
             Self::AgentClose(_) => ExtensionOperation::AgentClose,
+            Self::CriticCritique(_) => ExtensionOperation::CriticCritique,
+            Self::ChannelStart(_) => ExtensionOperation::ChannelStart,
+            Self::ChannelStop(_) => ExtensionOperation::ChannelStop,
+            Self::ChannelSend(_) => ExtensionOperation::ChannelSend,
+            Self::ChannelHealth(_) => ExtensionOperation::ChannelHealth,
+            Self::ChannelHandle(_) => ExtensionOperation::ChannelHandle,
+            Self::ChannelHandleStream(_) => ExtensionOperation::ChannelHandleStream,
+            Self::ChannelReply(_) => ExtensionOperation::ChannelReply,
+            Self::CompressorCompress(_) => ExtensionOperation::CompressorCompress,
+            Self::AgentComponentCall(_) => ExtensionOperation::AgentComponentCall,
+            Self::AgentComponentCallStream(_) => ExtensionOperation::AgentComponentCallStream,
         }
     }
 }
@@ -2091,6 +3180,15 @@ pub enum ExtensionResult {
     AgentExecute(String),
     AgentChat(String),
     AgentClose(ExtensionUnit),
+    CriticCritique(CritiqueWire),
+    ChannelStart(ExtensionUnit),
+    ChannelStop(ExtensionUnit),
+    ChannelSend(ExtensionUnit),
+    ChannelHealth(ExtensionUnit),
+    ChannelHandle(ChannelOutboundMessageWire),
+    ChannelReply(ExtensionUnit),
+    CompressorCompress(CompressionOutputWire),
+    AgentComponentCall(AgentComponentResultWire),
 }
 
 impl ExtensionResult {
@@ -2124,8 +3222,101 @@ impl ExtensionResult {
             Self::AgentExecute(_) => ExtensionOperation::AgentExecute,
             Self::AgentChat(_) => ExtensionOperation::AgentChat,
             Self::AgentClose(_) => ExtensionOperation::AgentClose,
+            Self::CriticCritique(_) => ExtensionOperation::CriticCritique,
+            Self::ChannelStart(_) => ExtensionOperation::ChannelStart,
+            Self::ChannelStop(_) => ExtensionOperation::ChannelStop,
+            Self::ChannelSend(_) => ExtensionOperation::ChannelSend,
+            Self::ChannelHealth(_) => ExtensionOperation::ChannelHealth,
+            Self::ChannelHandle(_) => ExtensionOperation::ChannelHandle,
+            Self::ChannelReply(_) => ExtensionOperation::ChannelReply,
+            Self::CompressorCompress(_) => ExtensionOperation::CompressorCompress,
+            Self::AgentComponentCall(_) => ExtensionOperation::AgentComponentCall,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxOutputChannelWire {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SandboxStreamChunkWire {
+    Output {
+        channel: SandboxOutputChannelWire,
+        chunk: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SandboxStreamFailureWire {
+    Cancelled { message: String },
+    IoError { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "terminal", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SandboxStreamCompleteWire {
+    Complete { result: WireValue },
+    Failed { failure: SandboxStreamFailureWire },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkflowStreamChunkWire {
+    NodeStart {
+        node_name: String,
+        step_index: WireU64,
+    },
+    NodeEnd {
+        node_name: String,
+        step_index: WireU64,
+        elapsed: WireDuration,
+    },
+    Token {
+        node_name: String,
+        token: String,
+    },
+    NodeError {
+        node_name: String,
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStreamCompleteWire {
+    pub result: String,
+    pub total_steps: WireU64,
+    pub elapsed: WireDuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "component",
+    content = "event",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum AgentComponentStreamChunkWire {
+    Sandbox(SandboxStreamChunkWire),
+    Workflow(WorkflowStreamChunkWire),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "component",
+    content = "terminal",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum AgentComponentStreamCompleteWire {
+    Sandbox(SandboxStreamCompleteWire),
+    Workflow(WorkflowStreamCompleteWire),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2140,6 +3331,8 @@ pub enum ExtensionStreamChunkValue {
     Tool(ToolStreamChunkWire),
     Llm(LlmStreamChunkWire),
     Agent(AgentStreamChunkWire),
+    Channel(ChannelOutboundMessageWire),
+    AgentComponent(AgentComponentStreamChunkWire),
 }
 
 impl ExtensionStreamChunkValue {
@@ -2148,6 +3341,8 @@ impl ExtensionStreamChunkValue {
             Self::Tool(_) => ExtensionKind::Tool,
             Self::Llm(_) => ExtensionKind::LlmClient,
             Self::Agent(_) => ExtensionKind::CustomAgent,
+            Self::Channel(_) => ExtensionKind::ChannelMessageHandler,
+            Self::AgentComponent(_) => ExtensionKind::AgentComponent,
         }
     }
 }
@@ -2164,6 +3359,8 @@ pub enum ExtensionStreamCompleteValue {
     Tool(ToolResultWire),
     Llm(LlmStreamCompleteWire),
     Agent(AgentStreamTerminalWire),
+    Channel(ChannelOutboundMessageWire),
+    AgentComponent(AgentComponentStreamCompleteWire),
 }
 
 impl ExtensionStreamCompleteValue {
@@ -2172,6 +3369,8 @@ impl ExtensionStreamCompleteValue {
             Self::Tool(_) => ExtensionKind::Tool,
             Self::Llm(_) => ExtensionKind::LlmClient,
             Self::Agent(_) => ExtensionKind::CustomAgent,
+            Self::Channel(_) => ExtensionKind::ChannelMessageHandler,
+            Self::AgentComponent(_) => ExtensionKind::AgentComponent,
         }
     }
 }
@@ -2317,6 +3516,278 @@ pub enum AgentEventWire {
         text: String,
     },
     Cancelled,
+}
+
+/// Canonical `WireValue` type id for one [`AgentEventWire`] payload.
+///
+/// Source-operation adapters accept this closed type only.  A `Variant` uses
+/// the enum variant name as its discriminator and stores the variant fields
+/// directly; a `Record` uses an `event` string field and the same payload
+/// fields (or a nested `data` record).  This keeps the source-operation
+/// boundary typed without admitting an arbitrary JSON object.
+pub const AGENT_EVENT_WIRE_TYPE_ID: &str = "echo_sdk_protocol::methods::AgentEventWire";
+
+impl AgentEventWire {
+    /// Decode the explicit `AgentEventWire` representation carried by a
+    /// facade [`WireValue`].
+    ///
+    /// The conversion first validates the closed enum discriminator and then
+    /// deserializes the already-typed fields into this DTO.  It never accepts
+    /// a plain JSON map as an event payload, and typed `WireValue` fields are
+    /// preserved as typed values instead of being flattened.
+    pub fn from_wire_value(value: &WireValue) -> Result<Self, String> {
+        let (variant, fields) = match value {
+            WireValue::Variant {
+                type_id,
+                variant,
+                fields,
+            } if type_id == AGENT_EVENT_WIRE_TYPE_ID => (variant.clone(), fields.clone()),
+            WireValue::Record { type_id, fields } if type_id == AGENT_EVENT_WIRE_TYPE_ID => {
+                let event = fields
+                    .iter()
+                    .find(|field| field.name == "event")
+                    .ok_or_else(|| "AgentEventWire record requires an event field".to_string())?;
+                let WireValue::String(variant) = &event.value else {
+                    return Err("AgentEventWire event field must be a string".to_string());
+                };
+                let nested = fields.iter().find(|field| field.name == "data");
+                let mut payload = fields
+                    .iter()
+                    .filter(|field| field.name != "event" && field.name != "data")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if let Some(data) = nested {
+                    let data_fields = match &data.value {
+                        WireValue::Record { fields, .. } | WireValue::Variant { fields, .. } => {
+                            fields.clone()
+                        }
+                        WireValue::Map(entries) => entries
+                            .iter()
+                            .map(|entry| {
+                                let WireValue::String(name) = &entry.key else {
+                                    return Err("AgentEventWire record data keys must be strings"
+                                        .to_string());
+                                };
+                                Ok(WireField {
+                                    name: name.clone(),
+                                    value: entry.value.clone(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?,
+                        _ => {
+                            return Err(
+                                "AgentEventWire record data must be a record, variant, or map"
+                                    .to_string(),
+                            );
+                        }
+                    };
+                    payload.extend(data_fields);
+                }
+                (variant.clone(), payload)
+            }
+            _ => {
+                return Err(format!(
+                    "expected WireValue variant or record with type_id {AGENT_EVENT_WIRE_TYPE_ID}"
+                ));
+            }
+        };
+
+        let known_variant = matches!(
+            variant.as_str(),
+            "token"
+                | "think_start"
+                | "think_end"
+                | "llm_usage"
+                | "budget_decision"
+                | "tool_call"
+                | "tool_result"
+                | "tool_stream"
+                | "tool_batch_start"
+                | "tool_batch_end"
+                | "guard_triggered"
+                | "memory_recalled"
+                | "context_compressed"
+                | "chart"
+                | "error"
+                | "safety_notice"
+                | "parameter_error"
+                | "final_answer"
+                | "cancelled"
+        );
+        if !known_variant {
+            return Err(format!("unknown AgentEventWire variant {variant}"));
+        }
+
+        let mut data = serde_json::Map::new();
+        for field in payload_fields(&variant, &fields)? {
+            let value = if is_wire_value_field(&variant, &field.name) {
+                serde_json::to_value(&field.value).map_err(|error| {
+                    format!("event field {} is not serializable: {error}", field.name)
+                })?
+            } else {
+                wire_value_to_json(&field.value)?
+            };
+            if data.insert(field.name.clone(), value).is_some() {
+                return Err(format!("duplicate AgentEventWire field {}", field.name));
+            }
+        }
+        let mut object = serde_json::Map::new();
+        object.insert("event".to_string(), serde_json::Value::String(variant));
+        if !data.is_empty() {
+            object.insert("data".to_string(), serde_json::Value::Object(data));
+        }
+        serde_json::from_value(serde_json::Value::Object(object))
+            .map_err(|error| format!("malformed AgentEventWire payload: {error}"))
+    }
+}
+
+fn payload_fields<'a>(variant: &str, fields: &'a [WireField]) -> Result<&'a [WireField], String> {
+    // The enum deserializer below performs the exact field/type validation;
+    // this helper only rejects fields that cannot belong to the selected
+    // variant before any object projection occurs.
+    let allowed = match variant {
+        "token" => &["text"][..],
+        "think_start" | "tool_batch_end" | "cancelled" => &[][..],
+        "think_end" => &["prompt_tokens", "completion_tokens"][..],
+        "llm_usage" => &[
+            "model",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "cached_prompt_tokens",
+            "cache_creation_prompt_tokens",
+            "usage_reported",
+        ][..],
+        "budget_decision" => &[
+            "decision",
+            "reason",
+            "iteration",
+            "reported_model_tokens",
+            "usage_complete",
+        ][..],
+        "tool_call" => &["call_id", "invocation"][..],
+        "tool_result" => &["call_id", "name", "result"][..],
+        "tool_stream" => &["call_id", "name", "event"][..],
+        "tool_batch_start" => &["tool_count"][..],
+        "guard_triggered" => &["guard", "blocked"][..],
+        "memory_recalled" => &["count"][..],
+        "context_compressed" => &[
+            "before_count",
+            "after_count",
+            "before_tokens",
+            "after_tokens",
+        ][..],
+        "chart" => &["spec"][..],
+        "error" => &["source", "message", "failure"][..],
+        "safety_notice" => &["action", "reason", "risk", "permission"][..],
+        "parameter_error" => &["tool", "parameter", "expected", "got"][..],
+        "final_answer" => &["text"][..],
+        _ => return Err(format!("unknown AgentEventWire variant {variant}")),
+    };
+    if let Some(field) = fields
+        .iter()
+        .find(|field| !allowed.contains(&field.name.as_str()))
+    {
+        return Err(format!(
+            "field {} is not valid for AgentEventWire variant {variant}",
+            field.name
+        ));
+    }
+    Ok(fields)
+}
+
+fn is_wire_value_field(variant: &str, field: &str) -> bool {
+    matches!(
+        (variant, field),
+        ("budget_decision", "decision")
+            | ("tool_call", "invocation")
+            | ("chart", "spec")
+            | ("error", "failure")
+    )
+}
+
+fn wire_value_to_json(value: &WireValue) -> Result<serde_json::Value, String> {
+    match value {
+        WireValue::Null => Ok(serde_json::Value::Null),
+        WireValue::Bool(value) => Ok(serde_json::Value::Bool(*value)),
+        WireValue::String(value) => Ok(serde_json::Value::String(value.clone())),
+        WireValue::I64(value) => Ok(serde_json::Value::String(value.as_str().to_string())),
+        WireValue::U64(value) => Ok(serde_json::Value::String(value.as_str().to_string())),
+        WireValue::F64(value) if value.is_finite() => serde_json::Number::from_f64(*value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| "non-finite AgentEventWire number".to_string()),
+        WireValue::F64(_) => Err("non-finite AgentEventWire number".to_string()),
+        WireValue::Bytes(value) => serde_json::to_value(value).map_err(|error| error.to_string()),
+        WireValue::Duration(value) => {
+            serde_json::to_value(value).map_err(|error| error.to_string())
+        }
+        WireValue::Timestamp(value) => {
+            serde_json::to_value(value).map_err(|error| error.to_string())
+        }
+        WireValue::Path(value) => serde_json::to_value(value).map_err(|error| error.to_string()),
+        WireValue::Handle(value) => serde_json::to_value(value).map_err(|error| error.to_string()),
+        WireValue::List(values) => values
+            .iter()
+            .map(wire_value_to_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+        WireValue::Map(entries) => {
+            let mut object = serde_json::Map::new();
+            for entry in entries {
+                let WireValue::String(key) = &entry.key else {
+                    return Err("AgentEventWire map keys must be strings".to_string());
+                };
+                if object
+                    .insert(key.clone(), wire_value_to_json(&entry.value)?)
+                    .is_some()
+                {
+                    return Err(format!("duplicate AgentEventWire map key {key}"));
+                }
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+        WireValue::Record { fields, .. } => {
+            let mut object = serde_json::Map::new();
+            for field in fields {
+                if object
+                    .insert(field.name.clone(), wire_value_to_json(&field.value)?)
+                    .is_some()
+                {
+                    return Err(format!(
+                        "duplicate AgentEventWire record field {}",
+                        field.name
+                    ));
+                }
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+        WireValue::Variant {
+            variant, fields, ..
+        } => {
+            let mut data = serde_json::Map::new();
+            for field in fields {
+                if data
+                    .insert(field.name.clone(), wire_value_to_json(&field.value)?)
+                    .is_some()
+                {
+                    return Err(format!(
+                        "duplicate AgentEventWire variant field {}",
+                        field.name
+                    ));
+                }
+            }
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "event".to_string(),
+                serde_json::Value::String(variant.clone()),
+            );
+            if !data.is_empty() {
+                object.insert("data".to_string(), serde_json::Value::Object(data));
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+        WireValue::Unknown { .. } => serde_json::to_value(value).map_err(|error| error.to_string()),
+    }
 }
 
 /// Non-terminal CustomAgent stream event. Terminal variants intentionally do
@@ -2487,7 +3958,7 @@ impl ExtensionInvocationContext {
 /// `_echo_agent/extension/register` request: register a host-language
 /// implementation of a public framework trait (Tool, LlmClient, Store,
 /// HumanLoopProvider, Hook, AgentCallback, InterventionCallback,
-/// AgentFactory, custom Agent). Registration is owned by the current
+/// AgentFactory, Critic, custom Agent). Registration is owned by the current
 /// connection generation: it never survives a Host restart or a reconnect.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, JsonRpcRequest)]
 #[request(method = "_echo_agent/extension/register", response = ExtensionRegisterResponse)]
@@ -2868,4 +4339,60 @@ pub use crate::event::{
 /// handle taxonomy.
 pub fn handle_kind_of(handle: &WireHandle) -> HandleKind {
     handle.kind
+}
+
+#[cfg(test)]
+mod agent_event_wire_tests {
+    use super::*;
+
+    fn field(name: &str, value: WireValue) -> WireField {
+        WireField {
+            name: name.to_string(),
+            value,
+        }
+    }
+
+    #[test]
+    fn explicit_variant_decodes_final_answer() {
+        let value = WireValue::Variant {
+            type_id: AGENT_EVENT_WIRE_TYPE_ID.to_string(),
+            variant: "final_answer".to_string(),
+            fields: vec![field("text", WireValue::String("done".to_string()))],
+        };
+        assert_eq!(
+            AgentEventWire::from_wire_value(&value),
+            Ok(AgentEventWire::FinalAnswer {
+                text: "done".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_record_decodes_cancelled() {
+        let value = WireValue::Record {
+            type_id: AGENT_EVENT_WIRE_TYPE_ID.to_string(),
+            fields: vec![field("event", WireValue::String("cancelled".to_string()))],
+        };
+        assert_eq!(
+            AgentEventWire::from_wire_value(&value),
+            Ok(AgentEventWire::Cancelled)
+        );
+    }
+
+    #[test]
+    fn malformed_type_or_field_is_rejected() {
+        let wrong_type = WireValue::Variant {
+            type_id: "serde_json::Value".to_string(),
+            variant: "final_answer".to_string(),
+            fields: vec![field("text", WireValue::String("done".to_string()))],
+        };
+        assert!(AgentEventWire::from_wire_value(&wrong_type).is_err());
+
+        let unknown_field = WireValue::Variant {
+            type_id: AGENT_EVENT_WIRE_TYPE_ID.to_string(),
+            variant: "cancelled".to_string(),
+            fields: vec![field("text", WireValue::String("unexpected".to_string()))],
+        };
+        assert!(AgentEventWire::from_wire_value(&unknown_field).is_err());
+    }
 }

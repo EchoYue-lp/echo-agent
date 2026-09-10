@@ -78,7 +78,18 @@ jobs:
         run: cargo test -p echo-sdk-host --features sdk-core-profile --lib --tests --locked
       - name: Test extension bridge E2E (sdk-host group only)
         if: matrix.group == 'sdk-host'
-        run: cargo test -p echo-sdk-host --features sdk-extension-bridge --tests --locked extension_bridge_e2e
+        run: |
+          RUSTFLAGS="$RUSTFLAGS -D warnings" cargo test -p echo-sdk-host --features sdk-extension-bridge --tests --no-run --locked
+          RUSTFLAGS="$RUSTFLAGS -D warnings" cargo test -p echo-sdk-host --features sdk-extension-bridge --locked --test extension_bridge_e2e
+      - name: Test facade feature adapters E2E (sdk-host group only)
+        if: matrix.group == 'sdk-host'
+        run: cargo test -p echo-sdk-host --features sdk-facade-all --locked --test facade_feature_adapters_e2e --test core_profile_e2e
+      - name: Test facade adapters without reverse bridge (sdk-host group only)
+        if: matrix.group == 'sdk-host'
+        run: >-
+          cargo test -p echo-sdk-host --no-default-features
+          --features sdk-facade-adapters,framework-eval,framework-improve,framework-sqlite
+          --locked --test core_profile_e2e every_canonical_source_operation_reaches_a_host_adapter
 
   windows-check:
     runs-on: windows-latest
@@ -123,6 +134,24 @@ jobs:
           cache-targets: "false"
       - name: Check SDK contract artifacts
         run: ./scripts/check-sdk-contracts.sh
+
+  language-sdk:
+    name: source language SDKs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build and test source SDKs
+        run: ./scripts/check-language-sdks.sh
 
   dependency-policy:
     runs-on: ubuntu-latest

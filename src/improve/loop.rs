@@ -37,6 +37,7 @@ pub struct LoopResult {
 /// It does NOT automatically apply suggestions to the agent. To apply suggestions,
 /// use [`PromptGenerator`](crate::improve::PromptGenerator) to generate an updated
 /// system prompt and pass it to a new agent via the factory.
+#[derive(Clone)]
 pub struct ImprovementLoop {
     pub max_iterations: usize,
     pub improvement_threshold: f64,
@@ -107,6 +108,22 @@ impl ImprovementLoop {
         agent_factory: impl Fn() -> Box<dyn crate::agent::Agent>,
         run_store: &Option<Arc<dyn crate::trace::RunStore>>,
     ) -> LoopResult {
+        self.run_async(cases, || std::future::ready(agent_factory()), run_store)
+            .await
+    }
+
+    /// Run with a lazily invoked asynchronous Agent factory. Remote adapters
+    /// use this entry so early-stop does not trigger speculative construction.
+    pub async fn run_async<F, Fut>(
+        &self,
+        cases: &[EvalCase],
+        agent_factory: F,
+        run_store: &Option<Arc<dyn crate::trace::RunStore>>,
+    ) -> LoopResult
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Box<dyn crate::agent::Agent>>,
+    {
         let started = Instant::now();
         if cases.is_empty() {
             return LoopResult {
@@ -129,7 +146,7 @@ impl ImprovementLoop {
             // a. Evaluate on train set
             let runner = EvalRunner::new(std::env::temp_dir().join(format!("improve_{i}")));
             let train_cases_vec: Vec<EvalCase> = train_cases.iter().map(|c| (*c).clone()).collect();
-            let train_report = runner.run_all(&train_cases_vec, || agent_factory()).await;
+            let train_report = runner.run_all_async(&train_cases_vec, &agent_factory).await;
 
             // b. Analyze failures — load runs and critique
             let mut critiques = Vec::new();
@@ -155,7 +172,7 @@ impl ImprovementLoop {
 
             // d. Re-evaluate on test set (blinded — test scores not visible to generator)
             let test_cases_vec: Vec<EvalCase> = test_cases.iter().map(|c| (*c).clone()).collect();
-            let test_report = runner.run_all(&test_cases_vec, || agent_factory()).await;
+            let test_report = runner.run_all_async(&test_cases_vec, &agent_factory).await;
 
             // e. Track best by test score
             if test_report.avg_score > best_score {

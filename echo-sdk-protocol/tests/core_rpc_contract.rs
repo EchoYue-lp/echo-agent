@@ -148,6 +148,7 @@ fn responses_round_trip_through_json() {
 
     let session = SessionCreateResponse {
         session: handle("sess-1", HandleKind::Session),
+        task_run: handle("task-run-1", HandleKind::TaskRun),
         acp_session_id: "sess_acp1".to_string(),
     };
     let encoded = session
@@ -204,6 +205,7 @@ fn notifications_keep_their_wire_names() {
     let _ = SessionCloseResponse { released: true }.into_json("_echo_agent/session/close");
     let _ = SessionLoadResponse {
         session: handle("sess-1", HandleKind::Session),
+        task_run: handle("task-run-1", HandleKind::TaskRun),
         acp_session_id: "sess_acp1".to_string(),
         recovered_sequence: None,
         runs: Vec::new(),

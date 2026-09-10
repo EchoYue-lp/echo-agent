@@ -17,20 +17,18 @@
 //! edges), matching the loader's own limits.
 
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
+use echo_sdk_protocol::handle::WireHandle;
 use echo_sdk_protocol::methods::FeatureOperationRequest;
-use echo_sdk_protocol::scalar::WireValue;
+use echo_sdk_protocol::scalar::{WireDuration, WireField, WireU64, WireValue};
+use futures::StreamExt as _;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::super::handles::HandleRegistry;
 use super::super::wire;
 use crate::factory::SessionAuthorityServices;
 
 const METHOD: &str = "_echo_agent/workflow/op";
-/// Upper bound on compiled graph resources per connection; a graph holds
-/// its agents, so this stays far below the subagent record bound.
-const MAX_GRAPHS: usize = 128;
-/// Upper bound on standalone SharedState resources per connection.
-const MAX_STATES: usize = 512;
 
 fn invalid(message: impl Into<String>) -> EchoSdkError {
     wire::sdk_error(
@@ -55,15 +53,13 @@ fn framework(error: echo_agent::error::ReactError) -> EchoSdkError {
 /// in-flight node boundary fail, exactly like an in-process caller's
 /// `with_cancel_token`.
 pub(crate) struct WorkflowGraphRecord {
-    pub graph: echo_agent::workflow::Graph,
+    pub graph: Arc<echo_agent::workflow::Graph>,
     pub cancel: tokio_util::sync::CancellationToken,
-    pub owner: String,
 }
 
 /// One standalone SharedState resource (owner-checked like graphs).
 pub(crate) struct WorkflowStateRecord {
     pub state: echo_agent::workflow::SharedState,
-    pub owner: String,
 }
 
 fn json_of(value: &WireValue, position: usize) -> Result<serde_json::Value, EchoSdkError> {
@@ -165,36 +161,116 @@ fn shared_state_of(
     echo_agent::workflow::SharedState::from_values(values)
 }
 
-/// The graph resource for `graph_id`, owner-checked against the requesting
-/// session; a graph built by one Session is invisible to every other.
+pub(crate) fn workflow_event_value(
+    event: echo_agent::workflow::WorkflowEvent,
+) -> Result<WireValue, EchoSdkError> {
+    let type_id = "echo_orchestration::workflow::WorkflowEvent".to_string();
+    let string = |name: &str, value: String| WireField {
+        name: name.to_string(),
+        value: WireValue::String(value),
+    };
+    let number = |name: &str, value: usize| -> Result<WireField, EchoSdkError> {
+        let value = u64::try_from(value)
+            .map_err(|_| invalid(format!("workflow event {name} exceeds WireU64")))?;
+        Ok(WireField {
+            name: name.to_string(),
+            value: WireValue::U64(WireU64::from_u64(value)),
+        })
+    };
+    let duration = |name: &str, value: std::time::Duration| WireField {
+        name: name.to_string(),
+        value: WireValue::Duration(WireDuration {
+            seconds: WireU64::from_u64(value.as_secs()),
+            nanos: value.subsec_nanos(),
+        }),
+    };
+    let (variant, fields) = match event {
+        echo_agent::workflow::WorkflowEvent::NodeStart {
+            node_name,
+            step_index,
+        } => (
+            "node_start",
+            vec![
+                string("node_name", node_name),
+                number("step_index", step_index)?,
+            ],
+        ),
+        echo_agent::workflow::WorkflowEvent::NodeEnd {
+            node_name,
+            step_index,
+            elapsed,
+        } => (
+            "node_end",
+            vec![
+                string("node_name", node_name),
+                number("step_index", step_index)?,
+                duration("elapsed", elapsed),
+            ],
+        ),
+        echo_agent::workflow::WorkflowEvent::Token { node_name, token } => (
+            "token",
+            vec![string("node_name", node_name), string("token", token)],
+        ),
+        echo_agent::workflow::WorkflowEvent::NodeError { node_name, error } => (
+            "node_error",
+            vec![string("node_name", node_name), string("error", error)],
+        ),
+        echo_agent::workflow::WorkflowEvent::Completed {
+            result,
+            total_steps,
+            elapsed,
+        } => (
+            "completed",
+            vec![
+                string("result", result),
+                number("total_steps", total_steps)?,
+                duration("elapsed", elapsed),
+            ],
+        ),
+    };
+    Ok(WireValue::Variant {
+        type_id,
+        variant: variant.to_string(),
+        fields,
+    })
+}
+
+/// The graph resource behind one issued [`WireHandle`], resolved through
+/// the unified handle authority (shape/kind/generation/issued + owner) and
+/// then the business map; a graph built by one Session is invisible to
+/// every other.
 fn graph_record(
+    handles: &HandleRegistry,
     records: &std::sync::Mutex<HashMap<String, Arc<WorkflowGraphRecord>>>,
-    graph_id: &str,
+    resource: &WireHandle,
     owner: &str,
 ) -> Result<Arc<WorkflowGraphRecord>, EchoSdkError> {
-    let record = records
+    super::owned_resource(handles, resource, owner, METHOD)?;
+    records
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .get(graph_id)
+        .get(&resource.id)
         .cloned()
-        .ok_or_else(|| invalid(format!("unknown workflow graph resource {graph_id}")))?;
-    if record.owner != owner {
-        return Err(invalid(format!(
-            "workflow graph {graph_id} belongs to another session"
-        )));
-    }
-    Ok(record)
+        .ok_or_else(|| invalid(format!("unknown workflow graph resource {}", resource.id)))
 }
 
 /// Dispatch one workflow family operation. `owner` is the requesting
 /// session's ACP id; every resource access is owner-checked against it.
+/// Resource and page bounds come from the advertised Host limits (see
+/// [`super::FacadeFamilyLimits`]), never from private magic constants.
+// The dispatcher receives each existing Rust authority explicitly so workflow
+// adapters cannot hide a second state, checkpoint, or stream owner in context.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch(
+    handles: &HandleRegistry,
     graphs: &std::sync::Mutex<HashMap<String, Arc<WorkflowGraphRecord>>>,
     states: &std::sync::Mutex<HashMap<String, Arc<WorkflowStateRecord>>>,
+    streams: &super::stream::FacadeStreamRuntime,
     authorities: &Arc<SessionAuthorityServices>,
+    checkpoint_store: Option<Arc<dyn echo_agent::workflow::CheckpointStore>>,
     owner: &str,
     request: &FeatureOperationRequest,
-    page_limit: usize,
+    limits: super::FacadeFamilyLimits,
 ) -> Result<WireValue, EchoSdkError> {
     let arguments: Vec<serde_json::Value> = request
         .arguments
@@ -227,36 +303,42 @@ pub(crate) async fn dispatch(
                     .build_graph_with_llm_config(authorities.llm_config.as_ref())
                     .map_err(framework)?
             };
+            let graph = match checkpoint_store.clone() {
+                Some(store) => graph.with_checkpoint_store(store),
+                None => graph,
+            };
             // One shared token: the record's cancel() reaches the graph's
             // node boundaries through the same clone the engine holds.
             let cancel = tokio_util::sync::CancellationToken::new();
-            let graph = graph.with_cancel_token(cancel.clone());
-            let graph_id = format!("wfg-{}", uuid::Uuid::new_v4());
-            let mut records = graphs.lock().unwrap_or_else(|error| error.into_inner());
-            if records.len() >= MAX_GRAPHS {
-                return Err(invalid(format!(
-                    "workflow graph resource limit {MAX_GRAPHS} reached"
-                )));
-            }
-            records.insert(
-                graph_id.clone(),
-                Arc::new(WorkflowGraphRecord {
-                    graph,
-                    cancel,
-                    owner: owner.to_string(),
-                }),
-            );
+            let graph = Arc::new(graph.with_cancel_token(cancel.clone()));
+            // The unified handle authority mints the id and enforces the
+            // advertised global resource bound.
+            let (resource, _record) = handles.register_facade_resource(
+                limits.max_resources,
+                "workflow",
+                "workflow.graph",
+                Some(owner),
+                METHOD,
+            )?;
+            graphs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(
+                    resource.id.clone(),
+                    Arc::new(WorkflowGraphRecord { graph, cancel }),
+                );
             wire(serde_json::json!({
-                "graph_id": graph_id,
+                "resource": resource,
                 "name": name,
                 "nodes": node_count,
                 "edges": edge_count,
             }))
         }
         "workflow.graph.run" => {
-            let graph_id = string_at(&arguments, 0, "a graph id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
             let values = object_at(&arguments, 1)?;
-            let record = graph_record(graphs, &graph_id, owner)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
             let result = record
                 .graph
                 .run(shared_state_of(values))
@@ -269,10 +351,50 @@ pub(crate) async fn dispatch(
                 "state": state_json(&result.state)?,
             }))
         }
-        "workflow.graph.run_until_interrupt" => {
-            let graph_id = string_at(&arguments, 0, "a graph id")?;
+        "workflow.graph.run_stream" => {
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
             let values = object_at(&arguments, 1)?;
-            let record = graph_record(graphs, &graph_id, owner)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
+            let producer = streams.open(handles, &resource, owner, &request.operation)?;
+            let sender = producer.sender.clone();
+            let cancel = producer.cancel.clone();
+            let graph = record.graph.clone();
+            let state = shared_state_of(values);
+            let background = tokio::spawn(async move {
+                let source = graph.run_stream(state).await;
+                let mut source = match source {
+                    Ok(source) => source,
+                    Err(error) => {
+                        let _ = sender.send(Err(framework(error))).await;
+                        return;
+                    }
+                };
+                loop {
+                    let item = tokio::select! {
+                        () = cancel.cancelled() => break,
+                        item = source.next() => item,
+                    };
+                    let Some(event) = item else { break };
+                    let item = event.map_err(framework).and_then(workflow_event_value);
+                    tokio::select! {
+                        () = cancel.cancelled() => break,
+                        result = sender.send(item) => {
+                            if result.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            streams.attach_background(&producer, background);
+            Ok(WireValue::Handle(producer.handle))
+        }
+        "workflow.graph.run_until_interrupt" => {
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
+            let values = object_at(&arguments, 1)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
             let result = record
                 .graph
                 .run_until_interrupt(shared_state_of(values))
@@ -281,7 +403,8 @@ pub(crate) async fn dispatch(
             wire(run_outcome_json(result)?)
         }
         "workflow.graph.resume" => {
-            let graph_id = string_at(&arguments, 0, "a graph id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
             let checkpoint_id = string_at(&arguments, 1, "a checkpoint id")?;
             let decision = string_at(&arguments, 2, "a decision (approve|reject|defer)")?;
             let reason = arguments.get(3).and_then(serde_json::Value::as_str);
@@ -297,7 +420,7 @@ pub(crate) async fn dispatch(
                     )));
                 }
             };
-            let record = graph_record(graphs, &graph_id, owner)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
             let checkpoint = record
                 .graph
                 .load_checkpoint(&checkpoint_id)
@@ -311,12 +434,64 @@ pub(crate) async fn dispatch(
                 .map_err(framework)?;
             wire(run_outcome_json(result)?)
         }
+        "workflow.graph.resume_exact" => {
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
+            let checkpoint = arguments
+                .get(1)
+                .cloned()
+                .ok_or_else(|| invalid("workflow.graph.resume_exact requires a checkpoint"))?;
+            let checkpoint: echo_agent::workflow::Checkpoint =
+                serde_json::from_value(checkpoint)
+                    .map_err(|error| invalid(format!("checkpoint is malformed: {error}")))?;
+            let decision = string_at(&arguments, 2, "a decision (approve|reject|defer)")?;
+            let reason = arguments.get(3).and_then(serde_json::Value::as_str);
+            let decision = match decision.as_str() {
+                "approve" => echo_agent::workflow::ApprovalDecision::Approved,
+                "reject" => echo_agent::workflow::ApprovalDecision::Rejected {
+                    reason: reason.map(str::to_string),
+                },
+                "defer" => echo_agent::workflow::ApprovalDecision::Deferred,
+                other => {
+                    return Err(invalid(format!(
+                        "unknown resume decision {other}; expected approve|reject|defer"
+                    )));
+                }
+            };
+            let record = graph_record(handles, graphs, &resource, owner)?;
+            let result = record
+                .graph
+                .resume(checkpoint, decision)
+                .await
+                .map_err(framework)?;
+            wire(run_outcome_json(result)?)
+        }
+        "workflow.graph.resume_with_state" => {
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
+            let checkpoint = arguments
+                .get(1)
+                .cloned()
+                .ok_or_else(|| invalid("workflow.graph.resume_with_state requires a checkpoint"))?;
+            let checkpoint: echo_agent::workflow::Checkpoint =
+                serde_json::from_value(checkpoint)
+                    .map_err(|error| invalid(format!("checkpoint is malformed: {error}")))?;
+            let updates = object_at(&arguments, 2)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
+            let result = record
+                .graph
+                .resume_with_state(checkpoint, updates)
+                .await
+                .map_err(framework)?;
+            wire(run_outcome_json(result)?)
+        }
         "workflow.graph.branch" => {
-            let graph_id = string_at(&arguments, 0, "a graph id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
             let checkpoint_id = string_at(&arguments, 1, "a checkpoint id")?;
             let updates = object_at(&arguments, 2)?;
             let branch_name = arguments.get(3).and_then(serde_json::Value::as_str);
-            let record = graph_record(graphs, &graph_id, owner)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
             let result = record
                 .graph
                 .branch_from(&checkpoint_id, updates, branch_name.map(str::to_string))
@@ -325,7 +500,8 @@ pub(crate) async fn dispatch(
             wire(run_outcome_json(result)?)
         }
         "workflow.graph.tag_checkpoint" => {
-            let graph_id = string_at(&arguments, 0, "a graph id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
             let checkpoint_id = string_at(&arguments, 1, "a checkpoint id")?;
             let label = arguments.get(2).and_then(serde_json::Value::as_str);
             let tags: Vec<String> = arguments
@@ -338,7 +514,7 @@ pub(crate) async fn dispatch(
                         .collect()
                 })
                 .unwrap_or_default();
-            let record = graph_record(graphs, &graph_id, owner)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
             let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
             record
                 .graph
@@ -348,23 +524,48 @@ pub(crate) async fn dispatch(
             wire(serde_json::json!({"ok": true}))
         }
         "workflow.graph.list_checkpoints" => {
-            let graph_id = string_at(&arguments, 0, "a graph id")?;
-            let record = graph_record(graphs, &graph_id, owner)?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
             let infos = record.graph.list_checkpoints().await.map_err(framework)?;
             let page: Vec<serde_json::Value> = infos
                 .iter()
-                .take(page_limit)
+                .take(limits.page)
                 .map(|info| serde_json::to_value(info).unwrap_or_else(|_| serde_json::Value::Null))
                 .collect();
             wire(serde_json::json!({
                 "checkpoints": page,
-                "truncated": infos.len() > page_limit,
+                "truncated": infos.len() > limits.page,
             }))
         }
-        "workflow.graph.restore" => {
-            let graph_id = string_at(&arguments, 0, "a graph id")?;
+        "workflow.graph.list_checkpoints_by_graph" => {
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
+            let infos = record
+                .graph
+                .list_checkpoints_by_graph()
+                .await
+                .map_err(framework)?;
+            wire(serde_json::to_value(infos).map_err(|error| invalid(error.to_string()))?)
+        }
+        "workflow.graph.load_checkpoint" => {
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
             let checkpoint_id = string_at(&arguments, 1, "a checkpoint id")?;
-            let record = graph_record(graphs, &graph_id, owner)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
+            let checkpoint = record
+                .graph
+                .load_checkpoint(&checkpoint_id)
+                .await
+                .map_err(framework)?;
+            wire(serde_json::to_value(checkpoint).map_err(|error| invalid(error.to_string()))?)
+        }
+        "workflow.graph.restore" => {
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
+            let checkpoint_id = string_at(&arguments, 1, "a checkpoint id")?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
             let (state, checkpoint) = record
                 .graph
                 .restore_to_checkpoint(&checkpoint_id)
@@ -378,33 +579,37 @@ pub(crate) async fn dispatch(
             }))
         }
         "workflow.graph.cancel" => {
-            let graph_id = string_at(&arguments, 0, "a graph id")?;
-            let record = graph_record(graphs, &graph_id, owner)?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow graph resource", METHOD)?;
+            let record = graph_record(handles, graphs, &resource, owner)?;
             record.cancel.cancel();
             wire(serde_json::json!({"cancelled": true}))
         }
         "workflow.state.new" => {
             let values = object_at(&arguments, 0)?;
-            let state_id = format!("wfs-{}", uuid::Uuid::new_v4());
-            let mut records = states.lock().unwrap_or_else(|error| error.into_inner());
-            if records.len() >= MAX_STATES {
-                return Err(invalid(format!(
-                    "workflow state resource limit {MAX_STATES} reached"
-                )));
-            }
-            records.insert(
-                state_id.clone(),
-                Arc::new(WorkflowStateRecord {
-                    state: shared_state_of(values),
-                    owner: owner.to_string(),
-                }),
-            );
-            wire(serde_json::json!({"state_id": state_id}))
+            let (resource, _record) = handles.register_facade_resource(
+                limits.max_resources,
+                "workflow",
+                "workflow.state",
+                Some(owner),
+                METHOD,
+            )?;
+            states
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(
+                    resource.id.clone(),
+                    Arc::new(WorkflowStateRecord {
+                        state: shared_state_of(values),
+                    }),
+                );
+            wire(serde_json::json!({"resource": resource}))
         }
         "workflow.state.get" => {
-            let state_id = string_at(&arguments, 0, "a state id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow state resource", METHOD)?;
             let key = string_at(&arguments, 1, "a key")?;
-            let record = state_record(states, &state_id, owner)?;
+            let record = state_record(handles, states, &resource, owner)?;
             let value = record
                 .state
                 .get_raw(&key)
@@ -412,13 +617,14 @@ pub(crate) async fn dispatch(
             wire(serde_json::json!({"value": value}))
         }
         "workflow.state.set" => {
-            let state_id = string_at(&arguments, 0, "a state id")?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow state resource", METHOD)?;
             let key = string_at(&arguments, 1, "a key")?;
             let value = arguments
                 .get(2)
                 .cloned()
                 .ok_or_else(|| invalid("workflow.state.set requires a value at argument 2"))?;
-            let record = state_record(states, &state_id, owner)?;
+            let record = state_record(handles, states, &resource, owner)?;
             record
                 .state
                 .set(&key, value)
@@ -426,15 +632,17 @@ pub(crate) async fn dispatch(
             wire(serde_json::json!({"ok": true}))
         }
         "workflow.state.keys" => {
-            let state_id = string_at(&arguments, 0, "a state id")?;
-            let record = state_record(states, &state_id, owner)?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow state resource", METHOD)?;
+            let record = state_record(handles, states, &resource, owner)?;
             let mut keys = record.state.keys();
-            keys.truncate(page_limit);
+            keys.truncate(limits.page);
             wire(serde_json::json!({"keys": keys}))
         }
         "workflow.state.snapshot" => {
-            let state_id = string_at(&arguments, 0, "a state id")?;
-            let record = state_record(states, &state_id, owner)?;
+            let resource =
+                super::resource_handle_at(&arguments, 0, "a workflow state resource", METHOD)?;
+            let record = state_record(handles, states, &resource, owner)?;
             wire(state_json(&record.state)?)
         }
         other => Err(invalid(format!(
@@ -444,35 +652,32 @@ pub(crate) async fn dispatch(
 }
 
 fn state_record(
+    handles: &HandleRegistry,
     records: &std::sync::Mutex<HashMap<String, Arc<WorkflowStateRecord>>>,
-    state_id: &str,
+    resource: &WireHandle,
     owner: &str,
 ) -> Result<Arc<WorkflowStateRecord>, EchoSdkError> {
-    let record = records
+    super::owned_resource(handles, resource, owner, METHOD)?;
+    records
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .get(state_id)
+        .get(&resource.id)
         .cloned()
-        .ok_or_else(|| invalid(format!("unknown workflow state resource {state_id}")))?;
-    if record.owner != owner {
-        return Err(invalid(format!(
-            "workflow state {state_id} belongs to another session"
-        )));
-    }
-    Ok(record)
+        .ok_or_else(|| invalid(format!("unknown workflow state resource {}", resource.id)))
 }
 
-/// Drop every workflow resource owned by one session (session close).
+/// Drop every workflow resource whose handle the unified authority just
+/// closed (session close or connection teardown cascade).
 pub(crate) fn drop_session_resources(
     graphs: &std::sync::Mutex<HashMap<String, Arc<WorkflowGraphRecord>>>,
     states: &std::sync::Mutex<HashMap<String, Arc<WorkflowStateRecord>>>,
-    owner: &str,
+    closed: &[String],
 ) {
     graphs
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .retain(|_, record| {
-            if record.owner == owner {
+        .retain(|id, record| {
+            if closed.iter().any(|closed_id| closed_id == id) {
                 record.cancel.cancel();
                 false
             } else {
@@ -482,5 +687,5 @@ pub(crate) fn drop_session_resources(
     states
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .retain(|_, record| record.owner != owner);
+        .retain(|id, _| !closed.iter().any(|closed_id| closed_id == id));
 }

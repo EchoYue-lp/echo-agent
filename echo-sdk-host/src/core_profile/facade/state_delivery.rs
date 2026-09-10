@@ -19,17 +19,17 @@ use echo_agent::delivery::{
 use echo_agent::state::RuntimeStateStore as _;
 use echo_agent::state::journal::{MemoryCheckpointStore, MemoryEventJournal};
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
+use echo_sdk_protocol::handle::WireHandle;
 use echo_sdk_protocol::methods::FeatureOperationRequest;
 use echo_sdk_protocol::scalar::WireValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::super::handles::HandleRegistry;
 use super::super::wire;
 
 const STATE_METHOD: &str = "_echo_agent/state/op";
 const DELIVERY_METHOD: &str = "_echo_agent/delivery/op";
-/// Upper bound on ledger resources per connection.
-const MAX_LEDGERS: usize = 64;
 /// Checkpoint the delivery projection after every N journal appends.
 const DELIVERY_CHECKPOINT_EVERY: u64 = 16;
 
@@ -37,7 +37,6 @@ const DELIVERY_CHECKPOINT_EVERY: u64 = 16;
 /// journal, plus the owning ACP session.
 pub(crate) struct DeliveryLedgerRecord {
     pub ledger: DeliveryLedger<MemoryEventJournal<DeliveryEvent>>,
-    pub owner: String,
 }
 
 fn invalid(method: &'static str, message: impl Into<String>) -> EchoSdkError {
@@ -184,28 +183,23 @@ pub(crate) async fn dispatch_state(
 
 /// Resolve one ledger resource, owner-checked against the session.
 fn ledger_record(
+    handles: &HandleRegistry,
     ledgers: &std::sync::Mutex<HashMap<String, Arc<DeliveryLedgerRecord>>>,
-    ledger_id: &str,
+    resource: &WireHandle,
     owner: &str,
 ) -> Result<Arc<DeliveryLedgerRecord>, EchoSdkError> {
-    let record = ledgers
+    super::owned_resource(handles, resource, owner, DELIVERY_METHOD)?;
+    ledgers
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .get(ledger_id)
+        .get(&resource.id)
         .cloned()
         .ok_or_else(|| {
             invalid(
                 DELIVERY_METHOD,
-                format!("unknown ledger resource {ledger_id}"),
+                format!("unknown ledger resource {}", resource.id),
             )
-        })?;
-    if record.owner != owner {
-        return Err(invalid(
-            DELIVERY_METHOD,
-            format!("delivery ledger {ledger_id} belongs to another session"),
-        ));
-    }
-    Ok(record)
+        })
 }
 
 /// Rebuild the framework claim for one message from the live projection;
@@ -266,10 +260,11 @@ fn ledger_error(error: DeliveryLedgerError) -> echo_agent::error::ReactError {
 
 /// Dispatch one delivery family operation.
 pub(crate) async fn dispatch_delivery(
+    handles: &HandleRegistry,
     ledgers: &std::sync::Mutex<HashMap<String, Arc<DeliveryLedgerRecord>>>,
     owner: &str,
     request: &FeatureOperationRequest,
-    page_limit: usize,
+    limits: super::FacadeFamilyLimits,
 ) -> Result<WireValue, EchoSdkError> {
     let wire = |value: serde_json::Value| {
         WireValue::from_json(value).map_err(|error| invalid(DELIVERY_METHOD, error.to_string()))
@@ -282,32 +277,38 @@ pub(crate) async fn dispatch_delivery(
         .collect::<Result<_, _>>()?;
     match request.operation.as_str() {
         "delivery.ledger.open" => {
-            let ledger_id = format!("dlv-{}", uuid::Uuid::new_v4());
             let journal = Arc::new(MemoryEventJournal::<DeliveryEvent>::new());
             let checkpoints = Arc::new(MemoryCheckpointStore::new());
-            let mut ledgers = ledgers.lock().unwrap_or_else(|error| error.into_inner());
-            if ledgers.len() >= MAX_LEDGERS {
-                return Err(invalid(
-                    DELIVERY_METHOD,
-                    format!("delivery ledger resource limit {MAX_LEDGERS} reached"),
-                ));
-            }
-            ledgers.insert(
-                ledger_id.clone(),
-                Arc::new(DeliveryLedgerRecord {
-                    ledger: DeliveryLedger::new(
-                        journal,
-                        checkpoints,
-                        DeliveryLedgerConfig::default(),
-                        DELIVERY_CHECKPOINT_EVERY,
-                    ),
-                    owner: owner.to_string(),
-                }),
-            );
-            wire(serde_json::json!({"ledger_id": ledger_id}))
+            let (resource, _record) = handles.register_facade_resource(
+                limits.max_resources,
+                "delivery",
+                "delivery.ledger",
+                Some(owner),
+                DELIVERY_METHOD,
+            )?;
+            ledgers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(
+                    resource.id.clone(),
+                    Arc::new(DeliveryLedgerRecord {
+                        ledger: DeliveryLedger::new(
+                            journal,
+                            checkpoints,
+                            DeliveryLedgerConfig::default(),
+                            DELIVERY_CHECKPOINT_EVERY,
+                        ),
+                    }),
+                );
+            wire(serde_json::json!({"resource": resource}))
         }
         "delivery.enqueue" => {
-            let ledger_id = string_at(DELIVERY_METHOD, &arguments, 0, "a ledger id")?;
+            let resource = super::resource_handle_at(
+                &arguments,
+                0,
+                "a delivery ledger resource",
+                DELIVERY_METHOD,
+            )?;
             let message_id = string_at(DELIVERY_METHOD, &arguments, 1, "a message id")?;
             let route = string_at(DELIVERY_METHOD, &arguments, 2, "a route")?;
             let payload = arguments.get(3).ok_or_else(|| {
@@ -316,7 +317,7 @@ pub(crate) async fn dispatch_delivery(
                     "delivery.enqueue requires a payload at argument 3",
                 )
             })?;
-            let record = ledger_record(ledgers, &ledger_id, owner)?;
+            let record = ledger_record(handles, ledgers, &resource, owner)?;
             let envelope = DeliveryEnvelope::new(message_id, route, payload.clone());
             envelope
                 .validate()
@@ -328,8 +329,13 @@ pub(crate) async fn dispatch_delivery(
             wire(serde_json::json!({"ok": true}))
         }
         "delivery.claim_next" => {
-            let ledger_id = string_at(DELIVERY_METHOD, &arguments, 0, "a ledger id")?;
-            let record = ledger_record(ledgers, &ledger_id, owner)?;
+            let resource = super::resource_handle_at(
+                &arguments,
+                0,
+                "a delivery ledger resource",
+                DELIVERY_METHOD,
+            )?;
+            let record = ledger_record(handles, ledgers, &resource, owner)?;
             let claim = record
                 .ledger
                 .claim_next()
@@ -348,11 +354,16 @@ pub(crate) async fn dispatch_delivery(
             wire(serde_json::json!({"claim": claim}))
         }
         "delivery.transition" => {
-            let ledger_id = string_at(DELIVERY_METHOD, &arguments, 0, "a ledger id")?;
+            let resource = super::resource_handle_at(
+                &arguments,
+                0,
+                "a delivery ledger resource",
+                DELIVERY_METHOD,
+            )?;
             let message_id = string_at(DELIVERY_METHOD, &arguments, 1, "a message id")?;
             let kind = string_at(DELIVERY_METHOD, &arguments, 2, "a transition kind")?;
             let turn_id = string_at(DELIVERY_METHOD, &arguments, 3, "a turn id")?;
-            let record = ledger_record(ledgers, &ledger_id, owner)?;
+            let record = ledger_record(handles, ledgers, &resource, owner)?;
             let claim = claim_of(&record, &message_id)?;
             let transition = match kind.as_str() {
                 "effect_started" => DeliveryTransition::effect_started(turn_id),
@@ -374,11 +385,16 @@ pub(crate) async fn dispatch_delivery(
             wire(serde_json::json!({"ok": true}))
         }
         "delivery.defer" => {
-            let ledger_id = string_at(DELIVERY_METHOD, &arguments, 0, "a ledger id")?;
+            let resource = super::resource_handle_at(
+                &arguments,
+                0,
+                "a delivery ledger resource",
+                DELIVERY_METHOD,
+            )?;
             let message_id = string_at(DELIVERY_METHOD, &arguments, 1, "a message id")?;
             let reason = string_at(DELIVERY_METHOD, &arguments, 2, "a reason")?;
             let next_attempt_at = string_at(DELIVERY_METHOD, &arguments, 3, "an RFC3339 deadline")?;
-            let record = ledger_record(ledgers, &ledger_id, owner)?;
+            let record = ledger_record(handles, ledgers, &resource, owner)?;
             let claim = claim_of(&record, &message_id)?;
             let parsed =
                 chrono::DateTime::parse_from_rfc3339(&next_attempt_at).map_err(|error| {
@@ -395,12 +411,17 @@ pub(crate) async fn dispatch_delivery(
             wire(serde_json::json!({"ok": true}))
         }
         "delivery.settle" => {
-            let ledger_id = string_at(DELIVERY_METHOD, &arguments, 0, "a ledger id")?;
+            let resource = super::resource_handle_at(
+                &arguments,
+                0,
+                "a delivery ledger resource",
+                DELIVERY_METHOD,
+            )?;
             let message_id = string_at(DELIVERY_METHOD, &arguments, 1, "a message id")?;
             let outcome = string_at(DELIVERY_METHOD, &arguments, 2, "an outcome")?;
             let reason = arguments.get(3).and_then(serde_json::Value::as_str);
             let turn_id = arguments.get(4).and_then(serde_json::Value::as_str);
-            let record = ledger_record(ledgers, &ledger_id, owner)?;
+            let record = ledger_record(handles, ledgers, &resource, owner)?;
             let claim = claim_of(&record, &message_id)?;
             let settlement = DeliverySettlement::terminal(
                 turn_id.map(str::to_string),
@@ -416,8 +437,13 @@ pub(crate) async fn dispatch_delivery(
             wire(serde_json::json!({"ok": true}))
         }
         "delivery.recover" => {
-            let ledger_id = string_at(DELIVERY_METHOD, &arguments, 0, "a ledger id")?;
-            let record = ledger_record(ledgers, &ledger_id, owner)?;
+            let resource = super::resource_handle_at(
+                &arguments,
+                0,
+                "a delivery ledger resource",
+                DELIVERY_METHOD,
+            )?;
+            let record = ledger_record(handles, ledgers, &resource, owner)?;
             let receipt = record
                 .ledger
                 .recover()
@@ -427,12 +453,17 @@ pub(crate) async fn dispatch_delivery(
             }))
         }
         "delivery.snapshot" => {
-            let ledger_id = string_at(DELIVERY_METHOD, &arguments, 0, "a ledger id")?;
-            let record = ledger_record(ledgers, &ledger_id, owner)?;
+            let resource = super::resource_handle_at(
+                &arguments,
+                0,
+                "a delivery ledger resource",
+                DELIVERY_METHOD,
+            )?;
+            let record = ledger_record(handles, ledgers, &resource, owner)?;
             let page = record.ledger.with_projection(|projection| {
                 projection
                     .records()
-                    .take(page_limit)
+                    .take(limits.page)
                     .map(|record| serde_json::to_value(record).unwrap_or_default())
                     .collect::<Vec<_>>()
             });
@@ -448,10 +479,10 @@ pub(crate) async fn dispatch_delivery(
 /// Drop every delivery ledger owned by one session (session close).
 pub(crate) fn drop_session_ledgers(
     ledgers: &std::sync::Mutex<HashMap<String, Arc<DeliveryLedgerRecord>>>,
-    owner: &str,
+    closed: &[String],
 ) {
     ledgers
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .retain(|_, record| record.owner != owner);
+        .retain(|id, _| !closed.iter().any(|closed_id| closed_id == id));
 }

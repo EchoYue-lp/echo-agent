@@ -59,7 +59,30 @@ impl McpClient {
             }
         };
 
-        tracing::info!("MCP: 正在连接服务端 '{}'", config.name);
+        Self::from_transport(config.name, transport).await
+    }
+
+    /// Connect through an application-supplied transport while preserving the
+    /// same initialize, notification and capability-discovery lifecycle as
+    /// [`Self::new`]. This is the public consumer boundary used by SDK
+    /// transport bridges; it does not let adapters bypass MCP negotiation.
+    pub async fn from_transport(
+        server_name: impl Into<String>,
+        transport: Arc<dyn McpTransport>,
+    ) -> Result<Arc<Self>> {
+        let server_name = server_name.into();
+        let result = Self::initialize_from_transport(server_name, transport.clone()).await;
+        if result.is_err() {
+            transport.close().await;
+        }
+        result
+    }
+
+    async fn initialize_from_transport(
+        server_name: String,
+        transport: Arc<dyn McpTransport>,
+    ) -> Result<Arc<Self>> {
+        tracing::info!("MCP: 正在连接服务端 '{}'", server_name);
 
         // ── Step 1: initialize 握手 ───────────────────────────────────────────
         let init_params = InitializeParams {
@@ -94,7 +117,7 @@ impl McpClient {
         let negotiated_version = init_result.protocol_version.clone();
         tracing::info!(
             "MCP: 已连接 '{}' (协议版本: {}, 请求版本: {})",
-            config.name,
+            server_name,
             negotiated_version,
             MCP_PROTOCOL_VERSION
         );
@@ -121,25 +144,25 @@ impl McpClient {
 
         // 发现工具
         if server_capabilities.tools.is_some() {
-            tools = Self::fetch_tools(&transport, &config.name).await?;
-            tracing::info!("MCP: 从 '{}' 发现 {} 个工具", config.name, tools.len());
+            tools = Self::fetch_tools(&transport, &server_name).await?;
+            tracing::info!("MCP: 从 '{}' 发现 {} 个工具", server_name, tools.len());
         }
 
         // 发现资源
         if server_capabilities.resources.is_some() {
-            resources = Self::fetch_resources(&transport, &config.name).await?;
-            tracing::info!("MCP: 从 '{}' 发现 {} 个资源", config.name, resources.len());
+            resources = Self::fetch_resources(&transport, &server_name).await?;
+            tracing::info!("MCP: 从 '{}' 发现 {} 个资源", server_name, resources.len());
         }
 
         // 发现提示词
         if server_capabilities.prompts.is_some() {
-            prompts = Self::fetch_prompts(&transport, &config.name).await?;
-            tracing::info!("MCP: 从 '{}' 发现 {} 个提示词", config.name, prompts.len());
+            prompts = Self::fetch_prompts(&transport, &server_name).await?;
+            tracing::info!("MCP: 从 '{}' 发现 {} 个提示词", server_name, prompts.len());
         }
 
         Ok(Arc::new(McpClient {
             transport,
-            server_name: config.name,
+            server_name,
             negotiated_version,
             server_capabilities,
             tools,
@@ -586,5 +609,65 @@ impl McpClient {
             resources: Vec::new(),
             prompts: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::future::BoxFuture;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct FailingInitializeTransport {
+        closed: Arc<AtomicBool>,
+    }
+
+    impl McpTransport for FailingInitializeTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<super::super::types::JsonRpcResponse>> {
+            Box::pin(async move {
+                Ok(super::super::types::JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(super::super::types::JsonRpcError {
+                        code: -32000,
+                        message: "initialization rejected".to_string(),
+                        data: None,
+                    }),
+                })
+            })
+        }
+
+        fn notify(&self, _notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> BoxFuture<'_, ()> {
+            self.closed.store(true, Ordering::Release);
+            Box::pin(async {})
+        }
+
+        fn notification_rx(
+            &self,
+        ) -> Option<Arc<dyn super::super::types::JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn from_transport_closes_after_initialization_failure() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let transport: Arc<dyn McpTransport> = Arc::new(FailingInitializeTransport {
+            closed: closed.clone(),
+        });
+        assert!(
+            McpClient::from_transport("fixture", transport)
+                .await
+                .is_err()
+        );
+        assert!(closed.load(Ordering::Acquire));
     }
 }

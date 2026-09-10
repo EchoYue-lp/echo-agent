@@ -1185,6 +1185,18 @@ impl ReactAgent {
         }
     }
 
+    /// Replace the context-compression memory promoter.
+    pub async fn set_memory_promoter(
+        &self,
+        promoter: Arc<dyn echo_state::compression::MemoryPromoter>,
+    ) {
+        self.memory
+            .context
+            .lock()
+            .await
+            .set_memory_promoter(promoter);
+    }
+
     /// Replace the long-term memory Store and re-register `remember` / `recall` / `forget` tools.
     ///
     /// ```rust,no_run
@@ -1540,6 +1552,13 @@ impl ReactAgent {
 
     /// Set the sandbox manager to provide secure isolation for skill script execution.
     pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
+        self.set_sandbox_executor(manager);
+    }
+
+    /// Set an application-supplied sandbox executor. This is the generic
+    /// consumer boundary used by source SDK bridges; built-in callers keep
+    /// using [`Self::set_sandbox_manager`].
+    pub fn set_sandbox_executor(&mut self, manager: Arc<dyn crate::sandbox::SandboxExecutor>) {
         self.tools
             .skill_registry
             .set_sandbox_manager(manager.clone());

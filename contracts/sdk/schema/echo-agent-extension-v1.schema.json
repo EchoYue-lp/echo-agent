@@ -332,6 +332,15 @@
       "error_schema": "#/definitions/EchoSdkError"
     },
     {
+      "name": "_echo_agent/permission/op",
+      "direction": "request",
+      "capability": "feature_surfaces",
+      "summary": "Session-owned PermissionService checks, rules and approval cache operations.",
+      "params_schema": "#/definitions/FeatureOperationRequest",
+      "result_schema": "#/definitions/FeatureOperationResponse",
+      "error_schema": "#/definitions/EchoSdkError"
+    },
+    {
       "name": "_echo_agent/mcp/op",
       "direction": "request",
       "capability": "feature_surfaces",
@@ -2791,7 +2800,8 @@
       "type": "object",
       "required": [
         "acp_session_id",
-        "session"
+        "session",
+        "task_run"
       ],
       "properties": {
         "acp_session_id": {
@@ -2802,6 +2812,14 @@
         },
         "session": {
           "$ref": "#/definitions/WireHandle"
+        },
+        "task_run": {
+          "description": "Opaque TaskRun handle for this Session's revisioned task graph. It is issued by the Host and cannot be reconstructed from the ACP Session identity.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
         }
       }
     },
@@ -2842,7 +2860,8 @@
       "type": "object",
       "required": [
         "acp_session_id",
-        "session"
+        "session",
+        "task_run"
       ],
       "properties": {
         "acp_session_id": {
@@ -2871,6 +2890,14 @@
         },
         "session": {
           "$ref": "#/definitions/WireHandle"
+        },
+        "task_run": {
+          "description": "Fresh-generation TaskRun handle for the resumed Session.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
         }
       }
     },
@@ -2900,6 +2927,162 @@
         "released"
       ]
     },
+    "LlmMessageWire": {
+      "type": "object",
+      "required": [
+        "content",
+        "role"
+      ],
+      "properties": {
+        "content": {
+          "$ref": "#/definitions/WireValue"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_blocks": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LlmReasoningBlockWire"
+          }
+        },
+        "reasoning_content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_calls": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LlmToolCallWire"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LlmReasoningBlockWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "signature",
+            "thinking"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "signed"
+              ]
+            },
+            "signature": {
+              "type": "string"
+            },
+            "thinking": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "kind"
+          ],
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "redacted"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "id",
+            "kind",
+            "provider",
+            "summary"
+          ],
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "opaque"
+              ]
+            },
+            "provider": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LlmToolCallWire": {
+      "type": "object",
+      "required": [
+        "arguments",
+        "call_type",
+        "function_name",
+        "id"
+      ],
+      "properties": {
+        "arguments": {
+          "type": "string"
+        },
+        "call_type": {
+          "type": "string"
+        },
+        "function_name": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "RunInput": {
       "oneOf": [
         {
@@ -2920,6 +3103,46 @@
               "type": "string",
               "maxLength": 1048576,
               "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Interactive chat turn carrying the lossless provider-neutral Message shape used by the framework's multimodal and tool-call paths.",
+          "type": "object",
+          "required": [
+            "kind",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "chat_message"
+              ]
+            },
+            "message": {
+              "$ref": "#/definitions/LlmMessageWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Non-interactive execution carrying the lossless provider-neutral Message shape. This preserves the concrete ReactAgent `execute_stream_message` mode without smuggling an execute flag into a chat payload.",
+          "type": "object",
+          "required": [
+            "kind",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "execute_message"
+              ]
+            },
+            "message": {
+              "$ref": "#/definitions/LlmMessageWire"
             }
           },
           "additionalProperties": false
@@ -3522,29 +3745,31 @@
     },
     "TaskExecuteRequest": {
       "properties": {
-        "idempotency_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "maxLength": 256,
-          "minLength": 1
-        },
-        "task": {
-          "$ref": "#/definitions/WireHandle"
+        "task_run": {
+          "description": "TaskRun handle addressing the graph to drive.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
         }
       },
       "title": "TaskExecuteRequest",
-      "description": "`_echo_agent/task/execute` request: drive one PlanTask through the framework executor (single authority for scheduling/retry/cancel).",
+      "description": "`_echo_agent/task/execute` request: drive one task graph through the framework RuntimeTaskService (single authority for scheduling, waves, retry and terminals). The run continues after the response; terminals are observed through `task/list`.",
       "type": "object",
       "required": [
-        "task"
+        "task_run"
       ]
     },
     "TaskExecuteResponse": {
       "properties": {
         "run": {
-          "$ref": "#/definitions/WireHandle"
+          "description": "The driven TaskRun handle.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
         }
       },
       "title": "TaskExecuteResponse",
@@ -3572,15 +3797,24 @@
           ]
         },
         "task": {
+          "description": "PlanTask handle of the controlled task.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WireHandle"
+            }
+          ]
+        },
+        "task_run": {
           "$ref": "#/definitions/WireHandle"
         }
       },
       "title": "TaskControlRequest",
-      "description": "`_echo_agent/task/control` request: pause/resume/cancel routed to the framework service.",
+      "description": "`_echo_agent/task/control` request: pause/resume/cancel one exact task through the framework store (claim-settling semantics).",
       "type": "object",
       "required": [
         "action",
-        "task"
+        "task",
+        "task_run"
       ]
     },
     "TaskControlResponse": {
@@ -3756,6 +3990,77 @@
       "type": "object",
       "required": [
         "accepted"
+      ]
+    },
+    "AgentComponentCapabilitiesWire": {
+      "type": "object",
+      "properties": {
+        "isolation_level": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supports_notifications": {
+          "default": false,
+          "type": "boolean"
+        },
+        "supports_streaming": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentComponentKindWire": {
+      "type": "string",
+      "enum": [
+        "conversation_store",
+        "run_store",
+        "runtime_state_store",
+        "audit_logger",
+        "context_projector",
+        "memory_trigger_sink",
+        "guard",
+        "search_provider",
+        "workflow_checkpoint_store",
+        "revisioned_task_store",
+        "sandbox_executor",
+        "mcp_transport",
+        "embedder",
+        "memory_promoter",
+        "workflow",
+        "intent_classifier",
+        "skill_load_policy"
+      ]
+    },
+    "ChannelCapabilitiesWire": {
+      "type": "object",
+      "required": [
+        "supports_media",
+        "supports_threads"
+      ],
+      "properties": {
+        "chat_types": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ChannelChatTypeWire"
+          }
+        },
+        "supports_media": {
+          "type": "boolean"
+        },
+        "supports_threads": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelChatTypeWire": {
+      "type": "string",
+      "enum": [
+        "direct",
+        "group"
       ]
     },
     "ExtensionDescriptor": {
@@ -4074,6 +4379,164 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "critic"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "capabilities",
+            "channel_id",
+            "descriptor_version",
+            "handler_id",
+            "kind",
+            "label"
+          ],
+          "properties": {
+            "capabilities": {
+              "$ref": "#/definitions/ChannelCapabilitiesWire"
+            },
+            "channel_id": {
+              "type": "string"
+            },
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "handler_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "channel_plugin"
+              ]
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "handler_id",
+            "kind"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "handler_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "channel_message_handler"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "descriptor_version",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "context_compressor"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "component",
+            "descriptor_version",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "capabilities": {
+              "default": {
+                "supports_streaming": false,
+                "supports_notifications": false
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/AgentComponentCapabilitiesWire"
+                }
+              ]
+            },
+            "component": {
+              "$ref": "#/definitions/AgentComponentKindWire"
+            },
+            "descriptor_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent_component"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
         }
       ],
       "title": "ExtensionDescriptor",
@@ -4089,7 +4552,12 @@
         "agent_callback",
         "intervention_callback",
         "agent_factory",
-        "custom_agent"
+        "custom_agent",
+        "critic",
+        "channel_plugin",
+        "channel_message_handler",
+        "context_compressor",
+        "agent_component"
       ],
       "title": "ExtensionKind",
       "type": "string"
@@ -4197,7 +4665,7 @@
     "ExtensionRegisterRequest": {
       "additionalProperties": false,
       "title": "ExtensionRegisterRequest",
-      "description": "`_echo_agent/extension/register` request: register a host-language implementation of a public framework trait (Tool, LlmClient, Store, HumanLoopProvider, Hook, AgentCallback, InterventionCallback, AgentFactory, custom Agent). Registration is owned by the current connection generation: it never survives a Host restart or a reconnect.",
+      "description": "`_echo_agent/extension/register` request: register a host-language implementation of a public framework trait (Tool, LlmClient, Store, HumanLoopProvider, Hook, AgentCallback, InterventionCallback, AgentFactory, Critic, custom Agent). Registration is owned by the current connection generation: it never survives a Host restart or a reconnect.",
       "type": "object",
       "required": [
         "descriptor",
@@ -4279,6 +4747,1645 @@
       "required": [
         "released"
       ]
+    },
+    "AgentComponentCallInputWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation"
+              ],
+              "properties": {
+                "conversation": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_create"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation_id"
+              ],
+              "properties": {
+                "conversation_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_get"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "properties": {
+                "agent_type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "limit": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireU64"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "offset": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireU64"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "user_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_list"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation_id"
+              ],
+              "properties": {
+                "compressed_before_id": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireI64"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "conversation_id": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_update"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation_id"
+              ],
+              "properties": {
+                "conversation_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_delete"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation_id",
+                "messages"
+              ],
+              "properties": {
+                "conversation_id": {
+                  "type": "string"
+                },
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_save_messages"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation_id"
+              ],
+              "properties": {
+                "conversation_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_get_messages"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation_id"
+              ],
+              "properties": {
+                "conversation_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_count_messages"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation"
+              ],
+              "properties": {
+                "conversation": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_ensure"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "limit",
+                "query"
+              ],
+              "properties": {
+                "limit": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "query": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_search"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "run"
+              ],
+              "properties": {
+                "run": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_save"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "run_id"
+              ],
+              "properties": {
+                "run_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_load"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "session_id"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_list_by_session"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "limit"
+              ],
+              "properties": {
+                "limit": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_list_all"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "event",
+                "run_id"
+              ],
+              "properties": {
+                "event": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "run_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_append_event"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "parent_run_id"
+              ],
+              "properties": {
+                "parent_run_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_list_by_parent"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation_id"
+              ],
+              "properties": {
+                "conversation_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_get_checkpoint"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "checkpoint"
+              ],
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_save_checkpoint"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "checkpoint",
+                "scope_id"
+              ],
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "scope_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_save_checkpoint_for_scope"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "scope_id"
+              ],
+              "properties": {
+                "scope_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_state_ids"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "runtime_state_id",
+                "scope_id"
+              ],
+              "properties": {
+                "runtime_state_id": {
+                  "type": "string"
+                },
+                "scope_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_clear_state"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "scope_id"
+              ],
+              "properties": {
+                "scope_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_clear_scope"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "conversation_id"
+              ],
+              "properties": {
+                "conversation_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_clear_conversation"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "event"
+              ],
+              "properties": {
+                "event": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "audit_log"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "properties": {
+                "agent_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "limit": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireU64"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "session_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "to": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "audit_query"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "agent_name",
+                "iteration"
+              ],
+              "properties": {
+                "agent_name": {
+                  "type": "string"
+                },
+                "conversation_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "iteration": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "run_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "session_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "turn_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "context_project"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "trigger"
+              ],
+              "properties": {
+                "trigger": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "memory_trigger"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "content",
+                "direction"
+              ],
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "direction": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "guard_check"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "max_results",
+                "query"
+              ],
+              "properties": {
+                "max_results": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "query": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "search_provider_search"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "checkpoint"
+              ],
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_save"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "checkpoint_id"
+              ],
+              "properties": {
+                "checkpoint_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_load"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "checkpoint_id"
+              ],
+              "properties": {
+                "checkpoint_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_claim"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_list"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "graph_name"
+              ],
+              "properties": {
+                "graph_name": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_list_by_graph"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "filter"
+              ],
+              "properties": {
+                "filter": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_list_filtered"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "checkpoint_id"
+              ],
+              "properties": {
+                "checkpoint_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_delete"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_clear"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "scope_id"
+              ],
+              "properties": {
+                "scope_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "revisioned_task_load"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "commit",
+                "scope_id"
+              ],
+              "properties": {
+                "commit": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "scope_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "revisioned_task_compare_and_commit"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_is_available"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "command"
+              ],
+              "properties": {
+                "command": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_execute"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "command"
+              ],
+              "properties": {
+                "command": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_execute_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "command",
+                "limits"
+              ],
+              "properties": {
+                "command": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "limits": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_execute_with_limits"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "command",
+                "limits"
+              ],
+              "properties": {
+                "command": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "limits": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_execute_with_limits_and_cancel"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_cleanup"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "request"
+              ],
+              "properties": {
+                "request": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "mcp_transport_send"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "notification"
+              ],
+              "properties": {
+                "notification": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "mcp_transport_notify"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "mcp_transport_close"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "mcp_transport_try_notification"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "embedder_embed"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "evicted"
+              ],
+              "properties": {
+                "evicted": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/LlmMessageWire"
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "memory_promoter_promote"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "input"
+              ],
+              "properties": {
+                "input": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_run"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "input"
+              ],
+              "properties": {
+                "input": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_run_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "context",
+                "user_input"
+              ],
+              "properties": {
+                "context": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/LlmMessageWire"
+                  }
+                },
+                "user_input": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "intent_classify"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "descriptor"
+              ],
+              "properties": {
+                "descriptor": {
+                  "$ref": "#/definitions/SkillDescriptorPolicyWire"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "skill_load_allows"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AgentComponentCallWire": {
+      "type": "object",
+      "required": [
+        "call",
+        "component"
+      ],
+      "properties": {
+        "call": {
+          "$ref": "#/definitions/AgentComponentCallInputWire"
+        },
+        "component": {
+          "$ref": "#/definitions/AgentComponentKindWire"
+        }
+      },
+      "additionalProperties": false
     },
     "AgentFactoryConfigWire": {
       "type": "object",
@@ -4462,6 +6569,218 @@
         },
         "tool": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelAttachmentWire": {
+      "type": "object",
+      "required": [
+        "data_base64",
+        "kind"
+      ],
+      "properties": {
+        "data_base64": {
+          "type": "string"
+        },
+        "filename": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelHandleInput": {
+      "type": "object",
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "message": {
+          "$ref": "#/definitions/ChannelInboundMessageWire"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelInboundMessageWire": {
+      "type": "object",
+      "required": [
+        "channel_id",
+        "chat_id",
+        "chat_type",
+        "message_id",
+        "sender_id",
+        "text",
+        "timestamp"
+      ],
+      "properties": {
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ChannelAttachmentWire"
+          }
+        },
+        "channel_id": {
+          "type": "string"
+        },
+        "chat_id": {
+          "type": "string"
+        },
+        "chat_type": {
+          "$ref": "#/definitions/ChannelChatTypeWire"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "sender_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "timestamp": {
+          "$ref": "#/definitions/WireU64"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelOutboundMessageWire": {
+      "type": "object",
+      "required": [
+        "channel_id",
+        "chat_type",
+        "text",
+        "to"
+      ],
+      "properties": {
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ChannelAttachmentWire"
+          }
+        },
+        "channel_id": {
+          "type": "string"
+        },
+        "chat_type": {
+          "$ref": "#/definitions/ChannelChatTypeWire"
+        },
+        "reply_to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelReplyInput": {
+      "type": "object",
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "message": {
+          "$ref": "#/definitions/ChannelOutboundMessageWire"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelSendInput": {
+      "type": "object",
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "message": {
+          "$ref": "#/definitions/ChannelOutboundMessageWire"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelStartInput": {
+      "type": "object",
+      "required": [
+        "handler_id"
+      ],
+      "properties": {
+        "handler_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CompressionInputWire": {
+      "type": "object",
+      "required": [
+        "messages",
+        "token_limit",
+        "tokenizer"
+      ],
+      "properties": {
+        "current_query": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "focus_instructions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmMessageWire"
+          }
+        },
+        "token_limit": {
+          "$ref": "#/definitions/WireU64"
+        },
+        "tokenizer": {
+          "description": "Host-owned tokenizer for this compression pass. SDK implementations call the canonical `Tokenizer::count_tokens` source operation through this temporary resource instead of substituting a language heuristic.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TokenizerReferenceWire"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CritiqueInput": {
+      "description": "Inputs for one non-streaming Critic callback. The three strings mirror the framework `Critic::critique` contract without exposing any Host-owned runtime state or a second verifier authority.",
+      "type": "object",
+      "required": [
+        "answer",
+        "context",
+        "task"
+      ],
+      "properties": {
+        "answer": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "context": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "task": {
+          "type": "string",
+          "maxLength": 65536
         }
       },
       "additionalProperties": false
@@ -5075,6 +7394,215 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CritiqueInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "critic_critique"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ChannelStartInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_start"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ExtensionUnit"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_stop"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ChannelSendInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_send"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ExtensionUnit"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_health"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ChannelHandleInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_handle"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ChannelHandleInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_handle_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/ChannelReplyInput"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_reply"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/CompressionInputWire"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "compressor_compress"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/AgentComponentCallWire"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_component_call"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "$ref": "#/definitions/AgentComponentCallWire"
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_component_call_stream"
+              ]
+            }
+          },
+          "additionalProperties": false
         }
       ],
       "title": "ExtensionInvocation",
@@ -5385,162 +7913,6 @@
       },
       "additionalProperties": false
     },
-    "LlmMessageWire": {
-      "type": "object",
-      "required": [
-        "content",
-        "role"
-      ],
-      "properties": {
-        "content": {
-          "$ref": "#/definitions/WireValue"
-        },
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "reasoning_blocks": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "$ref": "#/definitions/LlmReasoningBlockWire"
-          }
-        },
-        "reasoning_content": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "role": {
-          "type": "string"
-        },
-        "tool_call_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "tool_calls": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "$ref": "#/definitions/LlmToolCallWire"
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "LlmReasoningBlockWire": {
-      "oneOf": [
-        {
-          "type": "object",
-          "required": [
-            "kind",
-            "signature",
-            "thinking"
-          ],
-          "properties": {
-            "kind": {
-              "type": "string",
-              "enum": [
-                "signed"
-              ]
-            },
-            "signature": {
-              "type": "string"
-            },
-            "thinking": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "required": [
-            "data",
-            "kind"
-          ],
-          "properties": {
-            "data": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "enum": [
-                "redacted"
-              ]
-            }
-          },
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "required": [
-            "data",
-            "id",
-            "kind",
-            "provider",
-            "summary"
-          ],
-          "properties": {
-            "data": {
-              "type": "string"
-            },
-            "id": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "enum": [
-                "opaque"
-              ]
-            },
-            "provider": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          },
-          "additionalProperties": false
-        }
-      ]
-    },
-    "LlmToolCallWire": {
-      "type": "object",
-      "required": [
-        "arguments",
-        "call_type",
-        "function_name",
-        "id"
-      ],
-      "properties": {
-        "arguments": {
-          "type": "string"
-        },
-        "call_type": {
-          "type": "string"
-        },
-        "function_name": {
-          "type": "string"
-        },
-        "id": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false
-    },
     "LlmToolDefinitionWire": {
       "type": "object",
       "required": [
@@ -5561,6 +7933,106 @@
         },
         "tool_type": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SkillDescriptorPolicyWire": {
+      "description": "Lossless public projection passed to a host-language [`SkillLoadPolicy`]. Fields skipped by the framework's persistence serde remain explicit here because a live policy may legitimately inspect their runtime values.",
+      "type": "object",
+      "required": [
+        "allowed_tools",
+        "depends_on",
+        "description",
+        "location",
+        "metadata",
+        "name",
+        "paths",
+        "triggers"
+      ],
+      "properties": {
+        "allowed_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "compatibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string"
+        },
+        "hooks": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "license": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "$ref": "#/definitions/WirePath"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shell": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "triggers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false
@@ -5805,6 +8277,22 @@
       },
       "additionalProperties": false
     },
+    "TokenizerReferenceWire": {
+      "type": "object",
+      "required": [
+        "owner_session_id",
+        "resource"
+      ],
+      "properties": {
+        "owner_session_id": {
+          "type": "string"
+        },
+        "resource": {
+          "$ref": "#/definitions/WireHandle"
+        }
+      },
+      "additionalProperties": false
+    },
     "ToolContextWire": {
       "description": "Lossless Tool execution context exposed to host-language implementations.",
       "type": "object",
@@ -6019,6 +8507,1394 @@
       },
       "additionalProperties": false
     },
+    "AgentComponentCallResultWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_create"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "conversation"
+              ],
+              "properties": {
+                "conversation": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_get"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "conversation": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireValue"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_list"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "conversations"
+              ],
+              "properties": {
+                "conversations": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_update"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_delete"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_save_messages"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_get_messages"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "messages"
+              ],
+              "properties": {
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_count_messages"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "count"
+              ],
+              "properties": {
+                "count": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_ensure"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "conversation"
+              ],
+              "properties": {
+                "conversation": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "conversation_search"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "conversations"
+              ],
+              "properties": {
+                "conversations": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_save"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_load"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "run": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireValue"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_list_by_session"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "runs"
+              ],
+              "properties": {
+                "runs": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_list_all"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "runs"
+              ],
+              "properties": {
+                "runs": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_append_event"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "run_list_by_parent"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "runs"
+              ],
+              "properties": {
+                "runs": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_get_checkpoint"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "checkpoint": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireValue"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_save_checkpoint"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_save_checkpoint_for_scope"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_state_ids"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "state_ids"
+              ],
+              "properties": {
+                "state_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_clear_state"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_clear_scope"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "runtime_clear_conversation"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "audit_log"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "audit_query"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "events"
+              ],
+              "properties": {
+                "events": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "context_project"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "projections"
+              ],
+              "properties": {
+                "projections": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "memory_trigger"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "disposition"
+              ],
+              "properties": {
+                "disposition": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "guard_check"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "result"
+              ],
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "search_provider_search"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "results"
+              ],
+              "properties": {
+                "results": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_save"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_load"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "checkpoint": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireValue"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_claim"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "checkpoint": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireValue"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_list"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "checkpoints"
+              ],
+              "properties": {
+                "checkpoints": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_list_by_graph"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "checkpoints"
+              ],
+              "properties": {
+                "checkpoints": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_list_filtered"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "checkpoints"
+              ],
+              "properties": {
+                "checkpoints": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/WireValue"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_delete"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_clear"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "revisioned_task_load"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "graph": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireValue"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "revisioned_task_compare_and_commit"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "graph"
+              ],
+              "properties": {
+                "graph": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_is_available"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "available"
+              ],
+              "properties": {
+                "available": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_execute"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "result"
+              ],
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_execute_with_limits"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "result"
+              ],
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_execute_with_limits_and_cancel"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "result"
+              ],
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "sandbox_cleanup"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "mcp_transport_send"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "response"
+              ],
+              "properties": {
+                "response": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "mcp_transport_notify"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "mcp_transport_close"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "mcp_transport_try_notification"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "notification": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/WireValue"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "embedder_embed"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "vector"
+              ],
+              "properties": {
+                "vector": {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "format": "float"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "memory_promoter_promote"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "deduplicated",
+                "promoted",
+                "submitted"
+              ],
+              "properties": {
+                "deduplicated": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "promoted": {
+                  "$ref": "#/definitions/WireU64"
+                },
+                "submitted": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_run"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "output"
+              ],
+              "properties": {
+                "output": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "intent_classify"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "intent"
+              ],
+              "properties": {
+                "intent": {
+                  "$ref": "#/definitions/WireValue"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "skill_load_allows"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "allowed"
+              ],
+              "properties": {
+                "allowed": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AgentComponentResultWire": {
+      "type": "object",
+      "required": [
+        "component",
+        "result"
+      ],
+      "properties": {
+        "component": {
+          "$ref": "#/definitions/AgentComponentKindWire"
+        },
+        "result": {
+          "$ref": "#/definitions/AgentComponentCallResultWire"
+        }
+      },
+      "additionalProperties": false
+    },
     "ApprovalScopeWire": {
       "type": "string",
       "enum": [
@@ -6026,6 +9902,69 @@
         "session",
         "session_tool"
       ]
+    },
+    "CompressionOutputWire": {
+      "type": "object",
+      "required": [
+        "evicted",
+        "messages"
+      ],
+      "properties": {
+        "checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evicted": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmMessageWire"
+          }
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmMessageWire"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CritiqueWire": {
+      "description": "Typed Critic callback result. `score` follows the framework's documented 0..=10 scale and the remaining fields preserve the framework `Critique` value losslessly.",
+      "type": "object",
+      "required": [
+        "feedback",
+        "passed",
+        "score"
+      ],
+      "properties": {
+        "feedback": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "score": {
+          "type": "number",
+          "format": "double"
+        },
+        "suggestions": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 128
+        }
+      },
+      "additionalProperties": false
     },
     "CustomAgentDescriptorWire": {
       "type": "object",
@@ -6609,6 +10548,177 @@
             },
             "value": {
               "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "critic_critique"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/CritiqueWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_start"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_stop"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_send"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_health"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_handle"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ChannelOutboundMessageWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "channel_reply"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ExtensionUnit"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "compressor_compress"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/CompressionOutputWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "agent_component_call"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/AgentComponentResultWire"
             }
           },
           "additionalProperties": false
@@ -7536,6 +11646,90 @@
         }
       }
     },
+    "AgentComponentStreamChunkWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "component",
+            "event"
+          ],
+          "properties": {
+            "component": {
+              "type": "string",
+              "enum": [
+                "sandbox"
+              ]
+            },
+            "event": {
+              "$ref": "#/definitions/SandboxStreamChunkWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "component",
+            "event"
+          ],
+          "properties": {
+            "component": {
+              "type": "string",
+              "enum": [
+                "workflow"
+              ]
+            },
+            "event": {
+              "$ref": "#/definitions/WorkflowStreamChunkWire"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AgentComponentStreamCompleteWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "component",
+            "terminal"
+          ],
+          "properties": {
+            "component": {
+              "type": "string",
+              "enum": [
+                "sandbox"
+              ]
+            },
+            "terminal": {
+              "$ref": "#/definitions/SandboxStreamCompleteWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "component",
+            "terminal"
+          ],
+          "properties": {
+            "component": {
+              "type": "string",
+              "enum": [
+                "workflow"
+              ]
+            },
+            "terminal": {
+              "$ref": "#/definitions/WorkflowStreamCompleteWire"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "AgentStreamChunkWire": {
       "oneOf": [
         {
@@ -8211,6 +12405,44 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "channel"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ChannelOutboundMessageWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent_component"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/AgentComponentStreamChunkWire"
+            }
+          },
+          "additionalProperties": false
         }
       ],
       "title": "ExtensionStreamChunkValue"
@@ -8270,6 +12502,44 @@
             },
             "value": {
               "$ref": "#/definitions/AgentStreamTerminalWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "channel"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/ChannelOutboundMessageWire"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent_component"
+              ]
+            },
+            "value": {
+              "$ref": "#/definitions/AgentComponentStreamCompleteWire"
             }
           },
           "additionalProperties": false
@@ -8443,6 +12713,124 @@
       },
       "additionalProperties": false
     },
+    "SandboxOutputChannelWire": {
+      "type": "string",
+      "enum": [
+        "stdout",
+        "stderr"
+      ]
+    },
+    "SandboxStreamChunkWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "channel",
+            "chunk",
+            "event"
+          ],
+          "properties": {
+            "channel": {
+              "$ref": "#/definitions/SandboxOutputChannelWire"
+            },
+            "chunk": {
+              "type": "string"
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "output"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SandboxStreamCompleteWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "result",
+            "terminal"
+          ],
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/WireValue"
+            },
+            "terminal": {
+              "type": "string",
+              "enum": [
+                "complete"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "failure",
+            "terminal"
+          ],
+          "properties": {
+            "failure": {
+              "$ref": "#/definitions/SandboxStreamFailureWire"
+            },
+            "terminal": {
+              "type": "string",
+              "enum": [
+                "failed"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SandboxStreamFailureWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "cancelled"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "io_error"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "ToolStreamChunkWire": {
       "oneOf": [
         {
@@ -8496,6 +12884,126 @@
           "additionalProperties": false
         }
       ]
+    },
+    "WorkflowStreamChunkWire": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "node_name",
+            "step_index"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "node_start"
+              ]
+            },
+            "node_name": {
+              "type": "string"
+            },
+            "step_index": {
+              "$ref": "#/definitions/WireU64"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "elapsed",
+            "event",
+            "node_name",
+            "step_index"
+          ],
+          "properties": {
+            "elapsed": {
+              "$ref": "#/definitions/WireDuration"
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "node_end"
+              ]
+            },
+            "node_name": {
+              "type": "string"
+            },
+            "step_index": {
+              "$ref": "#/definitions/WireU64"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "node_name",
+            "token"
+          ],
+          "properties": {
+            "event": {
+              "type": "string",
+              "enum": [
+                "token"
+              ]
+            },
+            "node_name": {
+              "type": "string"
+            },
+            "token": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "error",
+            "event",
+            "node_name"
+          ],
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "event": {
+              "type": "string",
+              "enum": [
+                "node_error"
+              ]
+            },
+            "node_name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "WorkflowStreamCompleteWire": {
+      "type": "object",
+      "required": [
+        "elapsed",
+        "result",
+        "total_steps"
+      ],
+      "properties": {
+        "elapsed": {
+          "$ref": "#/definitions/WireDuration"
+        },
+        "result": {
+          "type": "string"
+        },
+        "total_steps": {
+          "$ref": "#/definitions/WireU64"
+        }
+      },
+      "additionalProperties": false
     },
     "ExtensionStreamEvent": {
       "oneOf": [
@@ -9324,7 +13832,18 @@
         "agent_execute_stream",
         "agent_chat",
         "agent_chat_stream",
-        "agent_close"
+        "agent_close",
+        "critic_critique",
+        "channel_start",
+        "channel_stop",
+        "channel_send",
+        "channel_health",
+        "channel_handle",
+        "channel_handle_stream",
+        "channel_reply",
+        "compressor_compress",
+        "agent_component_call",
+        "agent_component_call_stream"
       ],
       "title": "ExtensionOperation",
       "description": "Closed operation set of the extension bridge. Every reverse invocation names exactly one operation; `kind()` binds it to its extension family so the Host can reject an operation dispatched to the wrong kind before any callback leaves the process (design §12.2).",

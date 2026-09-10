@@ -8,11 +8,14 @@
 
 use echo_agent::agent::EventEnvelope;
 use echo_agent::error::ReactError;
+use echo_agent::llm::types::{FunctionCall, Message, MessageContent, ReasoningBlock, ToolCall};
 use echo_agent::runtime::{TurnOutcome, TurnReceipt};
 use echo_sdk_protocol::error::{AgentFailureWire, EchoSdkError, ExtensionErrorCode, Retryability};
 use echo_sdk_protocol::event::{EventWireError, WireEventEnvelope};
 use echo_sdk_protocol::handle::{HandleKind, WireHandle};
-use echo_sdk_protocol::methods::{RunReceiptWire, RunStatus, RunTerminal};
+use echo_sdk_protocol::methods::{
+    LlmMessageWire, LlmReasoningBlockWire, RunReceiptWire, RunStatus, RunTerminal,
+};
 use echo_sdk_protocol::scalar::WireU64;
 
 /// Wire handle of a live object issued by this Host generation.
@@ -63,6 +66,7 @@ pub(crate) fn framework_error(error: &ReactError, operation: &str) -> EchoSdkErr
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn bounded_framework_message(message: &str) -> String {
     bounded_message(message)
 }
@@ -70,6 +74,68 @@ pub(crate) fn bounded_framework_message(message: &str) -> String {
 pub(crate) fn bounded_message(message: &str) -> String {
     const MAX_MESSAGE_CHARS: usize = 2048;
     message.chars().take(MAX_MESSAGE_CHARS).collect()
+}
+
+/// Convert the shared lossless Message wire DTO into the framework Message
+/// used by TurnRequest::from_message. This lives outside the extension bridge
+/// so core source-operation streams can consume the same DTO even when no
+/// reverse extension feature is enabled.
+pub(crate) fn message_from_wire(message: LlmMessageWire) -> Result<Message, String> {
+    let content = message
+        .content
+        .into_json()
+        .map_err(|error| error.to_string())
+        .and_then(|value| {
+            serde_json::from_value::<MessageContent>(value).map_err(|error| error.to_string())
+        })?;
+    let tool_calls = message.tool_calls.map(|calls| {
+        calls
+            .into_iter()
+            .map(|call| ToolCall {
+                id: call.id,
+                call_type: call.call_type,
+                function: FunctionCall {
+                    name: call.function_name,
+                    arguments: call.arguments,
+                },
+            })
+            .collect::<Vec<_>>()
+    });
+    let reasoning_blocks = message.reasoning_blocks.map(|blocks| {
+        blocks
+            .into_iter()
+            .map(|block| match block {
+                LlmReasoningBlockWire::Signed {
+                    thinking,
+                    signature,
+                } => ReasoningBlock::Signed {
+                    thinking,
+                    signature,
+                },
+                LlmReasoningBlockWire::Redacted { data } => ReasoningBlock::Redacted { data },
+                LlmReasoningBlockWire::Opaque {
+                    provider,
+                    id,
+                    data,
+                    summary,
+                } => ReasoningBlock::Opaque {
+                    provider,
+                    id,
+                    data,
+                    summary,
+                },
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(Message {
+        role: message.role.as_str().into(),
+        content,
+        tool_calls,
+        name: message.name,
+        tool_call_id: message.tool_call_id,
+        reasoning_content: message.reasoning_content,
+        reasoning_blocks,
+    })
 }
 
 /// The single authoritative terminal projected from a framework receipt.

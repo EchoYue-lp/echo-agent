@@ -1,300 +1,454 @@
-//! Bounded facade stream bookkeeping (plan 07, todo 2).
+//! Pull-based facade streams over the unified [`HandleRegistry`].
 //!
-//! Facade streams are family-owned event/data streams (workflow progress,
-//! eval reports, subagent envelopes, …) opened over a facade resource.
-//! This registry owns only the addressing lifecycle — open/close bounds,
-//! sequence watermarks, cancellation and page limits — mirroring the
-//! generation-fenced ladder of [`super::handles::HandleRegistry`]. Payload
-//! flow stays with the family adapters (todos 3–5); the Host never becomes
-//! a data authority (design §10.4).
-//!
-//! Deterministic edge behavior (plan verify): repeated close is idempotent
-//! (`false`), cancel after close is a no-op, advancing a closed/cancelled
-//! stream is a typed `closed_handle`/`cancelled` outcome, sequences are
-//! strictly monotonic, and every bound (open streams, page size) rejects
-//! before allocation.
-
-use std::collections::HashMap;
-use std::sync::Mutex;
+//! Framework stream producers run against their existing Rust authority and
+//! publish into a capacity-one queue. An SDK `stream.next` request consumes
+//! one item, which provides transport backpressure without buffering an
+//! unbounded response. Handle identity, owner, generation, sequence,
+//! cancellation and close state remain exclusively in `HandleRegistry`;
+//! this module stores only the live receiver and its producer task.
 
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
+use echo_sdk_protocol::handle::WireHandle;
+use echo_sdk_protocol::methods::FeatureOperationRequest;
+use echo_sdk_protocol::scalar::{WireField, WireU64, WireValue};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use crate::core_profile::wire::sdk_error;
+use super::super::handles::HandleRegistry;
+use super::super::wire;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FacadeStreamLimits {
-    pub max_open_streams: usize,
-    pub max_page_items: usize,
-}
+const STREAM_EVENT_TYPE_ID: &str = "echo_sdk::FacadeStreamEvent";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) type FacadeStreamItem = Result<WireValue, EchoSdkError>;
+
 pub(crate) struct FacadeStreamRecord {
-    /// Facade resource id that owns this stream.
-    pub resource_id: String,
-    /// Highest sequence delivered through this stream.
-    pub last_sequence: u64,
-    pub cancelled: bool,
+    owner_session: String,
+    family: String,
+    resource_id: String,
+    close_resource_on_finish: bool,
+    receiver: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<FacadeStreamItem>>,
+    cancel: tokio_util::sync::CancellationToken,
+    background: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-#[derive(Default)]
-struct FacadeStreamInner {
-    streams: HashMap<String, FacadeStreamRecord>,
+pub(crate) struct FacadeStreamProducer {
+    pub handle: WireHandle,
+    pub sender: tokio::sync::mpsc::Sender<FacadeStreamItem>,
+    pub cancel: tokio_util::sync::CancellationToken,
+    record: Arc<FacadeStreamRecord>,
 }
 
-#[allow(dead_code)]
-pub(crate) struct FacadeStreamBookkeeping {
-    limits: FacadeStreamLimits,
-    inner: Mutex<FacadeStreamInner>,
+pub(crate) struct FacadeStreamRuntime {
+    streams: Mutex<HashMap<String, Arc<FacadeStreamRecord>>>,
+    max_open_streams: usize,
+    shutdown_timeout: std::time::Duration,
 }
 
-#[allow(dead_code)]
-impl FacadeStreamBookkeeping {
-    pub fn new(limits: FacadeStreamLimits) -> Self {
+impl FacadeStreamRuntime {
+    pub fn new(max_open_streams: usize, shutdown_timeout_secs: u64) -> Self {
         Self {
-            limits,
-            inner: Mutex::new(FacadeStreamInner::default()),
+            streams: Mutex::new(HashMap::new()),
+            max_open_streams,
+            shutdown_timeout: std::time::Duration::from_secs(shutdown_timeout_secs),
         }
     }
 
-    pub fn limits(&self) -> FacadeStreamLimits {
-        self.limits
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, FacadeStreamInner> {
-        self.inner.lock().unwrap_or_else(|error| error.into_inner())
-    }
-
-    /// Open a stream over an existing facade resource. The stream id is
-    /// minted once and never reused; reopening the same id is a typed
-    /// conflict.
     pub fn open(
         &self,
-        stream_id: String,
-        resource_id: &str,
+        handles: &HandleRegistry,
+        resource: &WireHandle,
+        owner_session: &str,
         operation: &str,
-    ) -> Result<FacadeStreamRecord, EchoSdkError> {
-        let mut inner = self.lock();
-        if inner.streams.contains_key(&stream_id) {
-            return Err(sdk_error(
-                ExtensionErrorCode::InvalidRequest,
-                "facade stream id is already open",
-                Retryability::AfterDelay,
-                operation,
-            ));
-        }
-        if inner.streams.len() >= self.limits.max_open_streams {
-            return Err(sdk_error(
-                ExtensionErrorCode::PayloadTooLarge,
-                format!(
-                    "open facade stream limit {} reached",
-                    self.limits.max_open_streams
-                ),
-                Retryability::AfterDelay,
-                operation,
-            ));
-        }
-        let record = FacadeStreamRecord {
-            resource_id: resource_id.to_string(),
-            last_sequence: 0,
-            cancelled: false,
-        };
-        inner.streams.insert(stream_id, record.clone());
-        Ok(record)
+    ) -> Result<FacadeStreamProducer, EchoSdkError> {
+        self.open_with_ownership(handles, resource, owner_session, operation, false)
     }
 
-    /// Resolve one stream record.
-    pub fn get(
+    /// Open a stream whose facade resource exists only to anchor this stream.
+    /// Natural terminal or explicit close tombstones both handles together.
+    #[cfg(feature = "sdk-extension-bridge")]
+    pub fn open_ephemeral(
         &self,
-        stream_id: &str,
+        handles: &HandleRegistry,
+        resource: &WireHandle,
+        owner_session: &str,
         operation: &str,
-    ) -> Result<FacadeStreamRecord, EchoSdkError> {
-        self.lock().streams.get(stream_id).cloned().ok_or_else(|| {
-            sdk_error(
-                ExtensionErrorCode::InvalidValue,
-                "facade stream was never opened by this connection",
-                Retryability::Never,
-                operation,
-            )
+    ) -> Result<FacadeStreamProducer, EchoSdkError> {
+        self.open_with_ownership(handles, resource, owner_session, operation, true)
+    }
+
+    fn open_with_ownership(
+        &self,
+        handles: &HandleRegistry,
+        resource: &WireHandle,
+        owner_session: &str,
+        operation: &str,
+        close_resource_on_finish: bool,
+    ) -> Result<FacadeStreamProducer, EchoSdkError> {
+        let resource_record = handles.facade_resource(resource, operation)?;
+        let handle = handles.register_facade_stream(
+            self.max_open_streams,
+            resource,
+            Some(owner_session),
+            operation,
+        )?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let record = Arc::new(FacadeStreamRecord {
+            owner_session: owner_session.to_string(),
+            family: resource_record.family.clone(),
+            resource_id: resource.id.clone(),
+            close_resource_on_finish,
+            receiver: tokio::sync::Mutex::new(receiver),
+            cancel: cancel.clone(),
+            background: Mutex::new(None),
+        });
+        self.streams
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(handle.id.clone(), record.clone());
+        Ok(FacadeStreamProducer {
+            handle,
+            sender,
+            cancel,
+            record,
         })
     }
 
-    /// Advance the sequence watermark. Strictly monotonic: replaying or
-    /// going backwards is a typed invalid request, and cancelled streams
-    /// stop accepting advances.
-    pub fn advance(
+    pub fn attach_background(
         &self,
-        stream_id: &str,
-        sequence: u64,
+        producer: &FacadeStreamProducer,
+        background: tokio::task::JoinHandle<()>,
+    ) {
+        *producer
+            .record
+            .background
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(background);
+    }
+
+    pub async fn next(
+        &self,
+        handles: &HandleRegistry,
+        stream: &WireHandle,
+        owner_session: &str,
+        family: &str,
         operation: &str,
-    ) -> Result<(), EchoSdkError> {
-        let mut inner = self.lock();
-        let Some(record) = inner.streams.get_mut(stream_id) else {
-            return Err(sdk_error(
-                ExtensionErrorCode::InvalidValue,
-                "facade stream was never opened by this connection",
-                Retryability::Never,
-                operation,
-            ));
-        };
-        if record.cancelled {
-            return Err(sdk_error(
-                ExtensionErrorCode::Cancelled,
-                "facade stream is cancelled",
-                Retryability::Never,
-                operation,
-            ));
+    ) -> Result<WireValue, EchoSdkError> {
+        let record = self.record(handles, stream, owner_session, family, operation)?;
+        // Serialise all pulls for this stream. The registry sequence read,
+        // dequeue and sequence/terminal transition stay inside this one
+        // consumer critical section, so concurrent `next` calls cannot remove
+        // two items using the same pre-dequeue watermark.
+        let mut receiver = record.receiver.lock().await;
+        let (last_sequence, _) =
+            handles.facade_stream_state(stream, Some(owner_session), operation)?;
+        let item = receiver.recv().await;
+        let (_, cancelled) = handles.facade_stream_state(stream, Some(owner_session), operation)?;
+        if cancelled {
+            let sequence =
+                handles.settle_facade_stream(stream, Some(owner_session), true, operation)?;
+            let terminal = stream_event(stream, sequence, "cancelled", None);
+            drop(receiver);
+            let _ = self
+                .close(handles, stream, owner_session, family, operation)
+                .await;
+            return Ok(terminal);
         }
-        if sequence <= record.last_sequence {
-            return Err(sdk_error(
-                ExtensionErrorCode::InvalidRequest,
+        match item {
+            Some(Ok(value)) => {
+                let sequence = last_sequence.checked_add(1).ok_or_else(|| {
+                    wire::sdk_error(
+                        ExtensionErrorCode::FrameworkError,
+                        "facade stream sequence exhausted",
+                        Retryability::Never,
+                        operation,
+                    )
+                })?;
+                handles.advance_facade_stream(stream, Some(owner_session), sequence, operation)?;
+                Ok(stream_event(stream, sequence, "item", Some(value)))
+            }
+            Some(Err(error)) => {
+                let sequence =
+                    handles.settle_facade_stream(stream, Some(owner_session), false, operation)?;
+                let error = WireValue::from_json(serde_json::to_value(error).map_err(|error| {
+                    wire::sdk_error(
+                        ExtensionErrorCode::FrameworkError,
+                        format!("facade stream error projection failed: {error}"),
+                        Retryability::Never,
+                        operation,
+                    )
+                })?)
+                .map_err(|error| {
+                    wire::sdk_error(
+                        ExtensionErrorCode::FrameworkError,
+                        format!("facade stream error projection failed: {error}"),
+                        Retryability::Never,
+                        operation,
+                    )
+                })?;
+                let terminal = stream_event(stream, sequence, "failed", Some(error));
+                drop(receiver);
+                let _ = self
+                    .close(handles, stream, owner_session, family, operation)
+                    .await;
+                Ok(terminal)
+            }
+            None => {
+                let sequence =
+                    handles.settle_facade_stream(stream, Some(owner_session), false, operation)?;
+                let completed = stream_event(stream, sequence, "complete", None);
+                drop(receiver);
+                let _ = self
+                    .close(handles, stream, owner_session, family, operation)
+                    .await;
+                Ok(completed)
+            }
+        }
+    }
+
+    pub fn cancel(
+        &self,
+        handles: &HandleRegistry,
+        stream: &WireHandle,
+        owner_session: &str,
+        family: &str,
+        operation: &str,
+    ) -> Result<bool, EchoSdkError> {
+        let _ = self.record(handles, stream, owner_session, family, operation)?;
+        let changed = handles.cancel_facade_stream(stream, Some(owner_session), operation)?;
+        if changed
+            && let Some(record) = self
+                .streams
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&stream.id)
+                .cloned()
+        {
+            record.cancel.cancel();
+        }
+        Ok(changed)
+    }
+
+    pub async fn close(
+        &self,
+        handles: &HandleRegistry,
+        stream: &WireHandle,
+        owner_session: &str,
+        family: &str,
+        operation: &str,
+    ) -> Result<bool, EchoSdkError> {
+        if !handles.is_closed(stream) {
+            let _ = self.record(handles, stream, owner_session, family, operation)?;
+        }
+        let closed = handles.close_facade_stream(stream, Some(owner_session), operation)?;
+        let record = {
+            self.streams
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&stream.id)
+        };
+        if let Some(record) = record {
+            record.cancel.cancel();
+            let background = {
+                record
+                    .background
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+            };
+            if let Some(background) = background {
+                settle_background(background, self.shutdown_timeout).await;
+            }
+            if record.close_resource_on_finish {
+                let resource = WireHandle {
+                    id: record.resource_id.clone(),
+                    kind: echo_sdk_protocol::handle::HandleKind::FacadeResource,
+                    generation: stream.generation.clone(),
+                };
+                let _ = handles.close_facade_resource(&resource, operation);
+            }
+        }
+        Ok(closed)
+    }
+
+    pub async fn close_owner(&self, owner_session: &str) {
+        let records = take_matching(&self.streams, |record| {
+            record.owner_session == owner_session
+        });
+        cancel_records(records, self.shutdown_timeout).await;
+    }
+
+    pub async fn close_resource(&self, resource_id: &str) {
+        let records = take_matching(&self.streams, |record| record.resource_id == resource_id);
+        cancel_records(records, self.shutdown_timeout).await;
+    }
+
+    pub async fn close_all(&self) {
+        let records = std::mem::take(
+            &mut *self
+                .streams
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        cancel_records(records.into_values().collect(), self.shutdown_timeout).await;
+    }
+
+    fn record(
+        &self,
+        handles: &HandleRegistry,
+        stream: &WireHandle,
+        owner_session: &str,
+        family: &str,
+        operation: &str,
+    ) -> Result<Arc<FacadeStreamRecord>, EchoSdkError> {
+        handles.facade_stream(stream, Some(owner_session), operation)?;
+        let record = self
+            .streams
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&stream.id)
+            .cloned()
+            .ok_or_else(|| {
+                wire::sdk_error(
+                    ExtensionErrorCode::ClosedHandle,
+                    "facade stream receiver is no longer available",
+                    Retryability::Never,
+                    operation,
+                )
+            })?;
+        if record.family != family {
+            return Err(wire::sdk_error(
+                ExtensionErrorCode::InvalidValue,
                 format!(
-                    "facade stream sequence {sequence} does not advance past {}",
-                    record.last_sequence
+                    "facade stream belongs to family {}, not {family}",
+                    record.family
                 ),
                 Retryability::Never,
                 operation,
             ));
         }
-        record.last_sequence = sequence;
-        Ok(())
-    }
-
-    /// Cooperative cancellation; idempotent. Returns whether this call
-    /// flipped the stream to cancelled.
-    pub fn cancel(&self, stream_id: &str) -> bool {
-        self.lock()
-            .streams
-            .get_mut(stream_id)
-            .is_some_and(|record| {
-                if record.cancelled {
-                    false
-                } else {
-                    record.cancelled = true;
-                    true
-                }
-            })
-    }
-
-    /// Close one stream; idempotent (`false` when already closed).
-    pub fn close(&self, stream_id: &str) -> bool {
-        self.lock().streams.remove(stream_id).is_some()
-    }
-
-    /// Close every stream owned by one resource (resource close cascade).
-    pub fn close_of_resource(&self, resource_id: &str) -> usize {
-        let mut inner = self.lock();
-        let before = inner.streams.len();
-        inner
-            .streams
-            .retain(|_, record| record.resource_id != resource_id);
-        before.saturating_sub(inner.streams.len())
-    }
-
-    /// Streams currently open for one resource.
-    pub fn open_count_of_resource(&self, resource_id: &str) -> usize {
-        self.lock()
-            .streams
-            .values()
-            .filter(|record| record.resource_id == resource_id)
-            .count()
-    }
-
-    /// Bounded page size shared by every paginated family query.
-    pub fn clamp_page(&self, requested: usize) -> usize {
-        requested.min(self.limits.max_page_items)
+        Ok(record)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn bookkeeping() -> FacadeStreamBookkeeping {
-        FacadeStreamBookkeeping::new(FacadeStreamLimits {
-            max_open_streams: 2,
-            max_page_items: 16,
-        })
+pub(crate) async fn dispatch_control(
+    runtime: &FacadeStreamRuntime,
+    handles: &HandleRegistry,
+    owner_session: &str,
+    family: &str,
+    request: &FeatureOperationRequest,
+) -> Result<WireValue, EchoSdkError> {
+    if request.arguments.len() != 1 {
+        return Err(wire::sdk_error(
+            ExtensionErrorCode::InvalidValue,
+            "facade stream control accepts exactly one Stream handle argument",
+            Retryability::Never,
+            &request.operation,
+        ));
     }
-
-    #[test]
-    fn open_resolve_advance_and_close_are_deterministic() {
-        let streams = bookkeeping();
-        let record = streams
-            .open("fs-1".to_string(), "res-1", "test")
-            .expect("open");
-        assert_eq!(record.resource_id, "res-1");
-        assert!(streams.advance("fs-1", 1, "test").is_ok());
-        // Sequences must strictly advance.
-        assert!(
-            streams
-                .advance("fs-1", 1, "test")
-                .is_err_and(|error| error.code == ExtensionErrorCode::InvalidRequest)
-        );
-        assert!(streams.advance("fs-1", 2, "test").is_ok());
-        // Duplicate open is a typed conflict.
-        assert!(
-            streams
-                .open("fs-1".to_string(), "res-1", "test")
-                .is_err_and(|error| error.code == ExtensionErrorCode::InvalidRequest)
-        );
-        // Close is idempotent; a closed stream no longer resolves.
-        assert!(streams.close("fs-1"));
-        assert!(!streams.close("fs-1"));
-        assert!(
-            streams
-                .get("fs-1", "test")
-                .is_err_and(|error| error.code == ExtensionErrorCode::InvalidValue)
-        );
+    let stream = match request.arguments.first() {
+        Some(WireValue::Handle(handle)) => handle,
+        _ => {
+            return Err(wire::sdk_error(
+                ExtensionErrorCode::InvalidValue,
+                "facade stream control requires a Stream handle",
+                Retryability::Never,
+                &request.operation,
+            ));
+        }
+    };
+    if request.operation.ends_with(".stream.next") {
+        runtime
+            .next(handles, stream, owner_session, family, &request.operation)
+            .await
+    } else if request.operation.ends_with(".stream.cancel") {
+        runtime
+            .cancel(handles, stream, owner_session, family, &request.operation)
+            .map(WireValue::Bool)
+    } else if request.operation.ends_with(".stream.close") {
+        runtime
+            .close(handles, stream, owner_session, family, &request.operation)
+            .await
+            .map(WireValue::Bool)
+    } else {
+        Err(wire::sdk_error(
+            ExtensionErrorCode::InvalidValue,
+            "unknown facade stream control operation",
+            Retryability::Never,
+            &request.operation,
+        ))
     }
+}
 
-    #[test]
-    fn open_stream_bound_rejects_before_allocation() {
-        let streams = bookkeeping();
-        assert!(streams.open("fs-1".to_string(), "res-1", "test").is_ok());
-        assert!(streams.open("fs-2".to_string(), "res-1", "test").is_ok());
-        assert!(
-            streams
-                .open("fs-3".to_string(), "res-1", "test")
-                .is_err_and(|error| error.code == ExtensionErrorCode::PayloadTooLarge)
-        );
+fn stream_event(
+    stream: &WireHandle,
+    sequence: u64,
+    variant: &str,
+    value: Option<WireValue>,
+) -> WireValue {
+    let mut fields = vec![
+        WireField {
+            name: "stream".to_string(),
+            value: WireValue::Handle(stream.clone()),
+        },
+        WireField {
+            name: "sequence".to_string(),
+            value: WireValue::U64(WireU64::from_u64(sequence)),
+        },
+    ];
+    if let Some(value) = value {
+        fields.push(WireField {
+            name: "value".to_string(),
+            value,
+        });
     }
-
-    #[test]
-    fn cancel_is_idempotent_and_blocks_advances() {
-        let streams = bookkeeping();
-        streams
-            .open("fs-1".to_string(), "res-1", "test")
-            .expect("open");
-        assert!(streams.advance("fs-1", 5, "test").is_ok());
-        assert!(streams.cancel("fs-1"));
-        assert!(!streams.cancel("fs-1"));
-        assert!(
-            streams
-                .advance("fs-1", 6, "test")
-                .is_err_and(|error| error.code == ExtensionErrorCode::Cancelled)
-        );
+    WireValue::Variant {
+        type_id: STREAM_EVENT_TYPE_ID.to_string(),
+        variant: variant.to_string(),
+        fields,
     }
+}
 
-    #[test]
-    fn resource_close_cascades_to_its_streams_only() {
-        let streams = bookkeeping();
-        streams
-            .open("fs-1".to_string(), "res-1", "test")
-            .expect("open");
-        streams
-            .open("fs-2".to_string(), "res-2", "test")
-            .expect("open");
-        assert_eq!(streams.close_of_resource("res-1"), 1);
-        assert_eq!(streams.open_count_of_resource("res-2"), 1);
-        assert_eq!(streams.open_count_of_resource("res-1"), 0);
-        // Unknown resource closes are a no-op.
-        assert_eq!(streams.close_of_resource("res-none"), 0);
+fn take_matching(
+    streams: &Mutex<HashMap<String, Arc<FacadeStreamRecord>>>,
+    matches: impl Fn(&FacadeStreamRecord) -> bool,
+) -> Vec<Arc<FacadeStreamRecord>> {
+    let mut streams = streams.lock().unwrap_or_else(|error| error.into_inner());
+    let ids = streams
+        .iter()
+        .filter(|(_, record)| matches(record))
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    ids.into_iter()
+        .filter_map(|id| streams.remove(&id))
+        .collect()
+}
+
+async fn cancel_records(records: Vec<Arc<FacadeStreamRecord>>, timeout: std::time::Duration) {
+    for record in records {
+        record.cancel.cancel();
+        let background = {
+            record
+                .background
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+        };
+        if let Some(background) = background {
+            settle_background(background, timeout).await;
+        }
     }
+}
 
-    #[test]
-    fn page_clamp_is_bounded() {
-        let streams = bookkeeping();
-        assert_eq!(streams.clamp_page(4), 4);
-        assert_eq!(streams.clamp_page(1024), 16);
+async fn settle_background(
+    mut background: tokio::task::JoinHandle<()>,
+    timeout: std::time::Duration,
+) {
+    if tokio::time::timeout(timeout, &mut background)
+        .await
+        .is_err()
+    {
+        background.abort();
+        let _ = background.await;
     }
 }

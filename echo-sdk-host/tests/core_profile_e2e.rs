@@ -12,17 +12,27 @@
 #![cfg(feature = "sdk-core-profile")]
 
 use agent_client_protocol::schema::{ProtocolVersion, v1};
-use agent_client_protocol::{BoxFuture, ByteStreams, Client, ConnectionTo, LineDirection};
+use agent_client_protocol::{
+    BoxFuture, ByteStreams, Client, ConnectionTo, LineDirection, UntypedMessage,
+};
+#[cfg(feature = "sdk-facade-adapters")]
+use base64::Engine as _;
 use echo_sdk_protocol::capability::{
     EchoAgentCapability, EchoAgentClientHello, ExtensionCapability,
 };
+#[cfg(feature = "sdk-facade-adapters")]
+use echo_sdk_protocol::error::ExtensionErrorCode;
 use echo_sdk_protocol::event::{EventAck, EventAckNotification, EventNotification, ReplayRequest};
-use echo_sdk_protocol::handle::HandleKind;
+use echo_sdk_protocol::handle::{HandleKind, WireHandle};
 use echo_sdk_protocol::methods::{
-    AgentCloseRequest, AgentConfigWire, AgentCreateRequest, AgentDescribeRequest, ControlAction,
+    AgentCloseRequest, AgentConfigWire, AgentCreateRequest, AgentDescribeRequest, RunCancelRequest,
     RunGetRequest, RunInput, RunStartRequest, RunStatus, RunWaitRequest, SessionCloseRequest,
-    SessionCreateRequest, SessionLoadRequest, SubagentDispatchRequest, TaskControlRequest,
-    TaskCreateRequest, TaskExecuteRequest, TaskListRequest, TaskUpdateRequest,
+    SessionCreateRequest, SessionLoadRequest, TaskCreateRequest, TaskListRequest,
+    TaskUpdateRequest,
+};
+#[cfg(feature = "sdk-facade-adapters")]
+use echo_sdk_protocol::scalar::{
+    WireBytes, WireDuration, WireField, WireMapEntry, WirePath, WireValue,
 };
 use echo_sdk_protocol::scalar::{WireNonZeroU64, WireU64};
 use std::fs::OpenOptions;
@@ -236,6 +246,10 @@ async fn spawn_host(config: &Path) -> Result<HostProcess, Box<dyn std::error::Er
         // reaches the fixture. Loopback is always excluded from proxies.
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
+        // Keep the core-profile matrix deterministic even when the parent
+        // test process exports RUST_LOG=warn; the official ACP runtime's
+        // nested handler warning is intentionally expensive to format.
+        .env("RUST_LOG", "error")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -297,6 +311,8 @@ where
 {
     let _process_lock = acquire_e2e_process_lock();
     let transport = host_transport(&mut host.child);
+    let scenario_done = Arc::new(tokio::sync::Notify::new());
+    let scenario_done_for_client = scenario_done.clone();
     let connect = Client
         .builder()
         .on_receive_notification(
@@ -324,11 +340,25 @@ where
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_with(transport, async move |connection| {
-            scenario(connection).await
+            let result = scenario(connection).await;
+            scenario_done_for_client.notify_one();
+            result
         });
-    let outcome = tokio::time::timeout(Duration::from_secs(60), connect)
-        .await
-        .map_err(|_| "client scenario timed out")??;
+    tokio::pin!(connect);
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::select! {
+            result = &mut connect => result,
+            _ = scenario_done.notified() => {
+                // The scenario has completed its assertions. Close the
+                // source-built Host so the official Client connection can
+                // finish instead of waiting for an unrelated EOF timeout.
+                let _ = host.child.kill().await;
+                (&mut connect).await
+            }
+        }
+    })
+    .await
+    .map_err(|_| "client scenario timed out")??;
     Ok(outcome)
 }
 
@@ -439,6 +469,109 @@ async fn valid_hello_completes_full_core_lifecycle() -> Result<(), Box<dyn std::
                 .block_task()
                 .await?;
             assert!(!session.acp_session_id.is_empty());
+
+            let permission_mode = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/permission/op",
+                    serde_json::json!({
+                        "operation": "permission.mode",
+                        "signature_digest": family_op_digest(
+                            "permission",
+                            "permission.mode"
+                        ),
+                        "handle": session.session,
+                        "arguments": []
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let permission_mode = decoded_facade_response(permission_mode).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(permission_mode, serde_json::json!("default"));
+
+            let permission_update = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/permission/op",
+                    serde_json::json!({
+                        "operation": "permission.apply_update",
+                        "signature_digest": family_op_digest("permission", "permission.apply_update"),
+                        "handle": session.session.clone(),
+                        "arguments": [{
+                            "kind": "map",
+                            "value": [
+                                {"key": {"kind": "string", "value": "type"}, "value": {"kind": "string", "value": "add_rule"}},
+                                {"key": {"kind": "string", "value": "matcher"}, "value": {"kind": "string", "value": "fixture-tool"}},
+                                {"key": {"kind": "string", "value": "behavior"}, "value": {"kind": "string", "value": "deny"}},
+                                {"key": {"kind": "string", "value": "source"}, "value": {"kind": "string", "value": "session"}}
+                            ]
+                        }]
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(permission_update).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Null);
+            let permission_check = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/permission/op",
+                    serde_json::json!({
+                        "operation": "permission.check",
+                        "signature_digest": family_op_digest("permission", "permission.check"),
+                        "handle": session.session.clone(),
+                        "arguments": [
+                            {"kind": "string", "value": "fixture-tool"},
+                            {"kind": "map", "value": []}
+                        ]
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let permission_check = decoded_facade_response(permission_check).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(permission_check.get("decision"), Some(&serde_json::json!("deny")));
+
+            let record_approval = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/permission/op",
+                    serde_json::json!({
+                        "operation": "permission.record_approval",
+                        "signature_digest": family_op_digest("permission", "permission.record_approval"),
+                        "handle": session.session.clone(),
+                        "arguments": [
+                            {"kind": "string", "value": "scope-a"},
+                            {"kind": "string", "value": "fixture-tool"},
+                            {"kind": "map", "value": []},
+                            {"kind": "string", "value": "session"}
+                        ]
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(record_approval).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Null);
+            let is_approved = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/permission/op",
+                    serde_json::json!({
+                        "operation": "permission.is_approved",
+                        "signature_digest": family_op_digest("permission", "permission.is_approved"),
+                        "handle": session.session.clone(),
+                        "arguments": [
+                            {"kind": "string", "value": "scope-a"},
+                            {"kind": "string", "value": "fixture-tool"},
+                            {"kind": "map", "value": []}
+                        ]
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(is_approved).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::json!(true));
 
             let started = connection
                 .send_request(RunStartRequest {
@@ -634,7 +767,7 @@ async fn tiny_live_window_emits_a_valid_gap_until_acknowledged()
                 .agent;
             let session = connection
                 .send_request(SessionCreateRequest {
-                    agent,
+                    agent: agent.clone(),
                     working_dir: None,
                     session_id: None,
                     idempotency_id: None,
@@ -1313,21 +1446,25 @@ fn direction_marker(_: LineDirection) {}
 // ── Facade admission ladder (plan 07 todo 2) ────────────────────────────────
 
 #[cfg(feature = "sdk-facade-adapters")]
-fn first_catalog_invoke_operation() -> Result<String, Box<dyn std::error::Error>> {
+fn first_catalog_invoke_operation() -> Result<(String, String), Box<dyn std::error::Error>> {
     let catalog_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../contracts/sdk/facade-operation-catalog.json");
     let catalog: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(catalog_path)?)?;
-    let mut operations: Vec<String> = catalog
+    let mut operations: Vec<(String, String)> = catalog
         .get("routes")
         .and_then(|routes| routes.as_array())
         .into_iter()
         .flatten()
         .filter(|route| route.get("surface").and_then(|v| v.as_str()) == Some("invoke"))
         .filter_map(|route| {
-            route
-                .get("operation")
-                .and_then(|operation| operation.as_str())
-                .map(str::to_string)
+            let operation = route.get("operation")?.as_str()?.to_string();
+            let digest = route
+                .get("signature_digests")?
+                .as_array()?
+                .first()?
+                .as_str()?
+                .to_string();
+            Some((operation, digest))
         })
         .collect();
     operations.sort();
@@ -1335,6 +1472,80 @@ fn first_catalog_invoke_operation() -> Result<String, Box<dyn std::error::Error>
         .first()
         .cloned()
         .ok_or_else(|| "catalog carries no invoke identities".into())
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn catalog_source_operations() -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    let catalog_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../contracts/sdk/facade-operation-catalog.json");
+    let catalog: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(catalog_path)?)?;
+    let mut operations: Vec<(String, String)> = catalog
+        .get("routes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|route| route.get("surface").and_then(serde_json::Value::as_str) == Some("invoke"))
+        .filter(|route| {
+            route.get("family").and_then(serde_json::Value::as_str) == Some("source_operation")
+        })
+        .filter_map(|route| {
+            let operation = route.get("operation")?.as_str()?.to_string();
+            let digest = route
+                .get("signature_digests")?
+                .as_array()?
+                .first()?
+                .as_str()?
+                .to_string();
+            Some((operation, digest))
+        })
+        .collect();
+    operations.sort();
+    Ok(operations)
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn catalog_invoke_digest(operation: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let catalog_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../contracts/sdk/facade-operation-catalog.json");
+    let catalog: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(catalog_path)?)?;
+    let routes = catalog
+        .get("routes")
+        .and_then(|routes| routes.as_array())
+        .into_iter()
+        .flatten();
+    let direct = routes
+        .clone()
+        .find(|route| route.get("operation").and_then(|value| value.as_str()) == Some(operation))
+        .and_then(|route| route.get("signature_digests"))
+        .and_then(|digests| digests.as_array())
+        .and_then(|digests| digests.first())
+        .and_then(|digest| digest.as_str())
+        .map(str::to_string);
+    direct
+        .or_else(|| {
+            routes
+                .flat_map(|route| {
+                    route
+                        .get("operation_signatures")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                })
+                .find(|entry| {
+                    entry.get("operation").and_then(serde_json::Value::as_str) == Some(operation)
+                })
+                .and_then(|entry| entry.get("signature_digests"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|digests| digests.first())
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or_else(|| format!("catalog has no digest for {operation}").into())
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn family_op_digest(family: &str, operation: &str) -> String {
+    echo_sdk_protocol::facade::family_operation_signature_digest(family, operation)
 }
 
 #[cfg(feature = "sdk-facade-adapters")]
@@ -1355,6 +1566,170 @@ fn typed_facade_error(
 ) -> Result<echo_sdk_protocol::error::EchoSdkError, Box<dyn std::error::Error>> {
     echo_sdk_protocol::error::EchoSdkError::from_jsonrpc_data(error.data.as_ref())
         .map_err(|message| -> Box<dyn std::error::Error> { message.into() })
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+async fn invoke_facade(
+    connection: &ConnectionTo<agent_client_protocol::Agent>,
+    operation: &str,
+    handle: &WireHandle,
+    arguments: Vec<serde_json::Value>,
+) -> agent_client_protocol::Result<serde_json::Value> {
+    let signature_digest = catalog_invoke_digest(operation)
+        .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+    let response = connection
+        .send_request(UntypedMessage::new(
+            "_echo_agent/facade/invoke",
+            serde_json::json!({
+                "operation": operation,
+                "signature_digest": signature_digest,
+                "handle": handle,
+                "arguments": arguments,
+            }),
+        )?)
+        .block_task()
+        .await?;
+    decoded_facade_response(response)
+        .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+async fn invoke_facade_wire(
+    connection: &ConnectionTo<agent_client_protocol::Agent>,
+    operation: &str,
+    handle: &WireHandle,
+    arguments: Vec<WireValue>,
+) -> agent_client_protocol::Result<WireValue> {
+    let signature_digest = catalog_invoke_digest(operation)
+        .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+        operation: operation.to_string(),
+        signature_digest,
+        handle: Some(handle.clone()),
+        arguments,
+    };
+    let response = connection
+        .send_request(UntypedMessage::new(
+            "_echo_agent/facade/invoke",
+            serde_json::to_value(request).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?,
+        )?)
+        .block_task()
+        .await?;
+    let response: echo_sdk_protocol::methods::FeatureOperationResponse =
+        serde_json::from_value(response).map_err(|error| {
+            agent_client_protocol::Error::internal_error().data(error.to_string())
+        })?;
+    Ok(response.value)
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+async fn invoke_family_wire(
+    connection: &ConnectionTo<agent_client_protocol::Agent>,
+    method: &str,
+    family: &str,
+    operation: &str,
+    handle: &WireHandle,
+    arguments: Vec<WireValue>,
+) -> agent_client_protocol::Result<WireValue> {
+    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+        operation: operation.to_string(),
+        signature_digest: family_op_digest(family, operation),
+        handle: Some(handle.clone()),
+        arguments,
+    };
+    let response = connection
+        .send_request(UntypedMessage::new(
+            method,
+            serde_json::to_value(request).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?,
+        )?)
+        .block_task()
+        .await?;
+    let response: echo_sdk_protocol::methods::FeatureOperationResponse =
+        serde_json::from_value(response).map_err(|error| {
+            agent_client_protocol::Error::internal_error().data(error.to_string())
+        })?;
+    Ok(response.value)
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn test_wire_path(path: &Path) -> Result<WireValue, Box<dyn std::error::Error>> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| "test fixture path is not UTF-8".to_string())?;
+    Ok(WireValue::Path(WirePath::Utf8 {
+        path: path.to_string(),
+    }))
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn test_wire_bytes(bytes: &[u8]) -> WireValue {
+    WireValue::Bytes(WireBytes {
+        base64: base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes),
+    })
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn decode_wire_bytes(value: WireValue) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let WireValue::Bytes(bytes) = value else {
+        return Err("facade result is not Bytes".into());
+    };
+    base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(bytes.base64)
+        .map_err(|error| error.into())
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+async fn invoke_facade_without_handle_wire(
+    connection: &ConnectionTo<agent_client_protocol::Agent>,
+    operation: &str,
+    arguments: Vec<serde_json::Value>,
+) -> agent_client_protocol::Result<echo_sdk_protocol::scalar::WireValue> {
+    let signature_digest = catalog_invoke_digest(operation)
+        .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+    let response = connection
+        .send_request(UntypedMessage::new(
+            "_echo_agent/facade/invoke",
+            serde_json::json!({
+                "operation": operation,
+                "signature_digest": signature_digest,
+                "arguments": arguments,
+            }),
+        )?)
+        .block_task()
+        .await?;
+    let response: echo_sdk_protocol::methods::FeatureOperationResponse =
+        serde_json::from_value(response).map_err(|error| {
+            agent_client_protocol::Error::internal_error().data(error.to_string())
+        })?;
+    Ok(response.value)
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+fn session_argument(handle: &WireHandle) -> serde_json::Value {
+    serde_json::json!({"kind": "handle", "value": handle})
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+async fn assert_facade_invalid(
+    connection: &ConnectionTo<agent_client_protocol::Agent>,
+    operation: &str,
+    handle: &WireHandle,
+    arguments: Vec<serde_json::Value>,
+) -> agent_client_protocol::Result<()> {
+    let result = invoke_facade(connection, operation, handle, arguments).await;
+    let error = result.err().ok_or_else(|| {
+        agent_client_protocol::Error::internal_error().data(format!(
+            "{operation} unexpectedly accepted invalid arguments"
+        ))
+    })?;
+    let typed = typed_facade_error(&error)
+        .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+    assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
+    Ok(())
 }
 
 #[cfg(feature = "sdk-facade-adapters")]
@@ -1413,13 +1788,23 @@ async fn negotiated_facade_admission_fails_closed() -> Result<(), Box<dyn std::e
     let (endpoint, _request_seen) = start_model_server("unused").await?;
     let work = tempfile::tempdir()?;
     let state_root = tempfile::tempdir()?;
+    let skills_dir = work.path().join("skill-fixtures");
+    let skill_dir = skills_dir.join("projection-skill");
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: projection-skill\ndescription: A skill used by facade projection tests.\n---\n\nProjection fixture instructions.\n",
+    )?;
+    std::fs::write(work.path().join("AGENTS.md"), "project injected prompt")?;
     let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
     let mut host = spawn_host(&config).await?;
     let (events, updates, gaps) = empty_collectors::<EventNotification>();
-    let known_operation = first_catalog_invoke_operation()?;
+    let (known_operation, known_digest) = first_catalog_invoke_operation()?;
 
     drive(&mut host, events, updates, gaps, move |connection| {
         let known_operation = known_operation.clone();
+        let known_digest = known_digest.clone();
+        let skills_dir = skills_dir.clone();
         Box::pin(async move {
             use agent_client_protocol::UntypedMessage;
             use echo_sdk_protocol::error::ExtensionErrorCode;
@@ -1442,7 +1827,1452 @@ async fn negotiated_facade_admission_fails_closed() -> Result<(), Box<dyn std::e
                 })?;
             assert!(advertisement.declares(ExtensionCapability::FeatureSurfaces));
 
-            let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("source-operation-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let source_operation = "echo_core::agent::Agent::current_run_id";
+            let source = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": source_operation,
+                        "signature_digest": catalog_invoke_digest(source_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let source_value = decoded_facade_response(source).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(source_value, serde_json::Value::Null);
+
+            let name_operation = "echo_core::agent::Agent::name";
+            let name = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": name_operation,
+                        "signature_digest": catalog_invoke_digest(name_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let name = decoded_facade_response(name).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(name.as_str().is_some_and(|value| !value.is_empty()));
+
+            let react_prompt_operation = "echo_agent::agent::react::ReactAgent::current_system_prompt";
+            let react_prompt = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": react_prompt_operation,
+                        "signature_digest": catalog_invoke_digest(react_prompt_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let react_prompt = decoded_facade_response(react_prompt).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(react_prompt.as_str().is_some_and(|value| !value.is_empty()));
+
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: Some("source-operation-session".to_string()),
+                })
+                .block_task()
+                .await?;
+
+            let set_prompt = "echo_core::agent::Agent::set_system_prompt";
+            invoke_facade(
+                &connection,
+                set_prompt,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "string", "value": "runtime override"}),
+                ],
+            )
+            .await?;
+            let set_working_dir = "echo_core::agent::Agent::set_working_dir";
+            invoke_facade(
+                &connection,
+                set_working_dir,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({
+                        "kind": "path",
+                        "value": {
+                            "encoding": "utf8",
+                            "path": work.path().display().to_string(),
+                        }
+                    }),
+                ],
+            )
+            .await?;
+            let current_prompt = invoke_facade(
+                &connection,
+                react_prompt_operation,
+                &agent,
+                vec![session_argument(&session.session)],
+            )
+            .await?;
+            assert_eq!(current_prompt, serde_json::json!("runtime override"));
+
+            let load_skills_operation =
+                "echo_agent::agent::react::ReactAgent::load_skills_from_dir";
+            let load_skills = invoke_facade(
+                &connection,
+                load_skills_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({
+                        "kind": "path",
+                        "value": {
+                            "encoding": "utf8",
+                            "path": skills_dir.display().to_string(),
+                        },
+                    }),
+                ],
+            )
+            .await?;
+            assert_eq!(load_skills, serde_json::json!(["projection-skill"]));
+
+            // ReactAgent::list_skills returns the typed SkillInfo projection,
+            // not the string-only skill_names accessor. This exact source
+            // identity must retain description/tool metadata across the wire.
+            let list_skills_operation =
+                "echo_agent::agent::react::ReactAgent::list_skills";
+            let listed_skills = invoke_facade(
+                &connection,
+                list_skills_operation,
+                &agent,
+                vec![session_argument(&session.session)],
+            )
+            .await?;
+            let listed_skills = listed_skills.as_array().ok_or_else(|| {
+                agent_client_protocol::Error::internal_error()
+                    .data("ReactAgent::list_skills did not return an array")
+            })?;
+            // The fixture above is file-based, while this concrete API lists
+            // code-based skills only. The important contract is the typed
+            // array projection; file-based descriptors are covered below by
+            // the registry descriptor route.
+            assert!(listed_skills.iter().all(|skill| {
+                skill.get("name").and_then(serde_json::Value::as_str).is_some()
+                    && skill
+                        .get("tool_names")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some()
+            }));
+
+            // SkillRegistry read projections use the same Session Agent
+            // authority as the normal Agent accessors; there is no second
+            // registry handle or process-local resource map.
+            let registry_count_operation =
+                "echo_execution::skills::registry::SkillRegistry::count";
+            let registry_count = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": registry_count_operation,
+                        "signature_digest": catalog_invoke_digest(registry_count_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let registry_count = decoded_facade_response(registry_count).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(registry_count
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some());
+
+            let registry_descriptors_operation =
+                "echo_execution::skills::registry::SkillRegistry::list_descriptors";
+            let registry_descriptors = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": registry_descriptors_operation,
+                        "signature_digest": catalog_invoke_digest(registry_descriptors_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let registry_descriptors =
+                decoded_facade_response(registry_descriptors).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert!(registry_descriptors.is_array());
+
+            let registry_installed_operation =
+                "echo_execution::skills::registry::SkillRegistry::is_installed";
+            let registry_installed = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": registry_installed_operation,
+                        "signature_digest": catalog_invoke_digest(registry_installed_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "string", "value": "__missing_skill__"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(registry_installed).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Bool(false));
+
+            let registry_code_skills_operation =
+                "echo_execution::skills::registry::SkillRegistry::list_code_skills";
+            let registry_code_skills = invoke_facade(
+                &connection,
+                registry_code_skills_operation,
+                &agent,
+                vec![session_argument(&session.session)],
+            )
+            .await?;
+            assert_eq!(registry_code_skills, serde_json::json!([]));
+
+            let registry_descriptor_operation =
+                "echo_execution::skills::registry::SkillRegistry::get_descriptor";
+            let registry_descriptor = invoke_facade(
+                &connection,
+                registry_descriptor_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "string", "value": "projection-skill"}),
+                ],
+            )
+            .await?;
+            assert_eq!(
+                registry_descriptor.get("name"),
+                Some(&serde_json::json!("projection-skill"))
+            );
+            assert_eq!(
+                registry_descriptor.get("description"),
+                Some(&serde_json::json!(
+                    "A skill used by facade projection tests."
+                ))
+            );
+            assert!(registry_descriptor.get("location").is_none());
+
+            let registry_code_skill_operation =
+                "echo_execution::skills::registry::SkillRegistry::get_code_skill";
+            let registry_code_skill = invoke_facade(
+                &connection,
+                registry_code_skill_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "string", "value": "__missing_skill__"}),
+                ],
+            )
+            .await?;
+            assert_eq!(registry_code_skill, serde_json::Value::Null);
+
+            let registry_allowed_tools_operation =
+                "echo_execution::skills::registry::SkillRegistry::active_skill_allowed_tools";
+            let registry_allowed_tools = invoke_facade(
+                &connection,
+                registry_allowed_tools_operation,
+                &agent,
+                vec![session_argument(&session.session)],
+            )
+            .await?;
+            assert_eq!(registry_allowed_tools, serde_json::Value::Null);
+
+            let registry_catalog_operation =
+                "echo_execution::skills::registry::SkillRegistry::catalog_prompt";
+            let registry_catalog = invoke_facade(
+                &connection,
+                registry_catalog_operation,
+                &agent,
+                vec![session_argument(&session.session)],
+            )
+            .await?;
+            let registry_catalog = registry_catalog
+                .as_str()
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error()
+                        .data("SkillRegistry::catalog_prompt did not return a string")
+                })?;
+            assert!(registry_catalog.contains("projection-skill"));
+
+            let registry_sandbox_operation =
+                "echo_execution::skills::registry::SkillRegistry::get_active_sandbox_policy";
+            let registry_sandbox = invoke_facade(
+                &connection,
+                registry_sandbox_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "string", "value": "projection-skill"}),
+                ],
+            )
+            .await?;
+            assert_eq!(registry_sandbox, serde_json::Value::Null);
+
+            let registry_dependencies_operation =
+                "echo_execution::skills::registry::SkillRegistry::get_dependency_tree";
+            let registry_dependencies = invoke_facade(
+                &connection,
+                registry_dependencies_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "string", "value": "projection-skill"}),
+                ],
+            )
+            .await?;
+            assert_eq!(registry_dependencies, serde_json::json!([]));
+
+            // SkillRegistry source mutations run against the same Session
+            // Agent authority as the read projections above. Exercise each
+            // safe mutation and verify the descriptor projection changes.
+            let registry_tag_operation =
+                "echo_execution::skills::registry::SkillRegistry::tag_source";
+            let registry_unregister_operation =
+                "echo_execution::skills::registry::SkillRegistry::unregister_by_source";
+            let registry_unregister_names_operation =
+                "echo_execution::skills::registry::SkillRegistry::unregister_names_by_source";
+            let registry_remove_operation =
+                "echo_execution::skills::registry::SkillRegistry::remove_descriptor";
+            let skill_names = serde_json::json!({
+                "kind": "list",
+                "value": [{"kind": "string", "value": "projection-skill"}]
+            });
+            let tag_result = invoke_facade(
+                &connection,
+                registry_tag_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    skill_names.clone(),
+                    serde_json::json!({"kind": "string", "value": "fixture:source-a"}),
+                ],
+            )
+            .await?;
+            assert_eq!(tag_result, serde_json::Value::Null);
+            let unregister_count = invoke_facade(
+                &connection,
+                registry_unregister_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "string", "value": "fixture:source-a"}),
+                ],
+            )
+            .await?;
+            assert_eq!(unregister_count, serde_json::json!("1"));
+            let descriptors_after_source_unload = invoke_facade(
+                &connection,
+                registry_descriptors_operation,
+                &agent,
+                vec![session_argument(&session.session)],
+            )
+            .await?;
+            assert!(descriptors_after_source_unload
+                .as_array()
+                .is_some_and(|descriptors| descriptors.is_empty()));
+
+            // Reload the same fixture to cover the Vec<String> source unload
+            // result independently from the usize count operation.
+            let load_skills = invoke_facade(
+                &connection,
+                load_skills_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({
+                        "kind": "path",
+                        "value": {
+                            "encoding": "utf8",
+                            "path": skills_dir.display().to_string(),
+                        },
+                    }),
+                ],
+            )
+            .await?;
+            assert_eq!(load_skills, serde_json::json!(["projection-skill"]));
+            invoke_facade(
+                &connection,
+                registry_tag_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    skill_names,
+                    serde_json::json!({"kind": "string", "value": "fixture:source-b"}),
+                ],
+            )
+            .await?;
+            let unregister_names = invoke_facade(
+                &connection,
+                registry_unregister_names_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "string", "value": "fixture:source-b"}),
+                ],
+            )
+            .await?;
+            assert_eq!(unregister_names, serde_json::json!(["projection-skill"]));
+
+            // A final reload leaves an untagged descriptor for the direct
+            // remove_descriptor bool result.
+            invoke_facade(
+                &connection,
+                load_skills_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({
+                        "kind": "path",
+                        "value": {
+                            "encoding": "utf8",
+                            "path": skills_dir.display().to_string(),
+                        },
+                    }),
+                ],
+            )
+            .await?;
+            let removed_descriptor = invoke_facade(
+                &connection,
+                registry_remove_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "string", "value": "projection-skill"}),
+                ],
+            )
+            .await?;
+            assert_eq!(removed_descriptor, serde_json::Value::Bool(true));
+            let descriptors_after_direct_remove = invoke_facade(
+                &connection,
+                registry_descriptors_operation,
+                &agent,
+                vec![session_argument(&session.session)],
+            )
+            .await?;
+            assert!(descriptors_after_direct_remove
+                .as_array()
+                .is_some_and(|descriptors| descriptors.is_empty()));
+
+            for (operation, arguments) in [
+                (
+                    registry_tag_operation,
+                    vec![
+                        session_argument(&session.session),
+                        serde_json::json!({"kind": "string", "value": "projection-skill"}),
+                        serde_json::json!({"kind": "string", "value": "fixture:bad"}),
+                    ],
+                ),
+                (
+                    registry_unregister_operation,
+                    vec![
+                        session_argument(&session.session),
+                        serde_json::json!({"kind": "list", "value": []}),
+                    ],
+                ),
+                (
+                    registry_unregister_names_operation,
+                    vec![session_argument(&session.session)],
+                ),
+                (
+                    registry_remove_operation,
+                    vec![
+                        session_argument(&session.session),
+                        serde_json::json!({"kind": "list", "value": []}),
+                    ],
+                ),
+            ] {
+                assert_facade_invalid(&connection, operation, &agent, arguments)
+                    .await
+                    .map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?;
+            }
+
+            for operation in [
+                registry_code_skills_operation,
+                registry_allowed_tools_operation,
+                registry_catalog_operation,
+            ] {
+                assert_facade_invalid(
+                    &connection,
+                    operation,
+                    &agent,
+                    vec![
+                        session_argument(&session.session),
+                        serde_json::json!({"kind": "string", "value": "unexpected"}),
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            }
+            for operation in [
+                registry_descriptor_operation,
+                registry_code_skill_operation,
+                registry_sandbox_operation,
+                registry_dependencies_operation,
+            ] {
+                assert_facade_invalid(
+                    &connection,
+                    operation,
+                    &agent,
+                    vec![session_argument(&session.session)],
+                )
+                .await
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            }
+
+            let wrong_registry_args = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": registry_count_operation,
+                        "signature_digest": catalog_invoke_digest(registry_count_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await
+                .expect_err("SkillRegistry count requires a Session handle");
+            let typed = typed_facade_error(&wrong_registry_args).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
+
+            let wrong_registry_handle = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": registry_count_operation,
+                        "signature_digest": catalog_invoke_digest(registry_count_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": session.session.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await
+                .expect_err("SkillRegistry source operation requires an Agent handle");
+            let typed = typed_facade_error(&wrong_registry_handle).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
+
+            let set_plan_mode_operation = "echo_agent::agent::react::ReactAgent::set_plan_mode";
+            let set_plan_mode = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": set_plan_mode_operation,
+                        "signature_digest": catalog_invoke_digest(set_plan_mode_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "bool", "value": true}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(set_plan_mode).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Null);
+            let is_plan_mode_operation = "echo_agent::agent::react::ReactAgent::is_plan_mode";
+            let is_plan_mode = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": is_plan_mode_operation,
+                        "signature_digest": catalog_invoke_digest(is_plan_mode_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(is_plan_mode).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Bool(true));
+            let set_max_iterations_operation =
+                "echo_agent::agent::react::ReactAgent::set_max_iterations";
+            let set_max_iterations = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": set_max_iterations_operation,
+                        "signature_digest": catalog_invoke_digest(set_max_iterations_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "u64", "value": "7"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(set_max_iterations).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Null);
+            let max_iterations_operation = "echo_agent::agent::react::ReactAgent::max_iterations";
+            let max_iterations = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": max_iterations_operation,
+                        "signature_digest": catalog_invoke_digest(max_iterations_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(max_iterations).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::json!("7"));
+            let set_permission_mode_operation =
+                "echo_agent::agent::react::ReactAgent::set_permission_mode";
+            let set_permission_mode = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": set_permission_mode_operation,
+                        "signature_digest": catalog_invoke_digest(set_permission_mode_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "string", "value": "strict"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(set_permission_mode).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Null);
+            let get_permission_mode_operation =
+                "echo_agent::agent::react::ReactAgent::get_permission_mode";
+            let get_permission_mode = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": get_permission_mode_operation,
+                        "signature_digest": catalog_invoke_digest(get_permission_mode_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(get_permission_mode).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::json!("strict"));
+            let context_stats_operation = "echo_agent::agent::react::ReactAgent::context_stats";
+            let context_stats = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": context_stats_operation,
+                        "signature_digest": catalog_invoke_digest(context_stats_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let context_stats = decoded_facade_response(context_stats).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(context_stats.is_array());
+            assert_eq!(context_stats.as_array().map(Vec::len), Some(2));
+            let snapshot_operation = "echo_agent::agent::react::ReactAgent::snapshot";
+            let snapshot = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": snapshot_operation,
+                        "signature_digest": catalog_invoke_digest(snapshot_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let snapshot = decoded_facade_response(snapshot).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(snapshot.is_null() || snapshot.is_string());
+            let snapshots_operation = "echo_agent::agent::react::ReactAgent::snapshots";
+            let snapshots = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": snapshots_operation,
+                        "signature_digest": catalog_invoke_digest(snapshots_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert!(decoded_facade_response(snapshots)
+                .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?
+                .is_array());
+            let latest_snapshot_operation =
+                "echo_agent::agent::react::ReactAgent::latest_snapshot";
+            let latest_snapshot = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": latest_snapshot_operation,
+                        "signature_digest": catalog_invoke_digest(latest_snapshot_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let latest_snapshot = decoded_facade_response(latest_snapshot).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(latest_snapshot.is_null() || latest_snapshot.is_object());
+            let disconnect_mcp_operation =
+                "echo_agent::agent::react::ReactAgent::disconnect_mcp";
+            let disconnected = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": disconnect_mcp_operation,
+                        "signature_digest": catalog_invoke_digest(disconnect_mcp_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "string", "value": "missing-mcp"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(disconnected).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Bool(false));
+            let cancelled_delegate_operation =
+                "echo_agent::agent::react::ReactAgent::delegate_to_agent_with_cancel";
+            let cancelled_delegate = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": cancelled_delegate_operation,
+                        "signature_digest": catalog_invoke_digest(cancelled_delegate_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "string", "value": "target"},
+                            {"kind": "string", "value": "task"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await
+                .expect_err("cancel-aware delegation requires an active run");
+            let cancelled_delegate_error = typed_facade_error(&cancelled_delegate).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(
+                cancelled_delegate_error.code,
+                ExtensionErrorCode::FrameworkError
+            );
+            let messages_operation = "echo_core::agent::Agent::messages";
+            let messages = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": messages_operation,
+                        "signature_digest": catalog_invoke_digest(messages_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [{"kind": "handle", "value": session.session.clone()}],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let messages = decoded_facade_response(messages).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(messages.is_array());
+            let loaded_message = echo_sdk_protocol::scalar::WireValue::from_json(
+                serde_json::json!({
+                    "role": "user",
+                    "content": {"kind": "string", "value": "loaded replacement"}
+                }),
+            )
+            .map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let loaded_messages = echo_sdk_protocol::scalar::WireValue::List(vec![loaded_message]);
+            let load_messages_operation =
+                "echo_agent::agent::react::ReactAgent::load_messages";
+            let loaded = invoke_facade(
+                &connection,
+                load_messages_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::to_value(loaded_messages).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                ],
+            )
+            .await?;
+            assert_eq!(loaded, serde_json::Value::Null);
+            let replaced_messages = invoke_facade(
+                &connection,
+                messages_operation,
+                &agent,
+                vec![session_argument(&session.session)],
+            )
+            .await?;
+            assert_eq!(
+                replaced_messages
+                    .as_array()
+                    .and_then(|messages| messages.first())
+                    .and_then(|message| message.get("content"))
+                    .and_then(serde_json::Value::as_str),
+                Some("loaded replacement")
+            );
+            let tool_names_operation = "echo_core::agent::Agent::tool_names";
+            let tool_names = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": tool_names_operation,
+                        "signature_digest": catalog_invoke_digest(tool_names_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [{"kind": "handle", "value": session.session.clone()}],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let tool_names = decoded_facade_response(tool_names).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(tool_names.is_array());
+            let set_prompt_operation = "echo_core::agent::Agent::set_system_prompt";
+            let set_prompt = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": set_prompt_operation,
+                        "signature_digest": catalog_invoke_digest(set_prompt_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "string", "value": "updated system prompt"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(set_prompt).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Null);
+            let live_messages_operation = "echo_core::agent::Agent::messages";
+            let live_messages = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": live_messages_operation,
+                        "signature_digest": catalog_invoke_digest(live_messages_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [{"kind": "handle", "value": session.session.clone()}],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let live_messages = decoded_facade_response(live_messages).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(live_messages.to_string().contains("updated system prompt"));
+            let usage_operation = "echo_core::agent::Agent::token_usage_summary";
+            let usage = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": usage_operation,
+                        "signature_digest": catalog_invoke_digest(usage_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [{"kind": "handle", "value": session.session.clone()}],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let usage = decoded_facade_response(usage).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(usage.get("model_name"), Some(&serde_json::json!("fixture-model")));
+            let checkpoint_operation = "echo_agent::agent::react::ReactAgent::force_checkpoint";
+            let checkpoint = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": checkpoint_operation,
+                        "signature_digest": catalog_invoke_digest(checkpoint_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [{"kind": "handle", "value": session.session.clone()}],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(checkpoint).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Null);
+            let compress_operation =
+                "echo_agent::agent::react::ReactAgent::force_compress_context";
+            let compressed = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": compress_operation,
+                        "signature_digest": catalog_invoke_digest(compress_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [{"kind": "handle", "value": session.session.clone()}],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let compressed = decoded_facade_response(compressed).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(compressed.get("stats").is_some());
+            let reset_operation = "echo_core::agent::Agent::reset";
+            let reset = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": reset_operation,
+                        "signature_digest": catalog_invoke_digest(reset_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [{"kind": "handle", "value": session.session.clone()}],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            assert_eq!(decoded_facade_response(reset).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, serde_json::Value::Null);
+            let chat_operation = "echo_core::agent::Agent::chat";
+            let chat = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": chat_operation,
+                        "signature_digest": catalog_invoke_digest(chat_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "string", "value": "source chat"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let chat = decoded_facade_response(chat).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let chat: echo_sdk_protocol::methods::RunStartResponse =
+                serde_json::from_value(chat).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert_eq!(chat.run.kind, HandleKind::Run);
+            assert_eq!(chat.stream.kind, HandleKind::Stream);
+            let extra_chat_arg = assert_facade_invalid(
+                &connection,
+                chat_operation,
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "string", "value": "source chat"}),
+                    serde_json::json!({"kind": "string", "value": "unexpected"}),
+                ],
+            )
+            .await;
+            extra_chat_arg.map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let steer_operation = "echo_core::agent::Agent::steer_input";
+            let steer = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": steer_operation,
+                        "signature_digest": catalog_invoke_digest(steer_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": chat.run.clone()},
+                            {"kind": "string", "value": "source steer"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let steer = decoded_facade_response(steer).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let steer: echo_sdk_protocol::methods::RunSteerResponse =
+                serde_json::from_value(steer).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert!(steer.accepted || steer.steer_id.is_none());
+            let extra_steer_arg = assert_facade_invalid(
+                &connection,
+                steer_operation,
+                &agent,
+                vec![
+                    serde_json::json!({"kind": "handle", "value": chat.run.clone()}),
+                    serde_json::json!({"kind": "string", "value": "source steer"}),
+                    serde_json::json!({"kind": "string", "value": "unexpected"}),
+                ],
+            )
+            .await;
+            extra_steer_arg.map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let chat_run = chat.run;
+
+            // ReactAgent exposes the same live steering safe point through its
+            // concrete method identity. The Host routes it to the typed Run
+            // authority, so the result retains the normal accepted/steer_id
+            // lifecycle rather than simulating a local mailbox.
+            let react_steer_operation =
+                "echo_agent::agent::react::ReactAgent::steer_input";
+            let react_steer = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": react_steer_operation,
+                        "signature_digest": catalog_invoke_digest(react_steer_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": chat_run.clone()},
+                            {"kind": "string", "value": "react source steer"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let react_steer = decoded_facade_response(react_steer).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let react_steer: echo_sdk_protocol::methods::RunSteerResponse =
+                serde_json::from_value(react_steer).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert!(react_steer.accepted || react_steer.steer_id.is_none());
+
+            // Both concrete ReactAgent steering identities share the same
+            // strict wire shape. A missing Run handle is rejected before any
+            // framework authority is touched and remains a typed invalid
+            // value rather than a generic transport failure.
+            let tracked_operation =
+                "echo_agent::agent::react::ReactAgent::steer_input_tracked";
+            let tracked_error = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": tracked_operation,
+                        "signature_digest": catalog_invoke_digest(tracked_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await
+                .expect_err("ReactAgent steering requires a Run handle");
+            let typed = typed_facade_error(&tracked_error).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
+
+            let _ = connection
+                .send_request(RunCancelRequest {
+                    run: chat_run.clone(),
+                })
+                .block_task()
+                .await?;
+            let _ = connection
+                .send_request(RunWaitRequest {
+                    run: chat_run,
+                    timeout: None,
+                })
+                .block_task()
+                .await?;
+
+            let execute_operation = "echo_core::agent::Agent::execute";
+            let execute = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": execute_operation,
+                        "signature_digest": catalog_invoke_digest(execute_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "string", "value": "source execute"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let execute = decoded_facade_response(execute).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let execute: echo_sdk_protocol::methods::RunStartResponse =
+                serde_json::from_value(execute).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            let execute_run = execute.run;
+            let _ = connection
+                .send_request(RunCancelRequest {
+                    run: execute_run.clone(),
+                })
+                .block_task()
+                .await?;
+            let _ = connection
+                .send_request(RunWaitRequest {
+                    run: execute_run,
+                    timeout: None,
+                })
+                .block_task()
+                .await?;
+
+            let stream_operation = "echo_core::agent::Agent::chat_stream";
+            let streamed = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": stream_operation,
+                        "signature_digest": catalog_invoke_digest(stream_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            {"kind": "string", "value": "source stream"}
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let streamed = decoded_facade_response(streamed).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let streamed: echo_sdk_protocol::methods::RunStartResponse =
+                serde_json::from_value(streamed).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            let streamed_run = streamed.run;
+            let _ = connection
+                .send_request(RunCancelRequest {
+                    run: streamed_run.clone(),
+                })
+                .block_task()
+                .await?;
+            let _ = connection
+                .send_request(RunWaitRequest {
+                    run: streamed_run,
+                    timeout: None,
+                })
+                .block_task()
+                .await?;
+
+            let message_stream_operation =
+                "echo_agent::agent::react::ReactAgent::chat_stream_message";
+            let message_value = echo_sdk_protocol::scalar::WireValue::from_json(
+                serde_json::json!({
+                    "role": "user",
+                    "content": {"kind": "string", "value": "structured source message"}
+                }),
+            )
+            .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+            let message_stream = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": message_stream_operation,
+                        "signature_digest": catalog_invoke_digest(message_stream_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            serde_json::to_value(message_value.clone()).map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let message_stream = decoded_facade_response(message_stream).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let message_stream: echo_sdk_protocol::methods::RunStartResponse =
+                serde_json::from_value(message_stream).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            let message_run = message_stream.run;
+            let _ = connection
+                .send_request(RunCancelRequest {
+                    run: message_run.clone(),
+                })
+                .block_task()
+                .await?;
+            let _ = connection
+                .send_request(RunWaitRequest {
+                    run: message_run,
+                    timeout: None,
+                })
+                .block_task()
+                .await?;
+
+            let execute_message_operation =
+                "echo_agent::agent::react::ReactAgent::execute_stream_message";
+            let execute_message = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": execute_message_operation,
+                        "signature_digest": catalog_invoke_digest(execute_message_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent.clone(),
+                        "arguments": [
+                            {"kind": "handle", "value": session.session.clone()},
+                            serde_json::to_value(message_value).map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?
+                        ],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let execute_message = decoded_facade_response(execute_message).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let execute_message: echo_sdk_protocol::methods::RunStartResponse =
+                serde_json::from_value(execute_message).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            let _ = connection
+                .send_request(RunCancelRequest {
+                    run: execute_message.run.clone(),
+                })
+                .block_task()
+                .await?;
+            let _ = connection
+                .send_request(RunWaitRequest {
+                    run: execute_message.run,
+                    timeout: None,
+                })
+                .block_task()
+                .await?;
+
+            let digest =
+                |family: &str, operation: &str| family_op_digest(family, operation);
             // Unknown operation identities fail closed as invalid_value with
             // the typed facade detail carrying the rejected identity.
             let unknown = connection
@@ -1450,7 +3280,7 @@ async fn negotiated_facade_admission_fails_closed() -> Result<(), Box<dyn std::e
                     "_echo_agent/facade/invoke",
                     serde_json::json!({
                         "operation": "totally::unknown::operation",
-                        "signature_digest": digest,
+                        "signature_digest": known_digest,
                         "arguments": [],
                     }),
                 )?)
@@ -1472,25 +3302,47 @@ async fn negotiated_facade_admission_fails_closed() -> Result<(), Box<dyn std::e
                 Some("totally::unknown::operation")
             );
 
-            // A canonical operation resolves through the embedded catalog but
-            // no family dispatcher is compiled yet: typed feature_unavailable,
-            // never a simulated result.
+            // A canonical source operation resolves through the embedded
+            // catalog and reaches its concrete adapter's typed input checks;
+            // Plan 08 no longer permits an unbound generic source fallback.
             let known = connection
                 .send_request(UntypedMessage::new(
                     "_echo_agent/facade/invoke",
                     serde_json::json!({
-                        "operation": known_operation,
-                        "signature_digest": digest,
+                        "operation": known_operation.clone(),
+                        "signature_digest": known_digest,
                         "arguments": [],
                     }),
                 )?)
                 .block_task()
                 .await
-                .expect_err("family dispatch is not compiled yet");
+                .expect_err("source operation with invalid arguments must fail explicitly");
             let typed = typed_facade_error(&known).map_err(|error| {
                 agent_client_protocol::Error::internal_error().data(error.to_string())
             })?;
-            assert_eq!(typed.code, ExtensionErrorCode::FeatureUnavailable);
+            assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
+            assert_ne!(
+                typed.message,
+                "source operation is canonical but has no Host authority adapter"
+            );
+
+            let wrong_digest = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": known_operation,
+                        "signature_digest":
+                            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await
+                .expect_err("wrong canonical signature must fail closed");
+            let typed = typed_facade_error(&wrong_digest).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
 
             // The structured-output contract validation ships with the
             // facade runtime: a broken schema is a typed invalid value and
@@ -1519,7 +3371,9 @@ async fn negotiated_facade_admission_fails_closed() -> Result<(), Box<dyn std::e
                     }
                     let request = echo_sdk_protocol::methods::FeatureOperationRequest {
                         operation: "structured_output.validate".to_string(),
-                        signature_digest: digest.to_string(),
+                        signature_digest:
+                            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                                .to_string(),
                         handle: None,
                         arguments,
                     };
@@ -1578,7 +3432,7 @@ async fn negotiated_facade_admission_fails_closed() -> Result<(), Box<dyn std::e
                         .collect::<Result<Vec<_>, _>>()?;
                     let request = echo_sdk_protocol::methods::FeatureOperationRequest {
                         operation: operation.to_string(),
-                        signature_digest: digest.to_string(),
+                        signature_digest: digest("memory", operation),
                         handle: Some(handle),
                         arguments,
                     };
@@ -1597,7 +3451,7 @@ async fn negotiated_facade_admission_fails_closed() -> Result<(), Box<dyn std::e
                 .agent;
             let memory_session = connection
                 .send_request(SessionCreateRequest {
-                    agent,
+                    agent: agent.clone(),
                     working_dir: None,
                     session_id: None,
                     idempotency_id: None,
@@ -1673,31 +3527,1065 @@ async fn negotiated_facade_admission_fails_closed() -> Result<(), Box<dyn std::e
             })?;
             assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
 
-            // A family method whose handler family did not compile stays the
-            // official method-not-found even on a negotiated connection
-            // (memory is compiled now; channels needs a host-language
-            // handler factory and stays unbound by design).
-            let family = connection
+            #[cfg(all(feature = "framework-channels", feature = "sdk-extension-bridge"))]
+            {
+                // The full facade build binds channels through the reverse
+                // extension bridge, so the family is executable rather than
+                // method-not-found.
+                let family = connection
+                    .send_request(UntypedMessage::new(
+                        "_echo_agent/channels/op",
+                        serde_json::json!({
+                            "operation": "channels.manager.open",
+                            "signature_digest": family_op_digest(
+                                "channels",
+                                "channels.manager.open"
+                            ),
+                            "handle": memory_session.session,
+                            "arguments": [],
+                        }),
+                    )?)
+                    .block_task()
+                    .await?;
+                let family = decoded_facade_response(family).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+                assert!(family.get("resource").is_some());
+            }
+            #[cfg(not(all(feature = "framework-channels", feature = "sdk-extension-bridge")))]
+            {
+                // A build without the typed channel adapter must fail closed
+                // through the official method-not-found path.
+                let family = connection
+                    .send_request(UntypedMessage::new(
+                        "_echo_agent/channels/op",
+                        serde_json::json!({
+                            "operation": "channels.manager.open",
+                            "signature_digest":
+                                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                            "arguments": [],
+                        }),
+                    )?)
+                    .block_task()
+                    .await
+                    .expect_err("unbound family surface must fail closed");
+                assert_eq!(family.code, agent_client_protocol::ErrorCode::MethodNotFound);
+            }
+            let telemetry = connection
                 .send_request(UntypedMessage::new(
-                    "_echo_agent/channels/op",
+                    "_echo_agent/telemetry/op",
                     serde_json::json!({
-                        "operation": "channels.start",
-                        "signature_digest": digest,
+                        "operation": "telemetry.status",
+                        "signature_digest": family_op_digest("telemetry", "telemetry.status"),
                         "arguments": [],
                     }),
                 )?)
                 .block_task()
-                .await
-                .expect_err("uncompiled family method must fail");
-            assert!(matches!(
-                family.code,
-                agent_client_protocol::ErrorCode::MethodNotFound
-            ));
+                .await?;
+            let telemetry = decoded_facade_response(telemetry).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(
+                telemetry.get("initialized"),
+                Some(&serde_json::Value::Bool(false))
+            );
+            let close_operation = "echo_core::agent::Agent::close";
+            let closed = connection
+                .send_request(UntypedMessage::new(
+                    "_echo_agent/facade/invoke",
+                    serde_json::json!({
+                        "operation": close_operation,
+                        "signature_digest": catalog_invoke_digest(close_operation)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.to_string())
+                            })?,
+                        "handle": agent,
+                        "arguments": [],
+                    }),
+                )?)
+                .block_task()
+                .await?;
+            let closed = decoded_facade_response(closed).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(closed.get("released"), Some(&serde_json::Value::Bool(true)));
             Ok(())
         })
     })
     .await?;
     let _ = host.child.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+#[tokio::test]
+async fn every_canonical_source_operation_reaches_a_host_adapter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+    let operations = catalog_source_operations()?;
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        let operations = operations.clone();
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let mut missing = Vec::new();
+            for (operation, signature_digest) in operations {
+                let response = connection
+                    .send_request(UntypedMessage::new(
+                        "_echo_agent/facade/invoke",
+                        serde_json::json!({
+                            "operation": operation,
+                            "signature_digest": signature_digest,
+                            "arguments": [{"kind": "null"}],
+                        }),
+                    )?)
+                    .block_task()
+                    .await;
+                if let Err(error) = response {
+                    let typed = typed_facade_error(&error).map_err(|decode_error| {
+                        agent_client_protocol::Error::internal_error()
+                            .data(decode_error.to_string())
+                    })?;
+                    if typed.message
+                        == "source operation is canonical but has no Host authority adapter"
+                    {
+                        missing.push(operation);
+                    }
+                }
+            }
+            assert!(
+                missing.is_empty(),
+                "canonical source operations without Host adapters: {missing:#?}"
+            );
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+#[tokio::test]
+async fn stateful_source_resources_preserve_owner_state_and_close()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let plugin_root = work.path().join("plugins-state");
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    drive(&mut host, events, updates, gaps, move |connection| {
+        let plugin_root = plugin_root.clone();
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("stateful-resource-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let first = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: Some("stateful-resource-first".to_string()),
+                })
+                .block_task()
+                .await?;
+            let second = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: Some("stateful-resource-second".to_string()),
+                })
+                .block_task()
+                .await?;
+
+            let store = invoke_facade_wire(
+                &connection,
+                "echo_state::memory::store::InMemoryStore::new",
+                &agent,
+                vec![WireValue::Handle(first.session.clone())],
+            )
+            .await?;
+            let WireValue::Handle(store) = store else {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("InMemoryStore::new did not return a resource"));
+            };
+            let namespace = WireValue::List(vec![WireValue::String("sdk".to_string())]);
+            invoke_family_wire(
+                &connection,
+                "_echo_agent/memory/op",
+                "memory",
+                "memory.resource.put",
+                &first.session,
+                vec![
+                    WireValue::Handle(store.clone()),
+                    namespace.clone(),
+                    WireValue::String("answer".to_string()),
+                    WireValue::String("42".to_string()),
+                ],
+            )
+            .await?;
+            let found = invoke_family_wire(
+                &connection,
+                "_echo_agent/memory/op",
+                "memory",
+                "memory.resource.get",
+                &first.session,
+                vec![
+                    WireValue::Handle(store.clone()),
+                    namespace.clone(),
+                    WireValue::String("answer".to_string()),
+                ],
+            )
+            .await?;
+            let found = found.into_json().map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(found.get("key"), Some(&serde_json::json!("answer")));
+            assert_eq!(found.get("value"), Some(&serde_json::json!("42")));
+
+            let foreign = invoke_family_wire(
+                &connection,
+                "_echo_agent/memory/op",
+                "memory",
+                "memory.resource.get",
+                &second.session,
+                vec![
+                    WireValue::Handle(store.clone()),
+                    namespace,
+                    WireValue::String("answer".to_string()),
+                ],
+            )
+            .await
+            .expect_err("a foreign Session must not resolve a Store resource");
+            assert_eq!(
+                typed_facade_error(&foreign)
+                    .map_err(|error| agent_client_protocol::Error::internal_error()
+                        .data(error.to_string()))?
+                    .code,
+                ExtensionErrorCode::InvalidValue
+            );
+
+            let registry = invoke_facade_wire(
+                &connection,
+                "echo_core::plugin::registry::PluginRegistry::new",
+                &agent,
+                vec![
+                    WireValue::Handle(first.session.clone()),
+                    test_wire_path(&plugin_root).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                    WireValue::Null,
+                ],
+            )
+            .await?;
+            let WireValue::Handle(registry) = registry else {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("PluginRegistry::new did not return a resource"));
+            };
+            let count = invoke_facade_wire(
+                &connection,
+                "echo_core::plugin::registry::PluginRegistry::count",
+                &agent,
+                vec![
+                    WireValue::Handle(first.session.clone()),
+                    WireValue::Handle(registry.clone()),
+                ],
+            )
+            .await?;
+            assert_eq!(count, WireValue::U64(WireU64::from_u64(0)));
+
+            let no_secret = invoke_facade_wire(
+                &connection,
+                "echo_agent::security::contains_secrets",
+                &agent,
+                vec![
+                    WireValue::Handle(first.session.clone()),
+                    WireValue::String(String::new()),
+                ],
+            )
+            .await?;
+            assert_eq!(no_secret, WireValue::Bool(false));
+
+            let prompt_context = invoke_facade_wire(
+                &connection,
+                "echo_execution::skills::external::prompt_exec::PromptContext",
+                &agent,
+                vec![
+                    WireValue::Handle(first.session.clone()),
+                    WireValue::String(String::new()),
+                    WireValue::String(String::new()),
+                    WireValue::List(Vec::new()),
+                    WireValue::Null,
+                    WireValue::Duration(WireDuration::from_nanos(1_000_000)),
+                    WireValue::String("local".to_string()),
+                    WireValue::Null,
+                ],
+            )
+            .await?;
+            let WireValue::Handle(prompt_context) = prompt_context else {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("PromptContext did not return a resource"));
+            };
+            let rendered = invoke_facade_wire(
+                &connection,
+                "echo_execution::skills::external::prompt_exec::process_skill_content",
+                &agent,
+                vec![
+                    WireValue::Handle(first.session.clone()),
+                    WireValue::String(String::new()),
+                    WireValue::Handle(prompt_context.clone()),
+                ],
+            )
+            .await?;
+            assert_eq!(rendered, WireValue::String(String::new()));
+
+            for resource in [store.clone(), registry, prompt_context] {
+                assert_eq!(
+                    invoke_family_wire(
+                        &connection,
+                        "_echo_agent/facade/invoke",
+                        "invoke",
+                        "facade.resource.close",
+                        &first.session,
+                        vec![WireValue::Handle(resource)],
+                    )
+                    .await?,
+                    WireValue::Bool(true)
+                );
+            }
+            let closed = invoke_family_wire(
+                &connection,
+                "_echo_agent/memory/op",
+                "memory",
+                "memory.resource.get",
+                &first.session,
+                vec![
+                    WireValue::Handle(store),
+                    WireValue::List(vec![WireValue::String("sdk".to_string())]),
+                    WireValue::String("answer".to_string()),
+                ],
+            )
+            .await
+            .expect_err("a closed Store resource must stay closed");
+            assert_eq!(
+                typed_facade_error(&closed)
+                    .map_err(|error| agent_client_protocol::Error::internal_error()
+                        .data(error.to_string()))?
+                    .code,
+                ExtensionErrorCode::ClosedHandle
+            );
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+#[tokio::test]
+async fn source_files_and_skill_registry_preserve_rust_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let file_path = work.path().join("facade-file.txt");
+    let lease_path = work.path().join("facade-authority.json");
+    let skill_path = work.path().join("facade-methodology").join("SKILL.md");
+    let plugin_root = work.path().join("plugin-root");
+    let plugin_data = work.path().join("plugin-data");
+    let project_dir = work.path().to_path_buf();
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    let outcome = drive(&mut host, events, updates, gaps, move |connection| {
+        let file_path = file_path.clone();
+        let lease_path = lease_path.clone();
+        let skill_path = skill_path.clone();
+        let plugin_root = plugin_root.clone();
+        let plugin_data = plugin_data.clone();
+        let project_dir = project_dir.clone();
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("facade-authority-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let first = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: Some("facade-authority-first".to_string()),
+                })
+                .block_task()
+                .await?;
+            let second = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: Some("facade-authority-second".to_string()),
+                })
+                .block_task()
+                .await?;
+
+            let session = WireValue::Handle(first.session.clone());
+            let contains_secret = invoke_facade_wire(
+                &connection,
+                "echo_agent::security::contains_secrets",
+                &agent,
+                vec![
+                    session.clone(),
+                    WireValue::String("OPENAI_API_KEY=sk-facade-secret-fixture".to_string()),
+                ],
+            )
+            .await?;
+            assert_eq!(contains_secret, WireValue::Bool(true));
+
+            let risk = invoke_facade_wire(
+                &connection,
+                "echo_execution::risk::ToolRiskClassifier::classify",
+                &agent,
+                vec![session.clone(), WireValue::String("shell".to_string())],
+            )
+            .await?;
+            assert!(matches!(
+                risk,
+                WireValue::Variant { variant, .. } if variant == "shell_exec"
+            ));
+
+            let sandbox_command = WireValue::from_json(
+                serde_json::to_value(echo_agent::sandbox::SandboxCommand::shell("echo ok"))
+                    .map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+            )
+            .map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let isolation = invoke_facade_wire(
+                &connection,
+                "echo_execution::sandbox::policy::SandboxPolicy::evaluate",
+                &agent,
+                vec![
+                    session.clone(),
+                    WireValue::from_json(serde_json::json!({
+                        "default_level": "strict",
+                        "auto_escalate": true,
+                        "max_isolation_level": null,
+                        "container_required_languages": ["python"],
+                        "trusted_commands": ["echo"]
+                    }))
+                    .map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                    sandbox_command,
+                ],
+            )
+            .await?;
+            assert_eq!(isolation, WireValue::String("container".to_string()));
+
+            let valid_task = WireValue::from_json(serde_json::json!({
+                "id": "validate",
+                "title": "Validate facade",
+                "description": "Exercise the Rust PlanValidator authority",
+                "depends_on": [],
+                "max_retries": 1,
+                "extension": {}
+            }))
+            .map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            let validated = invoke_facade_wire(
+                &connection,
+                "echo_orchestration::planning::validator::PlanValidator::validate_task_specs",
+                &agent,
+                vec![
+                    session.clone(),
+                    WireValue::U64(WireU64::from_u64(8)),
+                    WireValue::U64(WireU64::from_u64(4)),
+                    WireValue::U64(WireU64::from_u64(2)),
+                    WireValue::List(vec![valid_task]),
+                ],
+            )
+            .await?;
+            let validated = validated.into_json().map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(validated.get("valid"), Some(&serde_json::json!(true)));
+
+            invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::atomic_write",
+                &agent,
+                vec![
+                    session.clone(),
+                    test_wire_path(&file_path).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                    test_wire_bytes(b"alpha\nbeta\n"),
+                ],
+            )
+            .await?;
+            let read = invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::read_existing",
+                &agent,
+                vec![
+                    session.clone(),
+                    test_wire_path(&file_path).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                ],
+            )
+            .await?;
+            assert_eq!(
+                decode_wire_bytes(read).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?,
+                b"alpha\nbeta\n"
+            );
+            let guard = invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::open_existing_regular_guard",
+                &agent,
+                vec![
+                    session.clone(),
+                    test_wire_path(&file_path).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                ],
+            )
+            .await?;
+            let WireValue::Handle(guard) = guard else {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("regular guard did not return a resource handle"));
+            };
+            assert_eq!(guard.kind, HandleKind::FacadeResource);
+            let len = invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::ExistingRegularFileGuard::len",
+                &agent,
+                vec![session.clone(), WireValue::Handle(guard.clone())],
+            )
+            .await?;
+            assert!(matches!(len, WireValue::U64(value) if value.to_u64() == Some(11)));
+
+            let foreign = invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::ExistingRegularFileGuard::len",
+                &agent,
+                vec![
+                    WireValue::Handle(second.session.clone()),
+                    WireValue::Handle(guard.clone()),
+                ],
+            )
+            .await
+            .expect_err("a file guard cannot cross Session ownership");
+            let typed = typed_facade_error(&foreign).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::InvalidValue);
+
+            invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::append_existing_matching",
+                &agent,
+                vec![
+                    session.clone(),
+                    test_wire_path(&file_path).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                    WireValue::Handle(guard.clone()),
+                    WireValue::U64(WireU64::from_u64(11)),
+                    test_wire_bytes(b"gamma\n"),
+                    WireValue::String("sync_data".to_string()),
+                ],
+            )
+            .await?;
+            assert_eq!(std::fs::read(&file_path).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?, b"alpha\nbeta\ngamma\n");
+
+            let closed_guard = invoke_facade_wire(
+                &connection,
+                "facade.resource.close",
+                &first.session,
+                vec![WireValue::Handle(guard.clone())],
+            )
+            .await?;
+            assert_eq!(closed_guard, WireValue::Bool(true));
+            let closed_guard_access = invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::ExistingRegularFileGuard::len",
+                &agent,
+                vec![session.clone(), WireValue::Handle(guard)],
+            )
+            .await
+            .expect_err("a closed file guard must not remain resolvable");
+            assert_eq!(
+                typed_facade_error(&closed_guard_access)
+                    .map_err(|error| agent_client_protocol::Error::internal_error()
+                        .data(error.to_string()))?
+                    .code,
+                ExtensionErrorCode::ClosedHandle
+            );
+
+            let lease = invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::try_exclusive_file_lease",
+                &agent,
+                vec![
+                    session.clone(),
+                    test_wire_path(&lease_path).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                ],
+            )
+            .await?;
+            let WireValue::Handle(lease) = lease else {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("file lease did not return a resource handle"));
+            };
+            assert_eq!(lease.kind, HandleKind::FacadeResource);
+            let duplicate = invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::try_exclusive_file_lease",
+                &agent,
+                vec![
+                    WireValue::Handle(second.session.clone()),
+                    test_wire_path(&lease_path).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                ],
+            )
+            .await
+            .expect_err("the Rust lease authority must reject a duplicate holder");
+            let typed = typed_facade_error(&duplicate).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(typed.code, ExtensionErrorCode::FrameworkError);
+
+            let foreign_close = invoke_facade_wire(
+                &connection,
+                "facade.resource.close",
+                &second.session,
+                vec![WireValue::Handle(lease.clone())],
+            )
+            .await
+            .expect_err("a foreign Session must not close a file lease");
+            assert_eq!(
+                typed_facade_error(&foreign_close)
+                    .map_err(|error| agent_client_protocol::Error::internal_error()
+                        .data(error.to_string()))?
+                    .code,
+                ExtensionErrorCode::InvalidValue
+            );
+            let closed_lease = invoke_facade_wire(
+                &connection,
+                "facade.resource.close",
+                &first.session,
+                vec![WireValue::Handle(lease.clone())],
+            )
+            .await?;
+            assert_eq!(closed_lease, WireValue::Bool(true));
+            let repeated_close = invoke_facade_wire(
+                &connection,
+                "facade.resource.close",
+                &first.session,
+                vec![WireValue::Handle(lease)],
+            )
+            .await?;
+            assert_eq!(repeated_close, WireValue::Bool(false));
+            let reacquired = invoke_facade_wire(
+                &connection,
+                "echo_core::utils::fs::try_exclusive_file_lease",
+                &agent,
+                vec![
+                    WireValue::Handle(second.session.clone()),
+                    test_wire_path(&lease_path).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                ],
+            )
+            .await?;
+            assert!(matches!(reacquired, WireValue::Handle(handle) if handle.kind == HandleKind::FacadeResource));
+
+            let markdown = concat!(
+                "---\n",
+                "name: facade-methodology\n",
+                "description: Facade methodology fixture.\n",
+                "metadata:\n  category: methodology\n",
+                "---\n\n",
+                "Plugin root is ${ECHO_PLUGIN_ROOT}.\n"
+            );
+            invoke_facade_wire(
+                &connection,
+                "echo_execution::skills::registry::SkillRegistry::register_prepared",
+                &agent,
+                vec![
+                    session.clone(),
+                    WireValue::String(markdown.to_string()),
+                    test_wire_path(&skill_path).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                    WireValue::Null,
+                ],
+            )
+            .await?;
+            let variables = WireValue::Record {
+                type_id: "echo_core::plugin::PluginVariables".to_string(),
+                fields: vec![
+                    WireField {
+                        name: "plugin_root".to_string(),
+                        value: test_wire_path(&plugin_root).map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })?,
+                    },
+                    WireField {
+                        name: "plugin_data".to_string(),
+                        value: test_wire_path(&plugin_data).map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })?,
+                    },
+                    WireField {
+                        name: "project_dir".to_string(),
+                        value: test_wire_path(&project_dir).map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })?,
+                    },
+                    WireField {
+                        name: "user_config".to_string(),
+                        value: WireValue::Map(vec![WireMapEntry {
+                            key: WireValue::String("mode".to_string()),
+                            value: WireValue::String("test".to_string()),
+                        }]),
+                    },
+                ],
+            };
+            invoke_facade_wire(
+                &connection,
+                "echo_execution::skills::registry::SkillRegistry::tag_source_with_variables",
+                &agent,
+                vec![
+                    session.clone(),
+                    WireValue::List(vec![WireValue::String(
+                        "facade-methodology".to_string(),
+                    )]),
+                    WireValue::String("plugin:facade".to_string()),
+                    variables,
+                ],
+            )
+            .await?;
+            let content = invoke_facade_wire(
+                &connection,
+                "echo_execution::skills::registry::SkillRegistry::activate",
+                &agent,
+                vec![
+                    session.clone(),
+                    WireValue::String("facade-methodology".to_string()),
+                ],
+            )
+            .await?
+            .into_json()
+            .map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert!(
+                content
+                    .get("instructions")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.contains(&plugin_root.display().to_string()))
+            );
+            let reset = invoke_facade_wire(
+                &connection,
+                "echo_execution::skills::registry::SkillRegistry::reset_activation_state",
+                &agent,
+                vec![session.clone()],
+            )
+            .await?;
+            assert_eq!(reset, WireValue::Null);
+            let activated = invoke_facade_wire(
+                &connection,
+                "echo_execution::skills::registry::SkillRegistry::mark_activated",
+                &agent,
+                vec![
+                    session.clone(),
+                    WireValue::String("facade-methodology".to_string()),
+                ],
+            )
+            .await?;
+            assert_eq!(activated, WireValue::Bool(true));
+            invoke_facade_wire(
+                &connection,
+                "echo_execution::skills::registry::SkillRegistry::record_code_skill",
+                &agent,
+                vec![
+                    session.clone(),
+                    WireValue::String("facade-code".to_string()),
+                    WireValue::String("Facade code skill".to_string()),
+                    WireValue::List(vec![WireValue::String("facade_tool".to_string())]),
+                    WireValue::Bool(true),
+                ],
+            )
+            .await?;
+
+            Ok(())
+        })
+    })
+    .await;
+    if outcome.is_err() {
+        eprintln!("source authority Host stderr: {}", stderr_text(&host));
+    }
+    outcome?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+#[cfg(feature = "sdk-facade-adapters")]
+#[tokio::test]
+async fn turn_receipt_source_operations_project_live_and_recovered()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, request_seen) = start_model_server("receipt-answer").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+
+    let mut host1 = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+    let session_id = drive(&mut host1, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("turn-receipt-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: None,
+                    session_id: Some("turn-receipt-session".to_string()),
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let classify_operation =
+                "echo_orchestration::runtime::turn_driver::TurnOutcome::classify";
+            let final_outcome = invoke_facade_without_handle_wire(
+                &connection,
+                classify_operation,
+                vec![serde_json::json!({
+                    "kind": "variant",
+                    "value": {
+                        "type_id": "echo_sdk_protocol::methods::AgentEventWire",
+                        "variant": "final_answer",
+                        "fields": [{
+                            "name": "text",
+                            "value": {"kind": "string", "value": "done"}
+                        }]
+                    }
+                })],
+            )
+            .await?;
+            assert!(matches!(
+                final_outcome,
+                echo_sdk_protocol::scalar::WireValue::Variant {
+                    ref variant, ref fields, ..
+                } if variant == "completed" && fields.is_empty()
+            ));
+            let pending_outcome = invoke_facade_without_handle_wire(
+                &connection,
+                classify_operation,
+                vec![serde_json::json!({
+                    "kind": "variant",
+                    "value": {
+                        "type_id": "echo_sdk_protocol::methods::AgentEventWire",
+                        "variant": "token",
+                        "fields": [{
+                            "name": "text",
+                            "value": {"kind": "string", "value": "partial"}
+                        }]
+                    }
+                })],
+            )
+            .await?;
+            assert_eq!(pending_outcome, echo_sdk_protocol::scalar::WireValue::Null);
+            let started = connection
+                .send_request(RunStartRequest {
+                    session: session.session.clone(),
+                    input: RunInput::Chat {
+                        text: "receipt projection".to_string(),
+                    },
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            wait_for_model_request(&request_seen)
+                .await
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            let wait = connection
+                .send_request(RunWaitRequest {
+                    run: started.run.clone(),
+                    timeout: None,
+                })
+                .block_task()
+                .await?;
+            assert!(wait.settled);
+
+            let outcome_status_operation =
+                "echo_orchestration::runtime::turn_driver::TurnOutcome::status";
+            let status_operation = "echo_orchestration::runtime::turn_driver::TurnReceipt::status";
+            let usage_operation = "echo_orchestration::runtime::turn_driver::TurnReceipt::usage";
+            let outcome_status =
+                invoke_facade(&connection, outcome_status_operation, &started.run, vec![]).await?;
+            assert_eq!(outcome_status, serde_json::json!("completed"));
+            let status = invoke_facade(&connection, status_operation, &started.run, vec![]).await?;
+            assert_eq!(status, serde_json::json!("completed"));
+            let usage = invoke_facade(&connection, usage_operation, &started.run, vec![]).await?;
+            assert!(
+                usage
+                    .get("duration_ms")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+            );
+            assert!(
+                usage
+                    .get("iterations")
+                    .is_some_and(serde_json::Value::is_null)
+            );
+
+            let invalid_arguments = invoke_facade(
+                &connection,
+                status_operation,
+                &started.run,
+                vec![serde_json::json!(null)],
+            )
+            .await
+            .expect_err("TurnReceipt accessors must reject arguments");
+            let invalid_arguments = typed_facade_error(&invalid_arguments).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(invalid_arguments.code, ExtensionErrorCode::InvalidValue);
+
+            let invalid_receiver = invoke_facade(&connection, status_operation, &agent, vec![])
+                .await
+                .expect_err("TurnReceipt receiver must be a Run handle");
+            let invalid_receiver = typed_facade_error(&invalid_receiver).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(invalid_receiver.code, ExtensionErrorCode::InvalidValue);
+            Ok(session.acp_session_id)
+        })
+    })
+    .await?;
+
+    let _ = host1.child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(5), host1.child.wait()).await;
+
+    let mut host2 = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+    drive(&mut host2, events, updates, gaps, move |connection| {
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("turn-receipt-recovered-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let loaded = connection
+                .send_request(SessionLoadRequest {
+                    agent: agent.clone(),
+                    session_id,
+                    working_dir: None,
+                })
+                .block_task()
+                .await?;
+            let recovered = loaded
+                .runs
+                .iter()
+                .find(|run| run.status == RunStatus::Completed)
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error()
+                        .data("settled run was not recovered")
+                })?;
+            let outcome_status_operation =
+                "echo_orchestration::runtime::turn_driver::TurnOutcome::status";
+            let status_operation = "echo_orchestration::runtime::turn_driver::TurnReceipt::status";
+            let usage_operation = "echo_orchestration::runtime::turn_driver::TurnReceipt::usage";
+            let outcome_status = invoke_facade(
+                &connection,
+                outcome_status_operation,
+                &recovered.run,
+                vec![],
+            )
+            .await?;
+            assert_eq!(outcome_status, serde_json::json!("completed"));
+            let status =
+                invoke_facade(&connection, status_operation, &recovered.run, vec![]).await?;
+            assert_eq!(status, serde_json::json!("completed"));
+            let usage = invoke_facade(&connection, usage_operation, &recovered.run, vec![]).await?;
+            assert!(
+                usage
+                    .get("duration_ms")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+            );
+            assert!(
+                usage
+                    .get("iterations")
+                    .is_some_and(serde_json::Value::is_null)
+            );
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host2.child.start_kill();
     Ok(())
 }
 
@@ -1717,9 +4605,8 @@ async fn workflow_family_runs_declarative_graphs_over_the_framework_engine()
     drive(&mut host, events, updates, gaps, move |connection| {
         Box::pin(async move {
             use agent_client_protocol::UntypedMessage;
-            use echo_sdk_protocol::error::ExtensionErrorCode;
             let digest =
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                |family: &str, operation: &str| family_op_digest(family, operation);
             let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
                 decoded_facade_response(value).map_err(|error| {
                     agent_client_protocol::Error::internal_error().data(error.to_string())
@@ -1744,7 +4631,7 @@ async fn workflow_family_runs_declarative_graphs_over_the_framework_engine()
                 .agent;
             let session = connection
                 .send_request(SessionCreateRequest {
-                    agent,
+                    agent: agent.clone(),
                     working_dir: None,
                     session_id: None,
                     idempotency_id: None,
@@ -1769,7 +4656,7 @@ async fn workflow_family_runs_declarative_graphs_over_the_framework_engine()
                         .collect::<Result<Vec<_>, _>>()?;
                     let request = echo_sdk_protocol::methods::FeatureOperationRequest {
                         operation: operation.to_string(),
-                        signature_digest: digest.to_string(),
+                        signature_digest: digest("workflow", operation),
                         handle: Some(handle),
                         arguments,
                     };
@@ -1823,13 +4710,20 @@ async fn workflow_family_runs_declarative_graphs_over_the_framework_engine()
                     .block_task()
                     .await?,
             )?;
-            let graph_id = built
-                .get("graph_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    agent_client_protocol::Error::internal_error().data("no graph_id")
-                })?
-                .to_string();
+            let graph: echo_sdk_protocol::handle::WireHandle =
+                serde_json::from_value(
+                    built.get("resource").cloned().ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error().data("no graph resource")
+                    })?,
+                )
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert_eq!(
+                graph.kind,
+                echo_sdk_protocol::handle::HandleKind::FacadeResource
+            );
+            let graph_id = graph;
             assert_eq!(built.get("nodes"), Some(&serde_json::json!(5)));
             assert_eq!(built.get("edges"), Some(&serde_json::json!(4)));
 
@@ -1861,6 +4755,12 @@ async fn workflow_family_runs_declarative_graphs_over_the_framework_engine()
                     agent_client_protocol::Error::internal_error().data("no checkpoint id")
                 })?
                 .to_string();
+            let checkpoint_value = first
+                .get("checkpoint")
+                .cloned()
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data("no checkpoint value")
+                })?;
 
             let checkpoints = decode(
                 connection
@@ -1879,23 +4779,53 @@ async fn workflow_family_runs_declarative_graphs_over_the_framework_engine()
                     .map(Vec::len),
                 Some(1)
             );
+            let graph_receiver = serde_json::json!({"kind": "handle", "value": graph_id.clone()});
+            let by_graph = invoke_facade(
+                &connection,
+                "echo_orchestration::workflow::graph::Graph::list_checkpoints_by_graph",
+                &agent,
+                vec![session_argument(&session.session), graph_receiver.clone()],
+            )
+            .await?;
+            assert_eq!(by_graph.as_array().map(Vec::len), Some(1));
+            let loaded = invoke_facade(
+                &connection,
+                "echo_orchestration::workflow::graph::Graph::load_checkpoint",
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    graph_receiver.clone(),
+                    serde_json::json!({"kind": "string", "value": checkpoint.clone()}),
+                ],
+            )
+            .await?;
+            assert_eq!(
+                loaded.get("id").and_then(serde_json::Value::as_str),
+                Some(checkpoint.as_str())
+            );
 
             // Approving the checkpoint resumes to completion through the
             // `yes` branch; the agent node's mock answer landed in state.
-            let resumed = decode(
-                connection
-                    .send_request(workflow_op(
-                        "workflow.graph.resume",
-                        session.session.clone(),
-                        vec![
-                            serde_json::json!(graph_id),
-                            serde_json::json!(checkpoint),
-                            serde_json::json!("approve"),
-                        ],
+            let resumed = invoke_facade(
+                &connection,
+                "echo_orchestration::workflow::graph::Graph::resume",
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    graph_receiver,
+                    serde_json::to_value(WireValue::from_json(checkpoint_value).map_err(
+                        |error| {
+                            agent_client_protocol::Error::internal_error()
+                                .data(error.to_string())
+                        },
                     )?)
-                    .block_task()
-                    .await?,
-            )?;
+                    .map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                    serde_json::json!({"kind": "string", "value": "approve"}),
+                ],
+            )
+            .await?;
             assert_eq!(
                 resumed.get("outcome"),
                 Some(&serde_json::json!("completed"))
@@ -1956,13 +4886,19 @@ async fn workflow_family_runs_declarative_graphs_over_the_framework_engine()
                     .block_task()
                     .await?,
             )?;
-            let state_id = state_new
-                .get("state_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    agent_client_protocol::Error::internal_error().data("no state_id")
-                })?
-                .to_string();
+            let state_id: echo_sdk_protocol::handle::WireHandle =
+                serde_json::from_value(
+                    state_new.get("resource").cloned().ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error().data("no state resource")
+                    })?,
+                )
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert_eq!(
+                state_id.kind,
+                echo_sdk_protocol::handle::HandleKind::FacadeResource
+            );
             let got = decode(
                 connection
                     .send_request(workflow_op(
@@ -2033,12 +4969,11 @@ async fn workflow_family_runs_declarative_graphs_over_the_framework_engine()
                     .await?,
             )?;
             let cancelled_id = cancelled_graph
-                .get("graph_id")
-                .and_then(serde_json::Value::as_str)
+                .get("resource")
+                .and_then(|value| serde_json::from_value::<echo_sdk_protocol::handle::WireHandle>(value.clone()).ok())
                 .ok_or_else(|| {
-                    agent_client_protocol::Error::internal_error().data("no graph_id")
-                })?
-                .to_string();
+                    agent_client_protocol::Error::internal_error().data("no graph resource")
+                })?;
             let cancelled = decode(
                 connection
                     .send_request(workflow_op(
@@ -2145,9 +5080,8 @@ async fn state_delivery_and_trace_families_use_framework_services()
     drive(&mut host, events, updates, gaps, move |connection| {
         Box::pin(async move {
             use agent_client_protocol::UntypedMessage;
-            use echo_sdk_protocol::error::ExtensionErrorCode;
             let digest =
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                |family: &str, operation: &str| family_op_digest(family, operation);
             let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
                 decoded_facade_response(value).map_err(|error| {
                     agent_client_protocol::Error::internal_error().data(error.to_string())
@@ -2172,7 +5106,7 @@ async fn state_delivery_and_trace_families_use_framework_services()
                 .agent;
             let session = connection
                 .send_request(SessionCreateRequest {
-                    agent,
+                    agent: agent.clone(),
                     working_dir: None,
                     session_id: None,
                     idempotency_id: None,
@@ -2195,9 +5129,28 @@ async fn state_delivery_and_trace_families_use_framework_services()
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    let family = method
+                        .trim_start_matches("_echo_agent/")
+                        .trim_end_matches("/op")
+                        .replace('-', "_");
+                    // Tool families accept the family-qualified spelling
+                    // (`git.git_status`); the frozen digest is over the
+                    // catalog's unqualified operation identity.
+                    let canonical_operation = if [
+                        "files", "web", "shell", "git", "database", "rag", "chart", "media",
+                        "data", "statistics", "research",
+                    ]
+                    .contains(&family.as_str())
+                    {
+                        operation
+                            .strip_prefix(&format!("{family}."))
+                            .unwrap_or(operation)
+                    } else {
+                        operation
+                    };
                     let request = echo_sdk_protocol::methods::FeatureOperationRequest {
                         operation: operation.to_string(),
-                        signature_digest: digest.to_string(),
+                        signature_digest: digest(family.as_str(), canonical_operation),
                         handle: Some(session.session.clone()),
                         arguments,
                     };
@@ -2292,13 +5245,19 @@ async fn state_delivery_and_trace_families_use_framework_services()
                     .block_task()
                     .await?,
             )?;
-            let ledger_id = ledger
-                .get("ledger_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    agent_client_protocol::Error::internal_error().data("no ledger id")
-                })?
-                .to_string();
+            let ledger_id: echo_sdk_protocol::handle::WireHandle =
+                serde_json::from_value(
+                    ledger.get("resource").cloned().ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error().data("no ledger resource")
+                    })?,
+                )
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert_eq!(
+                ledger_id.kind,
+                echo_sdk_protocol::handle::HandleKind::FacadeResource
+            );
             let enqueued = decode(
                 connection
                     .send_request(family_request(
@@ -2409,13 +5368,19 @@ async fn state_delivery_and_trace_families_use_framework_services()
                     .block_task()
                     .await?,
             )?;
-            let store_id = store
-                .get("store_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    agent_client_protocol::Error::internal_error().data("no store id")
-                })?
-                .to_string();
+            let store_id: echo_sdk_protocol::handle::WireHandle =
+                serde_json::from_value(
+                    store.get("resource").cloned().ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error().data("no store resource")
+                    })?,
+                )
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert_eq!(
+                store_id.kind,
+                echo_sdk_protocol::handle::HandleKind::FacadeResource
+            );
             let run = serde_json::json!({
                 "run_id": "run-e2e-1",
                 "session_id": "session-e2e",
@@ -2510,9 +5475,8 @@ async fn eval_and_improve_families_use_the_framework_analyzers()
     drive(&mut host, events, updates, gaps, move |connection| {
         Box::pin(async move {
             use agent_client_protocol::UntypedMessage;
-            use echo_sdk_protocol::error::ExtensionErrorCode;
             let digest =
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                |family: &str, operation: &str| family_op_digest(family, operation);
             let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
                 decoded_facade_response(value).map_err(|error| {
                     agent_client_protocol::Error::internal_error().data(error.to_string())
@@ -2537,7 +5501,7 @@ async fn eval_and_improve_families_use_the_framework_analyzers()
                 .agent;
             let session = connection
                 .send_request(SessionCreateRequest {
-                    agent,
+                    agent: agent.clone(),
                     working_dir: None,
                     session_id: None,
                     idempotency_id: None,
@@ -2560,9 +5524,28 @@ async fn eval_and_improve_families_use_the_framework_analyzers()
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    let family = method
+                        .trim_start_matches("_echo_agent/")
+                        .trim_end_matches("/op")
+                        .replace('-', "_");
+                    // Tool families accept the family-qualified spelling
+                    // (`git.git_status`); the frozen digest is over the
+                    // catalog's unqualified operation identity.
+                    let canonical_operation = if [
+                        "files", "web", "shell", "git", "database", "rag", "chart", "media",
+                        "data", "statistics", "research",
+                    ]
+                    .contains(&family.as_str())
+                    {
+                        operation
+                            .strip_prefix(&format!("{family}."))
+                            .unwrap_or(operation)
+                    } else {
+                        operation
+                    };
                     let request = echo_sdk_protocol::methods::FeatureOperationRequest {
                         operation: operation.to_string(),
-                        signature_digest: digest.to_string(),
+                        signature_digest: digest(family.as_str(), canonical_operation),
                         handle: Some(session.session.clone()),
                         arguments,
                     };
@@ -2693,16 +5676,23 @@ async fn tool_families_execute_framework_tools_with_the_session_cwd()
     let (endpoint, _request_seen) = start_model_server("unused").await?;
     let work = tempfile::tempdir()?;
     let state_root = tempfile::tempdir()?;
+    let project_root = work.path().join("project-rules-root");
+    let project_child = project_root.join("nested");
+    std::fs::create_dir_all(&project_child)?;
+    std::fs::write(project_root.join("AGENTS.md"), "root agents rule")?;
+    std::fs::write(project_child.join("AGENTS.md"), "nested agents rule")?;
+    std::fs::write(project_child.join("CLAUDE.md"), "must be excluded")?;
     let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
     let mut host = spawn_host(&config).await?;
     let (events, updates, gaps) = empty_collectors::<EventNotification>();
 
     drive(&mut host, events, updates, gaps, move |connection| {
+        let project_root = project_root.clone();
+        let project_child = project_child.clone();
         Box::pin(async move {
             use agent_client_protocol::UntypedMessage;
-            use echo_sdk_protocol::error::ExtensionErrorCode;
             let digest =
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                |family: &str, operation: &str| family_op_digest(family, operation);
             let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
                 decoded_facade_response(value).map_err(|error| {
                     agent_client_protocol::Error::internal_error().data(error.to_string())
@@ -2729,9 +5719,9 @@ async fn tool_families_execute_framework_tools_with_the_session_cwd()
             let work_dir = work.path().display().to_string();
             let session = connection
                 .send_request(SessionCreateRequest {
-                    agent,
+                    agent: agent.clone(),
                     working_dir: Some(echo_sdk_protocol::scalar::WirePath::Utf8 {
-                        path: work_dir,
+                        path: work_dir.clone(),
                     }),
                     session_id: None,
                     idempotency_id: None,
@@ -2754,9 +5744,28 @@ async fn tool_families_execute_framework_tools_with_the_session_cwd()
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    let family = method
+                        .trim_start_matches("_echo_agent/")
+                        .trim_end_matches("/op")
+                        .replace('-', "_");
+                    // Tool families accept the family-qualified spelling
+                    // (`git.git_status`); the frozen digest is over the
+                    // catalog's unqualified operation identity.
+                    let canonical_operation = if [
+                        "files", "web", "shell", "git", "database", "rag", "chart", "media",
+                        "data", "statistics", "research",
+                    ]
+                    .contains(&family.as_str())
+                    {
+                        operation
+                            .strip_prefix(&format!("{family}."))
+                            .unwrap_or(operation)
+                    } else {
+                        operation
+                    };
                     let request = echo_sdk_protocol::methods::FeatureOperationRequest {
                         operation: operation.to_string(),
-                        signature_digest: digest.to_string(),
+                        signature_digest: digest(family.as_str(), canonical_operation),
                         handle: Some(session.session.clone()),
                         arguments,
                     };
@@ -2848,6 +5857,45 @@ async fn tool_families_execute_framework_tools_with_the_session_cwd()
                     .is_some_and(|matches| !matches.is_empty())
             );
 
+            let guard = invoke_facade_wire(
+                &connection,
+                "echo_core::guard::content::ContentGuard::new",
+                &agent,
+                vec![WireValue::Handle(session.session.clone()), WireValue::String("reject".to_string())],
+            )
+            .await?;
+            let WireValue::Handle(guard) = guard else {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("ContentGuard::new did not return a handle"));
+            };
+            let clean = invoke_facade(
+                &connection,
+                "echo_core::guard::content::ContentGuard::is_clean",
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    serde_json::json!({"kind": "handle", "value": guard.clone()}),
+                    serde_json::json!({"kind": "string", "value": "plain text"}),
+                ],
+            )
+            .await?;
+            assert_eq!(clean, serde_json::json!(true));
+            let rejected = invoke_facade_wire(
+                &connection,
+                "echo_core::guard::content::ContentGuard::check",
+                &agent,
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::Handle(guard),
+                    WireValue::String("alice@example.com".to_string()),
+                ],
+            )
+            .await?;
+            assert!(matches!(
+                rejected,
+                WireValue::Variant { ref variant, .. } if variant == "rejected"
+            ));
+
             // project-rules: an empty temp workspace resolves no instruction
             // sources — the framework resolver's own answer.
             let resolved = decode(
@@ -2864,6 +5912,70 @@ async fn tool_families_execute_framework_tools_with_the_session_cwd()
                 resolved.get("is_empty"),
                 Some(&serde_json::json!(true))
             );
+
+            let path_argument = |path: &std::path::Path| {
+                WireValue::Path(WirePath::Utf8 {
+                    path: path.display().to_string(),
+                })
+            };
+            let resolver = invoke_facade_wire(
+                &connection,
+                "echo_core::project_rules::InstructionResolver::new",
+                &agent,
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    path_argument(&project_child),
+                ],
+            )
+            .await?;
+            let WireValue::Handle(resolver) = resolver else {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("InstructionResolver::new did not return a handle"));
+            };
+            for (operation, extra) in [
+                (
+                    "echo_core::project_rules::InstructionResolver::project_root",
+                    Some(path_argument(&project_root)),
+                ),
+                (
+                    "echo_core::project_rules::InstructionResolver::agents_files_only",
+                    None,
+                ),
+            ] {
+                let mut arguments = vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::Handle(resolver.clone()),
+                ];
+                if let Some(extra) = extra {
+                    arguments.push(extra);
+                }
+                invoke_facade_wire(&connection, operation, &agent, arguments).await?;
+            }
+            let resolved = invoke_facade_wire(
+                &connection,
+                "echo_core::project_rules::InstructionResolver::resolve",
+                &agent,
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::Handle(resolver),
+                ],
+            )
+            .await?;
+            let WireValue::Record { fields, .. } = resolved else {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("InstructionResolver::resolve did not return a record"));
+            };
+            let content = fields
+                .iter()
+                .find(|field| field.name == "content")
+                .and_then(|field| match &field.value {
+                    WireValue::String(value) => Some(value.as_str()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            assert!(content.contains("root agents rule"));
+            assert!(content.contains("nested agents rule"));
+            assert!(!content.contains("must be excluded"));
 
             // Unknown tools stay closed with typed invalid-value errors.
             let unknown = connection
@@ -2905,9 +6017,8 @@ async fn integration_families_use_framework_managers_and_clients()
     drive(&mut host, events, updates, gaps, move |connection| {
         Box::pin(async move {
             use agent_client_protocol::UntypedMessage;
-            use echo_sdk_protocol::error::ExtensionErrorCode;
             let digest =
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                |family: &str, operation: &str| family_op_digest(family, operation);
             let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
                 decoded_facade_response(value).map_err(|error| {
                     agent_client_protocol::Error::internal_error().data(error.to_string())
@@ -2932,7 +6043,7 @@ async fn integration_families_use_framework_managers_and_clients()
                 .agent;
             let session = connection
                 .send_request(SessionCreateRequest {
-                    agent,
+                    agent: agent.clone(),
                     working_dir: None,
                     session_id: None,
                     idempotency_id: None,
@@ -2955,9 +6066,28 @@ async fn integration_families_use_framework_managers_and_clients()
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    let family = method
+                        .trim_start_matches("_echo_agent/")
+                        .trim_end_matches("/op")
+                        .replace('-', "_");
+                    // Tool families accept the family-qualified spelling
+                    // (`git.git_status`); the frozen digest is over the
+                    // catalog's unqualified operation identity.
+                    let canonical_operation = if [
+                        "files", "web", "shell", "git", "database", "rag", "chart", "media",
+                        "data", "statistics", "research",
+                    ]
+                    .contains(&family.as_str())
+                    {
+                        operation
+                            .strip_prefix(&format!("{family}."))
+                            .unwrap_or(operation)
+                    } else {
+                        operation
+                    };
                     let request = echo_sdk_protocol::methods::FeatureOperationRequest {
                         operation: operation.to_string(),
-                        signature_digest: digest.to_string(),
+                        signature_digest: digest(family.as_str(), canonical_operation),
                         handle: Some(session.session.clone()),
                         arguments,
                     };
@@ -2980,13 +6110,19 @@ async fn integration_families_use_framework_managers_and_clients()
                     .block_task()
                     .await?,
             )?;
-            let manager_id = manager
-                .get("manager_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    agent_client_protocol::Error::internal_error().data("no manager id")
-                })?
-                .to_string();
+            let manager_id: echo_sdk_protocol::handle::WireHandle =
+                serde_json::from_value(
+                    manager.get("resource").cloned().ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error().data("no manager resource")
+                    })?,
+                )
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert_eq!(
+                manager_id.kind,
+                echo_sdk_protocol::handle::HandleKind::FacadeResource
+            );
             let servers = decode(
                 connection
                     .send_request(family_request(
@@ -3036,13 +6172,19 @@ async fn integration_families_use_framework_managers_and_clients()
                     .block_task()
                     .await?,
             )?;
-            let client_id = client
-                .get("client_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    agent_client_protocol::Error::internal_error().data("no client id")
-                })?
-                .to_string();
+            let client_id: echo_sdk_protocol::handle::WireHandle =
+                serde_json::from_value(
+                    client.get("resource").cloned().ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error().data("no client resource")
+                    })?,
+                )
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert_eq!(
+                client_id.kind,
+                echo_sdk_protocol::handle::HandleKind::FacadeResource
+            );
             let discovery = connection
                 .send_request(family_request(
                     "_echo_agent/a2a/op",
@@ -3071,13 +6213,20 @@ async fn integration_families_use_framework_managers_and_clients()
                     .block_task()
                     .await?,
             )?;
-            let lsp_id = lsp
-                .get("manager_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    agent_client_protocol::Error::internal_error().data("no lsp manager id")
-                })?
-                .to_string();
+            let lsp_id: echo_sdk_protocol::handle::WireHandle =
+                serde_json::from_value(
+                    lsp.get("resource").cloned().ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error()
+                            .data("no lsp manager resource")
+                    })?,
+                )
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert_eq!(
+                lsp_id.kind,
+                echo_sdk_protocol::handle::HandleKind::FacadeResource
+            );
             let statuses = decode(
                 connection
                     .send_request(family_request(
@@ -3095,6 +6244,24 @@ async fn integration_families_use_framework_managers_and_clients()
                     .map(Vec::len),
                 Some(0)
             );
+            let lsp_receiver = serde_json::json!({"kind": "handle", "value": lsp_id});
+            for operation in [
+                "echo_integration::lsp::manager::LspManager::configured_languages",
+                "echo_integration::lsp::manager::LspManager::running_servers",
+                "echo_integration::lsp::manager::LspManager::status_all",
+            ] {
+                let value = invoke_facade(
+                    &connection,
+                    operation,
+                    &agent,
+                    vec![session_argument(&session.session), lsp_receiver.clone()],
+                )
+                .await?;
+                assert!(
+                    value.is_array(),
+                    "{operation} must preserve its Rust vector result"
+                );
+            }
 
             // Topology: full round trip through the framework tracker.
             let tracker = decode(
@@ -3107,13 +6274,19 @@ async fn integration_families_use_framework_managers_and_clients()
                     .block_task()
                     .await?,
             )?;
-            let tracker_id = tracker
-                .get("tracker_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    agent_client_protocol::Error::internal_error().data("no tracker id")
-                })?
-                .to_string();
+            let tracker_id: echo_sdk_protocol::handle::WireHandle =
+                serde_json::from_value(
+                    tracker.get("resource").cloned().ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error().data("no tracker resource")
+                    })?,
+                )
+                .map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })?;
+            assert_eq!(
+                tracker_id.kind,
+                echo_sdk_protocol::handle::HandleKind::FacadeResource
+            );
             for (node, kind) in [("orchestrator", "orchestrator"), ("researcher", "subagent")] {
                 let added = decode(
                     connection
@@ -3171,6 +6344,65 @@ async fn integration_families_use_framework_managers_and_clients()
                     .map(Vec::len),
                 Some(1)
             );
+            let topology_receiver = serde_json::json!({
+                "kind": "handle",
+                "value": tracker_id.clone()
+            });
+            let exact_node = WireValue::from_json(serde_json::json!({
+                "id": "writer",
+                "label": "Writer Agent",
+                "node_type": "Subagent",
+                "metadata": {"model": "fixture-model"}
+            }))
+            .map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            invoke_facade(
+                &connection,
+                "echo_agent::topology::TopologyTracker::add_node",
+                &agent,
+                vec![
+                    session_argument(&session.session),
+                    topology_receiver.clone(),
+                    serde_json::to_value(exact_node).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?,
+                ],
+            )
+            .await?;
+            let nodes = invoke_facade(
+                &connection,
+                "echo_agent::topology::TopologyTracker::nodes",
+                &agent,
+                vec![session_argument(&session.session), topology_receiver.clone()],
+            )
+            .await?;
+            assert_eq!(nodes.as_array().map(Vec::len), Some(3));
+            assert!(nodes.as_array().is_some_and(|nodes| nodes.iter().any(|node| {
+                node.get("label").and_then(serde_json::Value::as_str) == Some("Writer Agent")
+                    && node
+                        .get("metadata")
+                        .and_then(|metadata| metadata.get("model"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("fixture-model")
+            })));
+            let edges = invoke_facade(
+                &connection,
+                "echo_agent::topology::TopologyTracker::edges",
+                &agent,
+                vec![session_argument(&session.session), topology_receiver.clone()],
+            )
+            .await?;
+            assert_eq!(edges.as_array().map(Vec::len), Some(1));
+            let stats = invoke_facade(
+                &connection,
+                "echo_agent::topology::TopologyTracker::stats",
+                &agent,
+                vec![session_argument(&session.session), topology_receiver],
+            )
+            .await?;
+            assert!(stats.is_object());
+            assert!(stats.get("nodes").is_none(), "stats must not return the full snapshot");
 
             // Owner isolation: a second session cannot reach the tracker.
             let second_agent = connection
@@ -3203,7 +6435,7 @@ async fn integration_families_use_framework_managers_and_clients()
                     .collect::<Result<Vec<_>, _>>()?;
                 let request = echo_sdk_protocol::methods::FeatureOperationRequest {
                     operation: "topology.snapshot".to_string(),
-                    signature_digest: digest.to_string(),
+                    signature_digest: digest("topology", "topology.snapshot"),
                     handle: Some(session),
                     arguments,
                 };
@@ -3222,6 +6454,670 @@ async fn integration_families_use_framework_managers_and_clients()
                 .await
                 .expect_err("cross-session topology access must fail");
             assert_eq!(typed_error(&cross)?.code, ExtensionErrorCode::InvalidValue);
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+// ── Remaining tool families (plan 07 todo 6) ─────────────────────────────────
+
+#[cfg(all(
+    feature = "sdk-facade-adapters",
+    feature = "framework-git",
+    feature = "framework-database",
+    feature = "framework-rag",
+    feature = "framework-chart",
+    feature = "framework-media",
+    feature = "framework-data",
+    feature = "framework-statistics",
+    feature = "framework-research"
+))]
+#[tokio::test]
+async fn remaining_tool_families_execute_framework_tools_locally()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    // Fixtures live under the workspace `target/` tree so the Host child
+    // process (which may run under a stricter file sandbox than the test)
+    // sees exactly what the test creates.
+    std::fs::create_dir_all("../target").map_err(|error| format!("target dir: {error}"))?;
+    let work = tempfile::Builder::new()
+        .prefix("facade-tools-e2e-")
+        .tempdir_in("../target")?;
+    let state_root = tempfile::Builder::new()
+        .prefix("facade-tools-state-")
+        .tempdir_in("../target")?;
+    // Canonicalize so the fixture path handed to the Host carries no `..`
+    // component (the git family rejects traversal patterns).
+    let work_root = std::fs::canonicalize(work.path())?;
+    let config = write_config(&work_root, &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let (events, updates, gaps) = empty_collectors::<EventNotification>();
+
+    // A real git repo plus local data files: every family call below stays
+    // inside this temp workspace, no network involved.
+    let git_init = std::process::Command::new("git")
+        .arg("init")
+        .arg(&work_root)
+        .output()
+        .map_err(|error| format!("git init failed: {error}"))?;
+    if !git_init.status.success() {
+        return Err(format!(
+            "git init failed: {}",
+            String::from_utf8_lossy(&git_init.stderr)
+        )
+        .into());
+    }
+    let verify = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&work_root)
+        .arg("status")
+        .arg("--short")
+        .output()
+        .map_err(|error| format!("git verify failed: {error}"))?;
+    if !verify.status.success() {
+        return Err(format!(
+            "git verify failed in {}: {}",
+            work_root.display(),
+            String::from_utf8_lossy(&verify.stderr)
+        )
+        .into());
+    }
+    std::fs::write(work_root.join("notes.txt"), "alpha beta\ngamma delta\n")?;
+    std::fs::write(work_root.join("points.csv"), "value\n1\n2\n3\n4\n")?;
+    let sqlite_db = work_root.join("points.db");
+    let bootstrap = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(format!(
+            "import sqlite3; c = sqlite3.connect({db:?});              c.execute('CREATE TABLE points (x INTEGER, y INTEGER)');              c.executemany('INSERT INTO points VALUES (?, ?)', [(1, 2), (3, 4)]);              c.commit()",
+            db = sqlite_db.display().to_string()
+        ))
+        .output()
+        .map_err(|error| format!("sqlite bootstrap failed: {error}"))?;
+    if !bootstrap.status.success() {
+        return Err(format!(
+            "sqlite bootstrap failed: {}",
+            String::from_utf8_lossy(&bootstrap.stderr)
+        )
+        .into());
+    }
+
+    let stderr_sink = host.stderr.clone();
+    let outcome = drive(&mut host, events, updates, gaps, move |connection| {
+        let work_dir = work_root.display().to_string();
+        let sqlite_url = format!("sqlite://{}", sqlite_db.display());
+        let csv_path = work_root.join("points.csv").display().to_string();
+        let notes_path = work_root.join("notes.txt").display().to_string();
+        Box::pin(async move {
+            use agent_client_protocol::UntypedMessage;
+            let digest =
+                |family: &str, operation: &str| family_op_digest(family, operation);
+            let decode = |value: serde_json::Value| -> Result<serde_json::Value, agent_client_protocol::Error> {
+                decoded_facade_response(value).map_err(|error| {
+                    agent_client_protocol::Error::internal_error().data(error.to_string())
+                })
+            };
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: Some(echo_sdk_protocol::scalar::WirePath::Utf8 {
+                        path: work_dir.clone(),
+                    }),
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let tool_request =
+                |method: &str,
+                 operation: &str,
+                 arguments: Vec<serde_json::Value>|
+                 -> Result<UntypedMessage, agent_client_protocol::Error> {
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|value| {
+                            echo_sdk_protocol::scalar::WireValue::from_json(value).map_err(
+                                |error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let family = method
+                        .trim_start_matches("_echo_agent/")
+                        .trim_end_matches("/op")
+                        .replace('-', "_");
+                    // Tool families accept the family-qualified spelling
+                    // (`git.git_status`); the frozen digest is over the
+                    // catalog's unqualified operation identity.
+                    let canonical_operation = if [
+                        "files", "web", "shell", "git", "database", "rag", "chart", "media",
+                        "data", "statistics", "research",
+                    ]
+                    .contains(&family.as_str())
+                    {
+                        operation
+                            .strip_prefix(&format!("{family}."))
+                            .unwrap_or(operation)
+                    } else {
+                        operation
+                    };
+                    let request = echo_sdk_protocol::methods::FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest: digest(family.as_str(), canonical_operation),
+                        handle: Some(session.session.clone()),
+                        arguments,
+                    };
+                    serde_json::to_value(&request)
+                        .map_err(|error| {
+                            agent_client_protocol::Error::internal_error().data(error.to_string())
+                        })
+                        .and_then(|value| UntypedMessage::new(method, value))
+                };
+
+            // git: real `git status` over the freshly initialized repo; the
+            // untracked files must show up through the framework tool.
+            let status = decode(
+                connection
+                    .send_request(tool_request("_echo_agent/git/op", "git_status", vec![serde_json::json!(work_dir)])?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(status.get("success"), Some(&serde_json::json!(true)));
+            assert!(
+                status
+                    .get("output")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.contains("points.csv")),
+                "git_status must report the untracked fixture, got: {status}"
+            );
+
+            // database: read the sqlite fixture through the framework
+            // SQL tool; a mutation statement is rejected by the tool's own
+            // read-only policy and surfaces as a failure result (the wire
+            // projects the tool's success/error contract verbatim).
+            let counted = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/database/op",
+                        "sql_query",
+                        vec![
+                            serde_json::json!(sqlite_url),
+                            serde_json::json!("SELECT COUNT(*) AS n FROM points"),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(counted.get("success"), Some(&serde_json::json!(true)));
+            let rejected = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/database/op",
+                        "sql_query",
+                        vec![
+                            serde_json::json!(sqlite_url),
+                            serde_json::json!("DELETE FROM points"),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(
+                rejected.get("success"),
+                Some(&serde_json::json!(false)),
+                "non-SELECT SQL must not succeed"
+            );
+            assert!(
+                rejected
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.contains("read-only")),
+                "rejected SQL must report the read-only policy, got: {rejected}"
+            );
+
+            // rag: chunk a document preview locally.
+            let chunked = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/rag/op",
+                        "rag_chunk_document",
+                        vec![
+                            serde_json::json!("facade rag chunking paragraph. ".repeat(24)),
+                            serde_json::json!(120),
+                            serde_json::json!(20),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(chunked.get("success"), Some(&serde_json::json!(true)));
+
+            // chart: a bar chart renders as a Vega-Lite spec, no rendering
+            // engine needed.
+            let chart = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/chart/op",
+                        "generate_chart",
+                        // Positional arguments follow the tool schema order
+                        // (chart_type, title, x_field, y_field, color_field,
+                        // data); color_field stays null (optional).
+                        vec![
+                            serde_json::json!("bar"),
+                            serde_json::json!("Facade chart"),
+                            serde_json::json!("label"),
+                            serde_json::json!("value"),
+                            serde_json::Value::Null,
+                            serde_json::json!([
+                                {"label": "a", "value": 1},
+                                {"label": "b", "value": 2}
+                            ]),
+                        ],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(chart.get("success"), Some(&serde_json::json!(true)));
+
+            // media: text statistics over a local text file.
+            let stats = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/media/op",
+                        "text_stats",
+                        vec![serde_json::json!(notes_path)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(stats.get("success"), Some(&serde_json::json!(true)));
+
+            // data: read the CSV fixture with preview metadata.
+            let read = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/data/op",
+                        "read_data",
+                        vec![serde_json::json!(csv_path)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(read.get("success"), Some(&serde_json::json!(true)));
+            let read_output: serde_json::Value = serde_json::from_str(
+                read.get("output")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        agent_client_protocol::Error::internal_error()
+                            .data("read_data output missing")
+                    })?,
+            )
+            .map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(read_output.get("rows"), Some(&serde_json::json!(4)));
+
+            // statistics: exploratory descriptive stats refuse inference.
+            let explored = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/statistics/op",
+                        "exploratory_statistics",
+                        // The derive macro orders schema keys alphabetically
+                        // (columns, data_path); columns stays null.
+                        vec![serde_json::Value::Null, serde_json::json!(csv_path)],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(explored.get("success"), Some(&serde_json::json!(true)));
+            assert!(
+                explored
+                    .get("output")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.contains("\"inference\":false")),
+                "exploratory statistics must disclaim inference, got: {explored}"
+            );
+
+            // research: BibTeX generation runs fully offline.
+            let bibtex = decode(
+                connection
+                    .send_request(tool_request(
+                        "_echo_agent/research/op",
+                        "bibtex_generate",
+                        vec![serde_json::json!([{
+                            "title": "Facade Family Adapters",
+                            "authors": ["Echo Agent"],
+                            "year": 2026
+                        }])],
+                    )?)
+                    .block_task()
+                    .await?,
+            )?;
+            assert_eq!(bibtex.get("success"), Some(&serde_json::json!(true)));
+            Ok(())
+        })
+    })
+    .await;
+    if let Err(error) = &outcome {
+        return Err(format!(
+            "{error}; host stderr: {}",
+            String::from_utf8_lossy(&stderr_sink.lock().expect("stderr lock"))
+        )
+        .into());
+    }
+    outcome?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+// ── Subagent RPC success path (plan 07 todo 6) ──────────────────────────────
+
+/// Drive helper variant whose client answers reverse extension calls:
+/// `agent_execute` resolves immediately unless the hang flag is set (the
+/// responder is parked silently, exercising control on a live attempt).
+#[cfg(all(
+    feature = "sdk-facade-adapters",
+    feature = "sdk-extension-bridge",
+    feature = "framework-subagent"
+))]
+async fn drive_answering<T, F>(
+    host: &mut HostProcess,
+    hang_agent_execute: Arc<Mutex<bool>>,
+    scenario: F,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    T: Send + 'static,
+    F: FnOnce(
+            ConnectionTo<agent_client_protocol::Agent>,
+        ) -> BoxFuture<'static, agent_client_protocol::Result<T>>
+        + Send
+        + 'static,
+{
+    use agent_client_protocol::Responder;
+    use echo_sdk_protocol::methods::{
+        AgentStreamChunkWire, AgentStreamTerminalWire, ExtensionInvocation, ExtensionInvokeCall,
+        ExtensionInvokeOutcome, ExtensionResult, ExtensionStreamChunkValue,
+        ExtensionStreamCompleteValue, ExtensionStreamEvent, ExtensionUnit,
+    };
+    let _process_lock = acquire_e2e_process_lock();
+    let transport = host_transport(&mut host.child);
+    let connect = Client
+        .builder()
+        .on_receive_request(
+            move |call: ExtensionInvokeCall,
+                  responder: Responder<ExtensionInvokeOutcome>,
+                  connection: ConnectionTo<agent_client_protocol::Agent>| {
+                let hang = hang_agent_execute.clone();
+                async move {
+                    match call.invocation {
+                        ExtensionInvocation::AgentExecute(_) => {
+                            if *hang.lock().expect("hang flag") {
+                                // Park the responder: the attempt stays live.
+                                std::mem::forget(responder);
+                                return Ok(());
+                            }
+                            responder.respond(ExtensionInvokeOutcome::Result {
+                                result: ExtensionResult::AgentExecute(
+                                    "SDK subagent executed".to_string(),
+                                ),
+                            })
+                        }
+                        ExtensionInvocation::AgentExecuteStream(_) => {
+                            let Some(stream) = call.stream.clone() else {
+                                return responder.respond(ExtensionInvokeOutcome::Error {
+                                    error: echo_sdk_protocol::error::EchoSdkError::new(
+                                        echo_sdk_protocol::error::ExtensionErrorCode::ExtensionFailed,
+                                        "missing stream handle",
+                                        echo_sdk_protocol::error::Retryability::Never,
+                                    ),
+                                });
+                            };
+                            responder.respond(ExtensionInvokeOutcome::Stream {
+                                stream: stream.clone(),
+                            })?;
+                            tokio::spawn(async move {
+                                let _ = connection.send_notification(ExtensionStreamEvent::Chunk {
+                                    stream: stream.clone(),
+                                    sequence: nonzero(1),
+                                    value: ExtensionStreamChunkValue::Agent(
+                                        AgentStreamChunkWire::Token {
+                                            text: "SDK subagent executed".to_string(),
+                                        },
+                                    ),
+                                });
+                                let _ = connection.send_notification(ExtensionStreamEvent::Complete {
+                                    stream,
+                                    sequence: nonzero(2),
+                                    value: ExtensionStreamCompleteValue::Agent(
+                                        AgentStreamTerminalWire::FinalAnswer {
+                                            text: "SDK subagent executed".to_string(),
+                                        },
+                                    ),
+                                });
+                            });
+                            Ok(())
+                        }
+                        ExtensionInvocation::AgentClose(_) => responder.respond(
+                            ExtensionInvokeOutcome::Result {
+                                result: ExtensionResult::AgentClose(ExtensionUnit),
+                            },
+                        ),
+                        other => Err(agent_client_protocol::Error::internal_error().data(
+                            format!("unexpected reverse invocation: {:?}", other.operation()),
+                        )),
+                    }
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_with(transport, async move |connection| scenario(connection).await);
+    let outcome = tokio::time::timeout(Duration::from_secs(60), connect)
+        .await
+        .map_err(|_| "client scenario timed out")??;
+    Ok(outcome)
+}
+
+#[cfg(all(
+    feature = "sdk-facade-adapters",
+    feature = "sdk-extension-bridge",
+    feature = "framework-subagent"
+))]
+#[tokio::test]
+async fn subagent_family_dispatches_and_controls_live_attempts()
+-> Result<(), Box<dyn std::error::Error>> {
+    use echo_sdk_protocol::methods::{
+        ExtensionDescriptor, ExtensionKind, ExtensionRegisterRequest, SubagentAwaitRequest,
+        SubagentControlAction, SubagentControlRequest, SubagentDispatchRequest,
+    };
+
+    let (endpoint, _request_seen) = start_model_server("unused").await?;
+    let work = tempfile::tempdir()?;
+    let state_root = tempfile::tempdir()?;
+    let config = write_config(work.path(), &endpoint, state_root.path(), None)?;
+    let mut host = spawn_host(&config).await?;
+    let hang = Arc::new(Mutex::new(false));
+    let stderr_sink = host.stderr.clone();
+
+    drive_answering(&mut host, hang.clone(), move |connection| {
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            // A bridge-registered custom Agent becomes the dispatch target;
+            // RPC, bridge and the delegation tool all share one registry.
+            let _registered: echo_sdk_protocol::methods::ExtensionRegisterResponse = connection
+                .send_request(ExtensionRegisterRequest {
+                    kind: ExtensionKind::CustomAgent,
+                    implementation_id: "sdk-subagent-target".to_string(),
+                    descriptor: ExtensionDescriptor::CustomAgent {
+                        descriptor_version: 1,
+                        name: "sdk-subagent-target".to_string(),
+                        model_name: "sdk-subagent-model".to_string(),
+                        system_prompt: "SDK subagent".to_string(),
+                        tool_names: Vec::new(),
+                    },
+                    timeout: None,
+                })
+                .block_task()
+                .await?;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+
+            // Happy path: dispatch resolves through the reverse bridge and
+            // awaits with the custom agent's own output.
+            let first = connection
+                .send_request(SubagentDispatchRequest {
+                    session: session.session.clone(),
+                    request: echo_sdk_protocol::scalar::WireValue::from_json(serde_json::json!({
+                        "agent_name": "sdk-subagent-target",
+                        "task": "compute the answer"
+                    }))
+                    .map_err(|error| {
+                        agent_client_protocol::Error::invalid_params().data(error.to_string())
+                    })?,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let awaited: echo_sdk_protocol::methods::SubagentAwaitResponse = connection
+                .send_request(SubagentAwaitRequest {
+                    subagent: first.subagent.clone(),
+                    timeout: None,
+                })
+                .block_task()
+                .await?;
+            assert!(
+                awaited.settled,
+                "custom agent dispatch must settle; host stderr: {}",
+                String::from_utf8_lossy(&stderr_sink.lock().expect("stderr lock"))
+            );
+            let output = awaited
+                .result
+                .clone()
+                .and_then(|value| value.into_json().ok())
+                .ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error()
+                        .data("await must return the subagent result")
+                })?;
+            assert!(
+                output
+                    .get("output")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.contains("SDK subagent executed")),
+                "unexpected subagent output: {output}"
+            );
+
+            // Control path: park the next attempt (agent_execute hangs),
+            // deliver a tracked message, then cancel and observe settlement.
+            *hang.lock().expect("hang flag") = true;
+            let second = connection
+                .send_request(SubagentDispatchRequest {
+                    session: session.session.clone(),
+                    request: echo_sdk_protocol::scalar::WireValue::from_json(serde_json::json!({
+                        "agent_name": "sdk-subagent-target",
+                        "task": "long-running work"
+                    }))
+                    .map_err(|error| {
+                        agent_client_protocol::Error::invalid_params().data(error.to_string())
+                    })?,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let messaged = connection
+                .send_request(SubagentControlRequest {
+                    subagent: second.subagent.clone(),
+                    action: SubagentControlAction::Message,
+                    payload: Some("checkpoint".to_string()),
+                })
+                .block_task()
+                .await;
+            // A bridge-backed custom agent cannot be live-steered; the
+            // framework rejection surfaces either as a typed framework
+            // error or as an unaccepted control — never as fake acceptance.
+            match messaged {
+                Ok(response) => assert!(
+                    !response.accepted,
+                    "live steering of a bridge-backed agent must not be accepted"
+                ),
+                Err(error) => {
+                    let typed = typed_facade_error(&error).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?;
+                    assert_eq!(typed.code, ExtensionErrorCode::FrameworkError);
+                }
+            }
+            let cancelled: echo_sdk_protocol::methods::SubagentControlResponse = connection
+                .send_request(SubagentControlRequest {
+                    subagent: second.subagent.clone(),
+                    action: SubagentControlAction::Cancel,
+                    payload: None,
+                })
+                .block_task()
+                .await?;
+            assert!(cancelled.accepted, "cancel must be accepted");
+            let settled: echo_sdk_protocol::methods::SubagentAwaitResponse = connection
+                .send_request(SubagentAwaitRequest {
+                    subagent: second.subagent.clone(),
+                    timeout: None,
+                })
+                .block_task()
+                .await?;
+            assert!(settled.settled, "cancelled attempt must settle");
+
+            // Stale generation addresses fail closed with a typed error.
+            let stale = echo_sdk_protocol::handle::WireHandle {
+                id: "never-issued".to_string(),
+                generation: first.subagent.generation.clone(),
+                kind: echo_sdk_protocol::handle::HandleKind::Subagent,
+            };
+            let rejected = connection
+                .send_request(SubagentAwaitRequest {
+                    subagent: stale,
+                    timeout: None,
+                })
+                .block_task()
+                .await
+                .expect_err("unknown subagent handle must fail");
+            let typed = typed_facade_error(&rejected).map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(error.to_string())
+            })?;
+            assert_eq!(
+                typed.code,
+                echo_sdk_protocol::error::ExtensionErrorCode::InvalidValue
+            );
             Ok(())
         })
     })
@@ -3269,11 +7165,7 @@ async fn task_rpc_shares_the_session_task_authority() -> Result<(), Box<dyn std:
                 .await?;
 
             // The TaskRun handle id is the session-scoped graph identity.
-            let task_run = echo_sdk_protocol::handle::WireHandle {
-                id: session.acp_session_id.clone(),
-                generation: session.session.generation.clone(),
-                kind: HandleKind::TaskRun,
-            };
+            let task_run = session.task_run.clone();
             let created = connection
                 .send_request(TaskCreateRequest {
                     task_run: task_run.clone(),
@@ -3291,8 +7183,8 @@ async fn task_rpc_shares_the_session_task_authority() -> Result<(), Box<dyn std:
                 .block_task()
                 .await?;
             assert_eq!(created.tasks.len(), 2);
-            assert_eq!(created.tasks[0].id, "plan");
             assert_eq!(created.tasks[0].kind, HandleKind::PlanTask);
+            assert_ne!(created.tasks[0].id, "plan");
             let revision_one = created.revision.to_u64().unwrap_or_default();
             assert!(revision_one >= 1);
 
@@ -3403,6 +7295,9 @@ async fn task_rpc_shares_the_session_task_authority() -> Result<(), Box<dyn std:
 #[tokio::test]
 async fn task_execute_and_control_settle_through_the_runtime()
 -> Result<(), Box<dyn std::error::Error>> {
+    use echo_sdk_protocol::methods::{
+        ControlAction, SubagentDispatchRequest, TaskControlRequest, TaskExecuteRequest,
+    };
     let (endpoint, _request_seen) = start_model_server("unused").await?;
     let work = tempfile::tempdir()?;
     let state_root = tempfile::tempdir()?;
@@ -3435,11 +7330,7 @@ async fn task_execute_and_control_settle_through_the_runtime()
                 })
                 .block_task()
                 .await?;
-            let task_run = echo_sdk_protocol::handle::WireHandle {
-                id: session.acp_session_id.clone(),
-                generation: session.session.generation.clone(),
-                kind: HandleKind::TaskRun,
-            };
+            let task_run = session.task_run.clone();
             // Two sequential tasks: the first dispatches to a missing
             // subagent (the runtime records the framework failure); the
             // dependent sibling never starts.
@@ -3462,6 +7353,12 @@ async fn task_execute_and_control_settle_through_the_runtime()
                 .block_task()
                 .await?;
             assert_eq!(created.tasks.len(), 2);
+            let work_handle = created.tasks.first().cloned().ok_or_else(|| {
+                agent_client_protocol::Error::internal_error().data("missing work handle")
+            })?;
+            let later_handle = created.tasks.get(1).cloned().ok_or_else(|| {
+                agent_client_protocol::Error::internal_error().data("missing later handle")
+            })?;
 
             // Drive the graph through the RuntimeTaskService; the missing
             // subagent settles the dispatch as a framework failure.
@@ -3485,7 +7382,7 @@ async fn task_execute_and_control_settle_through_the_runtime()
                 let work = listed
                     .tasks
                     .iter()
-                    .find(|summary| summary.task.id == "work")
+                    .find(|summary| summary.task == work_handle)
                     .cloned()
                     .ok_or_else(|| {
                         agent_client_protocol::Error::internal_error().data("work task missing")
@@ -3503,11 +7400,7 @@ async fn task_execute_and_control_settle_through_the_runtime()
             let cancelled = connection
                 .send_request(TaskControlRequest {
                     task_run: task_run.clone(),
-                    task: echo_sdk_protocol::handle::WireHandle {
-                        id: "later".to_string(),
-                        generation: task_run.generation.clone(),
-                        kind: HandleKind::PlanTask,
-                    },
+                    task: later_handle.clone(),
                     action: ControlAction::Cancel,
                 })
                 .block_task()

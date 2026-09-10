@@ -9,7 +9,6 @@ use crate::agent::InterventionCallback;
 use crate::agent::subagent::SubagentRegistry;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
-use crate::sandbox::SandboxManager;
 use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
 use crate::skills::registry::SharedRegistry;
@@ -41,7 +40,7 @@ pub(crate) struct ToolExecutionSubsystem {
     pub(crate) hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
     #[cfg(feature = "mcp")]
     pub(crate) mcp_manager: McpManager,
-    pub(crate) sandbox_manager: Option<Arc<SandboxManager>>,
+    pub(crate) sandbox_manager: Option<Arc<dyn crate::sandbox::SandboxExecutor>>,
     /// Intervention callbacks that can influence agent behavior before
     /// tool calls, LLM reasoning, and final answers.
     pub(crate) intervention_callbacks: Vec<Arc<dyn InterventionCallback>>,

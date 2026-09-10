@@ -124,7 +124,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
-use crate::sandbox::{SandboxCommand, SandboxManager};
+use crate::sandbox::{SandboxCommand, SandboxExecutor};
 use crate::skills::minimal_hook_env_with_context;
 
 // ── (HookEvent, HookContext, HookResult, CompressHookStats, HookSource are now in echo-core) ──
@@ -510,7 +510,7 @@ pub struct HookRegistry {
     /// Source -> hooks definition.
     sources: HashMap<HookSource, RegisteredHook>,
     /// Optional sandbox manager for executing hook commands.
-    sandbox: Option<Arc<SandboxManager>>,
+    sandbox: Option<Arc<dyn SandboxExecutor>>,
     /// Optional HTTP client for Http hook actions.
     http_client: Option<reqwest::Client>,
     /// Optional MCP tool executor for McpTool hook actions.
@@ -572,13 +572,13 @@ impl HookRegistry {
     }
 
     /// Attach a sandbox manager for executing hook commands.
-    pub fn with_sandbox_manager(mut self, manager: Arc<SandboxManager>) -> Self {
+    pub fn with_sandbox_manager(mut self, manager: Arc<dyn SandboxExecutor>) -> Self {
         self.sandbox = Some(manager);
         self
     }
 
     /// Attach or replace the sandbox manager.
-    pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
+    pub fn set_sandbox_manager(&mut self, manager: Arc<dyn SandboxExecutor>) {
         self.sandbox = Some(manager);
     }
 
@@ -1002,7 +1002,7 @@ fn matches_tool_name(matcher: &str, tool_name: &str) -> bool {
 
 struct HookActionRuntime<'a> {
     plugin_data_dir: Option<&'a str>,
-    sandbox: Option<&'a Arc<SandboxManager>>,
+    sandbox: Option<&'a Arc<dyn SandboxExecutor>>,
     http_client: Option<&'a reqwest::Client>,
     mcp_executor: Option<&'a McpExecutorFn>,
     subagent_executor: Option<&'a SubagentExecutorFn>,
@@ -1197,7 +1197,7 @@ async fn execute_command_hook(
     source_dir: &str,
     plugin_data_dir: Option<&str>,
     context: &HookContext,
-    sandbox: Option<&Arc<SandboxManager>>,
+    sandbox: Option<&Arc<dyn SandboxExecutor>>,
 ) -> HookResult {
     // Build JSON context for stdin (include hook_event_name for compatibility)
     let mut stdin_value = serde_json::to_value(context).unwrap_or_default();

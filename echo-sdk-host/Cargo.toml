@@ -26,8 +26,12 @@ framework-acp = ["dep:agent-client-protocol", "dep:uuid", "echo_agent/acp"]
 framework-mcp = ["echo_agent/mcp"]
 framework-human-loop = ["echo_agent/human-loop"]
 framework-subagent = ["echo_agent/subagent"]
+framework-sqlite = ["echo_agent/sqlite"]
+framework-telemetry = ["echo_agent/telemetry"]
+framework-channels = ["echo_agent/channels"]
+framework-testing = ["echo_agent/testing"]
 framework-eval = ["echo_agent/eval"]
-framework-improve = ["echo_agent/improve"]
+framework-improve = ["echo_agent/improve", "framework-eval"]
 # Root tool-leaf passthroughs (plan 07 todo 5); each advertises the exact
 # framework capability its family binds to.
 framework-web = ["echo_agent/web"]
@@ -65,14 +69,56 @@ sdk-core-profile = [
 # semantics. Requires the framework surfaces those proxies inject into.
 sdk-extension-bridge = [
     "sdk-core-profile",
+    "sdk-facade-adapters",
     "framework-human-loop",
     "framework-subagent",
 ]
 # Facade adapter runtime (plan 07 todo 2): connection-level adapter
 # registry, facade resource/stream lifecycle and the admission ladder over
-# the canonical route catalog. Family handlers land in todos 3-5; a family
-# is advertised only once its handler family compiles in.
-sdk-facade-adapters = ["sdk-core-profile", "dep:jsonschema", "dep:chrono"]
+# the canonical route catalog. A family is advertised only once its handler
+# family compiles in. `framework-subagent` is a hard dependency: the task
+# family's execute/control handlers and the subagent family dispatch through
+# the SubagentExecutor, and the TaskGraph capability must never be
+# advertised without those handlers (design §13 — advertisement and handler
+# use one feature authority).
+sdk-facade-adapters = [
+    "sdk-core-profile",
+    "framework-subagent",
+    "dep:jsonschema",
+    "dep:chrono",
+]
+# Full source-built facade profile. Every root leaf feature is explicit so
+# `features.rs` can derive advertisement from Cargo's actual compilation.
+sdk-facade-all = [
+    "sdk-facade-adapters",
+    "sdk-extension-bridge",
+    "framework-acp",
+    "framework-mcp",
+    "framework-human-loop",
+    "framework-subagent",
+    "framework-sqlite",
+    "framework-telemetry",
+    "framework-channels",
+    "framework-testing",
+    "framework-eval",
+    "framework-improve",
+    "framework-web",
+    "framework-files",
+    "framework-shell",
+    "framework-git",
+    "framework-database",
+    "framework-rag",
+    "framework-chart",
+    "framework-media",
+    "framework-data",
+    "framework-statistics",
+    "framework-research",
+    "framework-content-guard",
+    "framework-project-rules",
+    "framework-a2a",
+    "framework-lsp",
+    "framework-topology",
+]
 
 [dependencies]
 echo_agent = { version = "0.2.0", path = "..", default-features = false }

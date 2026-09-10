@@ -323,7 +323,7 @@ impl SummaryCompressor {
 }
 
 impl ContextCompressor for SummaryCompressor {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "Summary"
     }
 
@@ -678,7 +678,7 @@ impl IncrementalSummaryCompressor {
 }
 
 impl ContextCompressor for IncrementalSummaryCompressor {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "IncrementalSummary"
     }
 

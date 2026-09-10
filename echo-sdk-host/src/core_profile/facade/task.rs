@@ -8,10 +8,9 @@
 //! the graph, recomputes revisions or owns task state: it translates the
 //! typed RPC onto the framework authority and maps results back.
 //!
-//! TaskRun identity is the session-scoped graph id: the handle id equals
-//! the ACP session id, which is the `conversation_id` the framework scope
-//! policy resolves for this Session. PlanTask handles address framework
-//! `TaskId`s.
+//! TaskRun and PlanTask ids are opaque, Host-issued addresses. Their
+//! registry records retain the ACP Session/task identities used by the
+//! framework, so protocol handles never double as framework keys.
 
 use agent_client_protocol::{Client, ConnectionTo, Responder};
 use echo_agent::tasks::{TaskRevisionService, TaskStatus as FrameworkTaskStatus};
@@ -39,37 +38,36 @@ fn task_error(error: echo_agent::tasks::TaskRevisionError, method: &str) -> Echo
     )
 }
 
-/// Resolve the session authority services for one TaskRun handle. The
-/// handle id is the ACP session id (the framework graph scope); a session
-/// that is no longer open fails through the handle ladder.
+/// Resolve the session authority services for one issued TaskRun handle.
 pub(crate) fn session_services(
     state: &CoreProfileState,
     task_run: &WireHandle,
     method: &str,
 ) -> Result<Arc<SessionAuthorityServices>, EchoSdkError> {
-    state
+    let task_run_record = state
         .handles
-        .check_shape_and_generation(task_run, HandleKind::TaskRun, method)?;
-    let session_handle = state
-        .handles
-        .session_handle_for_acp(&task_run.id)
-        .ok_or_else(|| {
-            wire::handle_error(
-                ExtensionErrorCode::InvalidValue,
-                "task run does not address an open session scope",
-                method,
-                task_run,
-            )
-        })?;
-    let acp_session_id = state
+        .task_run(task_run)
+        .map_err(|error| wire::handle_error(error.code, error.message, method, task_run))?;
+    let session_handle = WireHandle {
+        id: task_run_record.session_handle_id.clone(),
+        generation: task_run.generation.clone(),
+        kind: HandleKind::Session,
+    };
+    let session = state
         .handles
         .session(&session_handle)
-        .map_err(|error| wire::handle_error(error.code, error.message, method, task_run))?
-        .acp_session_id
-        .clone();
+        .map_err(|error| wire::handle_error(error.code, error.message, method, task_run))?;
+    if session.acp_session_id != task_run_record.acp_session_id {
+        return Err(wire::handle_error(
+            ExtensionErrorCode::InvalidValue,
+            "TaskRun ownership record does not match its Session",
+            method,
+            task_run,
+        ));
+    }
     state
         .session_factory
-        .session_services(&acp_session_id)
+        .session_services(&task_run_record.acp_session_id)
         .ok_or_else(|| {
             wire::handle_error(
                 ExtensionErrorCode::ClosedHandle,
@@ -80,6 +78,19 @@ pub(crate) fn session_services(
         })
 }
 
+/// Framework graph scope behind one issued TaskRun.
+pub(crate) fn task_scope(
+    state: &CoreProfileState,
+    task_run: &WireHandle,
+    method: &str,
+) -> Result<String, EchoSdkError> {
+    state
+        .handles
+        .task_run(task_run)
+        .map(|record| record.acp_session_id.clone())
+        .map_err(|error| wire::handle_error(error.code, error.message, method, task_run))
+}
+
 /// ToolContext the framework scope policy resolves for this session's
 /// graph: `conversation_id` is the session identity, exactly what the
 /// in-conversation tool calls carry.
@@ -87,14 +98,6 @@ fn scope_context(acp_session_id: &str) -> echo_agent::tools::ToolContext {
     echo_agent::tools::ToolContext {
         conversation_id: Some(acp_session_id.to_string()),
         ..echo_agent::tools::ToolContext::default()
-    }
-}
-
-fn plan_task_handle(task_run: &WireHandle, task_id: &str) -> WireHandle {
-    WireHandle {
-        id: task_id.to_string(),
-        generation: task_run.generation.clone(),
-        kind: HandleKind::PlanTask,
     }
 }
 
@@ -196,19 +199,34 @@ pub(crate) async fn task_create(
         Ok(input) => input,
         Err(error) => fail!(error),
     };
-    let context = scope_context(&request.task_run.id);
+    let scope = match task_scope(&state, &request.task_run, method) {
+        Ok(scope) => scope,
+        Err(error) => fail!(error),
+    };
+    let context = scope_context(&scope);
     let outcome = match service.create_from_tool(input, &context).await {
         Ok(outcome) => outcome,
         Err(error) => fail!(task_error(error, method)),
     };
+    let tasks = match outcome
+        .graph
+        .snapshot
+        .tasks
+        .iter()
+        .map(|task| {
+            state.handles.register_plan_task(
+                &request.task_run,
+                task.execution.task_id.as_str(),
+                method,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(tasks) => tasks,
+        Err(error) => fail!(error),
+    };
     responder.respond(TaskCreateResponse {
-        tasks: outcome
-            .graph
-            .snapshot
-            .tasks
-            .iter()
-            .map(|task| plan_task_handle(&request.task_run, task.execution.task_id.as_str()))
-            .collect(),
+        tasks,
         revision: WireU64::from_u64(outcome.graph.snapshot.revision),
     })
 }
@@ -272,19 +290,34 @@ pub(crate) async fn task_update(
             ));
         }
     };
-    let context = scope_context(&request.task_run.id);
+    let scope = match task_scope(&state, &request.task_run, method) {
+        Ok(scope) => scope,
+        Err(error) => fail!(error),
+    };
+    let context = scope_context(&scope);
     let graph = match service.update_from_tool(input, &context).await {
         Ok(graph) => graph,
         Err(error) => fail!(task_error(error, method)),
     };
+    let updated = match graph
+        .snapshot
+        .tasks
+        .iter()
+        .map(|task| {
+            state.handles.register_plan_task(
+                &request.task_run,
+                task.execution.task_id.as_str(),
+                method,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(updated) => updated,
+        Err(error) => fail!(error),
+    };
     responder.respond(TaskUpdateResponse {
         revision: WireU64::from_u64(graph.snapshot.revision),
-        updated: graph
-            .snapshot
-            .tasks
-            .iter()
-            .map(|task| plan_task_handle(&request.task_run, task.execution.task_id.as_str()))
-            .collect(),
+        updated,
     })
 }
 
@@ -307,7 +340,11 @@ pub(crate) async fn task_list(
         Err(error) => fail!(error),
     };
     let service = authorities.task_revision_service.clone();
-    let graph = match service.load(&request.task_run.id).await {
+    let scope = match task_scope(&state, &request.task_run, method) {
+        Ok(scope) => scope,
+        Err(error) => fail!(error),
+    };
+    let graph = match service.load(&scope).await {
         Ok(Some(graph)) => graph,
         Ok(None) => {
             fail!(wire::sdk_error(
@@ -319,16 +356,24 @@ pub(crate) async fn task_list(
         }
         Err(error) => fail!(task_error(error, method)),
     };
-    responder.respond(TaskListResponse {
-        tasks: graph
-            .snapshot
-            .tasks
-            .iter()
-            .map(|task| TaskSummary {
-                task: plan_task_handle(&request.task_run, task.execution.task_id.as_str()),
-                status: wire_status(&task.execution.status),
-                revision: WireU64::from_u64(graph.snapshot.revision),
-            })
-            .collect(),
-    })
+    let tasks = match graph
+        .snapshot
+        .tasks
+        .iter()
+        .map(|task| {
+            state
+                .handles
+                .register_plan_task(&request.task_run, task.execution.task_id.as_str(), method)
+                .map(|handle| TaskSummary {
+                    task: handle,
+                    status: wire_status(&task.execution.status),
+                    revision: WireU64::from_u64(graph.snapshot.revision),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(tasks) => tasks,
+        Err(error) => fail!(error),
+    };
+    responder.respond(TaskListResponse { tasks })
 }

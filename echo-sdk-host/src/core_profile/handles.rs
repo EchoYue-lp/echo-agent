@@ -32,6 +32,24 @@ pub(crate) struct SessionRecord {
     pub agent_handle_id: String,
     #[allow(dead_code)]
     pub cwd: Option<std::path::PathBuf>,
+    /// Connection-owned TaskRun handle issued atomically with this Session.
+    pub task_run_handle_id: String,
+}
+
+/// One connection-owned task graph scope. The opaque handle id is distinct
+/// from the framework scope id so a client cannot manufacture a TaskRun by
+/// copying an ACP Session id.
+pub(crate) struct TaskRunRecord {
+    #[allow(dead_code)]
+    pub session_handle_id: String,
+    #[allow(dead_code)]
+    pub acp_session_id: String,
+}
+
+/// One issued PlanTask address within a TaskRun graph.
+pub(crate) struct PlanTaskRecord {
+    pub task_run_handle_id: String,
+    pub task_id: String,
 }
 
 /// One run known to the handle registry. Live runs carry the shared
@@ -57,8 +75,25 @@ pub(crate) enum RunRecord {
     Recovered(Box<RecoveredRunRecord>),
 }
 
+#[allow(dead_code)]
 pub(crate) struct StreamRecord {
     pub run_handle_id: String,
+    /// Facade streams are owned by a Session/resource and share this record
+    /// with ACP run and extension streams. The optional fields are `None` for
+    /// those existing stream kinds; a facade stream is identified by
+    /// `facade == true` and is always resolved through this registry.
+    pub owner_session: Option<String>,
+    pub resource_id: Option<String>,
+    pub facade: bool,
+    state: Mutex<StreamState>,
+}
+
+#[derive(Debug, Default)]
+#[allow(dead_code)]
+struct StreamState {
+    last_sequence: u64,
+    cancelled: bool,
+    terminal: bool,
 }
 
 /// One open facade resource (memory namespace, workflow, journal, ledger,
@@ -98,6 +133,9 @@ struct HandleInner {
     max_handles: usize,
     agents: HashMap<String, Arc<AgentRecord>>,
     sessions: HashMap<String, Arc<SessionRecord>>,
+    task_runs: HashMap<String, Arc<TaskRunRecord>>,
+    plan_tasks: HashMap<String, Arc<PlanTaskRecord>>,
+    plan_task_index: HashMap<(String, String), String>,
     runs: HashMap<String, Arc<RunRecord>>,
     streams: HashMap<String, Arc<StreamRecord>>,
     extensions: HashMap<String, Arc<ExtensionRecord>>,
@@ -159,6 +197,14 @@ fn extension_semantic_identity_conflicts(
                 name: candidate, ..
             },
         ) => existing == candidate,
+        (
+            ExtensionDescriptor::ChannelPlugin(existing),
+            ExtensionDescriptor::ChannelPlugin(candidate),
+        ) => existing.channel_id == candidate.channel_id,
+        (
+            ExtensionDescriptor::ChannelMessageHandler(existing),
+            ExtensionDescriptor::ChannelMessageHandler(candidate),
+        ) => existing.handler_id == candidate.handler_id,
         (ExtensionDescriptor::Store { .. }, ExtensionDescriptor::Store { .. })
         | (
             ExtensionDescriptor::HumanLoopProvider { .. },
@@ -176,6 +222,9 @@ impl HandleRegistry {
                 max_handles,
                 agents: HashMap::new(),
                 sessions: HashMap::new(),
+                task_runs: HashMap::new(),
+                plan_tasks: HashMap::new(),
+                plan_task_index: HashMap::new(),
                 runs: HashMap::new(),
                 streams: HashMap::new(),
                 extensions: HashMap::new(),
@@ -206,9 +255,12 @@ impl HandleRegistry {
             .agents
             .len()
             .saturating_add(inner.sessions.len())
+            .saturating_add(inner.task_runs.len())
+            .saturating_add(inner.plan_tasks.len())
             .saturating_add(inner.runs.len())
             .saturating_add(inner.streams.len())
-            .saturating_add(inner.extensions.len());
+            .saturating_add(inner.extensions.len())
+            .saturating_add(inner.facade_resources.len());
         if open.saturating_add(additional) > inner.max_handles {
             return Err(sdk_error(
                 ExtensionErrorCode::PayloadTooLarge,
@@ -336,13 +388,14 @@ impl HandleRegistry {
         Ok((agent, record, true))
     }
 
-    /// Register a Session handle over an existing ACP Session.
+    /// Register a Session handle and its one TaskRun handle over an existing
+    /// ACP Session. Both are committed under one registry lock.
     pub fn register_session_with_cwd(
         &self,
         acp_session_id: String,
         agent_handle_id: String,
         cwd: Option<std::path::PathBuf>,
-    ) -> Result<(WireHandle, Arc<SessionRecord>), EchoSdkError> {
+    ) -> Result<(WireHandle, WireHandle, Arc<SessionRecord>), EchoSdkError> {
         let mut inner = self.lock();
         if !inner.agents.contains_key(&agent_handle_id) {
             let agent = handle(agent_handle_id.clone(), HandleKind::Agent, inner.generation);
@@ -353,16 +406,110 @@ impl HandleRegistry {
                 "_echo_agent/session/create",
             ));
         }
-        self.enforce_budget(&mut inner, 1)?;
+        self.enforce_budget(&mut inner, 2)?;
         let id = Self::mint_id(&mut inner, HandleKind::Session)?;
+        let task_run_id = Self::mint_id(&mut inner, HandleKind::TaskRun)?;
         let record = Arc::new(SessionRecord {
-            acp_session_id,
+            acp_session_id: acp_session_id.clone(),
             agent_handle_id,
             cwd,
+            task_run_handle_id: task_run_id.clone(),
         });
         inner.sessions.insert(id.clone(), record.clone());
+        inner.task_runs.insert(
+            task_run_id.clone(),
+            Arc::new(TaskRunRecord {
+                session_handle_id: id.clone(),
+                acp_session_id,
+            }),
+        );
         let session = self.insert(&mut inner, HandleKind::Session, id)?;
-        Ok((session, record))
+        let task_run = self.insert(&mut inner, HandleKind::TaskRun, task_run_id)?;
+        Ok((session, task_run, record))
+    }
+
+    /// Resolve an issued TaskRun through the fixed handle ladder.
+    #[allow(dead_code)]
+    pub fn task_run(&self, handle: &WireHandle) -> Result<Arc<TaskRunRecord>, EchoSdkError> {
+        self.check_shape_and_generation(handle, HandleKind::TaskRun, "_echo_agent/task")?;
+        let found = self.lock().task_runs.get(&handle.id).cloned();
+        found.ok_or_else(|| self.resolve_error(handle, HandleKind::TaskRun, "_echo_agent/task"))
+    }
+
+    /// Return the already-issued TaskRun belonging to a Session.
+    #[allow(dead_code)]
+    pub fn task_run_for_session(&self, session: &WireHandle) -> Result<WireHandle, EchoSdkError> {
+        let record = self.session(session)?;
+        Ok(handle(
+            record.task_run_handle_id.clone(),
+            HandleKind::TaskRun,
+            self.generation(),
+        ))
+    }
+
+    /// Issue or reuse the canonical PlanTask handle for one framework task
+    /// identity. Re-listing a graph never creates a second address.
+    #[allow(dead_code)]
+    pub fn register_plan_task(
+        &self,
+        task_run: &WireHandle,
+        task_id: &str,
+        operation: &str,
+    ) -> Result<WireHandle, EchoSdkError> {
+        let task_run_record = self.task_run(task_run)?;
+        if task_id.trim().is_empty() {
+            return Err(sdk_error(
+                ExtensionErrorCode::InvalidValue,
+                "PlanTask identity must be non-empty",
+                Retryability::Never,
+                operation,
+            ));
+        }
+        let mut inner = self.lock();
+        let key = (task_run.id.clone(), task_id.to_string());
+        if let Some(existing_id) = inner.plan_task_index.get(&key).cloned() {
+            return Ok(handle(existing_id, HandleKind::PlanTask, inner.generation));
+        }
+        if !inner.task_runs.contains_key(&task_run.id) {
+            drop(inner);
+            return Err(self.resolve_error(task_run, HandleKind::TaskRun, operation));
+        }
+        self.enforce_budget(&mut inner, 1)?;
+        let id = Self::mint_id(&mut inner, HandleKind::PlanTask)?;
+        inner.plan_tasks.insert(
+            id.clone(),
+            Arc::new(PlanTaskRecord {
+                task_run_handle_id: task_run.id.clone(),
+                task_id: task_id.to_string(),
+            }),
+        );
+        inner.plan_task_index.insert(key, id.clone());
+        drop(task_run_record);
+        Ok(handle(id, HandleKind::PlanTask, inner.generation))
+    }
+
+    /// Resolve a PlanTask and prove it belongs to the supplied TaskRun.
+    #[allow(dead_code)]
+    pub fn plan_task_for_run(
+        &self,
+        handle: &WireHandle,
+        task_run: &WireHandle,
+        operation: &str,
+    ) -> Result<Arc<PlanTaskRecord>, EchoSdkError> {
+        self.check_shape_and_generation(handle, HandleKind::PlanTask, operation)?;
+        self.check_shape_and_generation(task_run, HandleKind::TaskRun, operation)?;
+        let found = self.lock().plan_tasks.get(&handle.id).cloned();
+        let record =
+            found.ok_or_else(|| self.resolve_error(handle, HandleKind::PlanTask, operation))?;
+        if record.task_run_handle_id != task_run.id {
+            return Err(handle_error(
+                ExtensionErrorCode::InvalidValue,
+                "PlanTask belongs to another TaskRun",
+                operation,
+                handle,
+            ));
+        }
+        Ok(record)
     }
 
     /// Register a Run handle over a live run entry.
@@ -447,6 +594,14 @@ impl HandleRegistry {
             stream_id.clone(),
             Arc::new(StreamRecord {
                 run_handle_id: run_id.clone(),
+                owner_session: None,
+                resource_id: None,
+                facade: false,
+                state: Mutex::new(StreamState {
+                    last_sequence,
+                    cancelled: false,
+                    terminal: false,
+                }),
             }),
         );
         let run = self.insert(&mut inner, HandleKind::Run, run_id)?;
@@ -470,9 +625,16 @@ impl HandleRegistry {
                 "_echo_agent/run/start",
             ));
         }
-        inner
-            .streams
-            .insert(stream_id.clone(), Arc::new(StreamRecord { run_handle_id }));
+        inner.streams.insert(
+            stream_id.clone(),
+            Arc::new(StreamRecord {
+                run_handle_id,
+                owner_session: None,
+                resource_id: None,
+                facade: false,
+                state: Mutex::new(StreamState::default()),
+            }),
+        );
         self.insert(&mut inner, HandleKind::Stream, stream_id)
     }
 
@@ -746,6 +908,10 @@ impl HandleRegistry {
             id.clone(),
             Arc::new(StreamRecord {
                 run_handle_id: extension_id.to_string(),
+                owner_session: None,
+                resource_id: None,
+                facade: false,
+                state: Mutex::new(StreamState::default()),
             }),
         );
         Ok(handle(id, HandleKind::Stream, inner.generation))
@@ -766,11 +932,13 @@ impl HandleRegistry {
     }
 
     // ── Facade resources ───────────────────────────────────────────────
-    // Staged with the facade runtime (plan 07 todo 2): family handlers
-    // (todos 3-5) open and close resources through this ladder; the
-    // admission ladder itself never allocates resources.
-    /// Open one facade resource handle (memory namespace, workflow,
-    /// journal, …). The id is minted once, generation-fenced and never
+    // Family handlers (todos 3-5) open and close every resource through
+    // this single ladder; the admission ladder itself never allocates
+    // resources. One global map and one advertised bound
+    // (`max_facade_resources`) means the total open resource count across
+    // all families can never exceed the `initialize` advertisement.
+    /// Open one facade resource handle (workflow graph, ledger, run store,
+    /// MCP manager, …). The id is minted once, generation-fenced and never
     /// rebound; the business object stays with the owning service.
     #[allow(dead_code)]
     pub fn register_facade_resource(
@@ -791,7 +959,12 @@ impl HandleRegistry {
             ));
         }
         if let Some(owner) = owner_session
-            && !inner.sessions.contains_key(owner)
+            // The owner is an ACP session id; session handle ids are minted
+            // independently, so match against the session records.
+            && !inner
+                .sessions
+                .values()
+                .any(|record| record.acp_session_id == owner)
         {
             let session = handle(owner.to_string(), HandleKind::Session, inner.generation);
             drop(inner);
@@ -811,36 +984,56 @@ impl HandleRegistry {
         ))
     }
 
-    /// Resolve one facade resource through the fixed ladder.
-    #[allow(dead_code)]
+    /// Resolve one facade resource through the fixed ladder
+    /// (shape → kind → generation → issued/closed).
     pub fn facade_resource(
         &self,
         handle: &WireHandle,
         operation: &str,
     ) -> Result<Arc<FacadeResourceRecord>, EchoSdkError> {
+        self.check_shape_and_generation(handle, HandleKind::FacadeResource, operation)?;
         let found = self.lock().facade_resources.get(&handle.id).cloned();
         found.ok_or_else(|| self.resolve_error(handle, HandleKind::FacadeResource, operation))
     }
 
-    /// Close one facade resource; idempotent (`false` when already
-    /// closed). Stream cascade is the caller's job (the facade runtime
-    /// owns stream bookkeeping).
+    /// Close one Host-issued facade resource through the same generation and
+    /// tombstone authority used by session/connection teardown.
     #[allow(dead_code)]
-    pub fn close_facade_resource(&self, handle: &WireHandle) -> Result<bool, EchoSdkError> {
-        const OPERATION: &str = "_echo_agent/facade/invoke";
-        let removed = {
-            let mut inner = self.lock();
-            inner.facade_resources.remove(&handle.id)
-        };
-        let Some(record) = removed else {
+    pub fn close_facade_resource(
+        &self,
+        handle: &WireHandle,
+        operation: &str,
+    ) -> Result<bool, EchoSdkError> {
+        self.check_shape_and_generation(handle, HandleKind::FacadeResource, operation)?;
+        let mut inner = self.lock();
+        if inner.facade_resources.remove(&handle.id).is_none() {
+            // Do not resolve while holding `inner`: `resolve_error` acquires
+            // the same non-reentrant mutex. Closed resource handles are
+            // idempotent, matching the stream close contract.
+            drop(inner);
             return if self.is_closed(handle) {
                 Ok(false)
             } else {
-                Err(self.resolve_error(handle, HandleKind::FacadeResource, OPERATION))
+                Err(self.resolve_error(handle, HandleKind::FacadeResource, operation))
             };
-        };
-        drop(record);
-        let mut inner = self.lock();
+        }
+
+        // Resource and all of its facade streams are released under one
+        // registry lock. A concurrent resolve therefore observes either the
+        // complete live set or the complete tombstoned set, never a dangling
+        // stream whose resource has already been closed.
+        let stream_ids = inner
+            .streams
+            .iter()
+            .filter(|(_, record)| {
+                record.facade && record.resource_id.as_deref() == Some(handle.id.as_str())
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for stream_id in stream_ids {
+            inner.streams.remove(&stream_id);
+            inner.tombstones.push_back((HandleKind::Stream, stream_id));
+        }
         inner
             .tombstones
             .push_back((HandleKind::FacadeResource, handle.id.clone()));
@@ -848,6 +1041,360 @@ impl HandleRegistry {
             inner.tombstones.pop_front();
         }
         Ok(true)
+    }
+
+    /// Open a facade data/event stream over an issued facade resource. The
+    /// stream uses the same generation-fenced `Stream` handle authority as
+    /// run replay and extension callbacks; only its lifecycle metadata is
+    /// facade-specific.
+    #[allow(dead_code)]
+    pub fn register_facade_stream(
+        &self,
+        max_facade_streams: usize,
+        resource: &WireHandle,
+        owner_session: Option<&str>,
+        operation: &str,
+    ) -> Result<WireHandle, EchoSdkError> {
+        let resource_record = self.facade_resource(resource, operation)?;
+        if resource_record.owner_session.as_deref() != owner_session {
+            return Err(sdk_error(
+                ExtensionErrorCode::InvalidValue,
+                "facade stream owner does not match its resource",
+                Retryability::Never,
+                operation,
+            ));
+        }
+        let mut inner = self.lock();
+        let open_facade_streams = inner
+            .streams
+            .values()
+            .filter(|record| record.facade)
+            .count();
+        if open_facade_streams >= max_facade_streams {
+            return Err(sdk_error(
+                ExtensionErrorCode::PayloadTooLarge,
+                format!("open facade stream limit {max_facade_streams} reached"),
+                Retryability::AfterDelay,
+                operation,
+            ));
+        }
+        self.enforce_budget(&mut inner, 1)?;
+        let id = Self::mint_id(&mut inner, HandleKind::Stream)?;
+        inner.streams.insert(
+            id.clone(),
+            Arc::new(StreamRecord {
+                run_handle_id: resource.id.clone(),
+                owner_session: owner_session.map(str::to_string),
+                resource_id: Some(resource.id.clone()),
+                facade: true,
+                state: Mutex::new(StreamState::default()),
+            }),
+        );
+        self.insert(&mut inner, HandleKind::Stream, id)
+    }
+
+    /// Resolve an issued facade stream and enforce its optional Session
+    /// owner. Run and extension streams cannot be reinterpreted as facade
+    /// streams even though all three share the wire `Stream` kind.
+    #[allow(dead_code)]
+    pub fn facade_stream(
+        &self,
+        handle: &WireHandle,
+        owner_session: Option<&str>,
+        operation: &str,
+    ) -> Result<Arc<StreamRecord>, EchoSdkError> {
+        self.check_shape_and_generation(handle, HandleKind::Stream, operation)?;
+        let found = self.lock().streams.get(&handle.id).cloned();
+        let record =
+            found.ok_or_else(|| self.resolve_error(handle, HandleKind::Stream, operation))?;
+        if !record.facade {
+            return Err(handle_error(
+                ExtensionErrorCode::InvalidValue,
+                "stream handle does not address a facade stream",
+                operation,
+                handle,
+            ));
+        }
+        if record.owner_session.as_deref() != owner_session {
+            return Err(handle_error(
+                ExtensionErrorCode::InvalidValue,
+                "facade stream belongs to another Session",
+                operation,
+                handle,
+            ));
+        }
+        Ok(record)
+    }
+
+    /// Return the facade stream's highest delivered sequence and
+    /// cancellation flag after full handle/owner validation.
+    #[allow(dead_code)]
+    pub fn facade_stream_state(
+        &self,
+        handle: &WireHandle,
+        owner_session: Option<&str>,
+        operation: &str,
+    ) -> Result<(u64, bool), EchoSdkError> {
+        let record = self.facade_stream(handle, owner_session, operation)?;
+        let state = record
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Ok((state.last_sequence, state.cancelled))
+    }
+
+    /// Advance a facade stream watermark. Sequences are strictly monotonic
+    /// and a cancelled stream never accepts another item.
+    #[allow(dead_code)]
+    pub fn advance_facade_stream(
+        &self,
+        handle: &WireHandle,
+        owner_session: Option<&str>,
+        sequence: u64,
+        operation: &str,
+    ) -> Result<(), EchoSdkError> {
+        let record = self.facade_stream(handle, owner_session, operation)?;
+        let mut state = record
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.cancelled {
+            return Err(handle_error(
+                ExtensionErrorCode::Cancelled,
+                "facade stream is cancelled",
+                operation,
+                handle,
+            ));
+        }
+        if state.terminal {
+            return Err(handle_error(
+                ExtensionErrorCode::ClosedHandle,
+                "facade stream already reached its terminal",
+                operation,
+                handle,
+            ));
+        }
+        if sequence <= state.last_sequence {
+            return Err(handle_error(
+                ExtensionErrorCode::InvalidRequest,
+                format!(
+                    "facade stream sequence {sequence} does not advance past {}",
+                    state.last_sequence
+                ),
+                operation,
+                handle,
+            ));
+        }
+        state.last_sequence = sequence;
+        Ok(())
+    }
+
+    /// Atomically allocate the final sequence and mark the facade stream
+    /// terminal. This is the only terminal transition; the caller can then
+    /// return the terminal event and tombstone the handle without another
+    /// consumer racing a duplicate terminal.
+    pub fn settle_facade_stream(
+        &self,
+        handle: &WireHandle,
+        owner_session: Option<&str>,
+        cancelled: bool,
+        operation: &str,
+    ) -> Result<u64, EchoSdkError> {
+        let record = self.facade_stream(handle, owner_session, operation)?;
+        let mut state = record
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.terminal {
+            return Err(handle_error(
+                ExtensionErrorCode::ClosedHandle,
+                "facade stream already reached its terminal",
+                operation,
+                handle,
+            ));
+        }
+        let sequence = state.last_sequence.checked_add(1).ok_or_else(|| {
+            handle_error(
+                ExtensionErrorCode::FrameworkError,
+                "facade stream sequence exhausted",
+                operation,
+                handle,
+            )
+        })?;
+        state.last_sequence = sequence;
+        state.cancelled |= cancelled;
+        state.terminal = true;
+        Ok(sequence)
+    }
+
+    /// Cooperatively cancel a facade stream. Repeated cancellation is an
+    /// idempotent `false`; invalid, stale and foreign handles still fail the
+    /// common ladder.
+    #[allow(dead_code)]
+    pub fn cancel_facade_stream(
+        &self,
+        handle: &WireHandle,
+        owner_session: Option<&str>,
+        operation: &str,
+    ) -> Result<bool, EchoSdkError> {
+        let record = self.facade_stream(handle, owner_session, operation)?;
+        let mut state = record
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.cancelled {
+            Ok(false)
+        } else {
+            state.cancelled = true;
+            Ok(true)
+        }
+    }
+
+    /// Close one facade stream. Repeated close is idempotent; a handle that
+    /// was never issued still fails instead of being treated as closed.
+    #[allow(dead_code)]
+    pub fn close_facade_stream(
+        &self,
+        handle: &WireHandle,
+        owner_session: Option<&str>,
+        operation: &str,
+    ) -> Result<bool, EchoSdkError> {
+        self.check_shape_and_generation(handle, HandleKind::Stream, operation)?;
+        let removed = {
+            let mut inner = self.lock();
+            match inner.streams.get(&handle.id) {
+                Some(record)
+                    if record.facade && record.owner_session.as_deref() == owner_session =>
+                {
+                    inner.streams.remove(&handle.id)
+                }
+                Some(record) if !record.facade => {
+                    return Err(handle_error(
+                        ExtensionErrorCode::InvalidValue,
+                        "stream handle does not address a facade stream",
+                        operation,
+                        handle,
+                    ));
+                }
+                Some(_) => {
+                    return Err(handle_error(
+                        ExtensionErrorCode::InvalidValue,
+                        "facade stream belongs to another Session",
+                        operation,
+                        handle,
+                    ));
+                }
+                None => None,
+            }
+        };
+        if removed.is_none() {
+            return if self.is_closed(handle) {
+                Ok(false)
+            } else {
+                Err(self.resolve_error(handle, HandleKind::Stream, operation))
+            };
+        }
+        let mut inner = self.lock();
+        inner
+            .tombstones
+            .push_back((HandleKind::Stream, handle.id.clone()));
+        while inner.tombstones.len() > inner.max_handles {
+            inner.tombstones.pop_front();
+        }
+        Ok(true)
+    }
+
+    /// Close every facade stream owned by one facade resource. This is the
+    /// resource-close cascade; run and extension streams are unaffected.
+    #[allow(dead_code)]
+    pub fn close_facade_streams_of_resource(&self, resource_id: &str) -> usize {
+        let mut inner = self.lock();
+        let ids = inner
+            .streams
+            .iter()
+            .filter(|(_, record)| {
+                record.facade && record.resource_id.as_deref() == Some(resource_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in &ids {
+            inner.streams.remove(id);
+            inner.tombstones.push_back((HandleKind::Stream, id.clone()));
+        }
+        while inner.tombstones.len() > inner.max_handles {
+            inner.tombstones.pop_front();
+        }
+        ids.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn facade_stream_count_of_resource(&self, resource_id: &str) -> usize {
+        self.lock()
+            .streams
+            .values()
+            .filter(|record| record.facade && record.resource_id.as_deref() == Some(resource_id))
+            .count()
+    }
+
+    /// Close every facade resource owned by one session (session close
+    /// cascade). Returns the closed handle ids so the facade runtime can
+    /// cascade its stream bookkeeping.
+    #[allow(dead_code)]
+    pub fn close_facade_resources_of(&self, owner: &str) -> Vec<String> {
+        let mut inner = self.lock();
+        let owned: Vec<String> = inner
+            .facade_resources
+            .iter()
+            .filter(|(_, record)| record.owner_session.as_deref() == Some(owner))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &owned {
+            inner.facade_resources.remove(id);
+            inner
+                .tombstones
+                .push_back((HandleKind::FacadeResource, id.clone()));
+        }
+        let stream_ids = inner
+            .streams
+            .iter()
+            .filter(|(_, record)| record.facade && record.owner_session.as_deref() == Some(owner))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in stream_ids {
+            inner.streams.remove(&id);
+            inner.tombstones.push_back((HandleKind::Stream, id));
+        }
+        while inner.tombstones.len() > inner.max_handles {
+            inner.tombstones.pop_front();
+        }
+        owned
+    }
+
+    /// Close every open facade resource (connection teardown).
+    #[allow(dead_code)]
+    pub fn close_all_facade_resources(&self) -> Vec<String> {
+        let mut inner = self.lock();
+        let closed: Vec<String> = inner.facade_resources.keys().cloned().collect();
+        for id in &closed {
+            inner
+                .tombstones
+                .push_back((HandleKind::FacadeResource, id.clone()));
+        }
+        inner.facade_resources.clear();
+        let stream_ids = inner
+            .streams
+            .iter()
+            .filter(|(_, record)| record.facade)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in stream_ids {
+            inner.streams.remove(&id);
+            inner.tombstones.push_back((HandleKind::Stream, id));
+        }
+        while inner.tombstones.len() > inner.max_handles {
+            inner.tombstones.pop_front();
+        }
+        closed
     }
 
     pub fn agent(&self, handle: &WireHandle) -> Result<Arc<AgentRecord>, EchoSdkError> {
@@ -992,6 +1539,29 @@ impl HandleRegistry {
         };
         {
             let mut inner = self.lock();
+            let task_run_id = record.task_run_handle_id.clone();
+            let plan_task_ids = inner
+                .plan_tasks
+                .iter()
+                .filter(|(_, plan_task)| plan_task.task_run_handle_id == task_run_id)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for plan_task_id in plan_task_ids {
+                if let Some(plan_task) = inner.plan_tasks.remove(&plan_task_id) {
+                    inner.plan_task_index.remove(&(
+                        plan_task.task_run_handle_id.clone(),
+                        plan_task.task_id.clone(),
+                    ));
+                }
+                inner
+                    .tombstones
+                    .push_back((HandleKind::PlanTask, plan_task_id));
+            }
+            if inner.task_runs.remove(&task_run_id).is_some() {
+                inner
+                    .tombstones
+                    .push_back((HandleKind::TaskRun, task_run_id));
+            }
             inner
                 .tombstones
                 .push_back((HandleKind::Session, handle.id.clone()));
@@ -1071,7 +1641,7 @@ impl HandleRegistry {
         }
     }
 
-    fn is_closed(&self, handle: &WireHandle) -> bool {
+    pub(crate) fn is_closed(&self, handle: &WireHandle) -> bool {
         let inner = self.lock();
         handle.generation.to_u64() == Some(inner.generation)
             && inner
@@ -1394,5 +1964,192 @@ mod tests {
         let fingerprint = HandleRegistry::config_fingerprint(&config);
         assert!(!fingerprint.contains("secret-token"));
         assert!(fingerprint.contains("sha256:"));
+    }
+
+    /// The TaskRun/PlanTask ladder runs shape → kind → generation before
+    /// any lookup: a stale generation on an unknown id reports
+    /// `stale_handle` (not `invalid_value`), proving the generation check
+    /// precedes the map lookup (design §10.4).
+    #[test]
+    fn task_handle_ladder_checks_generation_before_lookup() {
+        let registry = registry();
+        let stale = run_handle("never-issued", 6, HandleKind::TaskRun);
+        let error = registry
+            .task_run(&stale)
+            .err()
+            .expect("stale must fail before lookup");
+        assert_eq!(error.code, ExtensionErrorCode::StaleHandle);
+        let future = run_handle("never-issued", 8, HandleKind::TaskRun);
+        let error = registry
+            .task_run(&future)
+            .err()
+            .expect("future generation must fail");
+        assert_eq!(error.code, ExtensionErrorCode::InvalidValue);
+        let wrong_kind = run_handle("never-issued", 7, HandleKind::Session);
+        let error = registry
+            .task_run(&wrong_kind)
+            .err()
+            .expect("wrong kind must fail");
+        assert_eq!(error.code, ExtensionErrorCode::InvalidValue);
+        // The PlanTask ladder checks both handles the same way.
+        let plan_task = run_handle("never-issued", 6, HandleKind::PlanTask);
+        let task_run = run_handle("never-issued", 7, HandleKind::TaskRun);
+        let error = registry
+            .plan_task_for_run(&plan_task, &task_run, "test")
+            .err()
+            .expect("stale plan-task generation must fail");
+        assert_eq!(error.code, ExtensionErrorCode::StaleHandle);
+    }
+
+    #[test]
+    fn facade_stream_uses_registry_generation_owner_and_sequence_ladder() {
+        let registry = registry();
+        let (resource, _) = registry
+            .register_facade_resource(8, "test", "test.resource", None, "test")
+            .unwrap_or_else(|error| panic!("resource registration failed: {error:?}"));
+        let stream = registry
+            .register_facade_stream(2, &resource, None, "test")
+            .unwrap_or_else(|error| panic!("stream registration failed: {error:?}"));
+        assert!(
+            registry
+                .advance_facade_stream(&stream, None, 1, "test")
+                .is_ok()
+        );
+        assert!(
+            registry
+                .advance_facade_stream(&stream, None, 1, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::InvalidRequest)
+        );
+        assert!(
+            registry
+                .cancel_facade_stream(&stream, None, "test")
+                .is_ok_and(|changed| changed)
+        );
+        assert!(
+            registry
+                .advance_facade_stream(&stream, None, 2, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::Cancelled)
+        );
+        let stale = run_handle(&stream.id, 6, HandleKind::Stream);
+        assert!(
+            registry
+                .facade_stream(&stale, None, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::StaleHandle)
+        );
+        assert!(
+            registry
+                .close_facade_stream(&stream, None, "test")
+                .is_ok_and(|closed| closed)
+        );
+        assert!(
+            registry
+                .close_facade_stream(&stream, None, "test")
+                .is_ok_and(|closed| !closed)
+        );
+    }
+
+    #[test]
+    fn facade_stream_resource_cascade_does_not_touch_other_resources() {
+        let registry = registry();
+        let (first, _) = registry
+            .register_facade_resource(8, "test", "first", None, "test")
+            .unwrap_or_else(|error| panic!("resource registration failed: {error:?}"));
+        let (second, _) = registry
+            .register_facade_resource(8, "test", "second", None, "test")
+            .unwrap_or_else(|error| panic!("resource registration failed: {error:?}"));
+        let first_stream = registry
+            .register_facade_stream(8, &first, None, "test")
+            .unwrap_or_else(|error| panic!("stream registration failed: {error:?}"));
+        let second_stream = registry
+            .register_facade_stream(8, &second, None, "test")
+            .unwrap_or_else(|error| panic!("stream registration failed: {error:?}"));
+        assert_eq!(registry.close_facade_streams_of_resource(&first.id), 1);
+        assert!(
+            registry
+                .facade_stream(&first_stream, None, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::ClosedHandle)
+        );
+        assert!(registry.facade_stream(&second_stream, None, "test").is_ok());
+    }
+
+    #[test]
+    fn closing_facade_resource_atomically_closes_associated_streams() {
+        let registry = registry();
+        let resource_result =
+            registry.register_facade_resource(8, "test", "resource", None, "test");
+        assert!(resource_result.is_ok(), "resource registration failed");
+        let Some((resource, _)) = resource_result.ok() else {
+            return;
+        };
+        let stream_result = registry.register_facade_stream(8, &resource, None, "test");
+        assert!(stream_result.is_ok(), "stream registration failed");
+        let Some(stream) = stream_result.ok() else {
+            return;
+        };
+
+        assert!(
+            registry
+                .close_facade_resource(&resource, "test")
+                .is_ok_and(|closed| closed)
+        );
+        assert!(
+            registry
+                .facade_resource(&resource, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::ClosedHandle)
+        );
+        assert!(
+            registry
+                .facade_stream(&stream, None, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::ClosedHandle)
+        );
+        assert!(
+            registry
+                .advance_facade_stream(&stream, None, 1, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::ClosedHandle)
+        );
+        assert!(
+            registry
+                .close_facade_stream(&stream, None, "test")
+                .is_ok_and(|closed| !closed)
+        );
+        assert!(
+            registry
+                .close_facade_resource(&resource, "test")
+                .is_ok_and(|closed| !closed)
+        );
+    }
+
+    #[test]
+    fn resource_close_preserves_stale_generation_classification_for_old_streams() {
+        let registry = registry();
+        let resource_result =
+            registry.register_facade_resource(8, "test", "resource", None, "test");
+        assert!(resource_result.is_ok(), "resource registration failed");
+        let Some((resource, _)) = resource_result.ok() else {
+            return;
+        };
+        let stream_result = registry.register_facade_stream(8, &resource, None, "test");
+        assert!(stream_result.is_ok(), "stream registration failed");
+        let Some(stream) = stream_result.ok() else {
+            return;
+        };
+        assert!(registry.close_facade_resource(&resource, "test").is_ok());
+
+        let stale = run_handle(&stream.id, 6, HandleKind::Stream);
+        assert!(
+            registry
+                .facade_stream(&stale, None, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::StaleHandle)
+        );
+        assert!(
+            registry
+                .advance_facade_stream(&stale, None, 1, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::StaleHandle)
+        );
+        assert!(
+            registry
+                .close_facade_stream(&stale, None, "test")
+                .is_err_and(|error| error.code == ExtensionErrorCode::StaleHandle)
+        );
     }
 }

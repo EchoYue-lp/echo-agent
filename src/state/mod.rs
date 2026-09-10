@@ -330,7 +330,7 @@ fn invalid_checkpoint(message: String) -> crate::error::ReactError {
 // ── RuntimeStateStore trait ────────────────────────────────────────────
 
 /// Result of deleting one exact runtime-state incarnation from a stable scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeStateClearReceipt {
     pub scope_id: String,
     pub runtime_state_id: String,
@@ -338,7 +338,7 @@ pub struct RuntimeStateClearReceipt {
 }
 
 /// Result of deleting every indexed runtime-state incarnation in one scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeStateScopeClearReceipt {
     pub scope_id: String,
     pub runtime_state_ids: Vec<String>,

@@ -43,7 +43,6 @@ pub(crate) struct SubagentDispatchRecord {
         tokio::sync::Mutex<Option<Result<echo_agent::agent::subagent::SubagentResult, String>>>,
     /// ACP session that owns the dispatch (records are session-scoped;
     /// session close cascades through it in the family closeout).
-    #[allow(dead_code)]
     pub owner_session: String,
 }
 
@@ -191,7 +190,16 @@ pub(crate) async fn subagent_dispatch(
         generation: WireU64::from_u64(state.handles.generation()),
         kind: HandleKind::Subagent,
     };
-    state.facade.register_subagent(handle.id.clone(), record);
+    // The advertised live-subagent bound is a hard limit: when the record
+    // cannot be admitted, the attempt is cancelled so no dispatch runs
+    // without a control identity (never a leaked background subagent).
+    if let Err(error) = state
+        .facade
+        .register_subagent(handle.id.clone(), record.clone())
+    {
+        record.background.cancel();
+        fail!(error);
+    }
     responder.respond(SubagentDispatchResponse { subagent: handle })
 }
 
@@ -297,21 +305,24 @@ pub(crate) async fn subagent_control(
     };
     let execution_id = record.background.execution_id.clone();
     let attempt = record.attempt;
-    let payload_required = |payload: &Option<String>| -> Result<String, EchoSdkError> {
-        payload
-            .clone()
-            .filter(|text| !text.trim().is_empty())
-            .ok_or_else(|| {
-                subagent_error(
+    // Message and guidance carry text; interrupt and cancel address the
+    // attempt itself and take no payload.
+    let payload = match request.action {
+        SubagentControlAction::Message | SubagentControlAction::Guidance => {
+            match request
+                .payload
+                .clone()
+                .filter(|text| !text.trim().is_empty())
+            {
+                Some(payload) => payload,
+                None => fail!(subagent_error(
                     ExtensionErrorCode::InvalidValue,
                     "message and guidance control require a non-empty payload",
                     method,
-                )
-            })
-    };
-    let payload = match payload_required(&request.payload) {
-        Ok(payload) => payload,
-        Err(error) => fail!(error),
+                )),
+            }
+        }
+        SubagentControlAction::Interrupt | SubagentControlAction::Cancel => String::new(),
     };
     let accepted = match request.action {
         SubagentControlAction::Message => record

@@ -7,6 +7,7 @@ use echo_sdk_protocol::facade::{FACADE_FAMILIES, validate_facade_route_table};
 use echo_sdk_protocol::inventory::{
     AcpRelationship, FeatureSemantics, ItemKind, ManifestEntry, ParityManifest, SemanticClass,
 };
+use sha2::{Digest, Sha256};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -386,9 +387,10 @@ fn facade_route_table_is_mechanically_closed() -> TestResult {
         "route table violations: {:?}",
         validate_facade_route_table()
     );
-    // Every source-routed family must own at least one canonical manifest
-    // item (aliases do not count — one handler per route needs one real
-    // item to serve).
+    // Every family actually referenced by a canonical manifest item must
+    // have a registered descriptor. A descriptor may legitimately have no
+    // current root item: protocol-native tool families still own closed
+    // operations after their Rust construction types become language-local.
     let manifest = manifest()?;
     let mut items_by_family: std::collections::BTreeMap<&str, usize> =
         std::collections::BTreeMap::new();
@@ -414,17 +416,43 @@ fn facade_route_table_is_mechanically_closed() -> TestResult {
             }
         }
     }
-    for descriptor in FACADE_FAMILIES {
-        if !descriptor.family.is_source_routed() {
-            continue;
-        }
-        let family = descriptor.family.as_str();
-        let items = items_by_family.get(family).copied().unwrap_or(0);
+    let registered_families: BTreeSet<&str> = FACADE_FAMILIES
+        .iter()
+        .map(|descriptor| descriptor.family.as_str())
+        .collect();
+    for family in items_by_family.keys() {
         assert!(
-            items > 0,
-            "source-routed family {family} has no canonical manifest item"
+            registered_families.contains(family),
+            "canonical manifest family {family} has no route descriptor"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn intrinsic_routes_are_an_explicit_frozen_snapshot() -> TestResult {
+    const EXPECTED: &str = "32942a67d6f4bd225c7ce6ed0ce55aed284954145ee88e2f84d7fa1e69921501";
+    let mut routes = manifest()?
+        .entries
+        .into_iter()
+        .filter(|entry| entry.canonical && entry.route.route.starts_with("intrinsic:"))
+        .map(|entry| {
+            format!(
+                "{}\t{}\t{}",
+                entry.kind.as_str(),
+                entry.source_paths.into_iter().collect::<Vec<_>>().join(","),
+                entry.route.route
+            )
+        })
+        .collect::<Vec<_>>();
+    routes.sort();
+    let mut frozen = routes.join("\n");
+    frozen.push('\n');
+    let digest = format!("{:x}", Sha256::digest(frozen.as_bytes()));
+    assert_eq!(
+        digest, EXPECTED,
+        "intrinsic facade membership changed; review each new/removed identity and update the frozen snapshot deliberately"
+    );
     Ok(())
 }
 
@@ -446,6 +474,19 @@ fn facade_operation_catalog_artifact_matches_manifest() -> TestResult {
         .get("routes")
         .and_then(|v| v.as_array())
         .ok_or("facade catalog missing routes")?;
+    for descriptor in FACADE_FAMILIES
+        .iter()
+        .filter(|descriptor| !descriptor.family.operations().is_empty())
+    {
+        let route_id = format!("family:{}", descriptor.family.as_str());
+        assert!(
+            routes.iter().any(|route| {
+                route.get("route").and_then(serde_json::Value::as_str) == Some(route_id.as_str())
+            }),
+            "closed family operations have no executable catalog route: {}",
+            descriptor.family.as_str()
+        );
+    }
     let mut route_ids: Vec<&str> = routes
         .iter()
         .filter_map(|route| route.get("route").and_then(|v| v.as_str()))
@@ -462,9 +503,280 @@ fn facade_operation_catalog_artifact_matches_manifest() -> TestResult {
         .map(|e| e.route.route.as_str())
         .collect();
     for id in route_ids {
+        if !manifest_routes.contains(id)
+            && let Some(family) = id.strip_prefix("family:")
+        {
+            let route = routes
+                .iter()
+                .find(|route| route.get("route").and_then(|value| value.as_str()) == Some(id))
+                .ok_or("generated catalog is missing a synthetic family route")?;
+            let descriptor = FACADE_FAMILIES
+                .iter()
+                .find(|descriptor| descriptor.family.as_str() == family)
+                .ok_or("synthetic family route has no descriptor")?;
+            let operations: BTreeSet<&str> = route
+                .get("operation_signatures")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.get("operation").and_then(serde_json::Value::as_str))
+                .collect();
+            let expected: BTreeSet<&str> = descriptor.family.operations().iter().copied().collect();
+            assert_eq!(
+                operations, expected,
+                "protocol-owned family operations drifted for {family}"
+            );
+            assert_eq!(
+                route.get("method").and_then(serde_json::Value::as_str),
+                descriptor.methods.first().copied(),
+                "synthetic family route method drifted for {family}"
+            );
+            assert_eq!(
+                route.get("items").and_then(serde_json::Value::as_u64),
+                Some(0),
+                "synthetic family route must not fabricate manifest items"
+            );
+            continue;
+        }
         assert!(
             manifest_routes.contains(id),
             "generated catalog route {id} is absent from the manifest"
+        );
+    }
+    for route in routes {
+        if matches!(
+            route.get("surface").and_then(|value| value.as_str()),
+            Some("invoke") | Some("family")
+        ) {
+            assert_eq!(
+                route
+                    .get("input")
+                    .and_then(|value| value.get("encoding"))
+                    .and_then(|value| value.as_str()),
+                Some("wire_value_array"),
+                "operation route is missing its wire input description"
+            );
+            assert_eq!(
+                route
+                    .get("result")
+                    .and_then(|value| value.get("encoding"))
+                    .and_then(|value| value.as_str()),
+                Some("wire_value"),
+                "operation route is missing its wire result description"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Plan 08: the extension obligation set is closed. Every
+/// bridge-routed manifest item carries a typed kind the Host actually has
+/// a proxy for, every typed kind is reachable from at least one canonical
+/// trait identity, and the pre-closure `bridge:pending` middle state no
+/// longer exists anywhere in the contract.
+#[test]
+fn extension_obligations_form_a_closed_bridge_set() -> TestResult {
+    use echo_sdk_protocol::facade::typed_bridge_kinds;
+    use echo_sdk_protocol::methods::ExtensionKind;
+
+    let manifest = manifest()?;
+    let typed: BTreeSet<String> = typed_bridge_kinds()
+        .into_iter()
+        .map(|kind| kind.as_str().to_string())
+        .collect();
+    // Hook registers by event descriptor, not by trait identity; it is the
+    // only descriptor-routed kind. Everything else must come from the table.
+    let mut expected = typed.clone();
+    expected.insert(ExtensionKind::Hook.as_str().to_string());
+    let all_kinds: BTreeSet<String> = [
+        ExtensionKind::Tool,
+        ExtensionKind::LlmClient,
+        ExtensionKind::Store,
+        ExtensionKind::HumanLoopProvider,
+        ExtensionKind::Hook,
+        ExtensionKind::AgentCallback,
+        ExtensionKind::InterventionCallback,
+        ExtensionKind::AgentFactory,
+        ExtensionKind::CustomAgent,
+        ExtensionKind::Critic,
+        ExtensionKind::ChannelPlugin,
+        ExtensionKind::ChannelMessageHandler,
+        ExtensionKind::ContextCompressor,
+        ExtensionKind::AgentComponent,
+    ]
+    .into_iter()
+    .map(|kind| kind.as_str().to_string())
+    .collect();
+    assert_eq!(
+        expected, all_kinds,
+        "typed trait kinds + descriptor-routed Hook must cover every wire kind"
+    );
+
+    let mut routed_kinds: BTreeSet<String> = BTreeSet::new();
+    for entry in &manifest.entries {
+        let route = entry.route.route.as_str();
+        assert!(
+            route != "bridge:pending",
+            "pending bridge route reopened on {}: {}",
+            entry.path,
+            route
+        );
+        if let Some(kind) = route.strip_prefix("bridge:")
+            && entry.canonical
+        {
+            assert!(
+                all_kinds.contains(kind),
+                "unknown bridge kind '{kind}' on {}",
+                entry.path
+            );
+            assert!(
+                typed.contains(kind),
+                "kind {} has no typed trait identity and is not Hook",
+                kind
+            );
+            routed_kinds.insert(kind.to_string());
+        }
+    }
+    assert_eq!(
+        routed_kinds, typed,
+        "every typed trait kind must be routed by at least one canonical item"
+    );
+    Ok(())
+}
+
+#[test]
+fn canonical_consumer_traits_and_streams_have_executable_routes() -> TestResult {
+    let manifest = manifest()?;
+    for entry in manifest.entries.iter().filter(|entry| entry.canonical) {
+        if entry.classification == SemanticClass::Extension {
+            assert!(
+                matches!(entry.route.surface.as_str(), "bridge" | "intrinsic"),
+                "consumer trait {} is mislabeled as an executable family/core route: {}",
+                entry.path,
+                entry.route.route
+            );
+            if entry.route.surface == "intrinsic" {
+                assert!(
+                    entry.route.route.starts_with("intrinsic:process-local-"),
+                    "consumer trait {} lacks explicit process-local evidence: {}",
+                    entry.path,
+                    entry.route.route
+                );
+            }
+        }
+        if entry.classification == SemanticClass::Stream {
+            assert!(
+                matches!(
+                    entry.route.surface.as_str(),
+                    "bridge" | "core" | "family" | "intrinsic" | "invoke"
+                ),
+                "stream {} has no executable or evidenced route",
+                entry.path
+            );
+        }
+    }
+    let workflow = echo_sdk_protocol::facade::FacadeFamily::Workflow.operations();
+    for operation in [
+        "workflow.graph.run_stream",
+        "workflow.stream.next",
+        "workflow.stream.cancel",
+        "workflow.stream.close",
+    ] {
+        assert!(
+            workflow.contains(&operation),
+            "missing workflow stream operation {operation}"
+        );
+    }
+    let a2a = echo_sdk_protocol::facade::FacadeFamily::A2a.operations();
+    for operation in [
+        "a2a.task.stream.open",
+        "a2a.stream.next",
+        "a2a.stream.cancel",
+        "a2a.stream.close",
+    ] {
+        assert!(
+            a2a.contains(&operation),
+            "missing A2A stream operation {operation}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn source_family_operations_are_exact_and_type_scoped() -> TestResult {
+    let manifest = manifest()?;
+    let mut mapped = 0_usize;
+    for entry in manifest.entries.iter().filter(|entry| entry.canonical) {
+        let Some(handler_operation) = entry.route.handler_operation.as_deref() else {
+            continue;
+        };
+        mapped = mapped.saturating_add(1);
+        assert_eq!(
+            entry.route.surface, "invoke",
+            "mapped source route must use invoke"
+        );
+        assert_eq!(
+            entry.route.method.as_deref(),
+            Some("_echo_agent/facade/invoke"),
+            "mapped source route must retain the source-signature admission method"
+        );
+        let canonical_source = entry
+            .source_paths
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| entry.path.clone());
+        assert_eq!(
+            entry.route.operation.as_deref(),
+            Some(canonical_source.as_str()),
+            "mapped source route must preserve its exact canonical identity"
+        );
+        let family = entry
+            .route
+            .family
+            .as_deref()
+            .ok_or("mapped route has no family")?;
+        let descriptor = FACADE_FAMILIES
+            .iter()
+            .find(|descriptor| descriptor.family.as_str() == family)
+            .ok_or("mapped route has no family descriptor")?;
+        assert!(
+            descriptor.family.operations().contains(&handler_operation),
+            "mapped source route {} targets an operation absent from family {family}: {handler_operation}",
+            entry.path
+        );
+        assert!(
+            !entry.path.contains("McpServerBuilder")
+                && !entry.path.contains("PermissionServiceBuilder")
+                && !entry.path.contains("WsClient"),
+            "same-named construction or transport method was mapped as a runtime family operation: {}",
+            entry.path
+        );
+    }
+    assert!(
+        mapped > 0,
+        "the catalog must contain source-to-family operation mappings"
+    );
+    Ok(())
+}
+
+#[test]
+fn canonical_intrinsic_routes_do_not_use_generic_fallback_reasons() -> TestResult {
+    let manifest = manifest()?;
+    let forbidden = [
+        "intrinsic:callable-operation",
+        "intrinsic:consumer-implemented-trait",
+        "intrinsic:language-local-process-helper",
+        "intrinsic:language-local-pure-helper",
+        "intrinsic:language-local-react-agent-helper",
+        "intrinsic:process-local-explicit-type-seam",
+    ];
+    for entry in manifest.entries.iter().filter(|entry| entry.canonical) {
+        assert!(
+            !forbidden.contains(&entry.route.route.as_str()),
+            "canonical item {} uses a generic intrinsic fallback: {}",
+            entry.path,
+            entry.route.route
         );
     }
     Ok(())

@@ -40,6 +40,7 @@ pub struct GradingReport {
 }
 
 /// LLM-based grader for evaluating agent outputs.
+#[derive(Clone)]
 pub struct LlmGrader {
     grader_prompt: String,
 }

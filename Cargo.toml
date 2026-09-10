@@ -96,7 +96,7 @@ shell = ["echo_tools/shell"]
 files = ["echo_tools/files"]
 research = ["echo_tools/research"]
 eval = []
-improve = []
+improve = ["eval"]
 testing = []
 
 [dependencies]

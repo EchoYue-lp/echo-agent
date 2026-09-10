@@ -95,6 +95,7 @@ impl MethodDescriptor {
             | "_echo_agent/trace/op"
             | "_echo_agent/eval/op"
             | "_echo_agent/improve/op"
+            | "_echo_agent/permission/op"
             | "_echo_agent/mcp/op"
             | "_echo_agent/a2a/op"
             | "_echo_agent/lsp/op"
@@ -154,6 +155,7 @@ impl MethodDescriptor {
             | "_echo_agent/trace/op"
             | "_echo_agent/eval/op"
             | "_echo_agent/improve/op"
+            | "_echo_agent/permission/op"
             | "_echo_agent/mcp/op"
             | "_echo_agent/a2a/op"
             | "_echo_agent/lsp/op"
@@ -459,6 +461,12 @@ pub const METHOD_CATALOG: &[MethodDescriptor] = &[
         direction: Direction::Request,
         capability: ExtensionCapability::FeatureSurfaces,
         summary: "Improvement loop trajectory/critique operations (feature: improve).",
+    },
+    MethodDescriptor {
+        name: "_echo_agent/permission/op",
+        direction: Direction::Request,
+        capability: ExtensionCapability::FeatureSurfaces,
+        summary: "Session-owned PermissionService checks, rules and approval cache operations.",
     },
     MethodDescriptor {
         name: "_echo_agent/mcp/op",

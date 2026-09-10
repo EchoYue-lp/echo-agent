@@ -13,6 +13,14 @@ pub async fn read_http_request<S>(socket: &mut S) -> io::Result<()>
 where
     S: AsyncRead + Unpin,
 {
+    read_http_request_bytes(socket).await.map(|_| ())
+}
+
+/// Read one complete fixture HTTP request for assertions on its JSON body.
+pub async fn read_http_request_bytes<S>(socket: &mut S) -> io::Result<Vec<u8>>
+where
+    S: AsyncRead + Unpin,
+{
     let mut request = Vec::with_capacity(16 * 1024);
     let mut chunk = [0_u8; 16 * 1024];
     let header_end = loop {
@@ -111,5 +119,12 @@ where
             io::Error::new(io::ErrorKind::InvalidData, "fixture body length overflow")
         })?;
     }
-    Ok(())
+    let request_length = header_end.checked_add(body_length).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "fixture request length overflow",
+        )
+    })?;
+    request.truncate(request_length);
+    Ok(request)
 }

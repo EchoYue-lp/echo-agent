@@ -12,7 +12,9 @@ use echo_sdk_protocol::catalog::{self, Direction, METHOD_CATALOG, MethodDescript
 use echo_sdk_protocol::error::EchoSdkError;
 use echo_sdk_protocol::event::{GapNotification, ReplayRequest, ReplayResponse, WireEventEnvelope};
 use echo_sdk_protocol::handle::WireHandle;
-use echo_sdk_protocol::methods::{ExtensionInvokeOutcome, ExtensionStreamEvent, ToolRiskLevelWire};
+use echo_sdk_protocol::methods::{
+    AgentComponentCapabilitiesWire, ExtensionInvokeOutcome, ExtensionStreamEvent, ToolRiskLevelWire,
+};
 use echo_sdk_protocol::scalar::{WireBytes, WirePath, WireU64, WireValue};
 use echo_sdk_protocol::schema::{
     self, FixtureKind, build_extension_schema_doc, build_extension_validator,
@@ -150,6 +152,59 @@ fn extension_outcome_and_stream_are_tagged() {
 }
 
 #[test]
+fn agent_component_stream_rejects_inner_terminal_confusion() {
+    let stream = serde_json::json!({
+        "id": "stream-1",
+        "generation": "1",
+        "kind": "stream"
+    });
+    let terminal_as_chunk = serde_json::json!({
+        "event": "chunk",
+        "stream": stream,
+        "sequence": "1",
+        "value": {
+            "kind": "agent_component",
+            "value": {
+                "component": "sandbox",
+                "event": {
+                    "terminal": "failed",
+                    "failure": {"kind": "cancelled", "message": "cancelled"}
+                }
+            }
+        }
+    });
+    assert!(
+        serde_json::from_value::<ExtensionStreamEvent>(terminal_as_chunk).is_err(),
+        "a terminal Sandbox event must not be accepted as a stream chunk"
+    );
+
+    let chunk_as_terminal = serde_json::json!({
+        "event": "complete",
+        "stream": {
+            "id": "stream-1",
+            "generation": "1",
+            "kind": "stream"
+        },
+        "sequence": "1",
+        "value": {
+            "kind": "agent_component",
+            "value": {
+                "component": "workflow",
+                "terminal": {
+                    "event": "node_start",
+                    "node_name": "start",
+                    "step_index": "0"
+                }
+            }
+        }
+    });
+    assert!(
+        serde_json::from_value::<ExtensionStreamEvent>(chunk_as_terminal).is_err(),
+        "a non-terminal Workflow event must not be accepted as stream completion"
+    );
+}
+
+#[test]
 fn bridge_register_fixtures_enforce_typed_descriptors() {
     use echo_sdk_protocol::methods::ExtensionRegisterRequest;
     for fixture in fixtures_of("ExtensionRegisterRequest") {
@@ -208,7 +263,9 @@ fn bridge_invoke_and_cancel_fixtures_enforce_identity_rules() {
 
 #[test]
 fn extension_operation_taxonomy_is_closed_and_kind_bound() {
-    use echo_sdk_protocol::methods::{ExtensionDescriptor, ExtensionKind, ExtensionOperation};
+    use echo_sdk_protocol::methods::{
+        AgentComponentKindWire, ExtensionDescriptor, ExtensionKind, ExtensionOperation,
+    };
     // Every operation resolves to a kind, and streaming membership is stable.
     let all = [
         ExtensionOperation::ToolExecute,
@@ -243,6 +300,9 @@ fn extension_operation_taxonomy_is_closed_and_kind_bound() {
         ExtensionOperation::AgentChat,
         ExtensionOperation::AgentChatStream,
         ExtensionOperation::AgentClose,
+        ExtensionOperation::CriticCritique,
+        ExtensionOperation::CompressorCompress,
+        ExtensionOperation::AgentComponentCall,
     ];
     let mut names = std::collections::BTreeSet::new();
     for operation in all {
@@ -273,6 +333,9 @@ fn extension_operation_taxonomy_is_closed_and_kind_bound() {
         ExtensionKind::InterventionCallback,
         ExtensionKind::AgentFactory,
         ExtensionKind::CustomAgent,
+        ExtensionKind::Critic,
+        ExtensionKind::ContextCompressor,
+        ExtensionKind::AgentComponent,
     ];
     for kind in kinds {
         assert!(
@@ -295,6 +358,40 @@ fn extension_operation_taxonomy_is_closed_and_kind_bound() {
         }
         .kind(),
         ExtensionKind::InterventionCallback
+    );
+    assert_eq!(
+        ExtensionDescriptor::Critic {
+            descriptor_version: 1,
+            name: "sdk-critic".to_string(),
+        }
+        .kind(),
+        ExtensionKind::Critic
+    );
+    assert!(
+        ExtensionDescriptor::Critic {
+            descriptor_version: 1,
+            name: "sdk-critic".to_string(),
+        }
+        .validate()
+        .is_ok()
+    );
+    assert_eq!(
+        ExtensionDescriptor::ContextCompressor {
+            descriptor_version: 1,
+            name: "sdk-compressor".to_string(),
+        }
+        .kind(),
+        ExtensionKind::ContextCompressor
+    );
+    assert_eq!(
+        ExtensionDescriptor::AgentComponent {
+            descriptor_version: 1,
+            component: AgentComponentKindWire::ConversationStore,
+            name: "sdk-conversation-store".to_string(),
+            capabilities: AgentComponentCapabilitiesWire::default(),
+        }
+        .kind(),
+        ExtensionKind::AgentComponent
     );
     // Descriptor fingerprints are canonical: same descriptor, same string.
     let descriptor = ExtensionDescriptor::Tool {
@@ -322,6 +419,115 @@ fn extension_operation_taxonomy_is_closed_and_kind_bound() {
         .validate()
         .is_err()
     );
+}
+
+#[test]
+fn critic_invocation_and_result_are_typed_and_bounded() {
+    use echo_sdk_protocol::methods::{
+        CritiqueInput, CritiqueWire, ExtensionInvocation, ExtensionOperation, ExtensionResult,
+    };
+    let input = CritiqueInput {
+        task: "solve".to_string(),
+        answer: "42".to_string(),
+        context: "math".to_string(),
+    };
+    assert!(input.validate().is_ok());
+    let invocation = ExtensionInvocation::CriticCritique(input.clone());
+    assert_eq!(invocation.operation(), ExtensionOperation::CriticCritique);
+    let result = ExtensionResult::CriticCritique(CritiqueWire {
+        score: 9.5,
+        passed: true,
+        feedback: "good".to_string(),
+        suggestions: Vec::new(),
+    });
+    assert_eq!(result.operation(), ExtensionOperation::CriticCritique);
+    assert!(
+        CritiqueWire {
+            score: 10.0,
+            passed: true,
+            feedback: String::new(),
+            suggestions: Vec::new(),
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        CritiqueWire {
+            score: 10.1,
+            passed: true,
+            feedback: String::new(),
+            suggestions: Vec::new(),
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
+fn agent_component_extended_methods_and_stream_capabilities_are_closed() {
+    use echo_sdk_protocol::methods::{
+        AgentComponentCallInputWire, AgentComponentKindWire, AgentComponentOperationWire,
+        ExtensionDescriptor,
+    };
+
+    let cases = [
+        (
+            AgentComponentCallInputWire::ConversationEnsure {
+                conversation: WireValue::Null,
+            },
+            AgentComponentOperationWire::ConversationEnsure,
+        ),
+        (
+            AgentComponentCallInputWire::RunAppendEvent {
+                run_id: "run".to_string(),
+                event: WireValue::Null,
+            },
+            AgentComponentOperationWire::RunAppendEvent,
+        ),
+        (
+            AgentComponentCallInputWire::SandboxExecuteStream {
+                command: WireValue::Null,
+            },
+            AgentComponentOperationWire::SandboxExecuteStream,
+        ),
+        (
+            AgentComponentCallInputWire::WorkflowRunStream {
+                input: String::new(),
+            },
+            AgentComponentOperationWire::WorkflowRunStream,
+        ),
+        (
+            AgentComponentCallInputWire::IntentClassify {
+                user_input: String::new(),
+                context: Vec::new(),
+            },
+            AgentComponentOperationWire::IntentClassify,
+        ),
+    ];
+    for (input, operation) in cases {
+        assert_eq!(input.operation(), operation);
+    }
+
+    let sandbox = ExtensionDescriptor::AgentComponent {
+        descriptor_version: 1,
+        component: AgentComponentKindWire::SandboxExecutor,
+        name: "sandbox".to_string(),
+        capabilities: AgentComponentCapabilitiesWire {
+            supports_streaming: true,
+            ..AgentComponentCapabilitiesWire::default()
+        },
+    };
+    assert!(sandbox.validate().is_ok());
+    let audit = ExtensionDescriptor::AgentComponent {
+        descriptor_version: 1,
+        component: AgentComponentKindWire::AuditLogger,
+        name: "audit".to_string(),
+        capabilities: AgentComponentCapabilitiesWire {
+            supports_streaming: true,
+            ..AgentComponentCapabilitiesWire::default()
+        },
+    };
+    assert!(audit.validate().is_err());
 }
 
 #[test]

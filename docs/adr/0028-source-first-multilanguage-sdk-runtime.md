@@ -5,6 +5,10 @@
 - Owners: `echo-agent` framework
 - Design: [`../supreme/specs/2026-09-04-source-first-multilanguage-sdk-runtime/design.md`](../supreme/specs/2026-09-04-source-first-multilanguage-sdk-runtime/design.md)
 
+## Status
+
+Accepted.
+
 ## Context
 
 `echo-agent` is a reusable Rust Agent framework. TypeScript, Python, and Java
@@ -337,3 +341,106 @@ negotiated `extension_bridge` capability.
   type-erased executor injections) and exporting the `HumanInLoop` tool for
   embedders that swap the approval provider. Everything else uses existing
   public setters.
+
+## Decision: facade feature adapters (plan 07)
+
+The facade adapter layer ships as the `sdk-facade-adapters` Host feature
+(plus the explicit `sdk-facade-all` profile) behind the negotiated
+`feature_surfaces`/`task_graph`/`subagents`/`structured_output`
+capabilities.
+
+- **One executable catalog, no path heuristics.** The generated
+  `contracts/sdk/facade-operation-catalog.json` is embedded verbatim and is
+  the only route authority: exact operation identities, per-route sha256
+  signature digests and frozen all-of/any-of feature requirements. Unknown
+  operations, wrong digests and unlisted family operations fail closed with
+  typed errors; the generic invoke surface never wildcards.
+- **Feature authority stays with Cargo.** The `initialize` advertisement is
+  derived from the compiled feature set (`echo-sdk-host/src/features.rs`);
+  `sdk-facade-adapters` implies `framework-subagent` so `task_graph` is
+  never advertised without the task execute/control handlers. `improve`
+  explicitly implies `eval`, matching ImprovementLoop's public type
+  dependencies; the Host passthrough preserves that transitive feature.
+  `sdk-extension-bridge` explicitly implies `sdk-facade-adapters`, because the
+  compressor bridge's Host tokenizer is invoked through the canonical facade
+  route instead of a duplicate bridge-only dispatcher.
+  Family methods and invoke routes enforce the same feature semantics.
+- **Family handlers are thin adapters.** Task/PlanTask bind the Session's
+  `TaskRevisionService`/`RuntimeTaskService`; subagent verbs bind the same
+  `SubagentExecutor`; stateful/integration/tool families call the framework
+  services directly. The Host owns addressing and lifecycle only.
+- **Host-issued handles and hard bounds.** TaskRun/PlanTask handles are
+  minted and generation-fenced by the Host; a second `task/execute` of a
+  live run is a typed conflict; live subagent records obey the advertised
+  `max_open_handles`; family resources obey the advertised
+  `max_facade_resources`; page and argument bounds come from the same
+  advertised limits.
+- **Teardown is bounded and complete.** Session close cancels the session's
+  task executions and subagent dispatches and drops its family resources;
+  connection teardown cancels all live executions/dispatches and awaits
+  `McpManager::close_all` inside the bounded shutdown chain.
+- **Honest status.** The Rust Host facade adapters and source-built
+  TypeScript/Python/Java ACP client baselines are delivered; the language
+  SDKs are not yet claimed as full facade parity. `channels` is bound when
+  both the framework channel feature and the typed extension bridge are
+  compiled; `telemetry` has its process-scoped adapter, while `testing`
+  remains deliberately unbound with method-not-found, never simulated
+  results.
+
+## Decision: facade public-API parity (plan 08)
+
+- **No generic source fallback.** Every canonical `source:` operation is
+  mechanically exercised against the real Host and must reach a concrete
+  adapter. Agent, Session, Run, Task, Subagent, Store, MCP and Skill operations
+  reuse their existing authorities. Durable filesystem functions call
+  `echo_core::utils::fs`; lease and identity-guard values live behind the
+  unified Session-owned `FacadeResource` handle.
+- **Intrinsic membership is frozen, not inferred.** Pure language values and
+  Rust-only construction helpers carry an explicit reason. Rust closure APIs
+  such as `atomic_compare_and_swap` remain process-local because narrowing an
+  arbitrary predicate to byte equality would not be semantically equivalent.
+  A digest over every canonical intrinsic item fails when a new member appears
+  beneath a previously classified type or module.
+- **Consumer traits form a closed set.** Live host-language implementations use
+  typed ExtensionBridge kinds. Rust generic, borrowed-view, `FnOnce`,
+  marker/builder, event-bus registration and runtime-owned construction traits
+  without a Host call site carry an exact process-local evidence route and a
+  language interface/helper obligation. Canonical consumer traits cannot fall
+  into generic invocation or be relabeled as a same-topic family/core route.
+- **Stateful public methods stay in Rust.** EvalRunner/LlmGrader,
+  ImprovementLoop/TrajectorySaver, PluginRegistry and concrete memory backends
+  are Session-owned facade resources. Their complete state/I/O method sets use
+  exact source operations or `memory.resource.*` Store verbs; they are not
+  hidden by process-local intrinsic labels.
+- **Callback inputs are semantically complete.** Agent-component calls and
+  results are operation-discriminated DTO unions. ContextCompressor callbacks
+  receive a temporary Host-owned tokenizer resource, and same-Session
+  callback mutations fail immediately with `extension_conflict`.
+- **Default trait methods remain overridable.** ConversationStore ensure/search,
+  RunStore append/parent-list, Sandbox cancel-aware execution and
+  Workflow/Sandbox streams have explicit component operations. IntentClassifier
+  and SkillLoadPolicy are live components; the latter is awaited by discovery,
+  prepared registration and reconciliation. Workflow mutation is exclusive per
+  registration; ordinary Send+Sync component calls remain concurrent across
+  Sessions. Sandbox and Workflow use separate typed chunk/terminal DTOs, and
+  extension Workflow events reuse the graph stream projection.
+- **Eval dependencies remain caller-selected.** Eval/grade calls use explicit
+  Agent handles, batch/improvement calls invoke an AgentFactory lazily, and
+  RunStore accepts either the Host trace resource or a language component.
+  Public eval/improvement configuration fields are exposed as resource
+  property operations.
+- **MCP publication is transactional and bounded.** Client/tool handle
+  publication rolls back and disconnects as one transaction. Transport
+  initialization failure and post-initialize facade-handle publication failure
+  both close the transport; notification polling is on-demand and capacity
+  bounded.
+- **Public streams are real streams.** Agent streams use Run/EventReplay and
+  extension streams use ExtensionBridge. Workflow and A2A producers use a
+  capacity-one pull queue with `next/cancel/close`; the returned Stream handle
+  is minted, owner-checked, sequenced and tombstoned by the existing
+  `HandleRegistry`. The runtime map stores only receivers and producer tasks,
+  never a second stream identity or lifecycle state.
+- **Status remains layered.** Rust Host facade parity can be complete while
+  TypeScript, Python and Java rows remain incomplete. Overall `Parity complete`
+  is not claimed until all three language suites pass the full all-feature
+  matrix.

@@ -15,13 +15,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
 
-use crate::sandbox::SandboxManager;
 use crate::skills::SkillInfo;
 use crate::skills::external::SkillDocument;
 use crate::skills::external::prompt_exec::{PromptContext, SkillSource, process_skill_content};
 use crate::skills::external::types::{
     SkillContent, SkillDescriptor, SkillResourceEntry, SkillResourceKind, SkillSandboxPolicy,
 };
+use echo_core::sandbox::SandboxExecutor;
 
 // -- SkillRegistry --
 
@@ -51,7 +51,7 @@ pub struct SkillRegistry {
     session_id: String,
 
     /// Optional sandbox manager used when activating local skills with inline commands.
-    sandbox: Option<Arc<SandboxManager>>,
+    sandbox: Option<Arc<dyn SandboxExecutor>>,
 
     /// Active sandbox policies for activated skills: name -> policy.
     /// Populated during activation when a skill declares a sandbox policy.
@@ -231,7 +231,7 @@ impl SkillRegistry {
     }
 
     /// Attach a sandbox manager used for inline command execution during activation.
-    pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
+    pub fn set_sandbox_manager(&mut self, manager: Arc<dyn SandboxExecutor>) {
         self.sandbox = Some(manager);
     }
 

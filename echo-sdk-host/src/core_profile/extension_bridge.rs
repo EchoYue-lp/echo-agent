@@ -20,12 +20,19 @@
 //! registry) stay untouched.
 
 use agent_client_protocol::{Client, ConnectionTo};
+#[cfg(feature = "framework-channels")]
+use async_trait::async_trait;
 use base64::Engine as _;
 use echo_agent::agent::{Agent, AgentEvent, CancellationToken};
+#[cfg(feature = "framework-channels")]
+use echo_agent::channels::{
+    AttachmentKind, ChannelCapabilities, ChannelPlugin, ChatType as ChannelChatType,
+    InboundMessage, MessageAttachment, MessageHandler, OutboundMessage,
+};
 use echo_agent::error::ReactError;
 use echo_agent::tools::{ToolContext, ToolParameters, ToolResult, ToolStreamEvent};
 use futures::{Stream, StreamExt as _};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -37,27 +44,39 @@ use tokio::sync::{Notify, mpsc};
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
 use echo_sdk_protocol::handle::{HandleKind, WireHandle};
 use echo_sdk_protocol::methods::{
-    ActivateSkillWire, AgentEventWire, AgentFactoryConfigWire, AgentMessageInput,
-    AgentStreamChunkWire, AgentStreamTerminalWire, AgentTaskInput, ApprovalScopeWire,
-    CallbackFinalAnswerInput, CallbackIterationInput, CallbackThinkEndInput,
-    CallbackThinkStartInput, CallbackToolEndInput, CallbackToolErrorInput, CallbackToolStartInput,
-    CustomAgentDescriptorWire, ExtensionDescriptor, ExtensionInvocation,
-    ExtensionInvocationContext, ExtensionInvokeCall, ExtensionInvokeOutcome, ExtensionKind,
-    ExtensionOperation, ExtensionResult, ExtensionStreamChunkValue, ExtensionStreamCompleteValue,
-    ExtensionStreamEvent, ExtensionUnit, HookResultWire, HookRunInput, HumanLoopKindWire,
-    HumanLoopRequestWire, HumanLoopResponseWire, HumanRiskLevelWire, InterventionResultWire,
-    LlmChatChunkWire, LlmChatRequestWire, LlmChatResponseWire, LlmDeltaToolCallWire,
-    LlmMessageWire, LlmReasoningBlockWire, LlmStreamChunkWire, LlmStreamCompleteWire,
-    LlmToolCallWire, LlmToolDefinitionWire, PermissionDecisionWire, StepTypeWire, StoreItemWire,
-    StoreKeyInput, StoreListNamespacesInput, StoreNamespaceInput, StorePutInput, StoreSearchInput,
-    StoreSearchModeWire, StoreSearchQueryWire, StoreSearchWithInput, ToolContextWire,
-    ToolExecuteInput, ToolFailureWire, ToolOutputArtifactConfigWire, ToolOutputArtifactRefWire,
-    ToolResultContentWire, ToolResultKindWire, ToolResultWire, ToolStreamChunkWire,
-    ToolStreamEventWire, ToolValidateInput,
+    ActivateSkillWire, AgentComponentCallInputWire, AgentComponentCallResultWire,
+    AgentComponentCallWire, AgentComponentCapabilitiesWire, AgentComponentKindWire,
+    AgentComponentOperationWire, AgentComponentStreamChunkWire, AgentComponentStreamCompleteWire,
+    AgentEventWire, AgentFactoryConfigWire, AgentMessageInput, AgentStreamChunkWire,
+    AgentStreamTerminalWire, AgentTaskInput, ApprovalScopeWire, CallbackFinalAnswerInput,
+    CallbackIterationInput, CallbackThinkEndInput, CallbackThinkStartInput, CallbackToolEndInput,
+    CallbackToolErrorInput, CallbackToolStartInput, CompressionInputWire, CompressionOutputWire,
+    CritiqueInput, CritiqueWire, CustomAgentDescriptorWire, ExtensionDescriptor,
+    ExtensionInvocation, ExtensionInvocationContext, ExtensionInvokeCall, ExtensionInvokeOutcome,
+    ExtensionKind, ExtensionOperation, ExtensionResult, ExtensionStreamChunkValue,
+    ExtensionStreamCompleteValue, ExtensionStreamEvent, ExtensionUnit, HookResultWire,
+    HookRunInput, HumanLoopKindWire, HumanLoopRequestWire, HumanLoopResponseWire,
+    HumanRiskLevelWire, InterventionResultWire, LlmChatChunkWire, LlmChatRequestWire,
+    LlmChatResponseWire, LlmDeltaToolCallWire, LlmMessageWire, LlmReasoningBlockWire,
+    LlmStreamChunkWire, LlmStreamCompleteWire, LlmToolCallWire, LlmToolDefinitionWire,
+    PermissionDecisionWire, SandboxOutputChannelWire, SandboxStreamChunkWire,
+    SandboxStreamCompleteWire, SandboxStreamFailureWire, SkillDescriptorPolicyWire, StepTypeWire,
+    StoreItemWire, StoreKeyInput, StoreListNamespacesInput, StoreNamespaceInput, StorePutInput,
+    StoreSearchInput, StoreSearchModeWire, StoreSearchQueryWire, StoreSearchWithInput,
+    TokenizerReferenceWire, ToolContextWire, ToolExecuteInput, ToolFailureWire,
+    ToolOutputArtifactConfigWire, ToolOutputArtifactRefWire, ToolResultContentWire,
+    ToolResultKindWire, ToolResultWire, ToolStreamChunkWire, ToolStreamEventWire,
+    ToolValidateInput, WorkflowStreamChunkWire, WorkflowStreamCompleteWire,
+};
+#[cfg(feature = "framework-channels")]
+use echo_sdk_protocol::methods::{
+    ChannelAttachmentWire, ChannelChatTypeWire, ChannelHandleInput, ChannelInboundMessageWire,
+    ChannelOutboundMessageWire, ChannelPluginDescriptorWire, ChannelReplyInput, ChannelSendInput,
+    ChannelStartInput,
 };
 #[cfg(test)]
 use echo_sdk_protocol::methods::{LlmDeltaFunctionWire, LlmUsageWire};
-use echo_sdk_protocol::scalar::{WirePath, WireU64, WireValue};
+use echo_sdk_protocol::scalar::{WireI64, WirePath, WireU64, WireValue};
 
 use super::state::CoreProfileState;
 use super::wire::sdk_error;
@@ -67,6 +86,7 @@ use super::wire::sdk_error;
 /// notification handler wait (never the reader loop — routing is spawned).
 #[cfg(test)]
 const STREAM_CHANNEL_CAPACITY: usize = 128;
+const MCP_NOTIFICATION_QUEUE_CAPACITY: usize = 64;
 
 // ── Shared bridge state ─────────────────────────────────────────────────────
 
@@ -77,6 +97,11 @@ pub(crate) struct ExtensionBridgeShared {
     connection: OnceLock<ConnectionTo<Client>>,
     /// Live callback stream sinks by stream id.
     streams: Mutex<HashMap<String, Arc<ExtensionStreamSink>>>,
+    /// Number of reverse callbacks currently awaiting the SDK for each
+    /// Session. A callback may issue independent SDK requests, but an
+    /// exclusive mutation of the same Session must fail immediately rather
+    /// than wait on the Agent lock held by the originating run.
+    active_session_callbacks: Mutex<HashMap<String, usize>>,
 }
 
 impl ExtensionBridgeShared {
@@ -84,7 +109,34 @@ impl ExtensionBridgeShared {
         Self {
             connection: OnceLock::new(),
             streams: Mutex::new(HashMap::new()),
+            active_session_callbacks: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn enter_session_callback(
+        self: &Arc<Self>,
+        session_id: Option<&str>,
+    ) -> Option<SessionCallbackGuard> {
+        let session_id = session_id?.to_string();
+        let mut active = self
+            .active_session_callbacks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = active.entry(session_id.clone()).or_default();
+        *count = count.saturating_add(1);
+        drop(active);
+        Some(SessionCallbackGuard {
+            shared: self.clone(),
+            session_id,
+        })
+    }
+
+    pub(crate) fn has_active_session_callback(&self, session_id: &str) -> bool {
+        self.active_session_callbacks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .is_some_and(|count| *count > 0)
     }
 
     /// Capture the connection once. Later calls with the same connection are
@@ -250,6 +302,27 @@ impl ExtensionBridgeShared {
     }
 }
 
+struct SessionCallbackGuard {
+    shared: Arc<ExtensionBridgeShared>,
+    session_id: String,
+}
+
+impl Drop for SessionCallbackGuard {
+    fn drop(&mut self) {
+        let mut active = self
+            .shared
+            .active_session_callbacks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = active.get_mut(&self.session_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                active.remove(&self.session_id);
+            }
+        }
+    }
+}
+
 // ── Stream sink ─────────────────────────────────────────────────────────────
 
 /// One live callback stream: bounded mailbox plus the monotonic-sequence and
@@ -262,6 +335,7 @@ pub(crate) struct ExtensionStreamSink {
     inner: Mutex<StreamSinkInner>,
     closed: AtomicBool,
     closed_notify: Notify,
+    session_callback: Mutex<Option<SessionCallbackGuard>>,
 }
 
 struct StreamSinkInner {
@@ -276,6 +350,7 @@ impl ExtensionStreamSink {
         extension_id: String,
         value_kind: ExtensionKind,
         capacity: usize,
+        session_callback: Option<SessionCallbackGuard>,
     ) -> (Arc<Self>, mpsc::Receiver<ExtensionStreamEvent>) {
         let (sender, receiver) = mpsc::channel(capacity.max(1));
         (
@@ -291,6 +366,7 @@ impl ExtensionStreamSink {
                 }),
                 closed: AtomicBool::new(false),
                 closed_notify: Notify::new(),
+                session_callback: Mutex::new(session_callback),
             }),
             receiver,
         )
@@ -324,6 +400,10 @@ impl ExtensionStreamSink {
         if !self.closed.swap(true, Ordering::AcqRel) {
             self.closed_notify.notify_waiters();
         }
+        self.session_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
     }
 
     async fn wait_closed(&self) {
@@ -435,13 +515,28 @@ pub(crate) struct ExtensionBridge {
 /// Kinds whose callbacks mutate the implementation exclusively: a second
 /// in-flight invocation on the same registration is a typed conflict, never
 /// a wait (design §12.3).
-fn is_exclusive_kind(kind: ExtensionKind) -> bool {
+fn is_exclusive_invocation(kind: ExtensionKind, invocation: &ExtensionInvocation) -> bool {
+    if kind == ExtensionKind::AgentComponent {
+        return matches!(
+            invocation,
+            ExtensionInvocation::AgentComponentCall(AgentComponentCallWire {
+                component: AgentComponentKindWire::Workflow,
+                ..
+            }) | ExtensionInvocation::AgentComponentCallStream(AgentComponentCallWire {
+                component: AgentComponentKindWire::Workflow,
+                ..
+            })
+        );
+    }
     matches!(
         kind,
         ExtensionKind::HumanLoopProvider
             | ExtensionKind::AgentFactory
             | ExtensionKind::CustomAgent
             | ExtensionKind::Hook
+            | ExtensionKind::ChannelPlugin
+            | ExtensionKind::ChannelMessageHandler
+            | ExtensionKind::ContextCompressor
     )
 }
 
@@ -573,6 +668,7 @@ impl ExtensionBridge {
         &self,
         extension: &WireHandle,
         operation: ExtensionOperation,
+        invocation: &ExtensionInvocation,
         framework_cancellation: CancellationToken,
     ) -> std::result::Result<
         (
@@ -618,7 +714,7 @@ impl ExtensionBridge {
             )
         })?;
         let authority = services.extensions().clone();
-        let exclusive_key = is_exclusive_kind(record.kind)
+        let exclusive_key = is_exclusive_invocation(record.kind, invocation)
             .then(|| format!("{}/{}", extension.id, record.kind.as_str()));
         let lease = authority
             .lease(exclusive_key.as_deref(), framework_cancellation)
@@ -671,7 +767,7 @@ impl ExtensionBridge {
         };
         let connection = self.shared.connection()?;
         let (mut lease, record, _authority) =
-            self.prepare(extension, operation, framework_cancellation)?;
+            self.prepare(extension, operation, &invocation, framework_cancellation)?;
         self.ensure_payload_bound(&invocation, false)?;
         let deadline = self.deadline_of(&record);
         let call = ExtensionInvokeCall {
@@ -690,6 +786,11 @@ impl ExtensionBridge {
                 "_echo_agent/extension/invoke",
             ));
         }
+        let _session_callback = self.shared.enter_session_callback(
+            call.context
+                .as_ref()
+                .and_then(|value| value.session_id.as_deref()),
+        );
         let sent = connection.send_request(call);
         let cancellation = lease.cancellation();
         let mut drop_notice = InvocationDropNotice::new(self.clone(), lease.identity());
@@ -775,16 +876,22 @@ impl ExtensionBridge {
             .await;
         let connection = self.shared.connection()?;
         let (mut lease, record, _authority) =
-            self.prepare(extension, operation, framework_cancellation)?;
+            self.prepare(extension, operation, &invocation, framework_cancellation)?;
         self.ensure_payload_bound(&invocation, false)?;
         let deadline = self.deadline_of(&record);
         let state = self.state()?;
         let stream = state.handles.register_extension_stream(&extension.id)?;
+        let session_callback = self.shared.enter_session_callback(
+            context
+                .as_ref()
+                .and_then(|value| value.session_id.as_deref()),
+        );
         let (sink, receiver) = ExtensionStreamSink::new(
             stream.clone(),
             extension.id.clone(),
             operation.kind(),
             state.limits.max_outstanding_live_events,
+            session_callback,
         );
         self.shared.register_stream(sink.clone());
         let call = ExtensionInvokeCall {
@@ -1252,6 +1359,23 @@ fn react_error(error: EchoSdkError) -> ReactError {
         error.code.as_str(),
         error.message
     ))
+}
+
+fn sandbox_react_error(error: EchoSdkError) -> ReactError {
+    use echo_agent::error::SandboxError;
+    let message = format!(
+        "extension bridge failure {}: {}",
+        error.code.as_str(),
+        error.message
+    );
+    let error = match error.code {
+        ExtensionErrorCode::Cancelled => SandboxError::Cancelled(message),
+        ExtensionErrorCode::ExtensionTimeout => SandboxError::Timeout(message),
+        ExtensionErrorCode::FeatureUnavailable => SandboxError::Unavailable(message),
+        ExtensionErrorCode::ExtensionRejected => SandboxError::PermissionDenied(message),
+        _ => SandboxError::IoError(message),
+    };
+    ReactError::Sandbox(Box::new(error))
 }
 
 fn settlement_error(settlement: Option<echo_agent::acp::ExtensionSettlement>) -> EchoSdkError {
@@ -2867,6 +2991,1989 @@ impl echo_agent::llm::LlmClient for ExtensionLlmClientProxy {
     }
 }
 
+// ── Context-compressor proxy ────────────────────────────────────────────────
+
+/// Thin custom-compressor proxy. The Host retains cancellation and tokenizer
+/// authority; the callback receives the message/input fields and returns the
+/// framework's message, eviction and checkpoint result.
+pub(crate) struct ExtensionContextCompressorProxy {
+    bridge: Arc<ExtensionBridge>,
+    extension: WireHandle,
+    session_id: String,
+    name: String,
+}
+
+struct TokenizerResourceGuard {
+    state: Arc<CoreProfileState>,
+    owner: String,
+    handle: WireHandle,
+}
+
+impl TokenizerResourceGuard {
+    fn new(state: Arc<CoreProfileState>, owner: String, handle: WireHandle) -> Self {
+        Self {
+            state,
+            owner,
+            handle,
+        }
+    }
+}
+
+impl Drop for TokenizerResourceGuard {
+    fn drop(&mut self) {
+        crate::core_profile::facade::source_operations::release_tokenizer_authority(
+            &self.state,
+            &self.owner,
+            &self.handle,
+        );
+    }
+}
+
+impl ExtensionContextCompressorProxy {
+    pub(crate) fn new(
+        bridge: Arc<ExtensionBridge>,
+        extension: WireHandle,
+        session_id: String,
+    ) -> Option<Self> {
+        let record = bridge.state().ok()?.handles.extension(&extension).ok()?;
+        let ExtensionDescriptor::ContextCompressor { name, .. } = &record.descriptor else {
+            return None;
+        };
+        Some(Self {
+            bridge,
+            extension,
+            session_id,
+            name: name.clone(),
+        })
+    }
+}
+
+impl echo_agent::compression::ContextCompressor for ExtensionContextCompressorProxy {
+    fn compress(
+        &self,
+        input: echo_agent::compression::CompressionInput,
+    ) -> futures::future::BoxFuture<
+        '_,
+        echo_agent::error::Result<echo_agent::compression::CompressionOutput>,
+    > {
+        Box::pin(async move {
+            let cancellation = input.cancel_token.clone().unwrap_or_else(cancelled_token);
+            let tokenizer = input.tokenizer();
+            let token_limit = u64::try_from(input.token_limit).map_err(|_| {
+                ReactError::Other("compression token_limit exceeds WireU64".to_string())
+            })?;
+            let messages = input
+                .messages
+                .iter()
+                .map(message_wire)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(ReactError::Other)?;
+            let state = self.bridge.state().map_err(react_error)?;
+            let tokenizer_resource =
+                crate::core_profile::facade::source_operations::register_tokenizer_authority(
+                    &state,
+                    &self.session_id,
+                    tokenizer,
+                )
+                .map_err(react_error)?;
+            let tokenizer_resource = TokenizerResourceGuard::new(
+                state.clone(),
+                self.session_id.clone(),
+                tokenizer_resource,
+            );
+            let result = self
+                .bridge
+                .invoke_once(
+                    &self.extension,
+                    Some(session_invocation_context(&self.session_id)),
+                    ExtensionInvocation::CompressorCompress(CompressionInputWire {
+                        messages,
+                        token_limit: WireU64::from_u64(token_limit),
+                        current_query: input.current_query,
+                        focus_instructions: input.focus_instructions,
+                        tokenizer: TokenizerReferenceWire {
+                            resource: tokenizer_resource.handle.clone(),
+                            owner_session_id: self.session_id.clone(),
+                        },
+                    }),
+                    cancellation,
+                )
+                .await;
+            let result = result.map_err(react_error)?;
+            let ExtensionResult::CompressorCompress(CompressionOutputWire {
+                messages,
+                evicted,
+                checkpoint,
+            }) = result
+            else {
+                return Err(ReactError::Other(
+                    "context compressor extension returned the wrong result variant".to_string(),
+                ));
+            };
+            let messages = messages
+                .into_iter()
+                .map(message_from_wire)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(ReactError::Other)?;
+            let evicted = evicted
+                .into_iter()
+                .map(message_from_wire)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(ReactError::Other)?;
+            let checkpoint = checkpoint
+                .map(|checkpoint| {
+                    checkpoint
+                        .into_json()
+                        .map_err(|error| error.to_string())
+                        .and_then(|value| {
+                            serde_json::from_value(value).map_err(|error| error.to_string())
+                        })
+                })
+                .transpose()
+                .map_err(ReactError::Other)?;
+            Ok(echo_agent::compression::CompressionOutput {
+                messages,
+                evicted,
+                checkpoint,
+            })
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+// ── Live Agent component proxies ────────────────────────────────────────────
+
+/// Shared reverse bridge for application-supplied Agent infrastructure. The
+/// descriptor component and each operation form a closed pair; concrete trait
+/// impls below only translate values and never own persistence or policy.
+#[derive(Clone)]
+pub(crate) struct ExtensionAgentComponentProxy {
+    bridge: Arc<ExtensionBridge>,
+    extension: WireHandle,
+    session_id: String,
+    component: AgentComponentKindWire,
+    name: String,
+    capabilities: AgentComponentCapabilitiesWire,
+    notification_queue:
+        Arc<Mutex<VecDeque<echo_agent::mcp::integration::types::JsonRpcNotification>>>,
+    notification_cancel: CancellationToken,
+    notification_started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ExtensionAgentComponentProxy {
+    pub(crate) fn new(
+        bridge: Arc<ExtensionBridge>,
+        extension: WireHandle,
+        session_id: String,
+    ) -> Option<Self> {
+        let record = bridge.state().ok()?.handles.extension(&extension).ok()?;
+        let ExtensionDescriptor::AgentComponent {
+            component,
+            ref name,
+            ref capabilities,
+            ..
+        } = record.descriptor
+        else {
+            return None;
+        };
+        let proxy = Self {
+            bridge,
+            extension,
+            session_id,
+            component,
+            name: name.clone(),
+            capabilities: capabilities.clone(),
+            notification_queue: Arc::new(Mutex::new(VecDeque::new())),
+            notification_cancel: CancellationToken::new(),
+            notification_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        Some(proxy)
+    }
+
+    pub(crate) fn component(&self) -> AgentComponentKindWire {
+        self.component
+    }
+
+    fn start_notification_poll(&self) {
+        if !self.capabilities.supports_notifications
+            || self
+                .notification_started
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let proxy = self.clone();
+        let _ = tokio::runtime::Handle::try_current().map(|runtime| {
+            runtime.spawn(async move {
+                loop {
+                    let result = tokio::select! {
+                        () = proxy.notification_cancel.cancelled() => return,
+                        result = proxy.invoke(AgentComponentCallInputWire::McpTransportTryNotification) => result,
+                    };
+                    match result {
+                        Ok(AgentComponentCallResultWire::McpTransportTryNotification {
+                            notification: Some(notification),
+                        }) => {
+                            let Ok(notification) = component_decode(notification) else {
+                                return;
+                            };
+                            let mut queue = proxy
+                                .notification_queue
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            if queue.len() >= MCP_NOTIFICATION_QUEUE_CAPACITY {
+                                queue.pop_front();
+                                tracing::warn!(
+                                    extension = %proxy.extension.id,
+                                    capacity = MCP_NOTIFICATION_QUEUE_CAPACITY,
+                                    "MCP extension notification queue dropped its oldest item"
+                                );
+                            }
+                            queue.push_back(notification);
+                        }
+                        Ok(AgentComponentCallResultWire::McpTransportTryNotification {
+                            notification: None,
+                        }) => tokio::time::sleep(Duration::from_millis(25)).await,
+                        _ => return,
+                    }
+                }
+            });
+        });
+    }
+
+    async fn invoke(
+        &self,
+        call: AgentComponentCallInputWire,
+    ) -> echo_agent::error::Result<AgentComponentCallResultWire> {
+        let operation = call.operation();
+        if operation.component() != self.component {
+            return Err(ReactError::Other(
+                "agent component operation does not match its descriptor".to_string(),
+            ));
+        }
+        let result = self
+            .bridge
+            .invoke_once(
+                &self.extension,
+                Some(session_invocation_context(&self.session_id)),
+                ExtensionInvocation::AgentComponentCall(AgentComponentCallWire {
+                    component: self.component,
+                    call,
+                }),
+                self.bridge.connection_cancellation(),
+            )
+            .await
+            .map_err(react_error)?;
+        let ExtensionResult::AgentComponentCall(result) = result else {
+            return Err(ReactError::Other(
+                "agent component extension returned the wrong result variant".to_string(),
+            ));
+        };
+        if result.component != self.component || result.result.operation() != operation {
+            return Err(ReactError::Other(
+                "agent component extension returned a mismatched operation".to_string(),
+            ));
+        }
+        Ok(result.result)
+    }
+
+    async fn invoke_with_cancellation(
+        &self,
+        call: AgentComponentCallInputWire,
+        cancellation: CancellationToken,
+    ) -> echo_agent::error::Result<AgentComponentCallResultWire> {
+        let operation = call.operation();
+        if operation.component() != self.component {
+            return Err(ReactError::Other(
+                "agent component operation does not match its descriptor".to_string(),
+            ));
+        }
+        let result = self
+            .bridge
+            .invoke_once(
+                &self.extension,
+                Some(session_invocation_context(&self.session_id)),
+                ExtensionInvocation::AgentComponentCall(AgentComponentCallWire {
+                    component: self.component,
+                    call,
+                }),
+                cancellation,
+            )
+            .await
+            .map_err(sandbox_react_error)?;
+        let ExtensionResult::AgentComponentCall(result) = result else {
+            return Err(ReactError::Other(
+                "agent component extension returned the wrong result variant".to_string(),
+            ));
+        };
+        if result.component != self.component || result.result.operation() != operation {
+            return Err(ReactError::Other(
+                "agent component extension returned a mismatched operation".to_string(),
+            ));
+        }
+        Ok(result.result)
+    }
+}
+
+pub(crate) fn latest_agent_component_proxy(
+    state: &CoreProfileState,
+    bridge: Arc<ExtensionBridge>,
+    session_id: &str,
+    component: AgentComponentKindWire,
+) -> Option<ExtensionAgentComponentProxy> {
+    let extension = state
+        .handles
+        .extensions_of_kind(ExtensionKind::AgentComponent)
+        .into_iter()
+        .filter(|(_, record)| {
+            matches!(
+                &record.descriptor,
+                ExtensionDescriptor::AgentComponent {
+                    component: descriptor_component,
+                    ..
+                } if *descriptor_component == component
+            )
+        })
+        .max_by_key(|(_, record)| record.registration_order)?
+        .0;
+    ExtensionAgentComponentProxy::new(bridge, extension, session_id.to_string())
+}
+
+fn component_value(value: impl serde::Serialize) -> echo_agent::error::Result<WireValue> {
+    WireValue::from_json(
+        serde_json::to_value(value).map_err(|error| ReactError::Other(error.to_string()))?,
+    )
+    .map_err(|error| ReactError::Other(error.to_string()))
+}
+
+fn component_decode<T: serde::de::DeserializeOwned>(
+    value: WireValue,
+) -> echo_agent::error::Result<T> {
+    serde_json::from_value(
+        value
+            .into_json()
+            .map_err(|error| ReactError::Other(error.to_string()))?,
+    )
+    .map_err(|error| ReactError::Other(error.to_string()))
+}
+
+fn skill_descriptor_policy_wire(
+    descriptor: &echo_agent::skills::external::SkillDescriptor,
+) -> echo_agent::error::Result<SkillDescriptorPolicyWire> {
+    Ok(SkillDescriptorPolicyWire {
+        name: descriptor.name.clone(),
+        description: descriptor.description.clone(),
+        location: super::wire::path_to_wire(&descriptor.location)
+            .map_err(|error| ReactError::Other(error.to_string()))?,
+        license: descriptor.license.clone(),
+        compatibility: descriptor.compatibility.clone(),
+        metadata: descriptor
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        source: descriptor.source.clone(),
+        allowed_tools: descriptor.allowed_tools.clone(),
+        shell: descriptor.shell.clone(),
+        paths: descriptor.paths.clone(),
+        triggers: descriptor.triggers.clone(),
+        hooks: descriptor.hooks.as_ref().map(component_value).transpose()?,
+        sandbox: descriptor
+            .sandbox
+            .as_ref()
+            .map(component_value)
+            .transpose()?,
+        depends_on: descriptor.depends_on.clone(),
+    })
+}
+
+fn component_wire_usize(value: &WireU64, field: &str) -> echo_agent::error::Result<usize> {
+    value
+        .to_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| ReactError::Other(format!("{field} exceeds usize")))
+}
+
+fn component_duration(
+    value: echo_sdk_protocol::scalar::WireDuration,
+) -> echo_agent::error::Result<Duration> {
+    let seconds = value
+        .seconds
+        .to_u64()
+        .ok_or_else(|| ReactError::Other("duration seconds exceed u64".to_string()))?;
+    if value.nanos >= 1_000_000_000 {
+        return Err(ReactError::Other(
+            "duration nanos must be below one second".to_string(),
+        ));
+    }
+    Ok(Duration::new(seconds, value.nanos))
+}
+
+fn sandbox_stream_chunk(
+    value: AgentComponentStreamChunkWire,
+) -> echo_agent::error::Result<echo_agent::sandbox::SandboxStreamEvent> {
+    match value {
+        AgentComponentStreamChunkWire::Sandbox(SandboxStreamChunkWire::Output {
+            channel,
+            chunk,
+        }) => Ok(echo_agent::sandbox::SandboxStreamEvent::Output {
+            channel: match channel {
+                SandboxOutputChannelWire::Stdout => {
+                    echo_agent::sandbox::SandboxOutputChannel::Stdout
+                }
+                SandboxOutputChannelWire::Stderr => {
+                    echo_agent::sandbox::SandboxOutputChannel::Stderr
+                }
+            },
+            chunk,
+        }),
+        AgentComponentStreamChunkWire::Workflow(_) => Err(ReactError::Other(
+            "sandbox extension returned a workflow stream chunk".to_string(),
+        )),
+    }
+}
+
+fn sandbox_stream_complete(
+    value: AgentComponentStreamCompleteWire,
+) -> echo_agent::error::Result<echo_agent::sandbox::SandboxStreamEvent> {
+    match value {
+        AgentComponentStreamCompleteWire::Sandbox(SandboxStreamCompleteWire::Complete {
+            result,
+        }) => Ok(echo_agent::sandbox::SandboxStreamEvent::Complete(
+            component_decode(result)?,
+        )),
+        AgentComponentStreamCompleteWire::Sandbox(SandboxStreamCompleteWire::Failed {
+            failure,
+        }) => Ok(echo_agent::sandbox::SandboxStreamEvent::Failed {
+            failure: match failure {
+                SandboxStreamFailureWire::Cancelled { message } => {
+                    echo_agent::sandbox::SandboxStreamFailure::Cancelled { message }
+                }
+                SandboxStreamFailureWire::IoError { message } => {
+                    echo_agent::sandbox::SandboxStreamFailure::IoError { message }
+                }
+            },
+        }),
+        AgentComponentStreamCompleteWire::Workflow(_) => Err(ReactError::Other(
+            "sandbox extension returned a workflow stream terminal".to_string(),
+        )),
+    }
+}
+
+fn workflow_stream_chunk(
+    value: AgentComponentStreamChunkWire,
+) -> echo_agent::error::Result<echo_agent::workflow::WorkflowEvent> {
+    let AgentComponentStreamChunkWire::Workflow(event) = value else {
+        return Err(ReactError::Other(
+            "workflow extension returned a sandbox stream chunk".to_string(),
+        ));
+    };
+    match event {
+        WorkflowStreamChunkWire::NodeStart {
+            node_name,
+            step_index,
+        } => Ok(echo_agent::workflow::WorkflowEvent::NodeStart {
+            node_name,
+            step_index: component_wire_usize(&step_index, "workflow step_index")?,
+        }),
+        WorkflowStreamChunkWire::NodeEnd {
+            node_name,
+            step_index,
+            elapsed,
+        } => Ok(echo_agent::workflow::WorkflowEvent::NodeEnd {
+            node_name,
+            step_index: component_wire_usize(&step_index, "workflow step_index")?,
+            elapsed: component_duration(elapsed)?,
+        }),
+        WorkflowStreamChunkWire::Token { node_name, token } => {
+            Ok(echo_agent::workflow::WorkflowEvent::Token { node_name, token })
+        }
+        WorkflowStreamChunkWire::NodeError { node_name, error } => {
+            Ok(echo_agent::workflow::WorkflowEvent::NodeError { node_name, error })
+        }
+    }
+}
+
+fn workflow_stream_complete(
+    value: AgentComponentStreamCompleteWire,
+) -> echo_agent::error::Result<echo_agent::workflow::WorkflowEvent> {
+    let AgentComponentStreamCompleteWire::Workflow(WorkflowStreamCompleteWire {
+        result,
+        total_steps,
+        elapsed,
+    }) = value
+    else {
+        return Err(ReactError::Other(
+            "workflow extension returned a sandbox stream terminal".to_string(),
+        ));
+    };
+    Ok(echo_agent::workflow::WorkflowEvent::Completed {
+        result,
+        total_steps: component_wire_usize(&total_steps, "workflow total_steps")?,
+        elapsed: component_duration(elapsed)?,
+    })
+}
+
+fn component_decode_many<T: serde::de::DeserializeOwned>(
+    values: Vec<WireValue>,
+) -> echo_agent::error::Result<Vec<T>> {
+    values.into_iter().map(component_decode).collect()
+}
+
+fn component_mismatch(operation: AgentComponentOperationWire) -> ReactError {
+    ReactError::Other(format!(
+        "agent component returned the wrong payload for {operation:?}",
+    ))
+}
+
+fn usize_wire(value: usize, field: &str) -> echo_agent::error::Result<WireU64> {
+    u64::try_from(value)
+        .map(WireU64::from_u64)
+        .map_err(|_| ReactError::Other(format!("{field} exceeds WireU64")))
+}
+
+impl echo_agent::memory::ConversationStore for ExtensionAgentComponentProxy {
+    fn create_conversation<'a>(
+        &'a self,
+        conversation: echo_agent::memory::NewConversation,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<echo_agent::memory::Conversation>>
+    {
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationCreate {
+                    conversation: component_value(conversation)?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationCreate { conversation } => {
+                    component_decode(conversation)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationCreate,
+                )),
+            }
+        })
+    }
+
+    fn get_conversation<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<Option<echo_agent::memory::Conversation>>,
+    > {
+        let conversation_id = conversation_id.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationGet { conversation_id })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationGet { conversation } => {
+                    conversation.map(component_decode).transpose()
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationGet,
+                )),
+            }
+        })
+    }
+
+    fn list_conversations<'a>(
+        &'a self,
+        filter: echo_agent::memory::ConversationFilter,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<Vec<echo_agent::memory::ConversationMeta>>,
+    > {
+        Box::pin(async move {
+            let limit = filter
+                .limit
+                .map(|value| usize_wire(value, "limit"))
+                .transpose()?;
+            let offset = filter
+                .offset
+                .map(|value| usize_wire(value, "offset"))
+                .transpose()?;
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationList {
+                    user_id: filter.user_id,
+                    agent_type: filter.agent_type,
+                    limit,
+                    offset,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationList { conversations } => {
+                    component_decode_many(conversations)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationList,
+                )),
+            }
+        })
+    }
+
+    fn update_conversation<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        title: Option<&'a str>,
+        summary: Option<&'a str>,
+        compressed_before_id: Option<i64>,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<()>> {
+        let conversation_id = conversation_id.to_string();
+        let title = title.map(str::to_string);
+        let summary = summary.map(str::to_string);
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationUpdate {
+                    conversation_id,
+                    title,
+                    summary,
+                    compressed_before_id: compressed_before_id.map(WireI64::from_i64),
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationUpdate => Ok(()),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationUpdate,
+                )),
+            }
+        })
+    }
+
+    fn delete_conversation<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<()>> {
+        let conversation_id = conversation_id.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationDelete { conversation_id })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationDelete => Ok(()),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationDelete,
+                )),
+            }
+        })
+    }
+
+    fn save_messages<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        messages: &'a [echo_agent::memory::StoredMessage],
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<()>> {
+        let conversation_id = conversation_id.to_string();
+        let messages = messages
+            .iter()
+            .map(component_value)
+            .collect::<echo_agent::error::Result<Vec<_>>>();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationSaveMessages {
+                    conversation_id,
+                    messages: messages?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationSaveMessages => Ok(()),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationSaveMessages,
+                )),
+            }
+        })
+    }
+
+    fn get_messages<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<Vec<echo_agent::memory::StoredMessage>>,
+    > {
+        let conversation_id = conversation_id.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationGetMessages { conversation_id })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationGetMessages { messages } => {
+                    component_decode_many(messages)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationGetMessages,
+                )),
+            }
+        })
+    }
+
+    fn count_messages<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<usize>> {
+        let conversation_id = conversation_id.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationCountMessages { conversation_id })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationCountMessages { count } => count
+                    .to_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| ReactError::Other("message count exceeds usize".to_string())),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationCountMessages,
+                )),
+            }
+        })
+    }
+
+    fn ensure_conversation<'a>(
+        &'a self,
+        conv: echo_agent::memory::NewConversation,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<echo_agent::memory::Conversation>>
+    {
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationEnsure {
+                    conversation: component_value(conv)?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationEnsure { conversation } => {
+                    component_decode(conversation)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationEnsure,
+                )),
+            }
+        })
+    }
+
+    fn search_conversations<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<Vec<echo_agent::memory::ConversationMeta>>,
+    > {
+        let query = query.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::ConversationSearch {
+                    query,
+                    limit: usize_wire(limit, "conversation search limit")?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::ConversationSearch { conversations } => {
+                    component_decode_many(conversations)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::ConversationSearch,
+                )),
+            }
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl echo_agent::trace::RunStore for ExtensionAgentComponentProxy {
+    async fn save(&self, run: echo_agent::trace::Run) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::RunSave {
+                run: component_value(run)?,
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::RunSave => Ok(()),
+            _ => Err(component_mismatch(AgentComponentOperationWire::RunSave)),
+        }
+    }
+
+    async fn load(
+        &self,
+        run_id: &str,
+    ) -> echo_agent::error::Result<Option<echo_agent::trace::Run>> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::RunLoad {
+                run_id: run_id.to_string(),
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::RunLoad { run } => run.map(component_decode).transpose(),
+            _ => Err(component_mismatch(AgentComponentOperationWire::RunLoad)),
+        }
+    }
+
+    async fn list_by_session(
+        &self,
+        session_id: &str,
+    ) -> echo_agent::error::Result<Vec<echo_agent::trace::RunSummary>> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::RunListBySession {
+                session_id: session_id.to_string(),
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::RunListBySession { runs } => component_decode_many(runs),
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::RunListBySession,
+            )),
+        }
+    }
+
+    async fn list_all(
+        &self,
+        limit: usize,
+    ) -> echo_agent::error::Result<Vec<echo_agent::trace::RunSummary>> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::RunListAll {
+                limit: usize_wire(limit, "limit")?,
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::RunListAll { runs } => component_decode_many(runs),
+            _ => Err(component_mismatch(AgentComponentOperationWire::RunListAll)),
+        }
+    }
+
+    async fn append_event(
+        &self,
+        run_id: &str,
+        event: echo_agent::trace::RunEvent,
+    ) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::RunAppendEvent {
+                run_id: run_id.to_string(),
+                event: component_value(event)?,
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::RunAppendEvent => Ok(()),
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::RunAppendEvent,
+            )),
+        }
+    }
+
+    async fn list_by_parent_run(
+        &self,
+        parent_run_id: &str,
+    ) -> echo_agent::error::Result<Vec<echo_agent::trace::RunSummary>> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::RunListByParent {
+                parent_run_id: parent_run_id.to_string(),
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::RunListByParent { runs } => component_decode_many(runs),
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::RunListByParent,
+            )),
+        }
+    }
+}
+
+impl echo_agent::state::RuntimeStateStore for ExtensionAgentComponentProxy {
+    fn get_checkpoint<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<Option<echo_agent::state::AgentCheckpoint>>,
+    > {
+        let conversation_id = conversation_id.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::RuntimeGetCheckpoint { conversation_id })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::RuntimeGetCheckpoint { checkpoint } => {
+                    checkpoint.map(component_decode).transpose()
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::RuntimeGetCheckpoint,
+                )),
+            }
+        })
+    }
+
+    fn save_checkpoint<'a>(
+        &'a self,
+        checkpoint: &'a echo_agent::state::AgentCheckpoint,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<()>> {
+        let checkpoint = checkpoint.clone();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::RuntimeSaveCheckpoint {
+                    checkpoint: component_value(checkpoint)?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::RuntimeSaveCheckpoint => Ok(()),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::RuntimeSaveCheckpoint,
+                )),
+            }
+        })
+    }
+
+    fn save_checkpoint_for_scope<'a>(
+        &'a self,
+        scope_id: &'a str,
+        checkpoint: &'a echo_agent::state::AgentCheckpoint,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<()>> {
+        let scope_id = scope_id.to_string();
+        let checkpoint = checkpoint.clone();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::RuntimeSaveCheckpointForScope {
+                    scope_id,
+                    checkpoint: component_value(checkpoint)?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::RuntimeSaveCheckpointForScope => Ok(()),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::RuntimeSaveCheckpointForScope,
+                )),
+            }
+        })
+    }
+
+    fn runtime_state_ids<'a>(
+        &'a self,
+        scope_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<Vec<String>>> {
+        let scope_id = scope_id.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::RuntimeStateIds { scope_id })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::RuntimeStateIds { state_ids } => Ok(state_ids),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::RuntimeStateIds,
+                )),
+            }
+        })
+    }
+
+    fn clear_runtime_state<'a>(
+        &'a self,
+        scope_id: &'a str,
+        runtime_state_id: &'a str,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<echo_agent::state::RuntimeStateClearReceipt>,
+    > {
+        let scope_id = scope_id.to_string();
+        let runtime_state_id = runtime_state_id.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::RuntimeClearState {
+                    scope_id,
+                    runtime_state_id,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::RuntimeClearState { receipt } => {
+                    component_decode(receipt)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::RuntimeClearState,
+                )),
+            }
+        })
+    }
+
+    fn clear_runtime_state_scope<'a>(
+        &'a self,
+        scope_id: &'a str,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<echo_agent::state::RuntimeStateScopeClearReceipt>,
+    > {
+        let scope_id = scope_id.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::RuntimeClearScope { scope_id })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::RuntimeClearScope { receipt } => {
+                    component_decode(receipt)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::RuntimeClearScope,
+                )),
+            }
+        })
+    }
+
+    fn clear_conversation<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<()>> {
+        let conversation_id = conversation_id.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::RuntimeClearConversation { conversation_id })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::RuntimeClearConversation => Ok(()),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::RuntimeClearConversation,
+                )),
+            }
+        })
+    }
+}
+
+impl echo_agent::audit::AuditLogger for ExtensionAgentComponentProxy {
+    fn log<'a>(
+        &'a self,
+        event: echo_agent::audit::AuditEvent,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<()>> {
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::AuditLog {
+                    event: component_value(event)?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::AuditLog => Ok(()),
+                _ => Err(component_mismatch(AgentComponentOperationWire::AuditLog)),
+            }
+        })
+    }
+
+    fn query<'a>(
+        &'a self,
+        filter: echo_agent::audit::AuditFilter,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<Vec<echo_agent::audit::AuditEvent>>>
+    {
+        Box::pin(async move {
+            let limit = filter
+                .limit
+                .map(|value| usize_wire(value, "limit"))
+                .transpose()?;
+            let result = self
+                .invoke(AgentComponentCallInputWire::AuditQuery {
+                    session_id: filter.session_id,
+                    agent_name: filter.agent_name,
+                    from: filter.from.map(|value| value.to_rfc3339()),
+                    to: filter.to.map(|value| value.to_rfc3339()),
+                    limit,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::AuditQuery { events } => {
+                    component_decode_many(events)
+                }
+                _ => Err(component_mismatch(AgentComponentOperationWire::AuditQuery)),
+            }
+        })
+    }
+}
+
+impl echo_agent::compression::PreModelContextProjector for ExtensionAgentComponentProxy {
+    fn project<'a>(
+        &'a self,
+        context: &'a echo_agent::compression::ProjectionContext,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<Vec<echo_agent::compression::ContextProjection>>,
+    > {
+        let iteration = match usize_wire(context.iteration, "iteration") {
+            Ok(value) => value,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let agent_name = context.agent_name.clone();
+        let session_id = context.session_id.clone();
+        let conversation_id = context.conversation_id.clone();
+        let run_id = context.run_id.clone();
+        let turn_id = context.turn_id.clone();
+        Box::pin(async move {
+            #[derive(serde::Deserialize)]
+            struct ProjectionWire {
+                marker: String,
+                message: Option<LlmMessageWire>,
+            }
+            let result = self
+                .invoke(AgentComponentCallInputWire::ContextProject {
+                    iteration,
+                    agent_name,
+                    session_id,
+                    conversation_id,
+                    run_id,
+                    turn_id,
+                })
+                .await?;
+            let AgentComponentCallResultWire::ContextProject { projections } = result else {
+                return Err(component_mismatch(
+                    AgentComponentOperationWire::ContextProject,
+                ));
+            };
+            let values: Vec<ProjectionWire> = component_decode_many(projections)?;
+            values
+                .into_iter()
+                .map(|value| {
+                    Ok(echo_agent::compression::ContextProjection {
+                        marker: value.marker,
+                        message: value
+                            .message
+                            .map(message_from_wire)
+                            .transpose()
+                            .map_err(ReactError::Other)?,
+                    })
+                })
+                .collect()
+        })
+    }
+}
+
+impl echo_agent::evolution::MemoryTriggerSink for ExtensionAgentComponentProxy {
+    fn on_trigger<'a>(
+        &'a self,
+        trigger: &'a echo_agent::evolution::TriggerMatch,
+    ) -> futures::future::BoxFuture<
+        'a,
+        std::result::Result<echo_agent::evolution::MemoryTriggerDisposition, String>,
+    > {
+        let input = serde_json::json!({
+            "content": trigger.content,
+            "memory_type": trigger.memory_type,
+            "source": trigger.source,
+            "confidence": trigger.confidence,
+            "topic": trigger.topic,
+            "trust_level": trigger.trust_level,
+            "suggested_key": trigger.suggested_key,
+            "evidence": trigger.evidence.iter().map(|evidence| serde_json::json!({
+                "source_role": evidence.source_role,
+                "quote": evidence.quote,
+            })).collect::<Vec<_>>(),
+        });
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::MemoryTrigger {
+                    trigger: component_value(input).map_err(|error| error.to_string())?,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            let AgentComponentCallResultWire::MemoryTrigger { disposition } = result else {
+                return Err(
+                    component_mismatch(AgentComponentOperationWire::MemoryTrigger).to_string(),
+                );
+            };
+            match disposition.as_str() {
+                "persist" => Ok(echo_agent::evolution::MemoryTriggerDisposition::Persist),
+                "captured" => Ok(echo_agent::evolution::MemoryTriggerDisposition::Captured),
+                _ => Err("memory trigger disposition must be persist or captured".to_string()),
+            }
+        })
+    }
+}
+
+impl echo_agent::guard::Guard for ExtensionAgentComponentProxy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn check<'a>(
+        &'a self,
+        content: &'a str,
+        direction: echo_agent::guard::GuardDirection,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<echo_agent::guard::GuardResult>>
+    {
+        let content = content.to_string();
+        let direction = direction.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::GuardCheck { content, direction })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::GuardCheck { result } => component_decode(result),
+                _ => Err(component_mismatch(AgentComponentOperationWire::GuardCheck)),
+            }
+        })
+    }
+}
+
+#[cfg(feature = "framework-web")]
+#[async_trait::async_trait]
+impl echo_agent::tools::web::providers::SearchProvider for ExtensionAgentComponentProxy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> echo_agent::error::Result<Vec<echo_agent::tools::web::providers::SearchResult>> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::SearchProviderSearch {
+                query: query.to_string(),
+                max_results: usize_wire(max_results, "max_results")?,
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::SearchProviderSearch { results } => {
+                component_decode_many(results)
+            }
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::SearchProviderSearch,
+            )),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl echo_agent::workflow::CheckpointStore for ExtensionAgentComponentProxy {
+    async fn save(
+        &self,
+        checkpoint: &echo_agent::workflow::Checkpoint,
+    ) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointSave {
+                checkpoint: component_value(checkpoint)?,
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointSave => Ok(()),
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointSave,
+            )),
+        }
+    }
+
+    async fn load(
+        &self,
+        id: &str,
+    ) -> echo_agent::error::Result<Option<echo_agent::workflow::Checkpoint>> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointLoad {
+                checkpoint_id: id.to_string(),
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointLoad { checkpoint } => {
+                checkpoint.map(component_decode).transpose()
+            }
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointLoad,
+            )),
+        }
+    }
+
+    async fn claim(
+        &self,
+        id: &str,
+    ) -> echo_agent::error::Result<Option<echo_agent::workflow::Checkpoint>> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointClaim {
+                checkpoint_id: id.to_string(),
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointClaim { checkpoint } => {
+                checkpoint.map(component_decode).transpose()
+            }
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointClaim,
+            )),
+        }
+    }
+
+    async fn list(&self) -> echo_agent::error::Result<Vec<echo_agent::workflow::CheckpointInfo>> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointList)
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointList { checkpoints } => {
+                component_decode_many(checkpoints)
+            }
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointList,
+            )),
+        }
+    }
+
+    async fn list_by_graph(
+        &self,
+        graph_name: &str,
+    ) -> echo_agent::error::Result<Vec<echo_agent::workflow::CheckpointInfo>> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointListByGraph {
+                graph_name: graph_name.to_string(),
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointListByGraph { checkpoints } => {
+                component_decode_many(checkpoints)
+            }
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointListByGraph,
+            )),
+        }
+    }
+
+    async fn list_filtered(
+        &self,
+        filter: &echo_agent::workflow::orchestration::checkpoint_store::CheckpointFilter,
+    ) -> echo_agent::error::Result<Vec<echo_agent::workflow::CheckpointInfo>> {
+        let filter = WireValue::from_json(serde_json::json!({
+            "graph_name": filter.graph_name,
+            "branch": filter.branch,
+            "tag": filter.tag,
+            "limit": filter.limit.map(|value| value.to_string()),
+        }))
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointListFiltered { filter })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointListFiltered { checkpoints } => {
+                component_decode_many(checkpoints)
+            }
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointListFiltered,
+            )),
+        }
+    }
+
+    async fn delete(&self, id: &str) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointDelete {
+                checkpoint_id: id.to_string(),
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointDelete => Ok(()),
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointDelete,
+            )),
+        }
+    }
+
+    async fn clear(&self) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointClear)
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointClear => Ok(()),
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointClear,
+            )),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl echo_agent::tasks::RevisionedTaskStore for ExtensionAgentComponentProxy {
+    async fn load(
+        &self,
+        scope_id: &str,
+    ) -> std::result::Result<
+        Option<echo_agent::tasks::RevisionedTaskGraph>,
+        echo_agent::tasks::RevisionedTaskStoreError,
+    > {
+        let result = self
+            .invoke(AgentComponentCallInputWire::RevisionedTaskLoad {
+                scope_id: scope_id.to_string(),
+            })
+            .await
+            .map_err(
+                |error| echo_agent::tasks::RevisionedTaskStoreError::Backend {
+                    message: error.to_string(),
+                },
+            )?;
+        match result {
+            AgentComponentCallResultWire::RevisionedTaskLoad { graph } => {
+                graph.map(component_decode).transpose().map_err(|error| {
+                    echo_agent::tasks::RevisionedTaskStoreError::Backend {
+                        message: error.to_string(),
+                    }
+                })
+            }
+            _ => Err(echo_agent::tasks::RevisionedTaskStoreError::Backend {
+                message: component_mismatch(AgentComponentOperationWire::RevisionedTaskLoad)
+                    .to_string(),
+            }),
+        }
+    }
+
+    async fn compare_and_commit(
+        &self,
+        scope_id: &str,
+        commit: echo_agent::tasks::TaskGraphCommit,
+    ) -> std::result::Result<
+        echo_agent::tasks::RevisionedTaskGraph,
+        echo_agent::tasks::RevisionedTaskStoreError,
+    > {
+        let commit = component_value(commit).map_err(|error| {
+            echo_agent::tasks::RevisionedTaskStoreError::Backend {
+                message: error.to_string(),
+            }
+        })?;
+        let result = self
+            .invoke(
+                AgentComponentCallInputWire::RevisionedTaskCompareAndCommit {
+                    scope_id: scope_id.to_string(),
+                    commit,
+                },
+            )
+            .await
+            .map_err(
+                |error| echo_agent::tasks::RevisionedTaskStoreError::Backend {
+                    message: error.to_string(),
+                },
+            )?;
+        match result {
+            AgentComponentCallResultWire::RevisionedTaskCompareAndCommit { graph } => {
+                component_decode(graph).map_err(|error| {
+                    echo_agent::tasks::RevisionedTaskStoreError::Backend {
+                        message: error.to_string(),
+                    }
+                })
+            }
+            _ => Err(echo_agent::tasks::RevisionedTaskStoreError::Backend {
+                message: component_mismatch(
+                    AgentComponentOperationWire::RevisionedTaskCompareAndCommit,
+                )
+                .to_string(),
+            }),
+        }
+    }
+}
+
+impl echo_agent::sandbox::SandboxExecutor for ExtensionAgentComponentProxy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn isolation_level(&self) -> echo_agent::sandbox::IsolationLevel {
+        match self.capabilities.isolation_level.as_deref() {
+            Some("process") => echo_agent::sandbox::IsolationLevel::Process,
+            Some("os-sandbox") => echo_agent::sandbox::IsolationLevel::OsSandbox,
+            Some("container") => echo_agent::sandbox::IsolationLevel::Container,
+            Some("orchestrated") => echo_agent::sandbox::IsolationLevel::Orchestrated,
+            _ => echo_agent::sandbox::IsolationLevel::None,
+        }
+    }
+
+    fn is_available(&self) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(async move {
+            match self
+                .invoke(AgentComponentCallInputWire::SandboxIsAvailable)
+                .await
+            {
+                Ok(AgentComponentCallResultWire::SandboxIsAvailable { available }) => available,
+                _ => false,
+            }
+        })
+    }
+
+    fn execute(
+        &self,
+        command: echo_agent::sandbox::SandboxCommand,
+    ) -> futures::future::BoxFuture<
+        '_,
+        echo_agent::error::Result<echo_agent::sandbox::ExecutionResult>,
+    > {
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::SandboxExecute {
+                    command: component_value(command)?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::SandboxExecute { result } => component_decode(result),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::SandboxExecute,
+                )),
+            }
+        })
+    }
+
+    fn execute_stream<'a>(
+        &'a self,
+        command: echo_agent::sandbox::SandboxCommand,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures::Stream<Item = echo_agent::sandbox::SandboxStreamEvent> + Send + 'a,
+                >,
+            >,
+        >,
+    > {
+        Box::pin(async move {
+            if !self.capabilities.supports_streaming {
+                let result = self.execute(command).await?;
+                return Ok(Box::pin(futures::stream::once(async move {
+                    echo_agent::sandbox::SandboxStreamEvent::Complete(result)
+                }))
+                    as std::pin::Pin<Box<dyn futures::Stream<Item = _> + Send + 'a>>);
+            }
+            let (receiver, stream, invocation_id, cancellation, lease, sink) = self
+                .bridge
+                .invoke_stream(
+                    &self.extension,
+                    Some(session_invocation_context(&self.session_id)),
+                    ExtensionInvocation::AgentComponentCallStream(AgentComponentCallWire {
+                        component: self.component,
+                        call: AgentComponentCallInputWire::SandboxExecuteStream {
+                            command: component_value(command)?,
+                        },
+                    }),
+                    self.bridge.connection_cancellation(),
+                )
+                .await
+                .map_err(react_error)?;
+            let events = futures::StreamExt::map(
+                extension_event_stream(
+                    self.bridge.clone(),
+                    stream,
+                    invocation_id,
+                    cancellation,
+                    lease,
+                    sink,
+                    receiver,
+                ),
+                |event| match event {
+                    ExtensionStreamEvent::Chunk {
+                        value: ExtensionStreamChunkValue::AgentComponent(value),
+                        ..
+                    } => sandbox_stream_chunk(value).unwrap_or_else(|error| {
+                        echo_agent::sandbox::SandboxStreamEvent::Failed {
+                            failure: echo_agent::sandbox::SandboxStreamFailure::IoError {
+                                message: error.to_string(),
+                            },
+                        }
+                    }),
+                    ExtensionStreamEvent::Complete {
+                        value: ExtensionStreamCompleteValue::AgentComponent(value),
+                        ..
+                    } => sandbox_stream_complete(value).unwrap_or_else(|error| {
+                        echo_agent::sandbox::SandboxStreamEvent::Failed {
+                            failure: echo_agent::sandbox::SandboxStreamFailure::IoError {
+                                message: error.to_string(),
+                            },
+                        }
+                    }),
+                    ExtensionStreamEvent::Cancelled { .. } => {
+                        echo_agent::sandbox::SandboxStreamEvent::Failed {
+                            failure: echo_agent::sandbox::SandboxStreamFailure::Cancelled {
+                                message: "sandbox extension stream cancelled".to_string(),
+                            },
+                        }
+                    }
+                    ExtensionStreamEvent::Failed { error, .. } => {
+                        echo_agent::sandbox::SandboxStreamEvent::Failed {
+                            failure: echo_agent::sandbox::SandboxStreamFailure::IoError {
+                                message: error.message,
+                            },
+                        }
+                    }
+                    _ => echo_agent::sandbox::SandboxStreamEvent::Failed {
+                        failure: echo_agent::sandbox::SandboxStreamFailure::IoError {
+                            message: "sandbox extension returned a mismatched stream value"
+                                .to_string(),
+                        },
+                    },
+                },
+            );
+            Ok(Box::pin(events)
+                as std::pin::Pin<
+                    Box<dyn futures::Stream<Item = _> + Send + 'a>,
+                >)
+        })
+    }
+
+    fn execute_with_limits(
+        &self,
+        command: echo_agent::sandbox::SandboxCommand,
+        limits: echo_agent::sandbox::ResourceLimits,
+    ) -> futures::future::BoxFuture<
+        '_,
+        echo_agent::error::Result<echo_agent::sandbox::ExecutionResult>,
+    > {
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::SandboxExecuteWithLimits {
+                    command: component_value(command)?,
+                    limits: component_value(limits)?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::SandboxExecuteWithLimits { result } => {
+                    component_decode(result)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::SandboxExecuteWithLimits,
+                )),
+            }
+        })
+    }
+
+    fn execute_with_limits_and_cancel(
+        &self,
+        command: echo_agent::sandbox::SandboxCommand,
+        limits: echo_agent::sandbox::ResourceLimits,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> futures::future::BoxFuture<
+        '_,
+        echo_agent::error::Result<echo_agent::sandbox::ExecutionResult>,
+    > {
+        Box::pin(async move {
+            let cancellation = cancel
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(|| self.bridge.connection_cancellation());
+            let result = self
+                .invoke_with_cancellation(
+                    AgentComponentCallInputWire::SandboxExecuteWithLimitsAndCancel {
+                        command: component_value(command)?,
+                        limits: component_value(limits)?,
+                    },
+                    cancellation.clone(),
+                )
+                .await;
+            if cancellation.is_cancelled() {
+                let cleanup = self
+                    .invoke(AgentComponentCallInputWire::SandboxCleanup)
+                    .await;
+                if !matches!(cleanup, Ok(AgentComponentCallResultWire::SandboxCleanup)) {
+                    return Err(ReactError::Sandbox(Box::new(
+                        echo_agent::error::SandboxError::IoError(
+                            "sandbox extension cancellation cleanup failed".to_string(),
+                        ),
+                    )));
+                }
+                return Err(ReactError::Sandbox(Box::new(
+                    echo_agent::error::SandboxError::Cancelled(
+                        "owning run cancelled sandbox extension execution".to_string(),
+                    ),
+                )));
+            }
+            match result? {
+                AgentComponentCallResultWire::SandboxExecuteWithLimitsAndCancel { result } => {
+                    component_decode(result)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::SandboxExecuteWithLimitsAndCancel,
+                )),
+            }
+        })
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.capabilities.supports_streaming
+    }
+
+    fn cleanup(&self) -> futures::future::BoxFuture<'_, echo_agent::error::Result<()>> {
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::SandboxCleanup)
+                .await?;
+            match result {
+                AgentComponentCallResultWire::SandboxCleanup => Ok(()),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::SandboxCleanup,
+                )),
+            }
+        })
+    }
+}
+
+#[cfg(feature = "framework-mcp")]
+impl echo_agent::mcp::integration::transport::McpTransport for ExtensionAgentComponentProxy {
+    fn send(
+        &self,
+        request: echo_agent::mcp::integration::types::JsonRpcRequest,
+    ) -> futures::future::BoxFuture<
+        '_,
+        echo_agent::error::Result<echo_agent::mcp::integration::types::JsonRpcResponse>,
+    > {
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::McpTransportSend {
+                    request: component_value(request)?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::McpTransportSend { response } => {
+                    component_decode(response)
+                }
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::McpTransportSend,
+                )),
+            }
+        })
+    }
+
+    fn notify(
+        &self,
+        notification: echo_agent::mcp::integration::types::JsonRpcNotification,
+    ) -> futures::future::BoxFuture<'_, echo_agent::error::Result<()>> {
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::McpTransportNotify {
+                    notification: component_value(notification)?,
+                })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::McpTransportNotify => Ok(()),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::McpTransportNotify,
+                )),
+            }
+        })
+    }
+
+    fn close(&self) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.notification_cancel.cancel();
+            let _ = self
+                .invoke(AgentComponentCallInputWire::McpTransportClose)
+                .await;
+        })
+    }
+
+    fn notification_rx(
+        &self,
+    ) -> Option<Arc<dyn echo_agent::mcp::integration::types::JsonRpcNotificationReceiver>> {
+        self.capabilities.supports_notifications.then(|| {
+            self.start_notification_poll();
+            Arc::new(self.clone())
+                as Arc<dyn echo_agent::mcp::integration::types::JsonRpcNotificationReceiver>
+        })
+    }
+}
+
+#[cfg(feature = "framework-mcp")]
+impl echo_agent::mcp::integration::types::JsonRpcNotificationReceiver
+    for ExtensionAgentComponentProxy
+{
+    fn try_recv(&self) -> Option<echo_agent::mcp::integration::types::JsonRpcNotification> {
+        self.notification_queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+    }
+}
+
+impl echo_agent::memory::Embedder for ExtensionAgentComponentProxy {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<Vec<f32>>> {
+        let text = text.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::EmbedderEmbed { text })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::EmbedderEmbed { vector } => Ok(vector),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::EmbedderEmbed,
+                )),
+            }
+        })
+    }
+}
+
+impl echo_agent::compression::MemoryPromoter for ExtensionAgentComponentProxy {
+    fn promote(
+        &self,
+        evicted: &[echo_agent::llm::types::Message],
+    ) -> futures::future::BoxFuture<
+        '_,
+        echo_agent::error::Result<echo_agent::compression::MemoryPromotionReceipt>,
+    > {
+        let evicted = evicted.to_vec();
+        Box::pin(async move {
+            let evicted = evicted
+                .iter()
+                .map(message_wire)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(ReactError::Other)?;
+            let result = self
+                .invoke(AgentComponentCallInputWire::MemoryPromoterPromote { evicted })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::MemoryPromoterPromote {
+                    submitted,
+                    promoted,
+                    deduplicated,
+                } => Ok(echo_agent::compression::MemoryPromotionReceipt {
+                    submitted: wire_usize(submitted, "submitted").map_err(ReactError::Other)?,
+                    promoted: wire_usize(promoted, "promoted").map_err(ReactError::Other)?,
+                    deduplicated: wire_usize(deduplicated, "deduplicated")
+                        .map_err(ReactError::Other)?,
+                }),
+                _ => Err(component_mismatch(
+                    AgentComponentOperationWire::MemoryPromoterPromote,
+                )),
+            }
+        })
+    }
+}
+
+impl echo_agent::workflow::Workflow for ExtensionAgentComponentProxy {
+    fn run<'a>(
+        &'a mut self,
+        input: &'a str,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<echo_agent::workflow::WorkflowOutput>,
+    > {
+        let input = input.to_string();
+        Box::pin(async move {
+            let result = self
+                .invoke(AgentComponentCallInputWire::WorkflowRun { input })
+                .await?;
+            match result {
+                AgentComponentCallResultWire::WorkflowRun { output } => component_decode(output),
+                _ => Err(component_mismatch(AgentComponentOperationWire::WorkflowRun)),
+            }
+        })
+    }
+
+    fn run_stream<'a>(
+        &'a mut self,
+        input: &'a str,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<
+            futures::stream::BoxStream<
+                'a,
+                echo_agent::error::Result<echo_agent::workflow::WorkflowEvent>,
+            >,
+        >,
+    > {
+        let input = input.to_string();
+        Box::pin(async move {
+            if !self.capabilities.supports_streaming {
+                let output = self.run(&input).await?;
+                let event = echo_agent::workflow::WorkflowEvent::Completed {
+                    result: output.result,
+                    total_steps: output.steps.len(),
+                    elapsed: output.elapsed,
+                };
+                return Ok(futures::StreamExt::boxed(futures::stream::once(
+                    async move { Ok(event) },
+                )));
+            }
+            let (receiver, stream, invocation_id, cancellation, lease, sink) = self
+                .bridge
+                .invoke_stream(
+                    &self.extension,
+                    Some(session_invocation_context(&self.session_id)),
+                    ExtensionInvocation::AgentComponentCallStream(AgentComponentCallWire {
+                        component: self.component,
+                        call: AgentComponentCallInputWire::WorkflowRunStream { input },
+                    }),
+                    self.bridge.connection_cancellation(),
+                )
+                .await
+                .map_err(react_error)?;
+            Ok(futures::StreamExt::boxed(futures::StreamExt::map(
+                extension_event_stream(
+                    self.bridge.clone(),
+                    stream,
+                    invocation_id,
+                    cancellation,
+                    lease,
+                    sink,
+                    receiver,
+                ),
+                |event| match event {
+                    ExtensionStreamEvent::Chunk {
+                        value: ExtensionStreamChunkValue::AgentComponent(value),
+                        ..
+                    } => workflow_stream_chunk(value),
+                    ExtensionStreamEvent::Complete {
+                        value: ExtensionStreamCompleteValue::AgentComponent(value),
+                        ..
+                    } => workflow_stream_complete(value),
+                    ExtensionStreamEvent::Cancelled { .. } => Err(ReactError::Other(
+                        "workflow extension stream cancelled".to_string(),
+                    )),
+                    ExtensionStreamEvent::Failed { error, .. } => {
+                        Err(ReactError::Other(error.message))
+                    }
+                    _ => Err(ReactError::Other(
+                        "workflow extension returned a mismatched stream value".to_string(),
+                    )),
+                },
+            )))
+        })
+    }
+}
+
+impl echo_agent::intent::IntentClassifier for ExtensionAgentComponentProxy {
+    fn classify<'a>(
+        &'a self,
+        user_input: &'a str,
+        context: &'a [echo_agent::llm::types::Message],
+    ) -> futures::future::BoxFuture<'a, echo_agent::intent::Intent> {
+        let user_input = user_input.to_string();
+        let context = context
+            .iter()
+            .map(message_wire)
+            .collect::<std::result::Result<Vec<_>, _>>();
+        Box::pin(async move {
+            let Ok(context) = context else {
+                return echo_agent::intent::Intent::Fallback;
+            };
+            match self
+                .invoke(AgentComponentCallInputWire::IntentClassify {
+                    user_input,
+                    context,
+                })
+                .await
+            {
+                Ok(AgentComponentCallResultWire::IntentClassify { intent }) => {
+                    component_decode(intent).unwrap_or(echo_agent::intent::Intent::Fallback)
+                }
+                _ => echo_agent::intent::Intent::Fallback,
+            }
+        })
+    }
+}
+
+impl echo_agent::skills::external::SkillLoadPolicy for ExtensionAgentComponentProxy {
+    fn allows<'a>(
+        &'a self,
+        descriptor: &'a echo_agent::skills::external::SkillDescriptor,
+    ) -> futures::future::BoxFuture<'a, bool> {
+        let descriptor = skill_descriptor_policy_wire(descriptor);
+        Box::pin(async move {
+            let Ok(descriptor) = descriptor else {
+                return false;
+            };
+            match self
+                .invoke(AgentComponentCallInputWire::SkillLoadAllows {
+                    descriptor: Box::new(descriptor),
+                })
+                .await
+            {
+                Ok(AgentComponentCallResultWire::SkillLoadAllows { allowed }) => allowed,
+                _ => false,
+            }
+        })
+    }
+}
+
 // ── Store proxy ─────────────────────────────────────────────────────────────
 
 fn store_item_from_wire(
@@ -3182,6 +5289,92 @@ impl echo_agent::memory::Store for ExtensionStoreProxy {
                 )),
             }
         })
+    }
+}
+
+// ── Critic proxy ─────────────────────────────────────────────────────────────
+
+fn critique_from_wire(
+    wire: CritiqueWire,
+) -> std::result::Result<echo_agent::agent::critic::Critique, String> {
+    wire.validate()?;
+    Ok(echo_agent::agent::critic::Critique {
+        score: wire.score,
+        passed: wire.passed,
+        feedback: wire.feedback,
+        suggestions: wire.suggestions,
+    })
+}
+
+/// Thin `Critic` proxy. Registration only supplies the implementation; the
+/// framework's verifier remains disabled unless its own configuration enables
+/// it, so this bridge never changes verification policy implicitly.
+pub(crate) struct ExtensionCriticProxy {
+    bridge: Arc<ExtensionBridge>,
+    extension: WireHandle,
+    name: String,
+    session_id: String,
+}
+
+impl ExtensionCriticProxy {
+    pub(crate) fn new(
+        bridge: Arc<ExtensionBridge>,
+        extension: WireHandle,
+        session_id: String,
+    ) -> Option<Self> {
+        let record = bridge.state().ok()?.handles.extension(&extension).ok()?;
+        let ExtensionDescriptor::Critic { name, .. } = &record.descriptor else {
+            return None;
+        };
+        Some(Self {
+            bridge,
+            extension,
+            name: name.clone(),
+            session_id,
+        })
+    }
+}
+
+impl echo_agent::agent::critic::Critic for ExtensionCriticProxy {
+    fn critique<'a>(
+        &'a self,
+        task: &'a str,
+        answer: &'a str,
+        context: &'a str,
+    ) -> futures::future::BoxFuture<
+        'a,
+        echo_agent::error::Result<echo_agent::agent::critic::Critique>,
+    > {
+        Box::pin(async move {
+            let input = CritiqueInput {
+                task: task.to_string(),
+                answer: answer.to_string(),
+                context: context.to_string(),
+            };
+            input
+                .validate()
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            let value = self
+                .bridge
+                .invoke_once(
+                    &self.extension,
+                    Some(session_invocation_context(&self.session_id)),
+                    ExtensionInvocation::CriticCritique(input),
+                    self.bridge.connection_cancellation(),
+                )
+                .await
+                .map_err(react_error)?;
+            let ExtensionResult::CriticCritique(critique) = value else {
+                return Err(ReactError::Other(
+                    "critic extension returned the wrong result variant".to_string(),
+                ));
+            };
+            critique_from_wire(critique).map_err(ReactError::Other)
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -3783,11 +5976,30 @@ impl echo_agent::agent::InterventionCallback for ExtensionInterventionProxy {
 /// Async subagent-factory adapter: the framework's lazy subagent
 /// construction calls `create()`, which forwards to the same factory
 /// operation with a minimal construction config.
+#[derive(Clone)]
 pub(crate) struct SubagentFactoryAdapter {
     bridge: Arc<ExtensionBridge>,
     extension: WireHandle,
     subagent_name: String,
     session_id: String,
+}
+
+impl SubagentFactoryAdapter {
+    #[cfg(any(feature = "framework-eval", feature = "framework-improve"))]
+    pub(crate) fn for_registration(
+        bridge: Arc<ExtensionBridge>,
+        extension: WireHandle,
+        subagent_name: String,
+        session_id: String,
+    ) -> Option<Self> {
+        let record = bridge.state().ok()?.handles.extension(&extension).ok()?;
+        matches!(record.descriptor, ExtensionDescriptor::AgentFactory { .. }).then_some(Self {
+            bridge,
+            extension,
+            subagent_name,
+            session_id,
+        })
+    }
 }
 
 impl echo_agent::agent::subagent::AgentFactory for SubagentFactoryAdapter {
@@ -4185,6 +6397,384 @@ impl Agent for ExtensionCustomAgentProxy {
     }
 }
 
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+fn channel_chat_type_to_wire(value: ChannelChatType) -> ChannelChatTypeWire {
+    match value {
+        ChannelChatType::Direct => ChannelChatTypeWire::Direct,
+        ChannelChatType::Group => ChannelChatTypeWire::Group,
+    }
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+fn channel_chat_type_from_wire(value: ChannelChatTypeWire) -> ChannelChatType {
+    match value {
+        ChannelChatTypeWire::Direct => ChannelChatType::Direct,
+        ChannelChatTypeWire::Group => ChannelChatType::Group,
+    }
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+fn channel_attachment_to_wire(value: &MessageAttachment) -> ChannelAttachmentWire {
+    let (kind, data) = match value.kind {
+        AttachmentKind::Image => ("image", &value.data),
+        AttachmentKind::File => ("file", &value.data),
+        AttachmentKind::Audio => ("audio", &value.data),
+        AttachmentKind::Video => ("video", &value.data),
+    };
+    ChannelAttachmentWire {
+        kind: kind.to_string(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+        filename: value.filename.clone(),
+    }
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+fn channel_inbound_to_wire(value: &InboundMessage) -> ChannelInboundMessageWire {
+    ChannelInboundMessageWire {
+        channel_id: value.channel_id.clone(),
+        sender_id: value.sender_id.clone(),
+        chat_id: value.chat_id.clone(),
+        chat_type: channel_chat_type_to_wire(value.chat_type),
+        text: value.text.clone(),
+        message_id: value.message_id.clone(),
+        timestamp: WireU64::from_u64(value.timestamp),
+        attachments: value
+            .attachments
+            .iter()
+            .map(channel_attachment_to_wire)
+            .collect(),
+    }
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+fn channel_outbound_to_wire(value: &OutboundMessage) -> ChannelOutboundMessageWire {
+    ChannelOutboundMessageWire {
+        channel_id: value.channel_id.clone(),
+        to: value.to.clone(),
+        chat_type: channel_chat_type_to_wire(value.chat_type),
+        text: value.text.clone(),
+        reply_to: value.reply_to.clone(),
+        attachments: value
+            .attachments
+            .iter()
+            .map(channel_attachment_to_wire)
+            .collect(),
+    }
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+fn channel_attachment_from_wire(
+    value: ChannelAttachmentWire,
+) -> echo_agent::error::Result<MessageAttachment> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(value.data_base64)
+        .map_err(|error| ReactError::Other(format!("channel attachment base64: {error}")))?;
+    let kind = match value.kind.as_str() {
+        "image" => AttachmentKind::Image,
+        "file" => AttachmentKind::File,
+        "audio" => AttachmentKind::Audio,
+        "video" => AttachmentKind::Video,
+        other => {
+            return Err(ReactError::Other(format!(
+                "unknown channel attachment kind {other}"
+            )));
+        }
+    };
+    Ok(MessageAttachment {
+        kind,
+        data,
+        filename: value.filename,
+    })
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+fn channel_inbound_from_wire(
+    value: ChannelInboundMessageWire,
+) -> echo_agent::error::Result<InboundMessage> {
+    Ok(InboundMessage {
+        channel_id: value.channel_id,
+        sender_id: value.sender_id,
+        chat_id: value.chat_id,
+        chat_type: channel_chat_type_from_wire(value.chat_type),
+        text: value.text,
+        message_id: value.message_id,
+        timestamp: value.timestamp.to_u64().unwrap_or_default(),
+        attachments: value
+            .attachments
+            .into_iter()
+            .map(channel_attachment_from_wire)
+            .collect::<echo_agent::error::Result<Vec<_>>>()?,
+    })
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+pub(crate) fn channel_outbound_from_wire(
+    value: ChannelOutboundMessageWire,
+) -> echo_agent::error::Result<OutboundMessage> {
+    Ok(OutboundMessage {
+        channel_id: value.channel_id,
+        to: value.to,
+        chat_type: channel_chat_type_from_wire(value.chat_type),
+        text: value.text,
+        reply_to: value.reply_to,
+        attachments: value
+            .attachments
+            .into_iter()
+            .map(channel_attachment_from_wire)
+            .collect::<echo_agent::error::Result<Vec<_>>>()?,
+    })
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+pub(crate) struct ExtensionChannelMessageHandlerProxy {
+    bridge: Arc<ExtensionBridge>,
+    extension: WireHandle,
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+impl ExtensionChannelMessageHandlerProxy {
+    pub(crate) fn new(bridge: Arc<ExtensionBridge>, extension: WireHandle) -> Self {
+        Self { bridge, extension }
+    }
+
+    async fn invoke(
+        &self,
+        invocation: ExtensionInvocation,
+    ) -> echo_agent::error::Result<ExtensionResult> {
+        self.bridge
+            .invoke_once_connection_scoped(&self.extension, None, invocation)
+            .await
+            .map_err(react_error)
+    }
+}
+
+#[cfg(feature = "framework-channels")]
+#[async_trait]
+impl MessageHandler for ExtensionChannelMessageHandlerProxy {
+    async fn handle(&self, message: InboundMessage) -> echo_agent::error::Result<OutboundMessage> {
+        let result = self
+            .invoke(ExtensionInvocation::ChannelHandle(ChannelHandleInput {
+                message: channel_inbound_to_wire(&message),
+            }))
+            .await?;
+        let ExtensionResult::ChannelHandle(value) = result else {
+            return Err(ReactError::Other(
+                "channel handler returned the wrong result variant".to_string(),
+            ));
+        };
+        channel_outbound_from_wire(value)
+    }
+
+    async fn handle_stream<'a>(
+        &'a self,
+        message: InboundMessage,
+    ) -> echo_agent::error::Result<
+        futures::stream::BoxStream<'a, echo_agent::error::Result<OutboundMessage>>,
+    > {
+        let (receiver, stream, invocation_id, cancellation, lease, sink) = self
+            .bridge
+            .invoke_stream(
+                &self.extension,
+                None,
+                ExtensionInvocation::ChannelHandleStream(ChannelHandleInput {
+                    message: channel_inbound_to_wire(&message),
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .map_err(react_error)?;
+        Ok(Box::pin(
+            extension_event_stream(
+                self.bridge.clone(),
+                stream,
+                invocation_id,
+                cancellation,
+                lease,
+                sink,
+                receiver,
+            )
+            .map(|event| match event {
+                ExtensionStreamEvent::Chunk { value, .. } => match value {
+                    ExtensionStreamChunkValue::Channel(message) => {
+                        channel_outbound_from_wire(message)
+                    }
+                    _ => Err(ReactError::Other(
+                        "channel handler stream received a non-channel payload".to_string(),
+                    )),
+                },
+                ExtensionStreamEvent::Complete { value, .. } => match value {
+                    ExtensionStreamCompleteValue::Channel(message) => {
+                        channel_outbound_from_wire(message)
+                    }
+                    _ => Err(ReactError::Other(
+                        "channel handler stream received a non-channel terminal".to_string(),
+                    )),
+                },
+                ExtensionStreamEvent::Failed { error, .. } => Err(react_error(error)),
+                ExtensionStreamEvent::Cancelled { .. } => Err(ReactError::Other(
+                    "channel handler stream was cancelled".to_string(),
+                )),
+            }),
+        ))
+    }
+
+    async fn reply(&self, message: OutboundMessage) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(ExtensionInvocation::ChannelReply(ChannelReplyInput {
+                message: channel_outbound_to_wire(&message),
+            }))
+            .await?;
+        if matches!(result, ExtensionResult::ChannelReply(_)) {
+            Ok(())
+        } else {
+            Err(ReactError::Other(
+                "channel handler reply returned the wrong result variant".to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+pub(crate) struct ExtensionChannelPluginProxy {
+    bridge: Arc<ExtensionBridge>,
+    extension: WireHandle,
+    descriptor: ChannelPluginDescriptorWire,
+    capabilities: ChannelCapabilities,
+    handler: Mutex<Option<Arc<dyn MessageHandler>>>,
+}
+
+#[cfg(feature = "framework-channels")]
+#[allow(dead_code)]
+impl ExtensionChannelPluginProxy {
+    pub(crate) fn new(
+        bridge: Arc<ExtensionBridge>,
+        extension: WireHandle,
+        descriptor: ChannelPluginDescriptorWire,
+    ) -> Self {
+        static DIRECT: &[ChannelChatType] = &[ChannelChatType::Direct];
+        static GROUP: &[ChannelChatType] = &[ChannelChatType::Group];
+        static BOTH: &[ChannelChatType] = &[ChannelChatType::Direct, ChannelChatType::Group];
+        let chat_types = match descriptor.capabilities.chat_types.as_slice() {
+            [ChannelChatTypeWire::Direct] => DIRECT,
+            [ChannelChatTypeWire::Group] => GROUP,
+            _ => BOTH,
+        };
+        let capabilities = ChannelCapabilities {
+            chat_types,
+            supports_media: descriptor.capabilities.supports_media,
+            supports_threads: descriptor.capabilities.supports_threads,
+        };
+        Self {
+            bridge,
+            extension,
+            descriptor,
+            capabilities,
+            handler: Mutex::new(None),
+        }
+    }
+
+    async fn invoke(
+        &self,
+        invocation: ExtensionInvocation,
+    ) -> echo_agent::error::Result<ExtensionResult> {
+        self.bridge
+            .invoke_once_connection_scoped(&self.extension, None, invocation)
+            .await
+            .map_err(react_error)
+    }
+}
+
+#[cfg(feature = "framework-channels")]
+#[async_trait]
+impl ChannelPlugin for ExtensionChannelPluginProxy {
+    fn id(&self) -> &str {
+        &self.descriptor.channel_id
+    }
+
+    fn label(&self) -> &str {
+        &self.descriptor.label
+    }
+
+    fn capabilities(&self) -> &ChannelCapabilities {
+        &self.capabilities
+    }
+
+    async fn start(&mut self, handler: Arc<dyn MessageHandler>) -> echo_agent::error::Result<()> {
+        *self
+            .handler
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(handler);
+        let result = self
+            .invoke(ExtensionInvocation::ChannelStart(ChannelStartInput {
+                handler_id: self.descriptor.handler_id.clone(),
+            }))
+            .await?;
+        if matches!(result, ExtensionResult::ChannelStart(_)) {
+            Ok(())
+        } else {
+            Err(ReactError::Other(
+                "channel plugin start returned the wrong result variant".to_string(),
+            ))
+        }
+    }
+
+    async fn stop(&mut self) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(ExtensionInvocation::ChannelStop(ExtensionUnit))
+            .await?;
+        if matches!(result, ExtensionResult::ChannelStop(_)) {
+            *self
+                .handler
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+            Ok(())
+        } else {
+            Err(ReactError::Other(
+                "channel plugin stop returned the wrong result variant".to_string(),
+            ))
+        }
+    }
+
+    async fn send(&self, message: OutboundMessage) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(ExtensionInvocation::ChannelSend(ChannelSendInput {
+                message: channel_outbound_to_wire(&message),
+            }))
+            .await?;
+        if matches!(result, ExtensionResult::ChannelSend(_)) {
+            Ok(())
+        } else {
+            Err(ReactError::Other(
+                "channel plugin send returned the wrong result variant".to_string(),
+            ))
+        }
+    }
+
+    async fn health_check(&self) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(ExtensionInvocation::ChannelHealth(ExtensionUnit))
+            .await?;
+        if matches!(result, ExtensionResult::ChannelHealth(_)) {
+            Ok(())
+        } else {
+            Err(ReactError::Other(
+                "channel plugin health returned the wrong result variant".to_string(),
+            ))
+        }
+    }
+}
+
 // ── Session Agent construction integration ──────────────────────────────────
 
 /// Inject every currently registered extension into one Session Agent at
@@ -4211,6 +6801,144 @@ pub(crate) async fn apply_extensions_to_agent(
     {
         agent.set_llm_client(Arc::new(proxy));
     }
+    if let Some((extension, _)) = state
+        .handles
+        .extensions_of_kind(ExtensionKind::ContextCompressor)
+        .into_iter()
+        .max_by_key(|(_, record)| record.registration_order)
+        && let Some(proxy) =
+            ExtensionContextCompressorProxy::new(bridge.clone(), extension, session_id.to_string())
+    {
+        agent.set_compressor(proxy).await;
+    }
+    for component in [
+        AgentComponentKindWire::ConversationStore,
+        AgentComponentKindWire::RunStore,
+        AgentComponentKindWire::RuntimeStateStore,
+        AgentComponentKindWire::AuditLogger,
+        AgentComponentKindWire::ContextProjector,
+        AgentComponentKindWire::MemoryTriggerSink,
+        AgentComponentKindWire::RevisionedTaskStore,
+        AgentComponentKindWire::SandboxExecutor,
+        AgentComponentKindWire::MemoryPromoter,
+        AgentComponentKindWire::Embedder,
+        AgentComponentKindWire::Workflow,
+        AgentComponentKindWire::IntentClassifier,
+        AgentComponentKindWire::SkillLoadPolicy,
+    ] {
+        let selected = state
+            .handles
+            .extensions_of_kind(ExtensionKind::AgentComponent)
+            .into_iter()
+            .filter(|(_, record)| {
+                matches!(
+                    &record.descriptor,
+                    ExtensionDescriptor::AgentComponent {
+                        component: descriptor_component,
+                        ..
+                    } if *descriptor_component == component
+                )
+            })
+            .max_by_key(|(_, record)| record.registration_order);
+        let Some((extension, _)) = selected else {
+            continue;
+        };
+        let Some(proxy) =
+            ExtensionAgentComponentProxy::new(bridge.clone(), extension, session_id.to_string())
+        else {
+            continue;
+        };
+        match component {
+            AgentComponentKindWire::ConversationStore => {
+                agent.set_conversation_store(Arc::new(proxy));
+            }
+            AgentComponentKindWire::RunStore => agent.set_run_store(Arc::new(proxy)),
+            AgentComponentKindWire::RuntimeStateStore => agent.set_state_store(Arc::new(proxy)),
+            AgentComponentKindWire::AuditLogger => agent.set_audit_logger(Arc::new(proxy)),
+            AgentComponentKindWire::ContextProjector => {
+                agent.set_pre_model_context_projector(Some(Arc::new(proxy)));
+            }
+            AgentComponentKindWire::MemoryTriggerSink => {
+                agent.set_memory_trigger_sink(Some(Arc::new(proxy)));
+            }
+            AgentComponentKindWire::Guard => {}
+            AgentComponentKindWire::SearchProvider => {}
+            AgentComponentKindWire::WorkflowCheckpointStore => {}
+            AgentComponentKindWire::RevisionedTaskStore => {
+                agent.set_task_revision_service(Arc::new(
+                    echo_agent::tasks::TaskRevisionService::new(
+                        Arc::new(proxy),
+                        Arc::new(echo_agent::tasks::DefaultTaskToolPolicy::default()),
+                    ),
+                ));
+            }
+            AgentComponentKindWire::SandboxExecutor => {
+                agent.set_sandbox_executor(Arc::new(proxy));
+            }
+            AgentComponentKindWire::McpTransport => {}
+            AgentComponentKindWire::MemoryPromoter => {
+                agent.set_memory_promoter(Arc::new(proxy)).await;
+            }
+            AgentComponentKindWire::Embedder => {}
+            AgentComponentKindWire::Workflow => {}
+            AgentComponentKindWire::IntentClassifier => {
+                agent.set_intent_router(echo_agent::intent::IntentRouter::new(
+                    Box::new(proxy),
+                    echo_agent::intent::IntentRouterConfig::default(),
+                ));
+            }
+            AgentComponentKindWire::SkillLoadPolicy => {
+                agent.set_skill_load_policy(Some(Arc::new(proxy)));
+            }
+        }
+    }
+    let mut guards = state
+        .handles
+        .extensions_of_kind(ExtensionKind::AgentComponent)
+        .into_iter()
+        .filter(|(_, record)| {
+            matches!(
+                &record.descriptor,
+                ExtensionDescriptor::AgentComponent {
+                    component: AgentComponentKindWire::Guard,
+                    ..
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    guards.sort_by_key(|(_, record)| record.registration_order);
+    let guards = guards
+        .into_iter()
+        .filter_map(|(extension, _)| {
+            ExtensionAgentComponentProxy::new(bridge.clone(), extension, session_id.to_string())
+                .map(|proxy| Arc::new(proxy) as Arc<dyn echo_agent::guard::Guard>)
+        })
+        .collect::<Vec<_>>();
+    if !guards.is_empty() {
+        agent.set_guard_manager(echo_agent::guard::GuardManager::from_guards(guards));
+    }
+    #[cfg(feature = "framework-web")]
+    if let Some((extension, _)) = state
+        .handles
+        .extensions_of_kind(ExtensionKind::AgentComponent)
+        .into_iter()
+        .filter(|(_, record)| {
+            matches!(
+                &record.descriptor,
+                ExtensionDescriptor::AgentComponent {
+                    component: AgentComponentKindWire::SearchProvider,
+                    ..
+                }
+            )
+        })
+        .max_by_key(|(_, record)| record.registration_order)
+        && let Some(proxy) =
+            ExtensionAgentComponentProxy::new(bridge.clone(), extension, session_id.to_string())
+    {
+        agent.replace_tool(Box::new(echo_agent::tools::web::WebSearchTool::new(
+            Box::new(proxy),
+        )));
+    }
     // Tools.
     for (extension, _) in state.handles.extensions_of_kind(ExtensionKind::Tool) {
         if let Some(proxy) =
@@ -4230,7 +6958,31 @@ pub(crate) async fn apply_extensions_to_agent(
         && let Some(proxy) =
             ExtensionStoreProxy::new(bridge.clone(), extension, session_id.to_string())
     {
-        agent.set_memory_store(Arc::new(proxy));
+        let mut store: Arc<dyn echo_agent::memory::Store> = Arc::new(proxy);
+        if let Some(embedder) = latest_agent_component_proxy(
+            &state,
+            bridge.clone(),
+            session_id,
+            AgentComponentKindWire::Embedder,
+        ) {
+            store = Arc::new(echo_agent::memory::EmbeddingStore::new(
+                store,
+                Arc::new(embedder),
+            ));
+        }
+        agent.set_memory_store(store);
+    }
+    // Critic: deterministic latest-registration ownership. Installing the
+    // proxy does not enable the framework verifier; that remains config-owned.
+    if let Some((extension, _)) = state
+        .handles
+        .extensions_of_kind(ExtensionKind::Critic)
+        .into_iter()
+        .max_by_key(|(_, record)| record.registration_order)
+        && let Some(proxy) =
+            ExtensionCriticProxy::new(bridge.clone(), extension, session_id.to_string())
+    {
+        agent.set_critic(Arc::new(proxy));
     }
     // Human-in-the-loop provider: swap the approval channel and register the
     // appeal tool so model-initiated approvals also reach the extension.
@@ -4366,6 +7118,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn context_compressor_proxy_preserves_descriptor_name() {
+        let proxy = ExtensionContextCompressorProxy {
+            bridge: Arc::new(ExtensionBridge::unbound(Arc::new(
+                ExtensionBridgeShared::new(),
+            ))),
+            extension: WireHandle {
+                id: "compressor".to_string(),
+                generation: WireU64::from_u64(1),
+                kind: HandleKind::Extension,
+            },
+            session_id: "session".to_string(),
+            name: "sdk-compressor".to_string(),
+        };
+        assert_eq!(
+            echo_agent::compression::ContextCompressor::name(&proxy),
+            "sdk-compressor"
+        );
+    }
+
+    #[test]
+    fn agent_component_exclusivity_is_operation_scoped() {
+        let audit = ExtensionInvocation::AgentComponentCall(AgentComponentCallWire {
+            component: AgentComponentKindWire::AuditLogger,
+            call: AgentComponentCallInputWire::AuditLog {
+                event: WireValue::Null,
+            },
+        });
+        assert!(!is_exclusive_invocation(
+            ExtensionKind::AgentComponent,
+            &audit
+        ));
+
+        let workflow = ExtensionInvocation::AgentComponentCall(AgentComponentCallWire {
+            component: AgentComponentKindWire::Workflow,
+            call: AgentComponentCallInputWire::WorkflowRun {
+                input: "run".to_string(),
+            },
+        });
+        assert!(is_exclusive_invocation(
+            ExtensionKind::AgentComponent,
+            &workflow
+        ));
+
+        let workflow_stream =
+            ExtensionInvocation::AgentComponentCallStream(AgentComponentCallWire {
+                component: AgentComponentKindWire::Workflow,
+                call: AgentComponentCallInputWire::WorkflowRunStream {
+                    input: "stream".to_string(),
+                },
+            });
+        assert!(is_exclusive_invocation(
+            ExtensionKind::AgentComponent,
+            &workflow_stream
+        ));
+    }
+
     fn test_sequence(
         value: u64,
     ) -> std::result::Result<echo_sdk_protocol::scalar::WireNonZeroU64, String> {
@@ -4455,6 +7264,7 @@ mod tests {
             "extension-1".to_string(),
             ExtensionKind::Tool,
             STREAM_CHANNEL_CAPACITY,
+            None,
         );
         shared.register_stream(sink);
 
@@ -4485,6 +7295,7 @@ mod tests {
             "extension-1".to_string(),
             ExtensionKind::Tool,
             STREAM_CHANNEL_CAPACITY,
+            None,
         );
         shared.register_stream(sink.clone());
 

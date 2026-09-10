@@ -12,6 +12,7 @@
 
 #![cfg(feature = "sdk-extension-bridge")]
 
+use agent_client_protocol::UntypedMessage;
 use agent_client_protocol::schema::{ProtocolVersion, v1};
 use agent_client_protocol::{
     BoxFuture, ByteStreams, Client, ConnectionTo, Error as RpcError, Responder,
@@ -22,7 +23,7 @@ use echo_sdk_protocol::capability::{
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
 use echo_sdk_protocol::handle::{HandleKind, WireHandle};
 use echo_sdk_protocol::methods::*;
-use echo_sdk_protocol::scalar::{WireDuration, WireNonZeroU64, WireU64, WireValue};
+use echo_sdk_protocol::scalar::{WireDuration, WireNonZeroU64, WirePath, WireU64, WireValue};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,6 +50,24 @@ fn source_contract_digest() -> String {
         .and_then(serde_json::Value::as_str)
         .expect("aggregate_digest present")
         .to_string()
+}
+
+fn facade_digest(operation: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../contracts/sdk/facade-operation-catalog.json");
+    let catalog: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    catalog
+        .get("routes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|route| route.get("operation").and_then(serde_json::Value::as_str) == Some(operation))
+        .and_then(|route| route.get("signature_digests"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|digests| digests.first())
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("missing facade digest for {operation}").into())
 }
 
 fn client_hello() -> EchoAgentClientHello {
@@ -279,13 +298,21 @@ fn host_transport(
 }
 
 fn stderr_text(host: &HostProcess) -> String {
-    String::from_utf8_lossy(host.stderr.lock().expect("stderr lock").as_slice()).to_string()
+    String::from_utf8_lossy(
+        host.stderr
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_slice(),
+    )
+    .to_string()
 }
 
 /// The fake SDK dispatcher state shared by client handlers.
 #[derive(Default)]
 struct SdkDispatch {
     operations: SharedVec<String>,
+    compressor_extensions: SharedVec<String>,
+    component_operations: SharedVec<String>,
     cancel_notices: SharedVec<String>,
     /// Hold responders that must never answer (timeout/cancel scenarios).
     silent: Arc<Mutex<Vec<Responder<ExtensionInvokeOutcome>>>>,
@@ -298,6 +325,10 @@ struct SdkDispatch {
     oversized_stream: Arc<std::sync::atomic::AtomicBool>,
     flood_stream: Arc<std::sync::atomic::AtomicBool>,
     missing_finish_reason: Arc<std::sync::atomic::AtomicBool>,
+    hang_sandbox_cancel: Arc<std::sync::atomic::AtomicBool>,
+    reentrant_mutation: Arc<Mutex<Option<(WireHandle, WireHandle)>>>,
+    reentrant_conflicts: Arc<AtomicUsize>,
+    tokenizer_counts: Arc<AtomicUsize>,
 }
 
 fn tool_descriptor(name: &str) -> ExtensionDescriptor {
@@ -334,6 +365,47 @@ fn llm_descriptor_with_streaming(model: &str, supports_streaming: bool) -> Exten
     }
 }
 
+fn critic_descriptor(name: &str) -> ExtensionDescriptor {
+    ExtensionDescriptor::Critic {
+        descriptor_version: 1,
+        name: name.to_string(),
+    }
+}
+
+fn channel_handler_descriptor(handler_id: &str) -> ExtensionDescriptor {
+    ExtensionDescriptor::ChannelMessageHandler(ChannelMessageHandlerDescriptorWire {
+        descriptor_version: 1,
+        handler_id: handler_id.to_string(),
+    })
+}
+
+#[cfg(feature = "framework-channels")]
+fn channel_plugin_descriptor(channel_id: &str, handler_id: &str) -> ExtensionDescriptor {
+    ExtensionDescriptor::ChannelPlugin(ChannelPluginDescriptorWire {
+        descriptor_version: 1,
+        channel_id: channel_id.to_string(),
+        label: "SDK channel".to_string(),
+        capabilities: ChannelCapabilitiesWire {
+            chat_types: vec![ChannelChatTypeWire::Direct],
+            supports_media: false,
+            supports_threads: false,
+        },
+        handler_id: handler_id.to_string(),
+    })
+}
+
+#[cfg(feature = "framework-channels")]
+fn channel_outbound_fixture(text: &str) -> ChannelOutboundMessageWire {
+    ChannelOutboundMessageWire {
+        channel_id: "sdk-channel".to_string(),
+        to: "chat".to_string(),
+        chat_type: ChannelChatTypeWire::Direct,
+        text: text.to_string(),
+        reply_to: None,
+        attachments: Vec::new(),
+    }
+}
+
 /// Connect the fake SDK client with reverse-invocation handlers and run the
 /// scenario to completion.
 async fn drive_sdk<T, F>(
@@ -351,6 +423,8 @@ where
 {
     let transport = host_transport(host);
     let operations = dispatch.operations.clone();
+    let compressor_extensions = dispatch.compressor_extensions.clone();
+    let component_operations = dispatch.component_operations.clone();
     let cancel_notices = dispatch.cancel_notices.clone();
     let silent = dispatch.silent.clone();
     let hang = dispatch.hang.clone();
@@ -361,11 +435,17 @@ where
     let oversized_stream = dispatch.oversized_stream.clone();
     let flood_stream = dispatch.flood_stream.clone();
     let missing_finish_reason = dispatch.missing_finish_reason.clone();
+    let hang_sandbox_cancel = dispatch.hang_sandbox_cancel.clone();
+    let reentrant_mutation = dispatch.reentrant_mutation.clone();
+    let reentrant_conflicts = dispatch.reentrant_conflicts.clone();
+    let tokenizer_counts = dispatch.tokenizer_counts.clone();
     let connect = Client
         .builder()
         .on_receive_request(
             {
                 let operations = operations.clone();
+                let compressor_extensions = compressor_extensions.clone();
+                let component_operations = component_operations.clone();
                 let silent = silent.clone();
                 let hang = hang.clone();
                 let malformed_stream = malformed_stream.clone();
@@ -375,10 +455,16 @@ where
                 let oversized_stream = oversized_stream.clone();
                 let flood_stream = flood_stream.clone();
                 let missing_finish_reason = missing_finish_reason.clone();
+                let hang_sandbox_cancel = hang_sandbox_cancel.clone();
+                let reentrant_mutation = reentrant_mutation.clone();
+                let reentrant_conflicts = reentrant_conflicts.clone();
+                let tokenizer_counts = tokenizer_counts.clone();
                 move |call: ExtensionInvokeCall,
                       responder: Responder<ExtensionInvokeOutcome>,
                       connection: ConnectionTo<agent_client_protocol::Agent>| {
                     let operations = operations.clone();
+                    let compressor_extensions = compressor_extensions.clone();
+                    let component_operations = component_operations.clone();
                     let silent = silent.clone();
                     let hang = hang.clone();
                     let malformed_stream = malformed_stream.clone();
@@ -388,6 +474,10 @@ where
                     let oversized_stream = oversized_stream.clone();
                     let flood_stream = flood_stream.clone();
                     let missing_finish_reason = missing_finish_reason.clone();
+                    let hang_sandbox_cancel = hang_sandbox_cancel.clone();
+                    let reentrant_mutation = reentrant_mutation.clone();
+                    let reentrant_conflicts = reentrant_conflicts.clone();
+                    let tokenizer_counts = tokenizer_counts.clone();
                     async move {
                         let operation = call.invocation.operation();
                         operations
@@ -476,6 +566,379 @@ where
                                     result: ExtensionResult::LlmChat(response),
                                 })
                             }
+                            ExtensionInvocation::CompressorCompress(input) => {
+                                compressor_extensions
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .push(call.extension.id.clone());
+                                assert_eq!(
+                                    input.focus_instructions.as_deref(),
+                                    Some("preserve decisions")
+                                );
+                                let tokenizer_operation =
+                                    "echo_core::tokenizer::Tokenizer::count_tokens";
+                                let signature_digest = facade_digest(tokenizer_operation)
+                                    .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+                                let counts = tokenizer_counts.clone();
+                                let tokenizer = input.tokenizer.resource.clone();
+                                let tokenizer_owner = input.tokenizer.owner_session_id.clone();
+                                tokio::spawn(async move {
+                                    let Ok(message) = UntypedMessage::new(
+                                        "_echo_agent/facade/invoke",
+                                        serde_json::json!({
+                                            "operation": tokenizer_operation,
+                                            "signature_digest": signature_digest,
+                                            "handle": tokenizer,
+                                            "arguments": [
+                                                {"kind": "string", "value": tokenizer_owner},
+                                                {"kind": "string", "value": "hello"}
+                                            ],
+                                        }),
+                                    ) else {
+                                        return;
+                                    };
+                                    let Ok(counted) = connection.send_request(message).block_task().await else {
+                                        return;
+                                    };
+                                    let Ok(counted) = serde_json::from_value::<FeatureOperationResponse>(counted) else {
+                                        return;
+                                    };
+                                    if counted.value.into_json().ok() == Some(serde_json::json!(1)) {
+                                        counts.fetch_add(1, Ordering::AcqRel);
+                                    }
+                                });
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                                responder.respond(ExtensionInvokeOutcome::Result {
+                                    result: ExtensionResult::CompressorCompress(
+                                        CompressionOutputWire {
+                                            messages: input.messages,
+                                            evicted: Vec::new(),
+                                            checkpoint: None,
+                                        },
+                                    ),
+                                })
+                            }
+                            ExtensionInvocation::AgentComponentCall(input) => {
+                                let operation = input.call.operation();
+                                component_operations
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .push(format!("{:?}:{:?}", input.component, operation));
+                                if operation
+                                    == AgentComponentOperationWire::SandboxExecuteWithLimitsAndCancel
+                                    && hang_sandbox_cancel.load(Ordering::Acquire)
+                                {
+                                    silent
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner())
+                                        .push(responder);
+                                    return Ok(());
+                                }
+                                let reentrant = reentrant_mutation
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .clone();
+                                if operation == AgentComponentOperationWire::AuditLog
+                                    && let Some((agent, session)) = reentrant
+                                {
+                                    let mutation =
+                                        "echo_agent::agent::react::ReactAgent::set_plan_mode";
+                                    let signature_digest = facade_digest(mutation)
+                                        .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+                                    let conflicts = reentrant_conflicts.clone();
+                                    tokio::spawn(async move {
+                                        let Ok(message) = UntypedMessage::new(
+                                            "_echo_agent/facade/invoke",
+                                            serde_json::json!({
+                                                "operation": mutation,
+                                                "signature_digest": signature_digest,
+                                                "handle": agent,
+                                                "arguments": [
+                                                    {"kind": "handle", "value": session},
+                                                    {"kind": "bool", "value": true}
+                                                ],
+                                            }),
+                                        ) else {
+                                            return;
+                                        };
+                                        if let Err(error) = connection
+                                            .send_request(message)
+                                            .block_task()
+                                            .await
+                                            && EchoSdkError::from_jsonrpc_data(error.data.as_ref())
+                                                .is_ok_and(|typed| typed.code == ExtensionErrorCode::ExtensionConflict)
+                                        {
+                                            conflicts.fetch_add(1, Ordering::AcqRel);
+                                        }
+                                    });
+                                    tokio::time::sleep(Duration::from_millis(25)).await;
+                                }
+                                let result = match input.call {
+                                    AgentComponentCallInputWire::ConversationCreate { conversation } => {
+                                        AgentComponentCallResultWire::ConversationCreate { conversation }
+                                    }
+                                    AgentComponentCallInputWire::ConversationGet { .. } => {
+                                        AgentComponentCallResultWire::ConversationGet { conversation: None }
+                                    }
+                                    AgentComponentCallInputWire::ConversationList { .. } => {
+                                        AgentComponentCallResultWire::ConversationList { conversations: Vec::new() }
+                                    }
+                                    AgentComponentCallInputWire::ConversationUpdate { .. } => AgentComponentCallResultWire::ConversationUpdate,
+                                    AgentComponentCallInputWire::ConversationDelete { .. } => AgentComponentCallResultWire::ConversationDelete,
+                                    AgentComponentCallInputWire::ConversationSaveMessages { .. } => AgentComponentCallResultWire::ConversationSaveMessages,
+                                    AgentComponentCallInputWire::ConversationGetMessages { .. } => {
+                                        AgentComponentCallResultWire::ConversationGetMessages { messages: Vec::new() }
+                                    }
+                                    AgentComponentCallInputWire::ConversationCountMessages { .. } => {
+                                        AgentComponentCallResultWire::ConversationCountMessages { count: WireU64::from_u64(0) }
+                                    }
+                                    AgentComponentCallInputWire::ConversationEnsure { conversation } => {
+                                        AgentComponentCallResultWire::ConversationEnsure { conversation }
+                                    }
+                                    AgentComponentCallInputWire::ConversationSearch { .. } => {
+                                        AgentComponentCallResultWire::ConversationSearch { conversations: Vec::new() }
+                                    }
+                                    AgentComponentCallInputWire::RunSave { .. } => AgentComponentCallResultWire::RunSave,
+                                    AgentComponentCallInputWire::RunLoad { .. } => AgentComponentCallResultWire::RunLoad { run: None },
+                                    AgentComponentCallInputWire::RunListBySession { .. } => AgentComponentCallResultWire::RunListBySession { runs: Vec::new() },
+                                    AgentComponentCallInputWire::RunListAll { .. } => AgentComponentCallResultWire::RunListAll { runs: Vec::new() },
+                                    AgentComponentCallInputWire::RunAppendEvent { .. } => AgentComponentCallResultWire::RunAppendEvent,
+                                    AgentComponentCallInputWire::RunListByParent { .. } => AgentComponentCallResultWire::RunListByParent { runs: Vec::new() },
+                                    AgentComponentCallInputWire::RuntimeGetCheckpoint { .. } => AgentComponentCallResultWire::RuntimeGetCheckpoint { checkpoint: None },
+                                    AgentComponentCallInputWire::RuntimeSaveCheckpoint { .. } => AgentComponentCallResultWire::RuntimeSaveCheckpoint,
+                                    AgentComponentCallInputWire::RuntimeSaveCheckpointForScope { .. } => AgentComponentCallResultWire::RuntimeSaveCheckpointForScope,
+                                    AgentComponentCallInputWire::RuntimeStateIds { .. } => AgentComponentCallResultWire::RuntimeStateIds { state_ids: Vec::new() },
+                                    AgentComponentCallInputWire::RuntimeClearState { .. } => {
+                                        let receipt = WireValue::from_json(serde_json::json!({
+                                            "scope_id": "scope",
+                                            "runtime_state_id": "runtime",
+                                            "checkpoint_removed": false
+                                        }))
+                                        .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+                                        AgentComponentCallResultWire::RuntimeClearState { receipt }
+                                    }
+                                    AgentComponentCallInputWire::RuntimeClearScope { .. } => {
+                                        let receipt = WireValue::from_json(serde_json::json!({
+                                            "scope_id": "scope",
+                                            "runtime_state_ids": []
+                                        }))
+                                        .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+                                        AgentComponentCallResultWire::RuntimeClearScope { receipt }
+                                    }
+                                    AgentComponentCallInputWire::RuntimeClearConversation { .. } => AgentComponentCallResultWire::RuntimeClearConversation,
+                                    AgentComponentCallInputWire::AuditLog { .. } => AgentComponentCallResultWire::AuditLog,
+                                    AgentComponentCallInputWire::AuditQuery { .. } => AgentComponentCallResultWire::AuditQuery { events: Vec::new() },
+                                    AgentComponentCallInputWire::ContextProject { .. } => AgentComponentCallResultWire::ContextProject { projections: Vec::new() },
+                                    AgentComponentCallInputWire::MemoryTrigger { .. } => AgentComponentCallResultWire::MemoryTrigger { disposition: "persist".to_string() },
+                                    AgentComponentCallInputWire::GuardCheck { .. } => {
+                                        AgentComponentCallResultWire::GuardCheck {
+                                            result: WireValue::String("Pass".to_string()),
+                                        }
+                                    }
+                                    AgentComponentCallInputWire::SearchProviderSearch { .. } => {
+                                        AgentComponentCallResultWire::SearchProviderSearch {
+                                            results: Vec::new(),
+                                        }
+                                    }
+                                    AgentComponentCallInputWire::WorkflowCheckpointSave { .. } => AgentComponentCallResultWire::WorkflowCheckpointSave,
+                                    AgentComponentCallInputWire::WorkflowCheckpointLoad { .. } => AgentComponentCallResultWire::WorkflowCheckpointLoad { checkpoint: None },
+                                    AgentComponentCallInputWire::WorkflowCheckpointClaim { .. } => AgentComponentCallResultWire::WorkflowCheckpointClaim { checkpoint: None },
+                                    AgentComponentCallInputWire::WorkflowCheckpointList => AgentComponentCallResultWire::WorkflowCheckpointList { checkpoints: Vec::new() },
+                                    AgentComponentCallInputWire::WorkflowCheckpointListByGraph { .. } => AgentComponentCallResultWire::WorkflowCheckpointListByGraph { checkpoints: Vec::new() },
+                                    AgentComponentCallInputWire::WorkflowCheckpointListFiltered { .. } => AgentComponentCallResultWire::WorkflowCheckpointListFiltered { checkpoints: Vec::new() },
+                                    AgentComponentCallInputWire::WorkflowCheckpointDelete { .. } => AgentComponentCallResultWire::WorkflowCheckpointDelete,
+                                    AgentComponentCallInputWire::WorkflowCheckpointClear => AgentComponentCallResultWire::WorkflowCheckpointClear,
+                                    AgentComponentCallInputWire::RevisionedTaskLoad { .. } => AgentComponentCallResultWire::RevisionedTaskLoad { graph: None },
+                                    AgentComponentCallInputWire::RevisionedTaskCompareAndCommit { commit, .. } => AgentComponentCallResultWire::RevisionedTaskCompareAndCommit { graph: commit },
+                                    AgentComponentCallInputWire::SandboxIsAvailable => AgentComponentCallResultWire::SandboxIsAvailable { available: true },
+                                    AgentComponentCallInputWire::SandboxExecute { .. } => AgentComponentCallResultWire::SandboxExecute {
+                                        result: WireValue::from_json(serde_json::json!({
+                                            "exit_code": 0,
+                                            "stdout": "sandbox answer",
+                                            "stderr": "",
+                                            "duration": {"secs": 0, "nanos": 1_000_000},
+                                            "sandbox_type": "sdk",
+                                            "timed_out": false,
+                                            "cancelled": false,
+                                            "output_truncated": false,
+                                            "stdout_bytes": 14,
+                                            "stderr_bytes": 0
+                                        })).map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?,
+                                    },
+                                    AgentComponentCallInputWire::SandboxExecuteWithLimits { .. } => AgentComponentCallResultWire::SandboxExecuteWithLimits {
+                                        result: WireValue::from_json(serde_json::json!({
+                                            "exit_code": 0,
+                                            "stdout": "sandbox answer",
+                                            "stderr": "",
+                                            "duration": {"secs": 0, "nanos": 1_000_000},
+                                            "sandbox_type": "sdk",
+                                            "timed_out": false,
+                                            "cancelled": false,
+                                            "output_truncated": false,
+                                            "stdout_bytes": 14,
+                                            "stderr_bytes": 0
+                                        })).map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?,
+                                    },
+                                    AgentComponentCallInputWire::SandboxExecuteWithLimitsAndCancel { .. } => AgentComponentCallResultWire::SandboxExecuteWithLimitsAndCancel {
+                                        result: WireValue::from_json(serde_json::json!({
+                                            "exit_code": 0,
+                                            "stdout": "sandbox answer",
+                                            "stderr": "",
+                                            "duration": {"secs": 0, "nanos": 1_000_000},
+                                            "sandbox_type": "sdk",
+                                            "timed_out": false,
+                                            "cancelled": false,
+                                            "output_truncated": false,
+                                            "stdout_bytes": 14,
+                                            "stderr_bytes": 0
+                                        })).map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?,
+                                    },
+                                    AgentComponentCallInputWire::SandboxCleanup => AgentComponentCallResultWire::SandboxCleanup,
+                                    AgentComponentCallInputWire::McpTransportSend { request } => {
+                                        let Ok(request) = request.into_json() else {
+                                            return responder.respond(ExtensionInvokeOutcome::Error {
+                                                error: EchoSdkError::new(
+                                                    ExtensionErrorCode::InvalidValue,
+                                                    "MCP request is not JSON",
+                                                    Retryability::Never,
+                                                ),
+                                            });
+                                        };
+                                        let Ok(response) = WireValue::from_json(serde_json::json!({
+                                            "jsonrpc": "2.0",
+                                            "id": request.get("id").cloned(),
+                                            "result": {
+                                                "protocolVersion": "2025-11-25",
+                                                "capabilities": {},
+                                                "serverInfo": {
+                                                    "name": "sdk-transport",
+                                                    "version": "1.0.0"
+                                                }
+                                            }
+                                        })) else {
+                                            return responder.respond(ExtensionInvokeOutcome::Error {
+                                                error: EchoSdkError::new(
+                                                    ExtensionErrorCode::SerializationViolation,
+                                                    "MCP response could not be encoded",
+                                                    Retryability::Never,
+                                                ),
+                                            });
+                                        };
+                                        AgentComponentCallResultWire::McpTransportSend { response }
+                                    },
+                                    AgentComponentCallInputWire::McpTransportNotify { .. } => AgentComponentCallResultWire::McpTransportNotify,
+                                    AgentComponentCallInputWire::McpTransportClose => AgentComponentCallResultWire::McpTransportClose,
+                                    AgentComponentCallInputWire::McpTransportTryNotification => AgentComponentCallResultWire::McpTransportTryNotification { notification: None },
+                                    AgentComponentCallInputWire::EmbedderEmbed { .. } => AgentComponentCallResultWire::EmbedderEmbed { vector: vec![0.0, 1.0] },
+                                    AgentComponentCallInputWire::MemoryPromoterPromote { evicted } => AgentComponentCallResultWire::MemoryPromoterPromote {
+                                        submitted: WireU64::from_u64(u64::try_from(evicted.len()).unwrap_or(u64::MAX)),
+                                        promoted: WireU64::from_u64(0),
+                                        deduplicated: WireU64::from_u64(0),
+                                    },
+                                    AgentComponentCallInputWire::WorkflowRun { .. } => AgentComponentCallResultWire::WorkflowRun { output: WireValue::Null },
+                                    AgentComponentCallInputWire::IntentClassify { .. } => AgentComponentCallResultWire::IntentClassify {
+                                        intent: WireValue::String("Fallback".to_string()),
+                                    },
+                                    AgentComponentCallInputWire::SkillLoadAllows { descriptor } => {
+                                        AgentComponentCallResultWire::SkillLoadAllows {
+                                            allowed: descriptor.name != "blocked",
+                                        }
+                                    }
+                                    AgentComponentCallInputWire::SandboxExecuteStream { .. }
+                                    | AgentComponentCallInputWire::WorkflowRunStream { .. } => {
+                                        return responder.respond(ExtensionInvokeOutcome::Error {
+                                            error: EchoSdkError::new(
+                                                ExtensionErrorCode::InvalidValue,
+                                                "streaming component used non-streaming invocation",
+                                                Retryability::Never,
+                                            ),
+                                        });
+                                    }
+                                };
+                                responder.respond(ExtensionInvokeOutcome::Result {
+                                    result: ExtensionResult::AgentComponentCall(
+                                        AgentComponentResultWire {
+                                            component: input.component,
+                                            result,
+                                        },
+                                    ),
+                                })
+                            }
+                            ExtensionInvocation::AgentComponentCallStream(input) => {
+                                let Some(stream) = call.stream.clone() else {
+                                    return responder.respond(ExtensionInvokeOutcome::Error {
+                                        error: EchoSdkError::new(
+                                            ExtensionErrorCode::ExtensionFailed,
+                                            "missing Agent component stream handle",
+                                            Retryability::Never,
+                                        ),
+                                    });
+                                };
+                                responder.respond(ExtensionInvokeOutcome::Stream {
+                                    stream: stream.clone(),
+                                })?;
+                                tokio::spawn(async move {
+                                    let value = match input.call {
+                                        AgentComponentCallInputWire::SandboxExecuteStream { .. } => {
+                                            let Ok(result) = WireValue::from_json(serde_json::json!({
+                                                "exit_code": 0,
+                                                "stdout": "streamed sandbox",
+                                                "stderr": "",
+                                                "duration": {"secs": 0, "nanos": 1_000_000},
+                                                "sandbox_type": "sdk",
+                                                "timed_out": false,
+                                                "cancelled": false,
+                                                "output_truncated": false,
+                                                "stdout_bytes": 16,
+                                                "stderr_bytes": 0
+                                            })) else {
+                                                return;
+                                            };
+                                            ExtensionStreamCompleteValue::AgentComponent(
+                                                AgentComponentStreamCompleteWire::Sandbox(
+                                                    SandboxStreamCompleteWire::Complete { result },
+                                                ),
+                                            )
+                                        }
+                                        AgentComponentCallInputWire::WorkflowRunStream { .. } => {
+                                            ExtensionStreamCompleteValue::AgentComponent(
+                                                AgentComponentStreamCompleteWire::Workflow(
+                                                    WorkflowStreamCompleteWire {
+                                                        result: "streamed workflow".to_string(),
+                                                        total_steps: WireU64::from_u64(1),
+                                                        elapsed: WireDuration {
+                                                            seconds: WireU64::from_u64(0),
+                                                            nanos: 1_000_000,
+                                                        },
+                                                    },
+                                                ),
+                                            )
+                                        }
+                                        _ => return,
+                                    };
+                                    let _ = connection.send_notification(
+                                        ExtensionStreamEvent::Complete {
+                                            stream,
+                                            sequence: nonzero(1),
+                                            value,
+                                        },
+                                    );
+                                });
+                                Ok(())
+                            }
+                            ExtensionInvocation::CriticCritique(input) => {
+                                assert_eq!(input.task, "solve");
+                                assert_eq!(input.answer, "42");
+                                assert_eq!(input.context, "math");
+                                responder.respond(ExtensionInvokeOutcome::Result {
+                                    result: ExtensionResult::CriticCritique(CritiqueWire {
+                                        score: 9.5,
+                                        passed: true,
+                                        feedback: "good".to_string(),
+                                        suggestions: Vec::new(),
+                                    }),
+                                })
+                            }
                             ExtensionInvocation::LlmChatStream(_) => {
                                 let Some(stream) = call.stream.clone() else {
                                     return responder.respond(ExtensionInvokeOutcome::Error {
@@ -486,6 +949,29 @@ where
                                         ),
                                     });
                                 };
+                                if flood_stream.load(Ordering::Acquire) {
+                                    // Deliver the first burst before answering
+                                    // the reverse request. The Host has already
+                                    // minted and registered the sink, but the
+                                    // framework stream consumer cannot start
+                                    // draining until the stream outcome is
+                                    // received. This makes the bounded-mailbox
+                                    // branch deterministic instead of racing
+                                    // the consumer scheduler.
+                                    for sequence in 1_u64..=2 {
+                                        connection.send_notification(
+                                            ExtensionStreamEvent::Chunk {
+                                                stream: stream.clone(),
+                                                sequence: nonzero(sequence),
+                                                value: ExtensionStreamChunkValue::Llm(
+                                                    chat_stream_chunk_wire("x"),
+                                                ),
+                                            },
+                                        )?;
+                                    }
+                                    return responder
+                                        .respond(ExtensionInvokeOutcome::Stream { stream });
+                                }
                                 responder.respond(ExtensionInvokeOutcome::Stream {
                                     stream: stream.clone(),
                                 })?;
@@ -494,6 +980,43 @@ where
                                 // callback's own stream production (design §12.3:
                                 // the reader loop keeps dispatching).
                                 tokio::spawn(async move {
+                                    let reentrant = reentrant_mutation
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner())
+                                        .clone();
+                                    if let Some((agent, session)) = reentrant {
+                                        let mutation = "echo_agent::agent::react::ReactAgent::set_plan_mode";
+                                        let signature_digest =
+                                            facade_digest(mutation).ok();
+                                        let message = signature_digest.and_then(|signature_digest| {
+                                            UntypedMessage::new(
+                                                "_echo_agent/facade/invoke",
+                                                serde_json::json!({
+                                                    "operation": mutation,
+                                                    "signature_digest": signature_digest,
+                                                    "handle": agent,
+                                                    "arguments": [
+                                                        {"kind": "handle", "value": session},
+                                                        {"kind": "bool", "value": true}
+                                                    ],
+                                                }),
+                                            )
+                                            .ok()
+                                        });
+                                        if let Some(message) = message
+                                            && let Err(error) = connection
+                                                .send_request(message)
+                                                .block_task()
+                                                .await
+                                            && EchoSdkError::from_jsonrpc_data(error.data.as_ref())
+                                                .is_ok_and(|typed| {
+                                                    typed.code
+                                                        == ExtensionErrorCode::ExtensionConflict
+                                                })
+                                        {
+                                            reentrant_conflicts.fetch_add(1, Ordering::AcqRel);
+                                        }
+                                    }
                                     if oversized_stream.load(Ordering::Acquire) {
                                         let _ = connection.send_notification(
                                             ExtensionStreamEvent::Chunk {
@@ -501,33 +1024,6 @@ where
                                                 sequence: nonzero(1),
                                                 value: ExtensionStreamChunkValue::Llm(
                                                     chat_stream_chunk_wire(&"x".repeat(300_000)),
-                                                ),
-                                            },
-                                        );
-                                        return;
-                                    }
-                                    if flood_stream.load(Ordering::Acquire) {
-                                        let text = "x";
-                                        for sequence in 1_u64..=5_000 {
-                                            if connection
-                                                .send_notification(ExtensionStreamEvent::Chunk {
-                                                    stream: stream.clone(),
-                                                    sequence: nonzero(sequence),
-                                                    value: ExtensionStreamChunkValue::Llm(
-                                                        chat_stream_chunk_wire(text),
-                                                    ),
-                                                })
-                                                .is_err()
-                                            {
-                                                return;
-                                            }
-                                        }
-                                        let _ = connection.send_notification(
-                                            ExtensionStreamEvent::Complete {
-                                                stream,
-                                                sequence: nonzero(5_001),
-                                                value: ExtensionStreamCompleteValue::Llm(
-                                                    chat_stream_complete_wire("stop"),
                                                 ),
                                             },
                                         );
@@ -634,6 +1130,83 @@ where
                             ExtensionInvocation::AgentClose(_) => {
                                 responder.respond(ExtensionInvokeOutcome::Result {
                                     result: ExtensionResult::AgentClose(ExtensionUnit),
+                                })
+                            }
+                            #[cfg(feature = "framework-channels")]
+                            ExtensionInvocation::ChannelStart(_) => {
+                                responder.respond(ExtensionInvokeOutcome::Result {
+                                    result: ExtensionResult::ChannelStart(ExtensionUnit),
+                                })
+                            }
+                            #[cfg(feature = "framework-channels")]
+                            ExtensionInvocation::ChannelStop(_) => {
+                                responder.respond(ExtensionInvokeOutcome::Result {
+                                    result: ExtensionResult::ChannelStop(ExtensionUnit),
+                                })
+                            }
+                            #[cfg(feature = "framework-channels")]
+                            ExtensionInvocation::ChannelSend(_) => {
+                                responder.respond(ExtensionInvokeOutcome::Result {
+                                    result: ExtensionResult::ChannelSend(ExtensionUnit),
+                                })
+                            }
+                            #[cfg(feature = "framework-channels")]
+                            ExtensionInvocation::ChannelHealth(_) => {
+                                responder.respond(ExtensionInvokeOutcome::Result {
+                                    result: ExtensionResult::ChannelHealth(ExtensionUnit),
+                                })
+                            }
+                            #[cfg(feature = "framework-channels")]
+                            ExtensionInvocation::ChannelHandle(input) => {
+                                responder.respond(ExtensionInvokeOutcome::Result {
+                                    result: ExtensionResult::ChannelHandle(
+                                        channel_outbound_fixture(&format!(
+                                            "reply: {}",
+                                            input.message.text
+                                        )),
+                                    ),
+                                })
+                            }
+                            #[cfg(feature = "framework-channels")]
+                            ExtensionInvocation::ChannelHandleStream(input) => {
+                                let Some(stream) = call.stream.clone() else {
+                                    return responder.respond(ExtensionInvokeOutcome::Error {
+                                        error: EchoSdkError::new(
+                                            ExtensionErrorCode::ExtensionFailed,
+                                            "missing stream handle",
+                                            Retryability::Never,
+                                        ),
+                                    });
+                                };
+                                let text = format!("stream reply: {}", input.message.text);
+                                responder.respond(ExtensionInvokeOutcome::Stream {
+                                    stream: stream.clone(),
+                                })?;
+                                tokio::spawn(async move {
+                                    let _ =
+                                        connection.send_notification(ExtensionStreamEvent::Chunk {
+                                            stream: stream.clone(),
+                                            sequence: nonzero(1),
+                                            value: ExtensionStreamChunkValue::Channel(
+                                                channel_outbound_fixture(&text),
+                                            ),
+                                        });
+                                    let _ = connection.send_notification(
+                                        ExtensionStreamEvent::Complete {
+                                            stream,
+                                            sequence: nonzero(2),
+                                            value: ExtensionStreamCompleteValue::Channel(
+                                                channel_outbound_fixture("stream done"),
+                                            ),
+                                        },
+                                    );
+                                });
+                                Ok(())
+                            }
+                            #[cfg(feature = "framework-channels")]
+                            ExtensionInvocation::ChannelReply(_) => {
+                                responder.respond(ExtensionInvokeOutcome::Result {
+                                    result: ExtensionResult::ChannelReply(ExtensionUnit),
                                 })
                             }
                             ExtensionInvocation::AgentExecuteStream(_)
@@ -827,6 +1400,12 @@ fn neutral_result_wire(operation: ExtensionOperation) -> ExtensionResult {
             ExtensionResult::InterventionOnFinalAnswer(InterventionResultWire::default())
         }
         ExtensionOperation::AgentClose => ExtensionResult::AgentClose(ExtensionUnit),
+        ExtensionOperation::CriticCritique => ExtensionResult::CriticCritique(CritiqueWire {
+            score: 10.0,
+            passed: true,
+            feedback: String::new(),
+            suggestions: Vec::new(),
+        }),
         _ => ExtensionResult::CallbackOnIteration(ExtensionUnit),
     }
 }
@@ -863,6 +1442,32 @@ async fn unregister(
     Ok(response.released)
 }
 
+async fn invoke_source_operation(
+    connection: &ConnectionTo<agent_client_protocol::Agent>,
+    agent: WireHandle,
+    operation: &str,
+    arguments: Vec<WireValue>,
+) -> Result<FeatureOperationResponse, RpcError> {
+    let signature_digest = facade_digest(operation)
+        .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+    let request = FeatureOperationRequest {
+        operation: operation.to_string(),
+        signature_digest,
+        handle: Some(agent),
+        arguments,
+    };
+    let value = connection
+        .send_request(UntypedMessage::new(
+            "_echo_agent/facade/invoke",
+            serde_json::to_value(request)
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+        )?)
+        .block_task()
+        .await?;
+    serde_json::from_value(value)
+        .map_err(|error| RpcError::internal_error().data(error.to_string()))
+}
+
 /// Scenario A: negotiation advertises the bridge; a tool round trip drives
 /// callbacks, an intervention and a hook; unregister and the conflict /
 /// stale matrix behave as contracted.
@@ -883,7 +1488,6 @@ async fn tool_bridge_round_trip_with_callbacks_intervention_and_hook()
     );
     let mut host = spawn_host(&config).await?;
     let dispatch = Arc::new(SdkDispatch::default());
-
     let outcome = drive_sdk(&mut host, dispatch.clone(), move |connection| {
         Box::pin(async move {
             // Negotiate: the advertisement must declare the bridge with the
@@ -1036,7 +1640,11 @@ async fn tool_bridge_round_trip_with_callbacks_intervention_and_hook()
     .await;
 
     assert!(outcome.is_ok(), "scenario failed: {outcome:?}");
-    let operations = dispatch.operations.lock().expect("operations").clone();
+    let operations = dispatch
+        .operations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
     assert!(
         operations
             .iter()
@@ -1065,6 +1673,232 @@ async fn tool_bridge_round_trip_with_callbacks_intervention_and_hook()
         "the credential must never reach stderr"
     );
     host.child.kill().await?;
+    Ok(())
+}
+
+/// ChannelPlugin and MessageHandler registrations use the same connection
+/// owned extension authority as the other reverse traits. The facade manager
+/// owns the framework resource, while plugin lifecycle and send operations
+/// cross the typed bridge with no local fallback.
+#[cfg(feature = "framework-channels")]
+#[tokio::test]
+async fn channel_plugin_facade_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let state_root = directory.path().join("state");
+    let model = start_scripted_model(vec![final_script("unused")]).await?;
+    let config = write_config(
+        directory.path(),
+        &format!("http://{model}/v1/chat/completions"),
+        &state_root,
+    );
+    let mut host = spawn_host(&config).await?;
+    let dispatch = Arc::new(SdkDispatch::default());
+
+    drive_sdk(&mut host, dispatch, move |connection| {
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let handler = register_extension(
+                &connection,
+                ExtensionKind::ChannelMessageHandler,
+                "sdk-channel-handler",
+                channel_handler_descriptor("sdk-channel-handler"),
+                None,
+            )
+            .await?;
+            let plugin = register_extension(
+                &connection,
+                ExtensionKind::ChannelPlugin,
+                "sdk-channel-plugin",
+                channel_plugin_descriptor("sdk-channel", "sdk-channel-handler"),
+                None,
+            )
+            .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let request = |operation: &str, arguments: Vec<WireValue>| FeatureOperationRequest {
+                operation: operation.to_string(),
+                signature_digest: echo_sdk_protocol::facade::family_operation_signature_digest(
+                    "channels", operation,
+                ),
+                handle: Some(session.session.clone()),
+                arguments,
+            };
+            let to_wire = |value: serde_json::Value| {
+                WireValue::from_json(value)
+                    .map_err(|error| RpcError::internal_error().data(error.to_string()))
+            };
+            let invoke = |request: FeatureOperationRequest| async {
+                let value = connection
+                    .send_request(UntypedMessage::new(
+                        "_echo_agent/channels/op",
+                        serde_json::to_value(request)
+                            .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                    )?)
+                    .block_task()
+                    .await?;
+                let response: FeatureOperationResponse = serde_json::from_value(value)
+                    .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+                response
+                    .value
+                    .into_json()
+                    .map_err(|error| RpcError::internal_error().data(error.to_string()))
+            };
+            let opened = invoke(request("channels.manager.open", Vec::new())).await?;
+            let resource: WireHandle =
+                serde_json::from_value(opened.get("resource").cloned().ok_or_else(|| {
+                    RpcError::internal_error().data("channel manager did not return a resource")
+                })?)
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let registered =
+                invoke(request(
+                    "channels.plugin.register",
+                    vec![
+                        to_wire(serde_json::to_value(&resource).map_err(|error| {
+                            RpcError::internal_error().data(error.to_string())
+                        })?)?,
+                        to_wire(serde_json::to_value(&plugin).map_err(|error| {
+                            RpcError::internal_error().data(error.to_string())
+                        })?)?,
+                        to_wire(serde_json::to_value(&handler).map_err(|error| {
+                            RpcError::internal_error().data(error.to_string())
+                        })?)?,
+                    ],
+                ))
+                .await?;
+            assert_eq!(registered.get("registered"), Some(&serde_json::json!(true)));
+            let started =
+                invoke(request(
+                    "channels.manager.start",
+                    vec![
+                        to_wire(serde_json::to_value(&resource).map_err(|error| {
+                            RpcError::internal_error().data(error.to_string())
+                        })?)?,
+                        to_wire(serde_json::to_value(&handler).map_err(|error| {
+                            RpcError::internal_error().data(error.to_string())
+                        })?)?,
+                    ],
+                ))
+                .await?;
+            assert_eq!(started.get("channels"), Some(&serde_json::json!(1)));
+            assert_eq!(started.get("failures"), Some(&serde_json::json!(0)));
+            let listed = invoke(request(
+                "channels.manager.list",
+                vec![to_wire(serde_json::to_value(&resource).map_err(
+                    |error| RpcError::internal_error().data(error.to_string()),
+                )?)?],
+            ))
+            .await?;
+            assert_eq!(
+                listed.get("channels"),
+                Some(&serde_json::json!(["sdk-channel"]))
+            );
+            let healthy = invoke(request(
+                "channels.manager.health",
+                vec![
+                    to_wire(
+                        serde_json::to_value(&resource)
+                            .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                    )?,
+                    WireValue::String("sdk-channel".to_string()),
+                ],
+            ))
+            .await?;
+            assert_eq!(healthy.get("healthy"), Some(&serde_json::json!(true)));
+            let sent = invoke(request(
+                "channels.plugin.send",
+                vec![
+                    to_wire(
+                        serde_json::to_value(&resource)
+                            .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                    )?,
+                    WireValue::String("sdk-channel".to_string()),
+                    to_wire(
+                        serde_json::to_value(channel_outbound_fixture("hello"))
+                            .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                    )?,
+                ],
+            ))
+            .await?;
+            assert_eq!(sent.get("sent"), Some(&serde_json::json!(true)));
+            let stopped = invoke(request(
+                "channels.manager.stop",
+                vec![
+                    to_wire(
+                        serde_json::to_value(&resource)
+                            .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                    )?,
+                    WireValue::String("sdk-channel".to_string()),
+                ],
+            ))
+            .await?;
+            assert_eq!(stopped.get("stopped"), Some(&serde_json::json!(true)));
+            Ok(())
+        })
+    })
+    .await?;
+    let _ = host.child.kill().await;
+    Ok(())
+}
+
+/// A bridge-only Host must reject channel registrations because it has no
+/// compiled framework channel authority to consume them.
+#[cfg(not(feature = "framework-channels"))]
+#[tokio::test]
+async fn channel_extension_requires_framework_feature() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let state_root = directory.path().join("state");
+    let model = start_scripted_model(vec![final_script("unused")]).await?;
+    let config = write_config(
+        directory.path(),
+        &format!("http://{model}/v1/chat/completions"),
+        &state_root,
+    );
+    let mut host = spawn_host(&config).await?;
+    drive_sdk(
+        &mut host,
+        Arc::new(SdkDispatch::default()),
+        move |connection| {
+            Box::pin(async move {
+                connection
+                    .send_request(initialize_request(Some(client_hello())))
+                    .block_task()
+                    .await?;
+                let result = register_extension(
+                    &connection,
+                    ExtensionKind::ChannelMessageHandler,
+                    "sdk-channel-handler",
+                    channel_handler_descriptor("sdk-channel-handler"),
+                    None,
+                )
+                .await;
+                assert!(
+                    result.is_err(),
+                    "channel registration must require the feature"
+                );
+                Ok(())
+            })
+        },
+    )
+    .await?;
+    let _ = host.child.kill().await;
     Ok(())
 }
 
@@ -1136,7 +1970,7 @@ async fn store_and_human_loop_extensions_round_trip() -> Result<(), Box<dyn std:
         dispatch
             .operations
             .lock()
-            .expect("operations")
+            .unwrap_or_else(|error| error.into_inner())
             .iter()
             .any(|operation| operation == "store_put")
     );
@@ -1506,6 +2340,1261 @@ async fn directly_registered_custom_agent_round_trips_and_unregisters()
     Ok(())
 }
 
+/// Critic registration is connection-owned and injects a typed proxy into
+/// newly created Agents. Host defaults keep verifier_enabled=false, so a
+/// normal prompt must remain fail-open without silently invoking the callback;
+/// the protocol contract test covers the Critique DTO shape independently.
+#[tokio::test]
+async fn critic_registration_preserves_default_verifier_disabled_behavior()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let state_root = directory.path().join("state");
+    let model = start_scripted_model(vec![final_script("answer")]).await?;
+    let config = write_config(
+        directory.path(),
+        &format!("http://{model}/v1/chat/completions"),
+        &state_root,
+    );
+    let mut host = spawn_host(&config).await?;
+    let dispatch = Arc::new(SdkDispatch::default());
+    let session_dir = directory.path().canonicalize()?;
+    let outcome = drive_sdk(&mut host, dispatch.clone(), move |connection| {
+        let session_dir = session_dir.clone();
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let critic = register_extension(
+                &connection,
+                ExtensionKind::Critic,
+                "sdk-critic",
+                critic_descriptor("sdk-critic"),
+                None,
+            )
+            .await?;
+            let dto = CritiqueInput {
+                task: "solve".to_string(),
+                answer: "42".to_string(),
+                context: "math".to_string(),
+            };
+            let invocation = ExtensionInvocation::CriticCritique(dto.clone());
+            assert_eq!(invocation.operation(), ExtensionOperation::CriticCritique);
+            let round_trip: CritiqueInput = serde_json::from_value(serde_json::to_value(dto)?)?;
+            assert_eq!(round_trip.task, "solve");
+            let session: v1::NewSessionResponse = connection
+                .send_request(v1::NewSessionRequest::new(session_dir))
+                .block_task()
+                .await?;
+            let prompt = connection
+                .send_request(v1::PromptRequest::new(
+                    session.session_id,
+                    vec![v1::ContentBlock::Text(v1::TextContent::new("solve"))],
+                ))
+                .block_task()
+                .await?;
+            assert_eq!(prompt.stop_reason, v1::StopReason::EndTurn);
+            assert!(unregister(&connection, &critic).await?);
+            Ok::<_, RpcError>(())
+        })
+    })
+    .await;
+    assert!(outcome.is_ok(), "critic scenario failed: {outcome:?}");
+    let operations = dispatch.operations.lock().expect("operations").clone();
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| operation == "critic_critique"),
+        "default verifier disabled must not invoke the registered Critic: {operations:?}"
+    );
+    host.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn context_compressor_registration_drives_session_compression()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let state_root = directory.path().join("state");
+    let model = start_scripted_model(vec![final_script("unused")]).await?;
+    let config = write_config(
+        directory.path(),
+        &format!("http://{model}/v1/chat/completions"),
+        &state_root,
+    );
+    let mut host = spawn_host(&config).await?;
+    let dispatch = Arc::new(SdkDispatch::default());
+    let outcome = drive_sdk(&mut host, dispatch.clone(), move |connection| {
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let first_compressor = register_extension(
+                &connection,
+                ExtensionKind::ContextCompressor,
+                "sdk-context-compressor-first",
+                ExtensionDescriptor::ContextCompressor {
+                    descriptor_version: 1,
+                    name: "sdk-context-compressor-first".to_string(),
+                },
+                None,
+            )
+            .await?;
+            let second_compressor = register_extension(
+                &connection,
+                ExtensionKind::ContextCompressor,
+                "sdk-context-compressor-second",
+                ExtensionDescriptor::ContextCompressor {
+                    descriptor_version: 1,
+                    name: "sdk-context-compressor-second".to_string(),
+                },
+                None,
+            )
+            .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?
+                .agent;
+            let first_session = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let second_session = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: None,
+                })
+                .block_task()
+                .await?;
+            let bind_operation = "echo_agent::agent::react::ReactAgent::set_compressor";
+            let bound = invoke_source_operation(
+                &connection,
+                agent.clone(),
+                bind_operation,
+                vec![
+                    WireValue::Handle(first_session.session.clone()),
+                    WireValue::Handle(first_compressor.clone()),
+                ],
+            )
+            .await?;
+            assert_eq!(bound.value, WireValue::Null);
+            let operation =
+                "echo_agent::agent::react::ReactAgent::force_compress_with_focus_and_hooks";
+            for session in [first_session.session, second_session.session] {
+                let response = invoke_source_operation(
+                    &connection,
+                    agent.clone(),
+                    operation,
+                    vec![
+                        WireValue::Handle(session),
+                        WireValue::String("preserve decisions".to_string()),
+                        WireValue::U64(WireU64::from_u64(64)),
+                        WireValue::String("manual".to_string()),
+                    ],
+                )
+                .await?;
+                assert!(matches!(response.value, WireValue::Map(_)));
+            }
+            assert!(unregister(&connection, &first_compressor).await?);
+            assert!(unregister(&connection, &second_compressor).await?);
+            Ok::<_, RpcError>(())
+        })
+    })
+    .await;
+    assert!(outcome.is_ok(), "compressor scenario failed: {outcome:?}");
+    let operations = dispatch.operations.lock().expect("operations").clone();
+    assert!(
+        operations
+            .iter()
+            .any(|operation| operation == "compressor_compress"),
+        "custom compressor was not invoked: {operations:?}"
+    );
+    let compressor_extensions = dispatch
+        .compressor_extensions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert_eq!(
+        compressor_extensions.len(),
+        2,
+        "both Session compressors must be invoked: {compressor_extensions:?}"
+    );
+    assert_ne!(
+        compressor_extensions.first(),
+        compressor_extensions.get(1),
+        "explicit Session binding must override the default latest registration"
+    );
+    assert_eq!(
+        dispatch.tokenizer_counts.load(Ordering::Acquire),
+        2,
+        "each compressor callback must reach its Host-owned tokenizer"
+    );
+    host.child.kill().await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "framework-web", feature = "framework-shell"))]
+#[tokio::test]
+async fn agent_components_are_consumed_by_new_session_agents()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let state_root = directory.path().join("state");
+    let model = start_scripted_model(vec![
+        tool_call_script("web_search", r#"{"query":"bridge"}"#),
+        final_script("search component answer"),
+        tool_call_script("shell", r#"{"command":"printf sandbox"}"#),
+        final_script("sandbox component answer"),
+    ])
+    .await?;
+    let config = write_config(
+        directory.path(),
+        &format!("http://{model}/v1/chat/completions"),
+        &state_root,
+    );
+    let mut host = spawn_host(&config).await?;
+    let dispatch = Arc::new(SdkDispatch::default());
+    let reentrant_mutation = dispatch.reentrant_mutation.clone();
+    let session_dir = directory.path().to_path_buf();
+    let skill_dir = directory.path().join("policy-skills");
+    for name in ["allowed", "blocked"] {
+        let directory = skill_dir.join(name);
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} skill\n---\nbody"),
+        )?;
+    }
+    let outcome = drive_sdk(&mut host, dispatch.clone(), move |connection| {
+        let session_dir = session_dir.clone();
+        let skill_dir = skill_dir.clone();
+        let reentrant_mutation = reentrant_mutation.clone();
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let audit = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-audit",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::AuditLogger,
+                    name: "sdk-audit".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire::default(),
+                },
+                None,
+            )
+            .await?;
+            let conversation = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-conversation",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::ConversationStore,
+                    name: "sdk-conversation".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire::default(),
+                },
+                None,
+            )
+            .await?;
+            let run_store = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-run-store",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::RunStore,
+                    name: "sdk-run-store".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire::default(),
+                },
+                None,
+            )
+            .await?;
+            let projector = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-projector",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::ContextProjector,
+                    name: "sdk-projector".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire::default(),
+                },
+                None,
+            )
+            .await?;
+            let guard = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-guard",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::Guard,
+                    name: "sdk-guard".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire::default(),
+                },
+                None,
+            )
+            .await?;
+            let search = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-search",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::SearchProvider,
+                    name: "sdk-search".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire::default(),
+                },
+                None,
+            )
+            .await?;
+            let sandbox = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-sandbox",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::SandboxExecutor,
+                    name: "sdk-sandbox".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire {
+                        isolation_level: Some("process".to_string()),
+                        ..AgentComponentCapabilitiesWire::default()
+                    },
+                },
+                None,
+            )
+            .await?;
+            let intent = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-intent",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::IntentClassifier,
+                    name: "sdk-intent".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire::default(),
+                },
+                None,
+            )
+            .await?;
+            let skill_policy = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-skill-policy",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::SkillLoadPolicy,
+                    name: "sdk-skill-policy".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire::default(),
+                },
+                None,
+            )
+            .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("agent-component-reentry-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: Some(WirePath::Utf8 {
+                        path: session_dir.display().to_string(),
+                    }),
+                    session_id: None,
+                    idempotency_id: Some("agent-component-reentry-session".to_string()),
+                })
+                .block_task()
+                .await?;
+            *reentrant_mutation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) =
+                Some((agent, session.session.clone()));
+            let agent_handle = reentrant_mutation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .map(|(agent, _)| agent.clone())
+                .ok_or_else(|| RpcError::internal_error().data("missing Agent handle"))?;
+            let tool_names = invoke_source_operation(
+                &connection,
+                agent_handle.clone(),
+                "echo_core::agent::Agent::tool_names",
+                vec![WireValue::Handle(session.session.clone())],
+            )
+            .await?;
+            let WireValue::List(tool_names) = tool_names.value else {
+                return Err(RpcError::internal_error().data("tool_names was not a list"));
+            };
+            for expected in ["web_search", "shell"] {
+                assert!(
+                    tool_names
+                        .iter()
+                        .any(|value| matches!(value, WireValue::String(name) if name == expected)),
+                    "{expected} tool was not installed: {tool_names:?}"
+                );
+            }
+            invoke_source_operation(
+                &connection,
+                agent_handle.clone(),
+                "echo_agent::agent::react::ReactAgent::set_permission_mode",
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::String("full-auto".to_string()),
+                ],
+            )
+            .await?;
+            let discovered = invoke_source_operation(
+                &connection,
+                agent_handle.clone(),
+                "echo_agent::agent::react::ReactAgent::discover_skills",
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::List(vec![WireValue::Path(WirePath::Utf8 {
+                        path: skill_dir.display().to_string(),
+                    })]),
+                ],
+            )
+            .await?;
+            assert!(
+                matches!(discovered.value, WireValue::List(ref values)
+                    if values == &vec![WireValue::String("allowed".to_string())]),
+                "SkillLoadPolicy did not filter discovery: {:?}",
+                discovered.value
+            );
+            let reconciled = invoke_source_operation(
+                &connection,
+                agent_handle.clone(),
+                "echo_agent::agent::react::ReactAgent::reconcile_skill_load_policy",
+                vec![WireValue::Handle(session.session.clone())],
+            )
+            .await?;
+            assert!(
+                matches!(reconciled.value, WireValue::List(ref values) if values.is_empty()),
+                "unchanged SkillLoadPolicy should not remove allowed skills: {:?}",
+                reconciled.value
+            );
+            let prompt_context = invoke_source_operation(
+                &connection,
+                agent_handle.clone(),
+                "echo_execution::skills::external::prompt_exec::PromptContext",
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::String(session_dir.display().to_string()),
+                    WireValue::String(session.acp_session_id.clone()),
+                    WireValue::List(Vec::new()),
+                    WireValue::Null,
+                    WireValue::Duration(WireDuration::from_nanos(30_000_000_000)),
+                    WireValue::String("local".to_string()),
+                    WireValue::Handle(sandbox.clone()),
+                ],
+            )
+            .await?;
+            let WireValue::Handle(prompt_context) = prompt_context.value else {
+                return Err(RpcError::internal_error().data("no PromptContext resource"));
+            };
+            let rendered = invoke_source_operation(
+                &connection,
+                agent_handle,
+                "echo_execution::skills::external::prompt_exec::process_skill_content",
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::String("Version: !`echo test`".to_string()),
+                    WireValue::Handle(prompt_context),
+                ],
+            )
+            .await?;
+            assert!(
+                matches!(rendered.value, WireValue::String(ref value) if value.contains("sandbox answer"))
+            );
+            let prompt = connection
+                .send_request(v1::PromptRequest::new(
+                    v1::SessionId::new(session.acp_session_id.clone()),
+                    vec![v1::ContentBlock::Text(v1::TextContent::new(
+                        "use components",
+                    ))],
+                ))
+                .block_task()
+                .await?;
+            assert_eq!(prompt.stop_reason, v1::StopReason::EndTurn);
+            let prompt = connection
+                .send_request(v1::PromptRequest::new(
+                    v1::SessionId::new(session.acp_session_id),
+                    vec![v1::ContentBlock::Text(v1::TextContent::new(
+                        "use the shell",
+                    ))],
+                ))
+                .block_task()
+                .await?;
+            assert_eq!(prompt.stop_reason, v1::StopReason::EndTurn);
+            assert!(unregister(&connection, &audit).await?);
+            assert!(unregister(&connection, &conversation).await?);
+            assert!(unregister(&connection, &run_store).await?);
+            assert!(unregister(&connection, &projector).await?);
+            assert!(unregister(&connection, &guard).await?);
+            assert!(unregister(&connection, &search).await?);
+            assert!(unregister(&connection, &sandbox).await?);
+            assert!(unregister(&connection, &intent).await?);
+            assert!(unregister(&connection, &skill_policy).await?);
+            Ok::<_, RpcError>(())
+        })
+    })
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "component scenario failed: {outcome:?}; stderr: {}",
+        stderr_text(&host)
+    );
+    assert!(
+        dispatch.reentrant_conflicts.load(Ordering::Acquire) > 0,
+        "same-Session callback mutation did not return extension_conflict"
+    );
+    let operations = dispatch
+        .component_operations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert!(
+        operations
+            .iter()
+            .any(|operation| operation.contains("AuditLogger:AuditLog")),
+        "AuditLogger was not consumed: {operations:?}"
+    );
+    assert!(
+        operations
+            .iter()
+            .any(|operation| operation.contains("ContextProjector:ContextProject")),
+        "ContextProjector was not consumed: {operations:?}"
+    );
+    for expected in [
+        "Guard:GuardCheck",
+        "SearchProvider:SearchProviderSearch",
+        "SandboxExecutor:SandboxExecute",
+        "IntentClassifier:IntentClassify",
+        "SkillLoadPolicy:SkillLoadAllows",
+        "ConversationStore:ConversationEnsure",
+        "RunStore:RunAppendEvent",
+    ] {
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.contains(expected)),
+            "{expected} was not consumed: {operations:?}"
+        );
+    }
+    host.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_transport_is_closed_when_handle_publication_exceeds_quota()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let state_root = directory.path().join("state");
+    let model = start_scripted_model(vec![final_script("unused")]).await?;
+    let config = write_config(
+        directory.path(),
+        &format!("http://{model}/v1/chat/completions"),
+        &state_root,
+    );
+    set_profile_limit(&config, "max_facade_resources", 1)?;
+    let mut host = spawn_host(&config).await?;
+    let dispatch = Arc::new(SdkDispatch::default());
+    let outcome = drive_sdk(&mut host, dispatch.clone(), move |connection| {
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let transport = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-mcp-transport",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::McpTransport,
+                    name: "sdk-mcp-transport".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire::default(),
+                },
+                None,
+            )
+            .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("mcp-publication-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: Some("mcp-publication-session".to_string()),
+                })
+                .block_task()
+                .await?;
+            let family_call =
+                |family: &str, method: &str, operation: &str, arguments: Vec<WireValue>| {
+                    UntypedMessage::new(
+                        method,
+                        serde_json::to_value(FeatureOperationRequest {
+                            operation: operation.to_string(),
+                            signature_digest:
+                                echo_sdk_protocol::facade::family_operation_signature_digest(
+                                    family, operation,
+                                ),
+                            handle: Some(session.session.clone()),
+                            arguments,
+                        })
+                        .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                    )
+                };
+            let state = connection
+                .send_request(family_call(
+                    "workflow",
+                    "_echo_agent/workflow/op",
+                    "workflow.state.new",
+                    Vec::new(),
+                )?)
+                .block_task()
+                .await?;
+            let state: FeatureOperationResponse = serde_json::from_value(state)
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let state = state
+                .value
+                .into_json()
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let state_resource: WireHandle =
+                serde_json::from_value(state.get("resource").cloned().ok_or_else(|| {
+                    RpcError::internal_error().data("workflow state resource missing")
+                })?)
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+
+            let arguments = vec![
+                WireValue::Handle(session.session.clone()),
+                WireValue::String("quota-mcp".to_string()),
+                WireValue::Handle(transport.clone()),
+            ];
+            let failed = invoke_source_operation(
+                &connection,
+                agent.clone(),
+                "echo_integration::mcp::client::McpClient::from_transport",
+                arguments.clone(),
+            )
+            .await;
+            let Err(error) = failed else {
+                return Err(RpcError::internal_error()
+                    .data("MCP publication unexpectedly succeeded at the resource limit"));
+            };
+            let typed = EchoSdkError::from_jsonrpc_data(error.data.as_ref())
+                .map_err(|decode| RpcError::internal_error().data(decode.to_string()))?;
+            assert_eq!(typed.code, ExtensionErrorCode::PayloadTooLarge);
+
+            connection
+                .send_request(family_call(
+                    "invoke",
+                    "_echo_agent/facade/invoke",
+                    "facade.resource.close",
+                    vec![WireValue::Handle(state_resource)],
+                )?)
+                .block_task()
+                .await?;
+            let reopened = invoke_source_operation(
+                &connection,
+                agent,
+                "echo_integration::mcp::client::McpClient::from_transport",
+                arguments,
+            )
+            .await?;
+            let WireValue::Handle(client) = reopened.value else {
+                return Err(RpcError::internal_error().data("MCP client resource missing"));
+            };
+            connection
+                .send_request(family_call(
+                    "invoke",
+                    "_echo_agent/facade/invoke",
+                    "facade.resource.close",
+                    vec![WireValue::Handle(client)],
+                )?)
+                .block_task()
+                .await?;
+            assert!(unregister(&connection, &transport).await?);
+            Ok::<_, RpcError>(())
+        })
+    })
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "MCP publication rollback scenario failed: {outcome:?}; stderr: {}",
+        stderr_text(&host)
+    );
+    let operations = dispatch
+        .component_operations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let closes = operations
+        .iter()
+        .filter(|operation| operation.contains("McpTransport:McpTransportClose"))
+        .count();
+    assert_eq!(
+        closes, 2,
+        "failed publication and explicit resource close must each close the transport: {operations:?}"
+    );
+    host.child.kill().await?;
+    Ok(())
+}
+
+#[cfg(feature = "framework-shell")]
+#[tokio::test]
+async fn sandbox_cancel_bridge_waits_for_cleanup_and_preserves_cancelled_terminal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let state_root = directory.path().join("state");
+    let model = start_scripted_model(vec![tool_call_script(
+        "run_code",
+        r#"{"language":"python","code":"print(1)"}"#,
+    )])
+    .await?;
+    let config = write_config(
+        directory.path(),
+        &format!("http://{model}/v1/chat/completions"),
+        &state_root,
+    );
+    let mut host = spawn_host(&config).await?;
+    let dispatch = Arc::new(SdkDispatch::default());
+    dispatch.hang_sandbox_cancel.store(true, Ordering::Release);
+    let component_operations = dispatch.component_operations.clone();
+    let outcome = drive_sdk(&mut host, dispatch.clone(), move |connection| {
+        let component_operations = component_operations.clone();
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let sandbox = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-cancellable-sandbox",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::SandboxExecutor,
+                    name: "sdk-cancellable-sandbox".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire {
+                        isolation_level: Some("os-sandbox".to_string()),
+                        ..AgentComponentCapabilitiesWire::default()
+                    },
+                },
+                None,
+            )
+            .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("sandbox-cancel-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: Some(WirePath::Utf8 {
+                        path: directory.path().display().to_string(),
+                    }),
+                    session_id: None,
+                    idempotency_id: Some("sandbox-cancel-session".to_string()),
+                })
+                .block_task()
+                .await?;
+            invoke_source_operation(
+                &connection,
+                agent,
+                "echo_agent::agent::react::ReactAgent::set_permission_mode",
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::String("full-auto".to_string()),
+                ],
+            )
+            .await?;
+            let started = connection
+                .send_request(RunStartRequest {
+                    session: session.session,
+                    input: RunInput::Chat {
+                        text: "run the code".to_string(),
+                    },
+                    idempotency_id: Some("sandbox-cancel-run".to_string()),
+                })
+                .block_task()
+                .await?;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if component_operations
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .iter()
+                        .any(|operation| {
+                            operation.contains("SandboxExecutor:SandboxExecuteWithLimitsAndCancel")
+                        })
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                let operations = component_operations
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                RpcError::internal_error()
+                    .data(format!("sandbox callback did not start: {operations:?}"))
+            })?;
+            connection
+                .send_request(RunCancelRequest {
+                    run: started.run.clone(),
+                })
+                .block_task()
+                .await?;
+            let waited = connection
+                .send_request(RunWaitRequest {
+                    run: started.run,
+                    timeout: Some(WireDuration::from_nanos(10_000_000_000)),
+                })
+                .block_task()
+                .await?;
+            assert!(
+                matches!(waited.terminal, Some(RunTerminal::Cancelled)),
+                "sandbox cancellation must preserve the Run cancelled terminal: {:?}",
+                waited.terminal
+            );
+            assert!(
+                component_operations
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .any(|operation| operation.contains("SandboxExecutor:SandboxCleanup")),
+                "sandbox cancellation must wait for cleanup"
+            );
+            assert!(unregister(&connection, &sandbox).await?);
+            Ok::<_, RpcError>(())
+        })
+    })
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "sandbox cancellation scenario failed: {outcome:?}; stderr: {}",
+        stderr_text(&host)
+    );
+    host.child.kill().await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "framework-eval", feature = "framework-improve"))]
+#[tokio::test]
+async fn eval_and_improve_source_adapters_invoke_agent_factory_lazily()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let state_root = directory.path().join("state");
+    let model = start_scripted_model(vec![final_script("unused")]).await?;
+    let config = write_config(
+        directory.path(),
+        &format!("http://{model}/v1/chat/completions"),
+        &state_root,
+    );
+    let mut host = spawn_host(&config).await?;
+    let dispatch = Arc::new(SdkDispatch::default());
+    let workspace = directory.path().join("eval-workspace");
+    let outcome = drive_sdk(&mut host, dispatch.clone(), move |connection| {
+        let workspace = workspace.clone();
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let factory = register_extension(
+                &connection,
+                ExtensionKind::AgentFactory,
+                "sdk-eval-factory",
+                ExtensionDescriptor::AgentFactory {
+                    descriptor_version: 1,
+                },
+                None,
+            )
+            .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("eval-factory-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: Some(WirePath::Utf8 {
+                        path: workspace.display().to_string(),
+                    }),
+                    session_id: None,
+                    idempotency_id: Some("eval-factory-session".to_string()),
+                })
+                .block_task()
+                .await?;
+            let cases = ["case-1", "case-2"]
+                .into_iter()
+                .map(|id| {
+                    WireValue::from_json(serde_json::json!({
+                        "id": id,
+                        "name": id,
+                        "description": "lazy factory",
+                        "domain": null,
+                        "task": "return SDK output",
+                        "project_fixture": null,
+                        "success_criteria": {
+                            "type": "output_contains",
+                            "substring": "SDK"
+                        },
+                        "constraints": {}
+                    }))
+                    .map_err(|error| RpcError::invalid_params().data(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let runner = invoke_source_operation(
+                &connection,
+                agent.clone(),
+                "echo_agent::eval::runner::EvalRunner::new",
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::Path(WirePath::Utf8 {
+                        path: workspace.display().to_string(),
+                    }),
+                ],
+            )
+            .await?;
+            let WireValue::Handle(runner) = runner.value else {
+                return Err(RpcError::internal_error().data("no EvalRunner resource"));
+            };
+            let configured_runner = invoke_source_operation(
+                &connection,
+                agent.clone(),
+                "echo_agent::eval::runner::EvalRunner::timeout_secs",
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::Handle(runner),
+                    WireValue::U64(WireU64::from_u64(7)),
+                ],
+            )
+            .await?;
+            let WireValue::Handle(runner) = configured_runner.value else {
+                return Err(RpcError::internal_error().data("no configured EvalRunner"));
+            };
+            invoke_source_operation(
+                &connection,
+                agent.clone(),
+                "echo_agent::eval::runner::EvalRunner::run_all",
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::Handle(runner),
+                    WireValue::List(cases.clone()),
+                    WireValue::Handle(factory.clone()),
+                ],
+            )
+            .await?;
+            let improvement = invoke_source_operation(
+                &connection,
+                agent.clone(),
+                "echo_agent::improve::loop::ImprovementLoop::new",
+                vec![WireValue::Handle(session.session.clone())],
+            )
+            .await?;
+            let WireValue::Handle(improvement) = improvement.value else {
+                return Err(RpcError::internal_error().data("no ImprovementLoop resource"));
+            };
+            let configured_improvement = invoke_source_operation(
+                &connection,
+                agent.clone(),
+                "echo_agent::improve::loop::ImprovementLoop::max_iterations",
+                vec![
+                    WireValue::Handle(session.session.clone()),
+                    WireValue::Handle(improvement),
+                    WireValue::U64(WireU64::from_u64(1)),
+                ],
+            )
+            .await?;
+            let WireValue::Handle(improvement) = configured_improvement.value else {
+                return Err(RpcError::internal_error().data("no configured ImprovementLoop"));
+            };
+            invoke_source_operation(
+                &connection,
+                agent,
+                "echo_agent::improve::loop::ImprovementLoop::run",
+                vec![
+                    WireValue::Handle(session.session),
+                    WireValue::Handle(improvement),
+                    WireValue::List(cases),
+                    WireValue::Handle(factory.clone()),
+                    WireValue::Null,
+                ],
+            )
+            .await?;
+            assert!(unregister(&connection, &factory).await?);
+            Ok::<_, RpcError>(())
+        })
+    })
+    .await;
+    assert!(outcome.is_ok(), "lazy factory scenario failed: {outcome:?}");
+    let operations = dispatch
+        .operations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let factory_calls = operations
+        .iter()
+        .filter(|operation| operation.as_str() == "factory_create_agent")
+        .count();
+    assert_eq!(
+        factory_calls, 4,
+        "EvalRunner and early-stopped ImprovementLoop must construct exactly one Agent per executed case"
+    );
+    host.child.kill().await?;
+    Ok(())
+}
+
+#[cfg(feature = "framework-shell")]
+#[tokio::test]
+async fn workflow_agent_component_stream_flows_through_facade_pull_stream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let state_root = directory.path().join("state");
+    let model = start_scripted_model(vec![final_script("unused")]).await?;
+    let config = write_config(
+        directory.path(),
+        &format!("http://{model}/v1/chat/completions"),
+        &state_root,
+    );
+    let mut host = spawn_host(&config).await?;
+    let dispatch = Arc::new(SdkDispatch::default());
+    let outcome = drive_sdk(&mut host, dispatch.clone(), move |connection| {
+        Box::pin(async move {
+            connection
+                .send_request(initialize_request(Some(client_hello())))
+                .block_task()
+                .await?;
+            let workflow = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-stream-workflow",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::Workflow,
+                    name: "sdk-stream-workflow".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire {
+                        supports_streaming: true,
+                        ..AgentComponentCapabilitiesWire::default()
+                    },
+                },
+                None,
+            )
+            .await?;
+            let sandbox = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-stream-sandbox",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::SandboxExecutor,
+                    name: "sdk-stream-sandbox".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire {
+                        isolation_level: Some("process".to_string()),
+                        supports_streaming: true,
+                        ..AgentComponentCapabilitiesWire::default()
+                    },
+                },
+                None,
+            )
+            .await?;
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("workflow-stream-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent,
+                    working_dir: None,
+                    session_id: None,
+                    idempotency_id: Some("workflow-stream-session".to_string()),
+                })
+                .block_task()
+                .await?;
+            let call = |operation: &str, arguments: Vec<WireValue>| {
+                UntypedMessage::new(
+                    "_echo_agent/workflow/op",
+                    serde_json::to_value(FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest:
+                            echo_sdk_protocol::facade::family_operation_signature_digest(
+                                "workflow",
+                                operation,
+                            ),
+                        handle: Some(session.session.clone()),
+                        arguments,
+                    })
+                    .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                )
+            };
+            let opened = connection
+                .send_request(call(
+                    "workflow.extension.run_stream",
+                    vec![
+                        WireValue::Handle(workflow.clone()),
+                        WireValue::String("start".to_string()),
+                    ],
+                )?)
+                .block_task()
+                .await?;
+            let opened: FeatureOperationResponse = serde_json::from_value(opened)
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let WireValue::Handle(stream) = opened.value else {
+                return Err(RpcError::internal_error().data("no workflow stream"));
+            };
+            for expected in ["item", "complete"] {
+                let next = connection
+                    .send_request(call(
+                        "workflow.stream.next",
+                        vec![WireValue::Handle(stream.clone())],
+                    )?)
+                    .block_task()
+                    .await?;
+                let next: FeatureOperationResponse = serde_json::from_value(next)
+                    .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+                assert!(
+                    matches!(next.value, WireValue::Variant { ref variant, .. } if variant == expected),
+                    "workflow stream did not yield {expected}: {:?}",
+                    next.value
+                );
+                if expected == "item" {
+                    let WireValue::Variant { fields, .. } = &next.value else {
+                        return Err(RpcError::internal_error().data("workflow item is not a variant"));
+                    };
+                    let Some(value) = fields
+                        .iter()
+                        .find(|field| field.name == "value")
+                        .map(|field| &field.value)
+                    else {
+                        return Err(RpcError::internal_error().data("workflow item has no value"));
+                    };
+                    assert!(
+                        matches!(value, WireValue::Variant { type_id, variant, .. }
+                            if type_id == "echo_orchestration::workflow::WorkflowEvent"
+                                && variant == "completed"),
+                        "extension WorkflowEvent must use the canonical graph stream shape: {value:?}"
+                    );
+                }
+            }
+            let shell_call = |operation: &str, arguments: Vec<WireValue>| {
+                UntypedMessage::new(
+                    "_echo_agent/shell/op",
+                    serde_json::to_value(FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest:
+                            echo_sdk_protocol::facade::family_operation_signature_digest(
+                                "shell",
+                                operation.strip_prefix("shell.").unwrap_or(operation),
+                            ),
+                        handle: Some(session.session.clone()),
+                        arguments,
+                    })
+                    .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                )
+            };
+            let command = WireValue::from_json(serde_json::json!({
+                "kind": {"Shell": "printf stream"},
+                "minimum_isolation": null,
+                "working_dir": null,
+                "env": {},
+                "timeout": {"secs": 30, "nanos": 0},
+                "stdin": null
+            }))
+            .map_err(|error| RpcError::invalid_params().data(error.to_string()))?;
+            let opened = connection
+                .send_request(shell_call(
+                    "shell.sandbox.extension.run_stream",
+                    vec![WireValue::Handle(sandbox.clone()), command],
+                )?)
+                .block_task()
+                .await?;
+            let opened: FeatureOperationResponse = serde_json::from_value(opened)
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let WireValue::Handle(stream) = opened.value else {
+                return Err(RpcError::internal_error().data("no sandbox stream"));
+            };
+            for expected in ["item", "complete"] {
+                let next = connection
+                    .send_request(shell_call(
+                        "shell.sandbox.stream.next",
+                        vec![WireValue::Handle(stream.clone())],
+                    )?)
+                    .block_task()
+                    .await?;
+                let next: FeatureOperationResponse = serde_json::from_value(next)
+                    .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+                assert!(
+                    matches!(next.value, WireValue::Variant { ref variant, .. } if variant == expected),
+                    "sandbox stream did not yield {expected}: {:?}",
+                    next.value
+                );
+            }
+            assert!(unregister(&connection, &workflow).await?);
+            assert!(unregister(&connection, &sandbox).await?);
+            Ok::<_, RpcError>(())
+        })
+    })
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "workflow stream scenario failed: {outcome:?}"
+    );
+    assert!(
+        dispatch
+            .operations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|operation| operation.as_str() == "agent_component_call_stream")
+            .count()
+            >= 2
+    );
+    host.child.kill().await?;
+    Ok(())
+}
+
 /// Scenario B: a registered LlmClient replaces the model transport; the
 /// streaming callback delivers chunks and the Host accepts exactly one of
 /// two duplicate wire terminals.
@@ -1523,8 +3612,10 @@ async fn llm_client_stream_extension_answers_prompts() -> Result<(), Box<dyn std
     let mut host = spawn_host(&config).await?;
     let dispatch = Arc::new(SdkDispatch::default());
     dispatch.duplicate_terminal.store(true, Ordering::Release);
+    let reentrant_mutation = dispatch.reentrant_mutation.clone();
 
-    let outcome = drive_sdk(&mut host, dispatch.clone(), |connection| {
+    let outcome = drive_sdk(&mut host, dispatch.clone(), move |connection| {
+        let reentrant_mutation = reentrant_mutation.clone();
         Box::pin(async move {
             connection
                 .send_request(initialize_request(Some(client_hello())))
@@ -1538,18 +3629,37 @@ async fn llm_client_stream_extension_answers_prompts() -> Result<(), Box<dyn std
                 None,
             )
             .await?;
-            let session: v1::NewSessionResponse = connection
-                .send_request(v1::NewSessionRequest::new(
-                    directory
-                        .path()
-                        .canonicalize()
-                        .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
-                ))
+            let agent = connection
+                .send_request(AgentCreateRequest {
+                    config: AgentConfigWire::HostDefault,
+                    idempotency_id: Some("stream-reentry-agent".to_string()),
+                })
+                .block_task()
+                .await?
+                .agent;
+            let session = connection
+                .send_request(SessionCreateRequest {
+                    agent: agent.clone(),
+                    working_dir: Some(WirePath::Utf8 {
+                        path: directory
+                            .path()
+                            .canonicalize()
+                            .map_err(|error| RpcError::internal_error().data(error.to_string()))?
+                            .display()
+                            .to_string(),
+                    }),
+                    session_id: None,
+                    idempotency_id: Some("stream-reentry-session".to_string()),
+                })
                 .block_task()
                 .await?;
+            *reentrant_mutation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) =
+                Some((agent, session.session.clone()));
             let prompt = connection
                 .send_request(v1::PromptRequest::new(
-                    session.session_id.clone(),
+                    v1::SessionId::new(session.acp_session_id),
                     vec![v1::ContentBlock::Text(v1::TextContent::new("hello"))],
                 ))
                 .block_task()
@@ -1561,12 +3671,20 @@ async fn llm_client_stream_extension_answers_prompts() -> Result<(), Box<dyn std
     })
     .await;
     assert!(outcome.is_ok(), "scenario failed: {outcome:?}");
-    let operations = dispatch.operations.lock().expect("operations").clone();
+    let operations = dispatch
+        .operations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
     assert!(
         operations
             .iter()
             .any(|operation| operation == "llm_chat_stream" || operation == "llm_chat"),
         "the model call must route through the bridge; got {operations:?}"
+    );
+    assert!(
+        dispatch.reentrant_conflicts.load(Ordering::Acquire) > 0,
+        "stream callback mutation after the initial outcome did not return extension_conflict"
     );
     host.child.kill().await?;
     Ok(())
@@ -1980,7 +4098,17 @@ async fn sdk_disconnect_cancels_an_unterminated_stream_and_exits_host()
     })
     .await;
     assert!(outcome.is_ok(), "disconnect scenario failed: {outcome:?}");
-    let status = tokio::time::timeout(Duration::from_secs(5), host.child.wait()).await??;
+    // The Host's internal shutdown bound remains five seconds. Keep a small
+    // process-reaping margin here so scheduler/pipe teardown jitter does not
+    // race the assertion at the exact internal deadline.
+    let status = tokio::time::timeout(Duration::from_secs(10), host.child.wait())
+        .await
+        .map_err(|error| {
+            format!(
+                "Host did not exit after owner disconnect: {error}; stderr:\n{}",
+                stderr_text(&host)
+            )
+        })??;
     let stderr = stderr_text(&host);
     assert!(
         !status.success(),

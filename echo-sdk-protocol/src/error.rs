@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::handle::WireHandle;
+use crate::scalar::{WireU64, WireValue};
 
 /// Stable extension error codes. Codes are closed: reusing a retired code for
 /// a different meaning is a breaking protocol change (design §18).
@@ -409,12 +410,182 @@ pub struct AgentFailureWire {
     pub message: String,
 }
 
+/// Canonical `WireValue::Record` type id for [`AgentFailureWire`].
+pub const AGENT_FAILURE_WIRE_TYPE_ID: &str = "echo_sdk_protocol::error::AgentFailureWire";
+
 impl AgentFailureWire {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.message.chars().count() > MAX_FAILURE_MESSAGE_CHARS {
             return Err("failure message exceeds the character bound");
         }
         Ok(())
+    }
+
+    /// Parse the lossless record/map form used inside `AgentEventWire::Error`.
+    ///
+    /// A map is accepted for compatibility with the existing extension
+    /// bridge projection; a record is the canonical source-operation form.
+    pub fn from_wire_value(value: &WireValue) -> Result<Self, String> {
+        let fields = match value {
+            WireValue::Record { type_id, fields } if type_id == AGENT_FAILURE_WIRE_TYPE_ID => {
+                fields
+            }
+            WireValue::Map(entries) => {
+                let mut owned = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let WireValue::String(name) = &entry.key else {
+                        return Err("AgentFailureWire map keys must be strings".to_string());
+                    };
+                    owned.push(crate::scalar::WireField {
+                        name: name.clone(),
+                        value: entry.value.clone(),
+                    });
+                }
+                return Self::from_fields(&owned);
+            }
+            WireValue::Record { type_id, .. } => {
+                return Err(format!(
+                    "AgentFailureWire record type_id must be {AGENT_FAILURE_WIRE_TYPE_ID}, got {type_id}"
+                ));
+            }
+            _ => return Err("AgentFailureWire must be a record or map".to_string()),
+        };
+        Self::from_fields(fields)
+    }
+
+    /// Restore the framework failure without collapsing category, terminal
+    /// kind, retryability, code, status, or message into a generic error.
+    pub fn into_framework(self) -> Result<echo_core::error::AgentFailure, String> {
+        let category = match self.category.as_str() {
+            "llm" => echo_core::error::AgentFailureCategory::Llm,
+            "tool" => echo_core::error::AgentFailureCategory::Tool,
+            "parse" => echo_core::error::AgentFailureCategory::Parse,
+            "agent" => echo_core::error::AgentFailureCategory::Agent,
+            "config" => echo_core::error::AgentFailureCategory::Config,
+            "mcp" => echo_core::error::AgentFailureCategory::Mcp,
+            "memory" => echo_core::error::AgentFailureCategory::Memory,
+            "sandbox" => echo_core::error::AgentFailureCategory::Sandbox,
+            "runtime_state" => echo_core::error::AgentFailureCategory::RuntimeState,
+            "channel" => echo_core::error::AgentFailureCategory::Channel,
+            "io" => echo_core::error::AgentFailureCategory::Io,
+            "other" => echo_core::error::AgentFailureCategory::Other,
+            value => return Err(format!("unknown AgentFailure category {value}")),
+        };
+        let terminal_kind = match self.terminal_kind.as_str() {
+            "failed" => echo_core::error::AgentTerminalKind::Failed,
+            "cancelled" => echo_core::error::AgentTerminalKind::Cancelled,
+            "timed_out" => echo_core::error::AgentTerminalKind::TimedOut,
+            "permission_denied" => echo_core::error::AgentTerminalKind::PermissionDenied,
+            value => return Err(format!("unknown AgentFailure terminal_kind {value}")),
+        };
+        self.validate()
+            .map_err(|error| format!("invalid AgentFailureWire: {error}"))?;
+        if self.code.trim().is_empty() {
+            return Err("AgentFailure code must be non-empty".to_string());
+        }
+        if self.message.trim().is_empty() {
+            return Err("AgentFailure message must be non-empty".to_string());
+        }
+        Ok(echo_core::error::AgentFailure {
+            category,
+            terminal_kind,
+            retryable: self.retryable,
+            code: self.code,
+            http_status: self.http_status,
+            message: self.message,
+        })
+    }
+
+    fn from_fields(fields: &[crate::scalar::WireField]) -> Result<Self, String> {
+        let allowed = [
+            "category",
+            "terminal_kind",
+            "retryable",
+            "code",
+            "http_status",
+            "message",
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for field in fields {
+            if !allowed.contains(&field.name.as_str()) {
+                return Err(format!("unknown AgentFailure field {}", field.name));
+            }
+            if !seen.insert(field.name.as_str()) {
+                return Err(format!("duplicate AgentFailure field {}", field.name));
+            }
+        }
+        let field = |name: &str| {
+            fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| &field.value)
+        };
+        let string = |name: &str| match field(name) {
+            Some(WireValue::String(value)) => Ok(value.clone()),
+            Some(_) => Err(format!("AgentFailure field {name} must be a string")),
+            None => Err(format!("AgentFailure field {name} is required")),
+        };
+        let retryable = match field("retryable") {
+            Some(WireValue::Bool(value)) => *value,
+            Some(_) => return Err("AgentFailure field retryable must be a bool".to_string()),
+            None => return Err("AgentFailure field retryable is required".to_string()),
+        };
+        let http_status = match field("http_status") {
+            Some(WireValue::Null) | None => None,
+            Some(WireValue::U64(value)) => Some(
+                value
+                    .to_u64()
+                    .ok_or_else(|| "AgentFailure http_status is invalid".to_string())?
+                    .try_into()
+                    .map_err(|_| "AgentFailure http_status exceeds u16".to_string())?,
+            ),
+            Some(_) => return Err("AgentFailure field http_status must be U64 or null".to_string()),
+        };
+        Ok(Self {
+            category: string("category")?,
+            terminal_kind: string("terminal_kind")?,
+            retryable,
+            code: string("code")?,
+            http_status,
+            message: string("message")?,
+        })
+    }
+
+    /// Encode this failure as the canonical typed record used by source
+    /// operation results.
+    pub fn into_wire_value(self) -> WireValue {
+        WireValue::Record {
+            type_id: AGENT_FAILURE_WIRE_TYPE_ID.to_string(),
+            fields: vec![
+                crate::scalar::WireField {
+                    name: "category".to_string(),
+                    value: WireValue::String(self.category),
+                },
+                crate::scalar::WireField {
+                    name: "terminal_kind".to_string(),
+                    value: WireValue::String(self.terminal_kind),
+                },
+                crate::scalar::WireField {
+                    name: "retryable".to_string(),
+                    value: WireValue::Bool(self.retryable),
+                },
+                crate::scalar::WireField {
+                    name: "code".to_string(),
+                    value: WireValue::String(self.code),
+                },
+                crate::scalar::WireField {
+                    name: "http_status".to_string(),
+                    value: self
+                        .http_status
+                        .map(|value| WireValue::U64(WireU64::from_u64(u64::from(value))))
+                        .unwrap_or(WireValue::Null),
+                },
+                crate::scalar::WireField {
+                    name: "message".to_string(),
+                    value: WireValue::String(self.message),
+                },
+            ],
+        }
     }
 }
 

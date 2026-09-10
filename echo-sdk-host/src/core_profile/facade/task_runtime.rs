@@ -32,7 +32,6 @@ use echo_agent::tasks::{
 };
 use echo_sdk_protocol::capability::ExtensionCapability;
 use echo_sdk_protocol::error::{EchoSdkError, ExtensionErrorCode, Retryability};
-use echo_sdk_protocol::handle::HandleKind;
 use echo_sdk_protocol::methods::{
     ControlAction, TaskControlRequest, TaskControlResponse, TaskExecuteRequest,
     TaskExecuteResponse, WireTaskStatus,
@@ -44,7 +43,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::super::handler::{require_capability, require_extended};
 use super::super::state::CoreProfileState;
 use super::super::wire;
-use super::task::session_services;
+use super::task::{session_services, task_scope};
 use crate::factory::SessionAuthorityServices;
 
 /// Per-run stop policy, flipped by RPC before the cancel token fires.
@@ -332,25 +331,16 @@ fn wire_status(status: &TaskStatus) -> WireTaskStatus {
 }
 
 /// The concrete store and executor backing task execution for one session.
+/// The module only compiles with `framework-subagent` (the facade feature
+/// implies it), so the store and executor always resolve here.
 fn task_runtime_parts(
     authorities: &SessionAuthorityServices,
     method: &str,
 ) -> std::result::Result<(Arc<InMemoryRevisionedTaskStore>, Arc<SubagentExecutor>), EchoSdkError> {
-    #[cfg(feature = "framework-subagent")]
-    {
-        let store = authorities.task_store.clone().ok_or_else(|| {
-            runtime_error("task execution is not available in this Host build", method)
-        })?;
-        Ok((store, authorities.subagent_executor.clone()))
-    }
-    #[cfg(not(feature = "framework-subagent"))]
-    {
-        let _ = authorities;
-        Err(runtime_error(
-            "task execution requires the subagent feature in this Host build",
-            method,
-        ))
-    }
+    let store = authorities.task_store.clone().ok_or_else(|| {
+        runtime_error("task execution is not available in this Host build", method)
+    })?;
+    Ok((store, authorities.subagent_executor.clone()))
 }
 
 pub(crate) async fn task_execute(
@@ -375,28 +365,61 @@ pub(crate) async fn task_execute(
         Ok(parts) => parts,
         Err(error) => fail!(error),
     };
-    let scope = request.task_run.id.clone();
+    let scope = match task_scope(&state, &request.task_run, method) {
+        Ok(scope) => scope,
+        Err(error) => fail!(error),
+    };
+    // One live execution per TaskRun scope: a second execute while the first
+    // is still running is a typed conflict, never a silent takeover. Without
+    // this the tracking map would be overwritten and the old DAG would keep
+    // running untracked (no pause/cancel reachable, cleanup races).
     // One controller per live run; the spawn captures it directly so no
     // later lookup can race the execution.
     let controller = Arc::new(FacadeTaskController::new(store, executor));
     let cancel = tokio_util::sync::CancellationToken::new();
-    state.facade.register_task_execution(
+    let completion = Arc::new(super::TaskRunCompletion {
+        settled: std::sync::atomic::AtomicBool::new(false),
+        notify: tokio::sync::Notify::new(),
+    });
+    if let Err(error) = state.facade.try_register_task_execution(
         scope.clone(),
         super::TaskRunExecution {
             cancel: cancel.clone(),
             controller: controller.clone(),
+            completion: completion.clone(),
         },
-    );
+    ) {
+        fail!(error);
+    }
     let state_for_task = state.clone();
     let scope_for_task = scope.clone();
-    let _ = connection.spawn(async move {
+    // The execution rides the official connection task: connection teardown
+    // takes it down with the transport instead of leaving a detached DAG
+    // running past EOF (plan 07 todo 2 step 3). A failed spawn is reported
+    // as host-shutting-down — never a fake success for a run that never
+    // started.
+    let spawned = connection.spawn(async move {
         let service = RuntimeTaskService::new(controller, RuntimeTaskServiceConfig::default());
         if let Err(error) = service.execute(&scope_for_task, cancel).await {
             tracing::warn!("task graph execution for {scope_for_task} failed: {error}");
         }
         state_for_task.facade.remove_task_execution(&scope_for_task);
+        // Settle exactly once so bounded teardown can observe the end.
+        completion
+            .settled
+            .store(true, std::sync::atomic::Ordering::Release);
+        completion.notify.notify_waiters();
         Ok::<(), agent_client_protocol::Error>(())
     });
+    if let Err(error) = spawned {
+        state.facade.remove_task_execution(&scope);
+        fail!(wire::sdk_error(
+            ExtensionErrorCode::HostShuttingDown,
+            format!("connection can no longer host task execution: {error}"),
+            Retryability::Never,
+            method,
+        ));
+    }
     responder.respond(TaskExecuteResponse {
         run: request.task_run,
     })
@@ -416,13 +439,17 @@ pub(crate) async fn task_control(
             return responder.respond_with_error(wire::into_jsonrpc_error($error))
         };
     }
-    if let Err(error) =
-        state
-            .handles
-            .check_shape_and_generation(&request.task, HandleKind::PlanTask, method)
+    let scope = match task_scope(&state, &request.task_run, method) {
+        Ok(scope) => scope,
+        Err(error) => fail!(error),
+    };
+    let plan_task = match state
+        .handles
+        .plan_task_for_run(&request.task, &request.task_run, method)
     {
-        fail!(error);
-    }
+        Ok(plan_task) => plan_task,
+        Err(error) => fail!(error),
+    };
     let authorities = match session_services(&state, &request.task_run, method) {
         Ok(authorities) => authorities,
         Err(error) => fail!(error),
@@ -433,7 +460,7 @@ pub(crate) async fn task_control(
             method,
         ));
     };
-    let graph = match store.load(&request.task_run.id).await {
+    let graph = match store.load(&scope).await {
         Ok(Some(graph)) => graph,
         Ok(None) => {
             fail!(runtime_error(
@@ -449,7 +476,7 @@ pub(crate) async fn task_control(
         .snapshot
         .tasks
         .iter()
-        .find(|task| task.execution.task_id == request.task.id)
+        .find(|task| task.execution.task_id == plan_task.task_id)
         .cloned()
     else {
         fail!(runtime_error("task id is not part of the graph", method));
@@ -459,16 +486,14 @@ pub(crate) async fn task_control(
         match request.action {
             ControlAction::Pause => match task.execution.claim.clone() {
                 Some(claim) if task.execution.status == TaskStatus::Running => {
-                    if let Some(execution) = state.facade.task_execution_of(&request.task_run.id) {
-                        execution
-                            .controller
-                            .choose_interruption(&request.task_run.id, true);
+                    if let Some(execution) = state.facade.task_execution_of(&scope) {
+                        execution.controller.choose_interruption(&scope, true);
                         execution.cancel.cancel();
                     }
                     store
                         .settle_runtime_claim(
-                            &request.task_run.id,
-                            &request.task.id,
+                            &scope,
+                            &plan_task.task_id,
                             &claim,
                             TaskStatus::Paused("paused by rpc task control".to_string()),
                         )
@@ -478,28 +503,24 @@ pub(crate) async fn task_control(
                 _ => Err(not_running_claim_error()),
             },
             ControlAction::Resume => {
-                if let Some(execution) = state.facade.task_execution_of(&request.task_run.id) {
-                    execution
-                        .controller
-                        .choose_interruption(&request.task_run.id, false);
+                if let Some(execution) = state.facade.task_execution_of(&scope) {
+                    execution.controller.choose_interruption(&scope, false);
                 }
                 store
-                    .resume_runtime_task(&request.task_run.id, &task, revision)
+                    .resume_runtime_task(&scope, &task, revision)
                     .await
                     .map(|_| ())
             }
             ControlAction::Cancel => match task.execution.claim.clone() {
                 Some(claim) => {
-                    if let Some(execution) = state.facade.task_execution_of(&request.task_run.id) {
-                        execution
-                            .controller
-                            .choose_interruption(&request.task_run.id, false);
+                    if let Some(execution) = state.facade.task_execution_of(&scope) {
+                        execution.controller.choose_interruption(&scope, false);
                         execution.cancel.cancel();
                     }
                     store
                         .settle_runtime_claim(
-                            &request.task_run.id,
-                            &request.task.id,
+                            &scope,
+                            &plan_task.task_id,
                             &claim,
                             TaskStatus::Cancelled,
                         )
@@ -521,7 +542,7 @@ pub(crate) async fn task_control(
             fail!(runtime_error(error, method));
         }
     }
-    let updated = match store.load(&request.task_run.id).await {
+    let updated = match store.load(&scope).await {
         Ok(Some(graph)) => graph,
         _ => {
             fail!(runtime_error("task graph vanished during control", method));
@@ -531,7 +552,7 @@ pub(crate) async fn task_control(
         .snapshot
         .tasks
         .iter()
-        .find(|task| task.execution.task_id == request.task.id)
+        .find(|task| task.execution.task_id == plan_task.task_id)
         .map(|task| task.execution.status.clone())
         .unwrap_or(TaskStatus::Pending);
     responder.respond(TaskControlResponse {

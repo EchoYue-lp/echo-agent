@@ -13,7 +13,7 @@
 //!
 //! Facade family availability follows the same rule with one extra gate:
 //! a family is advertised only when its typed handler family is compiled
-//! in (todos 3–5 extend [`compiled_facade_families`] as adapters land);
+//! in as typed adapters land);
 //! merely compiling a passthrough feature is not enough, because the
 //! contract only advertises capabilities the Host can actually serve.
 
@@ -52,12 +52,16 @@ framework_feature_table! {
     // stay honest.
     ("framework-human-loop", "human-loop"),
     ("framework-subagent", "subagent"),
+    ("framework-sqlite", "sqlite"),
+    ("framework-telemetry", "telemetry"),
+    ("framework-channels", "channels"),
+    ("framework-testing", "testing"),
     // Leaf features the eval/improve facade families bind to.
     ("framework-eval", "eval"),
     ("framework-improve", "improve"),
-    // Tool leaf features the tool families bind to (todo 5). `testing`
-    // is intentionally absent: it is mock infrastructure, not a remote
-    // surface, so its family method stays method-not-found.
+    // Tool leaf features the tool families bind to. `testing` is compiled
+    // and advertised as a root leaf, but remains method-not-found because
+    // it is mock infrastructure rather than a remote facade family.
     ("framework-web", "web"),
     ("framework-files", "files"),
     ("framework-shell", "shell"),
@@ -79,8 +83,7 @@ framework_feature_table! {
 
 /// Facade families whose typed handler families are compiled into this
 /// build. Advertisement derives from handler presence (see module docs);
-/// each family feature is appended here together with its adapter in plan
-/// 07 todos 3–5.
+/// each family feature is appended here together with its concrete adapter.
 pub fn compiled_facade_families() -> Vec<&'static str> {
     let mut families = vec!["delivery", "memory", "state", "trace", "workflow"];
     if cfg!(feature = "framework-eval") {
@@ -88,6 +91,9 @@ pub fn compiled_facade_families() -> Vec<&'static str> {
     }
     if cfg!(feature = "framework-improve") {
         families.push("improve");
+    }
+    if cfg!(feature = "framework-human-loop") {
+        families.push("permission");
     }
     macro_rules! push_family {
         ($feature:literal, $family:literal) => {
@@ -110,13 +116,23 @@ pub fn compiled_facade_families() -> Vec<&'static str> {
     push_family!("framework-content-guard", "content_guard");
     push_family!("framework-project-rules", "project_rules");
     // Integration families: MCP rides the default framework-mcp feature;
-    // the rest follow their passthrough features. `channels` needs a
-    // host-language handler factory (ExtensionBridge obligation) and
-    // `telemetry` exports through OTLP only, so neither is bound.
+    // the rest follow their passthrough features.
     push_family!("framework-mcp", "mcp");
     push_family!("framework-a2a", "a2a");
     push_family!("framework-lsp", "lsp");
     push_family!("framework-topology", "topology");
+    push_family!("framework-telemetry", "telemetry");
+    // Channel plugins and handlers are reverse-RPC extensions, so the
+    // framework channel family is executable only when its bridge authority
+    // is present as well as the channel implementation.
+    if cfg!(all(
+        feature = "framework-channels",
+        feature = "sdk-extension-bridge"
+    )) {
+        families.push("channels");
+    }
+    // Do not advertise family methods without a concrete Host adapter.
+    // `testing` remains a root leaf feature but is not a facade family.
     families.sort_unstable();
     families
 }
