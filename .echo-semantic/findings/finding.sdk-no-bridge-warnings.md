@@ -16,7 +16,7 @@ decision_refs: []
 repair_evidence_refs: [evidence.sdk-contracts]
 verification_evidence_refs: [evidence.sdk-contracts]
 rereview_audit_refs: [audit.sdk-facade-plan08-final]
-discovered_at: source:d27e9085f3b853752d308cafcd719ab4059427b10f0cc9106c7412f6d2d47906
+discovered_at: source:64a3f6010a8c386321bee7ac23bcf0cac3f6cc8bd588d22c1ac2c87d942b317c
 ---
 
 # facade/bridge/improve feature组合未闭合

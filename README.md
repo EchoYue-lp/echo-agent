@@ -1108,20 +1108,33 @@ The source-built `echo-agent-sdk-host` passes the supported standard ACP v1
 profile through the official Client and stdio runtime, and — with the
 `sdk-core-profile` feature and an explicit state root — the negotiated
 `_echo_agent/*` core extension profile (Agent/Session/Run handles, full
-events with ACK/replay, restart recovery). With the additional
-`sdk-extension-bridge` feature it also serves the negotiated bidirectional
-extension bridge: host-language Tool, LlmClient, Store, HumanLoop, Hook,
-callback, intervention, factory and custom-Agent implementations register
-over the same connection and are reverse-invoked with lease, deadline,
-cancellation and stream-terminal semantics (see
-[docs/sdk/sdk-extension-bridge.md](docs/sdk/sdk-extension-bridge.md)). It
-uses the root
+events with ACK/replay, restart recovery). The `sdk-facade-adapters` feature
+can independently serve the facade feature families — task/subagent/structured output,
+memory/workflow/state/delivery/trace/eval/improve, MCP/A2A/LSP/topology and
+the tool families — over the framework's own authorities, with canonical
+catalog routing, frozen feature semantics, advertised resource bounds and
+teardown cascades (see
+[docs/sdk/facade-feature-adapters.md](docs/sdk/facade-feature-adapters.md)).
+The `sdk-extension-bridge` feature includes those adapters and additionally
+serves the negotiated bidirectional extension bridge: host-language Tool,
+LlmClient, Store, HumanLoop, Hook, callback, intervention, factory and
+custom-Agent implementations register over the same connection and are
+reverse-invoked with lease, deadline, cancellation and stream-terminal
+semantics (see
+[docs/sdk/sdk-extension-bridge.md](docs/sdk/sdk-extension-bridge.md)).
+Plan 08 closes the Rust Host facade contract across canonical source
+operations, consumer traits and public streams. Workflow and A2A use real
+Host-issued pull streams rather than buffered pseudo-streams, and the strict
+facade review plus final validation passed.
+It uses the root
 `AcpAgentAdapter`, creates one framework Agent per Session, and accepts an
 explicit product-neutral JSON configuration. Build it with
-`cargo build -p echo-sdk-host --features sdk-extension-bridge --locked`; no binary
-or language runtime is bundled. The TypeScript/Python/Java extension clients
-are not implemented yet, so **Runnable** and full facade parity are not
-claimed. Start at [docs/sdk/README.md](docs/sdk/README.md), the only SDK
+`cargo build -p echo-sdk-host --features sdk-facade-all --locked`; no binary
+or language runtime is bundled. Source-built TypeScript/Python/Java clients
+now cover the baseline Agent/Session/facade invoke path against a real Host;
+full per-language extension/all-feature parity is still pending, so overall
+**Runnable** and **Parity complete** are not claimed. Start at
+[docs/sdk/README.md](docs/sdk/README.md), the only SDK
 entry point; the core profile reference is
 [docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md).
 

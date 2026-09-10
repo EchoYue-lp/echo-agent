@@ -85,6 +85,18 @@ the section the Host is standard-only and never advertises the extension.
 See [`config.sdk.example.json`](../../echo-sdk-host/config.sdk.example.json)
 for a complete tested example.
 
+## Facade feature adapters (optional)
+
+The [`sdk-facade-adapters`](facade-feature-adapters.md) feature serves the
+`_echo_agent/*` facade family surfaces over the same connection: the
+task/subagent/structured-output families bind the Session's own authorities,
+and the stateful, integration and tool families route their closed operation
+lists to the framework services. `sdk-facade-all` compiles every root leaf
+feature explicitly so the `initialize` advertisement derives from the actual
+Cargo feature set. Family resources are bounded by the advertised
+`max_facade_resources` and cancelled with their owning Session or the
+connection teardown chain.
+
 ## Current status
 
 The real subprocess suite launches this source-built binary through the
@@ -93,6 +105,9 @@ invalid configuration, protocol-only stdout and credential non-disclosure.
 This evidence supports **ACP conformant** for the documented standard profile.
 The core-profile suite additionally covers valid-hello lifecycle, the
 fail-closed matrix, restart recovery, crash interruption and the stdin frame
-limiter for the negotiated profile. TypeScript, Python and Java clients do
-not exist yet, so **Runnable**, **Parity complete** and **Published** remain
-unreached.
+limiter for the negotiated profile; the facade suite covers the family
+happy paths, the advertised resource bounds and the live-execution conflict
+rules. Source-built TypeScript, Python and Java clients now have baseline
+Agent/Session/facade invoke smoke coverage, but full extension/all-feature
+coverage is still required before **Runnable** or **Parity complete**;
+**Published** remains out of scope.

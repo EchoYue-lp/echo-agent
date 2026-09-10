@@ -44,8 +44,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Session/Run/event authority, so a standard Prompt and an extension Run are
   the same object with one active-run slot. Real-process E2E covers the
   valid-hello lifecycle, the fail-closed matrix, restart recovery, crash
-  interruption and oversized-frame rejection. Language SDKs remain future
-  deliveries.
+  interruption and oversized-frame rejection. Full language SDK parity remains
+  a later delivery; source client baselines are tracked separately below.
+
+- **Facade feature adapters (`sdk-facade-adapters` / `sdk-facade-all`).**
+  The SDK Host now serves the `_echo_agent/*` facade feature families over
+  the same negotiated connection: task/subagent/structured-output bind the
+  Session Agent's own `TaskRevisionService`/`RuntimeTaskService`/
+  `SubagentExecutor`, and the stateful (memory/workflow/state/delivery/
+  trace/eval/improve), integration (MCP/A2A/LSP/topology/channels) and tool families
+  route their closed operation lists to the framework services. The
+  generated `facade-operation-catalog.json` is the executable route
+  authority: exact operation identities, frozen per-operation sha256
+  signature digests and frozen all-of/any-of feature requirements all fail
+  closed at admission, and the generic invoke surface executes the same
+  closed family operations as the `<family>/op` methods.
+  TaskRun/PlanTask handles are Host-issued and generation-fenced; a second
+  `task/execute` of a live run is a typed conflict; live subagent dispatch
+  records obey the advertised `max_open_handles` bound; family resources
+  are Host-issued generation-fenced handles under one authority with a
+  connection-wide `max_facade_resources` global bound; channels are
+  advertised only with the typed channel/extension bridge adapter, testing
+  remains unbound; and
+  session close / connection teardown cancel task executions and subagent
+  dispatches, wait for their bounded settlement and await
+  `McpManager::close_all` inside the bounded shutdown chain. Consumer
+  traits resolve to a live typed bridge or an exact documented process-local
+  language boundary; they are never relabeled as a same-topic family/core
+  route. Stateful Eval/Improve/PluginRegistry/Store methods use Rust resources
+  and exact source operations. The
+  `sdk-facade-adapters` feature now implies `framework-subagent` so the
+  `task_graph` capability is never advertised without its handlers.
+  Real-process E2E (`core_profile_e2e`, `facade_feature_adapters_e2e`),
+  contract drift gates and a CI facade job cover the family matrix. See
+  [docs/sdk/facade-feature-adapters.md](docs/sdk/facade-feature-adapters.md).
+
+- **Facade public-API parity work.** Canonical source operations no longer
+  have an unbound generic fallback: filesystem I/O and Session-owned
+  lease/identity guards call the Rust authority, and all live `SkillRegistry`
+  operations address the Session Agent. Consumer traits and stream routes are
+  mechanically audited. Workflow `run_stream` and A2A SSE now expose real
+  Host-issued pull streams with capacity-one backpressure, monotonic sequence,
+  typed cancellation, owner/generation checks and idempotent close. This closes
+  the Rust Host facade contract only; per-language full parity remains a
+  separate gate. Plan 08 strict review and final validation have passed.
+
+- **Source language SDK baselines.** Added source-only TypeScript, Python and
+  Java ACP clients using the official language runtimes, shared canonical
+  facade catalog, lossless i64/u64 wire values, typed extension registration,
+  source/family operation routing, Host-issued stream writers and real Host
+  smoke coverage for Agent, Session, memory, telemetry and Run settlement.
+  Full extension/all-feature parity is intentionally not claimed yet; no Host
+  binary, language runtime or registry artifact is published.
 
 - **Source-built standard ACP v1 Host.** Added the non-published
   `echo-sdk-host` workspace crate and `echo-agent-sdk-host` executable. It
@@ -55,8 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the official ACP stdio transport. Real subprocess tests use the official
   Client to cover initialize/new/prompt/update/cancel, clean stdin EOF,
   JSON-RPC-only stdout, bounded configuration failure, and credential
-  redaction. The repository still ships source only; language SDKs and the
-  `_echo_agent/*` runtime profile remain later deliveries.
+  redaction. The repository still ships source only; full language SDK parity
+  and the `_echo_agent/*` runtime profile remain later deliveries.
 
 - **Stable ACP v1 Agent adapter.** The root `echo_agent` facade now exposes a
   source-built, transport-neutral ACP Agent behind the optional `acp` feature.

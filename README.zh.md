@@ -813,15 +813,24 @@ agent.set_circuit_breaker(cb_config);
 可从源码构建的 `echo-agent-sdk-host` 已通过官方 Client 与 stdio runtime 的标准
 ACP v1 支持面验证；在 `sdk-core-profile` feature 与显式 state root 下，还支持协商式
 `_echo_agent/*` 核心扩展 Profile（Agent/Session/Run handle、完整事件与 ACK/replay、
-重启恢复）。再叠加 `sdk-extension-bridge` feature 后，还提供协商式双向扩展桥：
+重启恢复）。`sdk-facade-adapters` feature 可独立在同一连接上提供 facade feature
+家族——task/subagent/结构化输出、memory/workflow/state/delivery/
+trace/eval/improve、MCP/A2A/LSP/topology 与各工具家族——全部落到框架既有权威，
+并带有 canonical catalog 路由、冻结的 feature 语义、与广告一致的资源上限和
+teardown 级联（见 [docs/sdk/facade-feature-adapters.md](docs/sdk/facade-feature-adapters.md)）。
+`sdk-extension-bridge` 会自动包含这些 facade adapters，并进一步提供协商式双向扩展桥：
 宿主语言实现的 Tool、LlmClient、Store、HumanLoop、Hook、回调/干预、工厂与自定义
 Agent 在同一连接上注册，并由 Host 以租约、截止时间、取消与流终态语义反向调用
 （见 [docs/sdk/sdk-extension-bridge.md](docs/sdk/sdk-extension-bridge.md)）。
+Plan 08 已完成 Rust Host facade 的 canonical source operation、consumer trait
+与公共 stream 路由；Workflow 和 A2A 使用真实 Host-issued pull stream，而不是把完整
+结果缓存后伪装成流，严格 facade 复审和最终门禁均已通过。
 它复用根 crate 的 `AcpAgentAdapter`，每个 Session 创建一个
 独立框架 Agent，并只接受显式、产品无关的 JSON 配置。开发者用
-`cargo build -p echo-sdk-host --features sdk-extension-bridge --locked` 自行构建；仓库不
-携带 binary 或任何语言 runtime。TypeScript/Python/Java 扩展 Client 尚未实现，
-因此还不能宣称 **Runnable** 或完整 facade 对等。唯一 SDK 入口是
+`cargo build -p echo-sdk-host --features sdk-facade-all --locked` 自行构建；仓库不
+携带 binary 或任何语言 runtime。仓库现在包含可从源码构建的 TypeScript/Python/Java Client
+基线，并已通过真实 Host 的 Agent/Session/facade invoke 验证；完整扩展与 all-feature 对等
+仍需由三种语言分别完成，因此还不能宣称总体 **Runnable** 或 **Parity complete**。唯一 SDK 入口是
 [docs/sdk/README.md](docs/sdk/README.md)，核心 Profile 参考见
 [docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md)。
 

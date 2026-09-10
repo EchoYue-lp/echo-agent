@@ -83,7 +83,7 @@ todos:
     verify: 真实 Host E2E 覆盖标准客户端不变、协商失败、generation、重入、backpressure、Host/SDK
       退出和密钥隔离；文档明确 bridge 已可用但三语言 SDK 仍未 Runnable。
 artifact_id: plan:ed8047b7-0147-4232-b52b-c547f48f85f2
-design_revision: sha256:9685cabd8f692ea060b67e46fe1c7d47531edb44efd998913e252803ef122817
+design_revision: sha256:10a237f834b9fb9cc8ea2d740d19222b0b5776fb30904e9b8b2df88f12b63227
 ---
 ## Approach
 

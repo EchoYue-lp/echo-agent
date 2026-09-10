@@ -6,16 +6,23 @@ the Rust framework's public facade and TypeScript, Python and Java — without
 rewriting the agent framework in any of those languages.
 
 > **Current status: ACP conformant (standard profile) + core extension profile
-> + extension bridge delivered in the Rust Host.** The source-built `echo-agent-sdk-host` passes
+> + extension bridge + facade feature adapters delivered in the Rust Host.** The source-built `echo-agent-sdk-host` passes
 > initialize/new/prompt/update/cancel and shutdown scenarios through the
 > official v1 Client, and the negotiated `_echo_agent/*` **core profile**
 > (Agent/Session/Run handles, full events, ACK/replay, restart recovery) passes
-> real-process E2E ([sdk-core-profile.md](sdk-core-profile.md)), and the negotiated
+> real-process E2E ([sdk-core-profile.md](sdk-core-profile.md)), the negotiated
 > bidirectional **extension bridge** passes real-process E2E for Tool,
 > LlmClient, Store, hooks and callbacks
-> ([sdk-extension-bridge.md](sdk-extension-bridge.md)). Language SDKs
-> do not exist yet, so the program still does not claim **Runnable** or full
-> parity. See [Status ladder](#status-ladder) for the exact claims.
+> ([sdk-extension-bridge.md](sdk-extension-bridge.md)), and the **facade
+> feature adapters** serve the task/subagent/structured-output, stateful,
+> integration and tool families over the framework's own authorities
+> ([facade-feature-adapters.md](facade-feature-adapters.md)). Plan 08 closes
+> the Rust Host's canonical source-operation, consumer-trait and public-stream
+> routing, including real Workflow/A2A pull streams. Source-built
+> TypeScript, Python and Java client baselines now exist, but the full
+> facade/all-features extension matrix is not complete. The program therefore
+> still does not claim **Runnable** or full parity. See [Status ladder](#status-ladder)
+> for the exact claims.
 
 ## What the SDK program is
 
@@ -41,12 +48,33 @@ rewriting the agent framework in any of those languages.
 Details of the two profiles, the extension namespace and the error/lossless
 scalar rules live in [protocol.md](protocol.md). The delivered core profile —
 negotiation, handles, events/ACK/replay and recovery semantics — is specified
-in [sdk-core-profile.md](sdk-core-profile.md).
+in [sdk-core-profile.md](sdk-core-profile.md). The delivered facade family
+routes, feature model, resource/stream lifecycle and error boundaries are
+specified in [facade-feature-adapters.md](facade-feature-adapters.md).
 
 The implemented Rust adapter and its current method/content boundary are
 documented in [acp-agent-adapter.md](acp-agent-adapter.md).
 Build, configuration and lifecycle instructions for the executable are in
 [acp-standard-host.md](acp-standard-host.md).
+
+Source SDK clients live under [`sdks/`](../../sdks/):
+
+- [`sdks/typescript`](../../sdks/typescript) uses the official ACP TypeScript client;
+- [`sdks/python`](../../sdks/python) uses the official ACP asyncio client;
+- [`sdks/java`](../../sdks/java) provides the Java 17 CompletionStage/Flow client.
+
+Each directory is source-only and requires the caller to provide an absolute
+Host executable and configuration path.
+Runtime compatibility is recorded in [`sdks/shared/toolchain.json`](../../sdks/shared/toolchain.json):
+Node.js 20+, Python 3.10+, and JDK 17. The SDKs never install or bundle these
+runtimes.
+
+The cross-language source gate is `./scripts/check-language-sdks.sh`. It builds
+the Host from the current checkout, validates the shared catalog, runs the
+TypeScript/Python/Java unit suites, and exercises Agent/Session, canonical
+family operations and facade invoke against that real Host. This is a baseline
+client gate; full all-feature extension parity remains a separate status
+milestone.
 
 ## Contract artifacts
 
@@ -85,8 +113,9 @@ previous ones.
 | **Contract** | Protocol contracts, schema, parity manifest exist and pass drift gates | ✅ |
 | **ACP conformant** | A standard ACP v1 client passes the supported profile against a real source-built Host | ✅ |
 | **Core extension profile** | The negotiated `_echo_agent/*` core families run against a real Host with typed lifecycle, events, replay and recovery | ✅ (Rust Host only) |
-| **Runnable** | A real Host plus at least one language's full SDK extension path executes end-to-end | ❌ language extension path not started |
-| **Parity complete** | TypeScript, Python and Java all pass the full facade/all-features parity suite | ❌ not started |
+| **Host facade parity** | Every canonical root operation/consumer trait/stream has a concrete Host route or evidence-backed language-local boundary | ✅ Plan 08 complete |
+| **Runnable** | A real Host plus at least one language's full SDK extension path executes end-to-end | ❌ client baselines exist; full extension path pending |
+| **Parity complete** | TypeScript, Python and Java all pass the full facade/all-features parity suite | ❌ full facade matrix pending |
 | **Published** | Registry/binary publication — **explicitly out of scope**; this design ships source only | never (by design) |
 
 Only *Parity complete* justifies claiming "all public Rust capabilities are

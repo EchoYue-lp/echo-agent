@@ -66,7 +66,7 @@ todos:
       类型。
 artifact_id: plan:e007a4ae-73ef-4c54-9fc2-87ca413bbb7f
 lifecycle: completed
-design_revision: sha256:9685cabd8f692ea060b67e46fe1c7d47531edb44efd998913e252803ef122817
+design_revision: sha256:10a237f834b9fb9cc8ea2d740d19222b0b5776fb30904e9b8b2df88f12b63227
 ---
 ## Approach
 

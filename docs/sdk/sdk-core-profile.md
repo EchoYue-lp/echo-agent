@@ -8,9 +8,10 @@ delivery with ACK, durable replay and restart recovery.
 
 > **Status.** The core profile is delivered as a Rust Host capability with
 > real-process E2E coverage (see `echo-sdk-host/tests/core_profile_e2e.rs`).
-> No language SDK speaks it yet, so the program is still **not Runnable**
-> in the [status ladder](README.md#status-ladder) sense: that requires at
-> least one language's full extension path.
+> Source-built language clients can now negotiate and consume the baseline
+> profile. The program is still **not Runnable** in the [status
+> ladder](README.md#status-ladder) sense because full extension/all-feature
+> parity has not been demonstrated.
 
 ## Enabling the profile
 
@@ -184,3 +185,13 @@ them back through the same connection-scoped invocation authority. The
 bridge changes nothing about core profile semantics — standard
 initialize/session/prompt, handle ladders, ACK-gated live delivery and
 replay behave identically with or without it.
+
+## Relation to the facade feature adapters
+
+The facade feature adapters
+([facade-feature-adapters.md](facade-feature-adapters.md)) are another
+separately compiled layer (`sdk-facade-adapters`) over this same core
+profile: they add the task/subagent/structured-output families and the
+feature-family operation surfaces on top of the core handles and
+events. Core profile semantics — handle ladders, ACK-gated delivery,
+replay and recovery — stay identical with or without them.

@@ -3,13 +3,14 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: fcb5a46411b8d976583cbde97835dc0789046c7e
-  content_digest: d27e9085f3b853752d308cafcd719ab4059427b10f0cc9106c7412f6d2d47906
+  base_revision: 617f1b353ea90df3fdb5ad22e5a5e7da946be484
+  content_digest: 64a3f6010a8c386321bee7ac23bcf0cac3f6cc8bd588d22c1ac2c87d942b317c
 inventory_closure: open
 behavior_model_closure: open
 map_refs:
   - map.sdk-facade-parity
 regions:
+  - { path: .agents, status: supporting }
   - { path: .cargo, status: supporting }
   - { path: .example.env, status: supporting }
   - { path: .github, status: supporting }

@@ -444,3 +444,9 @@ capabilities.
   TypeScript, Python and Java rows remain incomplete. Overall `Parity complete`
   is not claimed until all three language suites pass the full all-feature
   matrix.
+
+Plan 08 final validation passed the complete workspace, all-feature,
+single-feature, contract, source-language and real Host ExtensionBridge gates.
+The resulting change is intentionally folded into the facade parity, Java,
+Python, TypeScript and shared SDK commits; no binary, runtime or registry
+artifact is published.

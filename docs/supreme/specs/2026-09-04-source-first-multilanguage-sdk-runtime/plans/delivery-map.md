@@ -36,6 +36,10 @@ outcomes:
     depends_on:
       - sdk-core-profile
       - sdk-extension-bridge
+    review_notes: 2026-09-08 复审指出的句柄、签名、资源、teardown、CI 与主要 family adapter
+      缺口已修复并有 Rust Host/协议 E2E 证据。剩余 root source-operation、consumer-trait
+      evidence 与 facade stream authority 已拆入 outcome facade-public-api-parity；Plan 07
+      只记录已交付的 family adapter 基线，不得把它单独标成全 root facade parity 完成。
   typescript-sdk:
     ships: 可从源码构建的 TypeScript ACP Client SDK，以 Promise、AsyncIterable、AbortSignal
       和语言惯用 handle/extension API 覆盖完整 facade，并通过真实 Host 验收。
@@ -78,7 +82,13 @@ outcomes:
       入口和构建说明，不宣传不存在的二进制或 registry 发布。
     depends_on:
       - sdk-parity-closeout
-design_revision: sha256:9685cabd8f692ea060b67e46fe1c7d47531edb44efd998913e252803ef122817
+  facade-public-api-parity:
+    ships: SDK Host 为剩余 root facade operation、consumer trait 和 stream surface 提供
+      Rust 权威驱动的 typed adapter/ExtensionBridge、统一 catalog、WireHandle
+      生命周期和跨语言合同验证；不重新实现 Agent 核心。
+    depends_on:
+      - facade-feature-adapters
+design_revision: sha256:10a237f834b9fb9cc8ea2d740d19222b0b5776fb30904e9b8b2df88f12b63227
 ---
 # 交付图说明
 

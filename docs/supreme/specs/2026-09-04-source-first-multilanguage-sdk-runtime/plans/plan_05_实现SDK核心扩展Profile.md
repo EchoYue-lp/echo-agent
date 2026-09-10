@@ -92,7 +92,7 @@ todos:
       parity分类、完整仓库门禁和适用feature矩阵全过；状态仍诚实停在语言SDK Runnable之前。
 lifecycle: completed
 artifact_id: plan:64cba496-bebb-42ef-af67-34e40fa8dd9f
-design_revision: sha256:9685cabd8f692ea060b67e46fe1c7d47531edb44efd998913e252803ef122817
+design_revision: sha256:10a237f834b9fb9cc8ea2d740d19222b0b5776fb30904e9b8b2df88f12b63227
 ---
 ## Approach
 

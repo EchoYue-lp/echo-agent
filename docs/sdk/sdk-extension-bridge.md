@@ -6,14 +6,19 @@ connection — with Rust semantics preserved under timeout, cancellation,
 disconnect and generation races. It is negotiated as the
 `extension_bridge` capability of the `_echo_agent` profile and compiled
 only when the Host is built with the `sdk-extension-bridge` feature.
+That feature also enables `sdk-facade-adapters`, because compressor callbacks
+invoke their temporary Host tokenizer through the canonical facade route;
+feature-surface advertisement therefore reflects both compiled handlers.
 
 Status: delivered in the Rust Host (source-built, real-process E2E). The
-TypeScript/Python/Java SDKs that would consume it do not exist yet — the
-program still does not claim **Runnable**.
+source-built TypeScript/Python/Java clients now expose registration and
+callback boundaries; their full all-feature parity matrix is still pending,
+so the program does not claim **Runnable** or **Parity complete**.
 
 Build the Host from source with `cargo build -p echo-sdk-host
 --features sdk-extension-bridge --locked`; this feature includes the core
-profile. The Host does not bundle a language runtime or a prebuilt artifact.
+and facade-adapter profiles. The Host does not bundle a language runtime or a
+prebuilt artifact.
 
 ## Model
 
@@ -53,6 +58,10 @@ is rejected before any callback leaves the process.
 | `intervention_callback` | `intervention_on_tool_call/think_start/final_answer` | `add_intervention_callback` |
 | `agent_factory` | `factory_create_agent` | `register_subagent_factory` (lazy construction) |
 | `custom_agent` | `agent_execute(_stream)/chat(_stream)/close` | `register_agent` (subagent dispatch by name) |
+| `channel_plugin` | `channel_start/stop/send/health` | `channels` facade manager (when `framework-channels` + `sdk-extension-bridge` are compiled) |
+| `channel_message_handler` | `channel_handle`, `channel_handle_stream`, `channel_reply` | ChannelPlugin/MessageHandler reverse adapter |
+| `context_compressor` | `compressor_compress` | `ReactAgent::set_compressor` for Sessions constructed after registration |
+| `agent_component` | closed component operation enum plus component stream | ConversationStore, RunStore, RuntimeStateStore, AuditLogger, PreModelContextProjector, MemoryTriggerSink, Guard, SearchProvider, Workflow CheckpointStore, RevisionedTaskStore, SandboxExecutor, McpTransport, Embedder, MemoryPromoter, Workflow, IntentClassifier and SkillLoadPolicy; injected into new Sessions or consumed by an explicit resource operation |
 
 Registrations are **connection-owned**: they never survive a Host restart
 or a reconnect, and they take effect for Session Agents constructed after
@@ -87,6 +96,72 @@ declared unsupported. The response must contain a non-empty, bounded
 `finish_reason`; the Host rejects an ambiguous response instead of inventing
 `stop` or `tool_calls`.
 
+A ContextCompressor call carries the framework message set, lossless token
+limit, current query, focus instructions and a temporary Host-owned tokenizer
+resource. The three SDKs expose `countTokens` / `count_tokens` against that
+resource, so a compressor uses the exact calibrated tokenizer selected by the
+ContextManager instead of a language heuristic. The resource is owner-checked
+and released when the callback settles. The SDK returns retained and evicted
+messages plus an optional compression checkpoint; cancellation, timeout and
+disconnect settlement remain Host-owned.
+Its descriptor carries the stable strategy name used by Rust compression
+metrics. `ReactAgent::set_compressor` accepts an extension handle for an
+explicit live-Session replacement; different Sessions can bind different
+registrations.
+
+Agent infrastructure components share one typed bridge family but not one
+untyped callback. The descriptor has a closed component discriminator;
+`AgentComponentCallInputWire` and `AgentComponentCallResultWire` are
+operation-discriminated unions that freeze every argument/result shape and
+lossless integer field. Rust proxies implement the actual framework traits and
+validate the returned component and operation before restoring the value.
+TypeScript exposes the same discriminated unions, Python validates the closed
+operation set and named argument map, and Java decodes calls into the sealed
+`AgentComponentRequest` hierarchy.
+
+Defaultable Rust trait methods are still explicit bridge operations when an
+implementation may override them: ConversationStore ensure/search, RunStore
+append/parent-list, Sandbox cancel-aware execution and Workflow/Sandbox streams
+all cross the callback boundary. `supports_streaming` is valid only for
+SandboxExecutor and Workflow. Their stream items use the Host-issued extension
+stream handle and separate typed Sandbox/Workflow chunk and terminal unions.
+Sandbox `complete/failed` and Workflow `completed` can only be sent as the
+outer stream terminal; output/node/token events can only be chunks. The Host
+then republishes Workflow extension events through the same canonical
+`WorkflowEvent` projection as graph streams. No buffered result is presented
+as a live stream. IntentClassifier receives the exact user input and message
+context and can be installed with an explicit IntentRouter config and
+available-skill fence. SkillLoadPolicy receives every public descriptor field
+through `skill_load_allows`; discovery, prepared-plugin registration and
+reconciliation await that same callback on the live Session Agent.
+
+Cancel-aware Sandbox callbacks preserve the framework error domain: extension
+cancel and timeout settle as `SandboxError::Cancelled` / `SandboxError::Timeout`,
+and Run cancellation waits for the component cleanup call before publishing
+the cancelled terminal.
+
+AgentComponent admission is operation-scoped. Workflow run/run-stream calls
+are exclusive because the Rust trait takes `&mut self`; Send+Sync `&self`
+components such as Store, AuditLogger, Guard, SearchProvider and Embedder may
+serve multiple Sessions concurrently. Same-Session callback mutation remains
+an independent `extension_conflict` rule.
+
+MCP transport notifications start polling only when `notification_rx()` is
+requested, use a bounded 64-item oldest-drop queue, and stop on transport
+close. MCP initialization failure closes the supplied transport. A successful
+`McpClient::from_transport` initialization whose facade handle cannot be
+published also closes the client before returning the quota error. Manager
+connect plus client/tool handle publication is transactional: any tool-handle
+quota failure removes the client handle and disconnects the manager.
+
+No public `extension` item is relabeled as a same-topic family/core operation.
+Traits with a live Host consumption point use a typed proxy. Rust generic,
+borrowed-view, `FnOnce`, marker/builder, event-bus registration and
+runtime-owned construction traits without a Host call site carry an exact
+process-local evidence route and remain language interface/helper obligations.
+A frozen intrinsic-membership digest makes any new intrinsic item an explicit
+contract change.
+
 AgentFactory results are invocation-scoped instances rather than direct
 CustomAgent registrations. Repeated or concurrent factory results may use the
 same logical name; each instance receives its own handle and is sent
@@ -116,9 +191,10 @@ Failure semantics (no built-in fallbacks, design §12.1):
   the invocation settles `extension_disconnected`;
 - **late response** — an answer after settlement is discarded with bounded
   diagnostics; it can never overwrite settled state;
-- **re-entry** — a second exclusive invocation on the same registration
-  (human loop, hook, factory, custom agent) fails fast with
-  `extension_conflict` instead of waiting (design §12.3).
+- **re-entry** — a second exclusive invocation on the same registration, or an
+  extension callback attempting an exclusive mutation of its active Session,
+  fails fast with `extension_conflict` instead of waiting on the Agent lock
+  (design §12.3).
 
 ## Streams
 
@@ -160,6 +236,15 @@ Descriptors, events, errors and diagnostics never carry credentials; the
 Host's credential stays out of stderr (asserted in the E2E). stdout carries
 only the official ACP wire.
 
+## Relation to the facade feature adapters
+
+The facade feature adapters
+([facade-feature-adapters.md](facade-feature-adapters.md)) route the
+feature-family surfaces to the framework's own services; the bridge remains
+the only reverse-call path for consumer-implemented traits. A facade family
+never simulates a result when a bridge callback fails — typed errors
+propagate unchanged.
+
 ## Verification
 
 - `echo-sdk-protocol` contract tests: typed descriptors, operation
@@ -171,7 +256,9 @@ only the official ACP wire.
 - Real-process E2E with the official Client as the SDK dispatcher
   (`echo-sdk-host/tests/extension_bridge_e2e.rs`): tool round trip with
   callbacks, intervention and hooks; Store/HITL; AgentFactory/CustomAgent;
-  streaming and non-streaming LlmClient; malformed kind, oversized chunk and
+  streaming and non-streaming LlmClient; ContextCompressor injection,
+  late binding and compression; Agent component consumption; channel plugin lifecycle/send;
+  malformed kind, oversized chunk and
   out-of-order immediate failure; duplicate terminal; real Host mailbox
   backpressure; registration deadline with late response; framework
   cancellation/consumer-drop notice; SDK disconnect; plain-client

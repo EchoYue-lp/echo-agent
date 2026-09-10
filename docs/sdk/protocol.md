@@ -6,8 +6,9 @@ event/replay semantics and versioning. The stable initialize/new/prompt/update/
 cancel subset now has a transport-neutral Rust Agent adapter and a real
 source-built stdio Host; the core extension profile and the extension bridge are delivered in
 that Host (see [sdk-core-profile.md](sdk-core-profile.md) and
-[sdk-extension-bridge.md](sdk-extension-bridge.md)); language SDKs remain later deliveries (see
-the [status ladder](README.md#status-ladder)).
+[sdk-extension-bridge.md](sdk-extension-bridge.md)). Source-built language
+client baselines exist; their complete facade/all-feature parity remains a
+later delivery (see the [status ladder](README.md#status-ladder)).
 
 ## Base protocol: official ACP v1
 
@@ -91,7 +92,7 @@ rejected before Session creation. See
 | Methods | standard ACP only | standard + negotiated `_echo_agent/*` core families |
 | Event view | ACP `session/update` (bounded projection) | full `EventEnvelope` extension stream + ACK/replay |
 | Negotiation | plain `initialize` | `initialize` + `_meta` hello/advertisement match |
-| Delivered | ✅ Rust Host | ✅ core families (Rust Host); language SDKs ❌ |
+| Delivered | ✅ Rust Host | ✅ core families (Rust Host); source SDK client baselines ✅; full language parity ❌ |
 
 A standard client ignores the `_meta` capability and keeps working. An SDK
 client **fails closed** when the extension protocol version, contract/source
@@ -224,6 +225,17 @@ as the `extension_bridge` capability only when the Host compiles the
 `sdk-extension-bridge` feature. See [sdk-extension-bridge.md](sdk-extension-bridge.md)
 for registration, invocation, stream, cancellation and error semantics, and
 the generated schema for the authoritative wire shapes.
+`ContextCompressor` is a typed reverse bridge kind: the Host sends messages,
+lossless token limit, optional focus fields and a temporary tokenizer resource.
+The SDK can count arbitrary text with the exact Host tokenizer while the
+callback is active, then returns retained and evicted messages plus an optional
+checkpoint through the same invocation settlement authority.
+
+`AgentComponentCallInputWire` / `AgentComponentCallResultWire` are closed,
+operation-discriminated unions. Each ConversationStore, RunStore,
+RuntimeStateStore, AuditLogger, ContextProjector and MemoryTrigger operation
+freezes its named input/result fields; the schema does not hide the complete
+payload behind an untyped JSON value.
 
 | Method | Direction | Purpose |
 |---|---|---|
@@ -232,3 +244,32 @@ the generated schema for the authoritative wire shapes.
 | `_echo_agent/extension/invoke` | Host → Client | Reverse invocation of one extension operation. |
 | `_echo_agent/extension/cancel` | Host → Client | Cancellation/deadline notice for an in-flight invocation. |
 | `_echo_agent/extension/stream` | Client → Host | Stream chunk or the single terminal of a streaming callback. |
+
+## Facade feature families
+
+The facade families live under `_echo_agent/<family>/op` plus the typed
+`_echo_agent/task/*`, `_echo_agent/subagent/*` and
+`_echo_agent/structured_output/validate` methods, and the generic
+`_echo_agent/facade/invoke` surface for exact source identities. The
+embedded `facade-operation-catalog.json` is the route authority; family
+operations, signature digests, feature requirements, resource bounds and
+teardown semantics are specified in
+[facade-feature-adapters.md](facade-feature-adapters.md).
+
+The generic source-operation route is mechanically closed: each canonical
+identity reaches a concrete Host adapter, or the manifest classifies it as an
+evidence-backed language-local construct. Stateful filesystem leases and
+identity guards are Session-owned `FacadeResource` handles; live skill-registry
+operations address the Session Agent's registry.
+`facade.resource.close` explicitly releases any owner-matched facade resource;
+repeat close is idempotent and foreign owners fail closed.
+
+Workflow and A2A family streams use pull operations on their existing family
+method. `workflow.graph.run_stream` / `a2a.task.stream.open` return a
+Host-issued `WireHandle(Stream)`. `workflow.stream.*` and `a2a.stream.*`
+provide `next`, `cancel` and `close`. Each successful `next` advances the
+registry-owned sequence exactly once and yields a typed
+`echo_sdk::FacadeStreamEvent` (`item`, `complete`, `failed` or `cancelled`). The producer queue has
+capacity one; owner, generation, cancellation and idempotent close use the same
+`HandleRegistry` as Run and extension streams. Concurrent `next` calls are
+serialized per stream so dequeue and sequence advancement cannot race.

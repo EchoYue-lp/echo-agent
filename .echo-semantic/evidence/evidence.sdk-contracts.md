@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:d27e9085f3b853752d308cafcd719ab4059427b10f0cc9106c7412f6d2d47906
+observed_at: source:64a3f6010a8c386321bee7ac23bcf0cac3f6cc8bd588d22c1ac2c87d942b317c
 source_refs:
   - Cargo.toml
   - contracts/sdk/parity-manifest.json
