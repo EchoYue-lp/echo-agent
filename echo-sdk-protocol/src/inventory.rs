@@ -1774,8 +1774,22 @@ fn language_status_for(
         "echo_core::tools::ToolResult::with_output",
         "echo_core::tools::ToolResult::with_truncated",
     ];
+    const A2A_TASK_STATE_IDENTITIES: &[&str] = &[
+        "echo_agent::a2a::types::TaskState",
+        "echo_agent::a2a::types::TaskState::Canceled",
+        "echo_agent::a2a::types::TaskState::Completed",
+        "echo_agent::a2a::types::TaskState::Failed",
+        "echo_agent::a2a::types::TaskState::InputRequired",
+        "echo_agent::a2a::types::TaskState::Submitted",
+        "echo_agent::a2a::types::TaskState::Working",
+        "echo_agent::a2a::types::TaskState::can_transition_to",
+        "echo_agent::a2a::types::TaskState::impl<Display>",
+        "echo_agent::a2a::types::TaskState::is_terminal",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
+    } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "a2a_task_state")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

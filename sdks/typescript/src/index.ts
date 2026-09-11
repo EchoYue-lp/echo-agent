@@ -1,3 +1,4 @@
+export * from "./a2a.js";
 export * from "./catalog.js";
 export * from "./client.js";
 export * from "./errors.js";

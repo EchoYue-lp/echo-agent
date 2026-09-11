@@ -105,6 +105,10 @@ Java. Each implementation has focused constructor, modifier and validation
 tests, and the manifest marks only this exact slice `done`; process-local
 authority and the remaining intrinsic behavior stay explicitly open.
 
+The same route-baseline increment also closes the 10 canonical A2A `TaskState`
+value identities (terminal/transition behavior and Display) in all three
+language SDKs; no Host or wire authority is introduced.
+
 ## SDK-Skill-Impact
 
 `update`: `ReactAgent::discover_skills` is now a canonical source operation

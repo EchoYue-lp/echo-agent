@@ -53,6 +53,8 @@ modifiers; structured payloads use the shared lossless WireValue conversion.
 Failure categories are validated as a closed set with the Rust recovery
 mapping, and ordinary JSON objects are encoded as maps even when they contain
 `kind`/`value` keys.
+`TaskState` is a native string enum with the same terminal, transition and
+display semantics as the Rust A2A value.
 Session updates and Run events are bounded async iterators with cursor ACKs,
 gap/overflow errors, Host-exit propagation and idempotent close semantics.
 Context compressor calls include a Host-owned tokenizer handle;

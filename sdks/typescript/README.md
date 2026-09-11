@@ -47,6 +47,8 @@ Failure categories are closed and preserve Rust recovery (`restore_then_retry`
 for unavailable, `verify_then_retry` for timeout/partial side effects,
 `retry` for transient and `stop` otherwise); ordinary JSON objects are always
 encoded as maps even when they contain `kind`/`value` keys.
+The A2A `TaskState` union and `taskStateCanTransitionTo` helper preserve the
+closed terminal and transition table without adding a wire route.
 `SessionHandle.updates()` and `RunHandle.events` are bounded async iterables;
 Run events validate stream identity and sequence, acknowledge consumed cursors,
 surface gaps, and fail with `host_exited` if the Host exits unexpectedly.

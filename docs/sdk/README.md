@@ -127,6 +127,8 @@ manifest keeps process-local mechanisms `not_implemented` until their
 language-native behavior is implemented and tested. The first intrinsic value
 slice (`ToolCallParams` and `ToolResult`) is now implemented and tested in all
 three languages; the remaining intrinsic route set is still open.
+The closed A2A `TaskState` transition/display slice is also implemented in all
+three languages, without changing the wire surface.
 
 ## For contributors
 

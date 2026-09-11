@@ -176,6 +176,15 @@ closed. Failure recovery tags and optional failure fields are validated as a
 closed lossless DTO, and ordinary JSON objects are force-encoded as maps so
 `kind`/`value` field names cannot be confused with pre-encoded WireValue data.
 
+## A2A TaskState intrinsic slice
+
+`update`: TypeScript, Python and Java now expose the closed A2A `TaskState`
+terminal/transition table and display values in their native enum/union forms.
+All 10 canonical identities (six variants, enum, two behavior methods and the
+Display implementation) have focused tests and `done` mappings. No wire or
+second state authority is introduced; the remaining intrinsic routes stay
+open.
+
 ## SDK-Skill-Impact
 
 `none`: this stage adds language SDK source clients and protocol/catalog

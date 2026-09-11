@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:8820387fee1e6a4064330fe817bd4bc2796a93306467c03affe6d02f7a008d75
+observed_at: source:a15d97994648871ff5b563ad1c41616c9f5f7ba957fafbfb6b62a65328d6e7c4
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -50,12 +50,16 @@ source_refs:
   - sdks/typescript/tsconfig.examples.json
   - sdks/typescript/src/helpers.ts
   - sdks/typescript/src/index.ts
+  - sdks/typescript/src/a2a.ts
   - sdks/typescript/test/intrinsic-tool-values.test.js
+  - sdks/typescript/test/a2a-task-state.test.js
   - sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java
   - sdks/java/src/test/java/com/echoagent/sdk/IntrinsicToolValueTest.java
+  - sdks/java/src/test/java/com/echoagent/sdk/A2ATaskStateTest.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentHandle.java
   - sdks/java/src/main/java/com/echoagent/sdk/ToolCallParams.java
   - sdks/java/src/main/java/com/echoagent/sdk/ToolResult.java
+  - sdks/java/src/main/java/com/echoagent/sdk/TaskState.java
   - echo-sdk-host/tests/support/mod.rs
   - sdks/typescript/src/client.ts
   - sdks/typescript/src/types.ts
@@ -64,8 +68,10 @@ source_refs:
   - sdks/python/src/echo_agent_sdk/client.py
   - sdks/python/src/echo_agent_sdk/__init__.py
   - sdks/python/src/echo_agent_sdk/intrinsics.py
+  - sdks/python/src/echo_agent_sdk/a2a.py
   - sdks/python/tests/test_lifecycle.py
   - sdks/python/tests/test_intrinsic_tool_values.py
+  - sdks/python/tests/test_a2a_task_state.py
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentCall.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentDescriptor.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentHandler.java

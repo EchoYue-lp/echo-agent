@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manifest marks this exact 28-item intrinsic slice complete; the remaining
   process-local intrinsic surface stays explicitly open.
 
+- **A2A TaskState intrinsic in all source SDKs.** The closed terminal and
+  transition table is available as a TypeScript union, Python string enum and
+  Java enum, with matching display values and fail-fast invalid-state checks.
+  The generated manifest marks the exact 10-item intrinsic identity group;
+  remaining intrinsic behavior is still open.
+
 - **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
   Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
   capability and lets a host language register Tool, LlmClient, Store,

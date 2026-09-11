@@ -1,3 +1,4 @@
+from .a2a import TaskState
 from .catalog import FacadeCatalog, ResolvedOperation
 from .client import (
     AgentComponent,
@@ -210,6 +211,7 @@ __all__ = [
     "Store",
     "StoreCall",
     "StoreDescriptor",
+    "TaskState",
     "TokenizerReference",
     "Tool",
     "ToolCall",
