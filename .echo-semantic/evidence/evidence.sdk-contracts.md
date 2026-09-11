@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:1629189d62d3776c3919e9400e0c73623a1826dc8c89c62c40212d6dd4629846
+observed_at: source:d1d5ddea8d320786cc7c41ed0d9092c8709bb995f3811b7363d2f93f795b3068
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -53,6 +53,7 @@ source_refs:
   - sdks/typescript/src/a2a.ts
   - sdks/typescript/test/intrinsic-tool-values.test.js
   - sdks/typescript/test/a2a-task-state.test.js
+  - sdks/typescript/README.md
   - sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java
   - sdks/java/src/test/java/com/echoagent/sdk/IntrinsicToolValueTest.java
   - sdks/java/src/test/java/com/echoagent/sdk/A2ATaskStateTest.java
@@ -65,6 +66,11 @@ source_refs:
   - sdks/java/src/main/java/com/echoagent/sdk/A2ATaskStatus.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentProvider.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentSkill.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentAuthentication.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentCapabilities.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentCard.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentCardBuilder.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AuthenticationScheme.java
   - echo-sdk-host/tests/support/mod.rs
   - sdks/typescript/src/client.ts
   - sdks/typescript/src/types.ts
@@ -77,6 +83,7 @@ source_refs:
   - sdks/python/tests/test_lifecycle.py
   - sdks/python/tests/test_intrinsic_tool_values.py
   - sdks/python/tests/test_a2a_task_state.py
+  - sdks/python/README.md
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentCall.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentDescriptor.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentHandler.java

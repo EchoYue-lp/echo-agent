@@ -114,6 +114,10 @@ TaskStatus, Provider and Skill constructor/projection identities in all three
 language SDKs; these values remain immutable projections with no new Host,
 network or lifecycle authority.
 
+The Agent Card increment closes the local card and fluent builder identities in
+all three SDKs while retaining `from_agent` as an explicit Rust-authority
+boundary.
+
 ## SDK-Skill-Impact
 
 `update`: `ReactAgent::discover_skills` is now a canonical source operation

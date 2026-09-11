@@ -8,6 +8,7 @@ import pytest
 from echo_agent_sdk import (
     A2AMessage,
     A2ATaskStatus,
+    AgentCard,
     AgentProvider,
     AgentSkill,
     TaskState,
@@ -74,6 +75,41 @@ def test_a2a_value_identity_mappings_are_ready() -> None:
         for entry in manifest["entries"]
         if entry["canonical"]
         and entry["languages"]["python"]["contract_test"].endswith("/a2a_values")
+    ]
+    assert len(entries) == 14
+    assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)
+
+
+def test_a2a_agent_card_builder_preserves_local_value_semantics() -> None:
+    skill = AgentSkill.new("search", "Search docs")
+    card = (
+        AgentCard.builder("eko", "https://example.test")
+        .description("Local agent")
+        .version("1.0.0")
+        .provider(AgentProvider.new("Echo"))
+        .skill(skill)
+        .input_modes(["text/plain"])
+        .output_modes(["text/plain", "application/json"])
+        .streaming()
+        .push_notifications()
+        .build()
+    )
+    assert card.name == "eko"
+    assert card.description == "Local agent"
+    assert card.skills == (skill,)
+    assert card.default_output_modes == ("text/plain", "application/json")
+    assert card.capabilities.streaming
+    assert card.capabilities.push_notifications
+
+
+def test_a2a_agent_card_identity_mappings_are_ready() -> None:
+    root = Path(__file__).resolve().parents[3]
+    manifest = json.loads((root / "contracts/sdk/parity-manifest.json").read_text())
+    entries = [
+        entry
+        for entry in manifest["entries"]
+        if entry["canonical"]
+        and entry["languages"]["python"]["contract_test"].endswith("/a2a_agent_card")
     ]
     assert len(entries) == 14
     assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)

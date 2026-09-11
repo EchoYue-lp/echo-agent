@@ -158,6 +158,178 @@ export class AgentSkill {
   }
 }
 
+export type AuthenticationScheme = Readonly<{
+  scheme: string;
+  config: Readonly<Record<string, unknown>>;
+}>;
+
+export type AgentAuthentication = Readonly<{
+  schemes: readonly AuthenticationScheme[];
+}>;
+
+export type AgentCapabilities = Readonly<{
+  streaming: boolean;
+  pushNotifications: boolean;
+  stateTransitionHistory: boolean;
+}>;
+
+type AgentCardInput = {
+  name: string;
+  url: string;
+  description?: string;
+  version?: string;
+  provider?: AgentProvider;
+  skills: readonly AgentSkill[];
+  defaultInputModes: readonly string[];
+  defaultOutputModes: readonly string[];
+  authentication?: AgentAuthentication;
+  capabilities: AgentCapabilities;
+};
+
+export class AgentCard {
+  public readonly name: string;
+  public readonly description?: string;
+  public readonly url: string;
+  public readonly version?: string;
+  public readonly provider?: AgentProvider;
+  public readonly skills: readonly AgentSkill[];
+  public readonly defaultInputModes: readonly string[];
+  public readonly defaultOutputModes: readonly string[];
+  public readonly authentication?: AgentAuthentication;
+  public readonly capabilities: AgentCapabilities;
+
+  private constructor(input: AgentCardInput) {
+    this.name = input.name;
+    this.description = input.description;
+    this.url = input.url;
+    this.version = input.version;
+    this.provider = input.provider;
+    this.skills = Object.freeze([...input.skills]);
+    this.defaultInputModes = Object.freeze([...input.defaultInputModes]);
+    this.defaultOutputModes = Object.freeze([...input.defaultOutputModes]);
+    this.authentication = input.authentication
+      ? Object.freeze({
+          schemes: Object.freeze(input.authentication.schemes.map((scheme) =>
+            Object.freeze({ scheme: scheme.scheme, config: Object.freeze({ ...scheme.config }) }),
+          )),
+        })
+      : undefined;
+    this.capabilities = Object.freeze({ ...input.capabilities });
+    Object.freeze(this);
+  }
+
+  public static builder(name: string, url: string): AgentCardBuilder {
+    validateText(name, "agent name");
+    validateText(url, "agent url");
+    return new AgentCardBuilder(name, url);
+  }
+
+  /** @internal */
+  public static fromInput(input: AgentCardInput): AgentCard {
+    return new AgentCard(input);
+  }
+
+}
+
+export class AgentCardBuilder {
+  private descriptionValue?: string;
+  private versionValue?: string;
+  private providerValue?: AgentProvider;
+  private readonly skillsValue: AgentSkill[] = [];
+  private inputModesValue: string[] = ["text/plain"];
+  private outputModesValue: string[] = ["text/plain"];
+  private authenticationValue?: AgentAuthentication;
+  private streamingValue = false;
+  private pushNotificationsValue = false;
+
+  private readonly nameValue: string;
+  private readonly urlValue: string;
+
+  constructor(nameValue: string, urlValue: string) {
+    validateText(nameValue, "agent name");
+    validateText(urlValue, "agent url");
+    this.nameValue = nameValue;
+    this.urlValue = urlValue;
+  }
+
+  public description(value: string): AgentCardBuilder {
+    validateText(value, "agent description");
+    this.descriptionValue = value;
+    return this;
+  }
+
+  public version(value: string): AgentCardBuilder {
+    validateText(value, "agent version");
+    this.versionValue = value;
+    return this;
+  }
+
+  public provider(value: AgentProvider): AgentCardBuilder {
+    if (!(value instanceof AgentProvider)) throw new TypeError("provider must be an AgentProvider");
+    this.providerValue = value;
+    return this;
+  }
+
+  public skill(value: AgentSkill): AgentCardBuilder {
+    if (!(value instanceof AgentSkill)) throw new TypeError("skill must be an AgentSkill");
+    this.skillsValue.push(value);
+    return this;
+  }
+
+  public skills(values: readonly AgentSkill[]): AgentCardBuilder {
+    if (!Array.isArray(values) || values.some((value) => !(value instanceof AgentSkill))) {
+      throw new TypeError("skills must be an AgentSkill array");
+    }
+    this.skillsValue.push(...values);
+    return this;
+  }
+
+  public inputModes(values: readonly string[]): AgentCardBuilder {
+    this.inputModesValue = [...textList(values, "input modes")];
+    return this;
+  }
+
+  public outputModes(values: readonly string[]): AgentCardBuilder {
+    this.outputModesValue = [...textList(values, "output modes")];
+    return this;
+  }
+
+  public authentication(value: AgentAuthentication): AgentCardBuilder {
+    if (!value || !Array.isArray(value.schemes)) throw new TypeError("invalid agent authentication");
+    this.authenticationValue = value;
+    return this;
+  }
+
+  public streaming(): AgentCardBuilder {
+    this.streamingValue = true;
+    return this;
+  }
+
+  public pushNotifications(): AgentCardBuilder {
+    this.pushNotificationsValue = true;
+    return this;
+  }
+
+  public build(): AgentCard {
+    return AgentCard.fromInput({
+      name: this.nameValue,
+      url: this.urlValue,
+      description: this.descriptionValue,
+      version: this.versionValue,
+      provider: this.providerValue,
+      skills: this.skillsValue,
+      defaultInputModes: this.inputModesValue,
+      defaultOutputModes: this.outputModesValue,
+      authentication: this.authenticationValue,
+      capabilities: {
+        streaming: this.streamingValue,
+        pushNotifications: this.pushNotificationsValue,
+        stateTransitionHistory: false,
+      },
+    });
+  }
+}
+
 function validateTaskState(state: string): asserts state is TaskState {
   if (!TASK_STATES.has(state)) throw new TypeError(`unknown A2A task state: ${state}`);
 }
@@ -167,4 +339,8 @@ function textList(values: readonly string[], field: string): readonly string[] {
     throw new TypeError(`${field} must be a string array`);
   }
   return [...values];
+}
+
+function validateText(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string") throw new TypeError(`${field} must be text`);
 }

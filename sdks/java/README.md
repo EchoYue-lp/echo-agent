@@ -72,6 +72,8 @@ maps, while the `JsonNode` overload remains the explicit pre-encoded path.
 semantics as the Rust A2A value; it does not add a protocol route.
 `A2AMessage`, `A2ATaskStatus`, `AgentProvider` and `AgentSkill` provide the
 corresponding immutable value constructors and text projections.
+`AgentCard.builder(...)` provides the local immutable card and fluent builder;
+it does not mirror the Host-owned `from_agent` operation.
 `RunHandle.status()`, `RunHandle.outcomeStatus()` and `RunHandle.usage()` query
 the Host-owned settled receipt through the canonical Run receiver. They return
 `JsonNode` values directly; `WireU64` counters in usage remain textual nodes so

@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   projections in TypeScript, Python and Java; the exact 14-item intrinsic
   identity group is covered by the parity manifest and focused tests.
 
+- **A2A Agent Card builder in all source SDKs.** The local card projection and
+  fluent builder now preserve Rust defaults and capability flags in all three
+  languages; Host-owned `from_agent` derivation remains intentionally open.
+
 - **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
   Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
   capability and lets a host language register Tool, LlmClient, Store,

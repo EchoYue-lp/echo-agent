@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 
@@ -93,12 +94,184 @@ class AgentSkill:
         return replace(self, tags=_text_list(tags, "tags"))
 
 
+@dataclass(frozen=True, slots=True)
+class AuthenticationScheme:
+    scheme: str
+    config: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scheme, str):
+            raise TypeError("authentication scheme must be text")
+        if not isinstance(self.config, Mapping):
+            raise TypeError("authentication config must be a mapping")
+        object.__setattr__(self, "config", MappingProxyType(dict(self.config)))
+
+
+@dataclass(frozen=True, slots=True)
+class AgentAuthentication:
+    schemes: tuple[AuthenticationScheme, ...]
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(scheme, AuthenticationScheme) for scheme in self.schemes):
+            raise TypeError(
+                "authentication schemes must be AuthenticationScheme values"
+            )
+        object.__setattr__(self, "schemes", tuple(self.schemes))
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCapabilities:
+    streaming: bool = False
+    push_notifications: bool = False
+    state_transition_history: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCard:
+    name: str
+    url: str
+    description: str | None = None
+    version: str | None = None
+    provider: AgentProvider | None = None
+    skills: tuple[AgentSkill, ...] = ()
+    default_input_modes: tuple[str, ...] = ("text/plain",)
+    default_output_modes: tuple[str, ...] = ("text/plain",)
+    authentication: AgentAuthentication | None = None
+    capabilities: AgentCapabilities = field(default_factory=AgentCapabilities)
+
+    def __post_init__(self) -> None:
+        _require_text(self.name, "agent name")
+        _require_text(self.url, "agent url")
+        if self.description is not None:
+            _require_text(self.description, "agent description")
+        if self.version is not None:
+            _require_text(self.version, "agent version")
+        if self.provider is not None and not isinstance(self.provider, AgentProvider):
+            raise TypeError("provider must be an AgentProvider")
+        if any(not isinstance(skill, AgentSkill) for skill in self.skills):
+            raise TypeError("skills must be AgentSkill values")
+        object.__setattr__(self, "skills", tuple(self.skills))
+        object.__setattr__(
+            self,
+            "default_input_modes",
+            _text_list(self.default_input_modes, "input modes"),
+        )
+        object.__setattr__(
+            self,
+            "default_output_modes",
+            _text_list(self.default_output_modes, "output modes"),
+        )
+        if self.authentication is not None and not isinstance(
+            self.authentication, AgentAuthentication
+        ):
+            raise TypeError("authentication must be an AgentAuthentication")
+        if not isinstance(self.capabilities, AgentCapabilities):
+            raise TypeError("capabilities must be AgentCapabilities")
+
+    @classmethod
+    def builder(cls, name: str, url: str) -> AgentCardBuilder:
+        return AgentCardBuilder(name, url)
+
+
+class AgentCardBuilder:
+    def __init__(self, name: str, url: str) -> None:
+        _require_text(name, "agent name")
+        _require_text(url, "agent url")
+        self._name = name
+        self._url = url
+        self._description: str | None = None
+        self._version: str | None = None
+        self._provider: AgentProvider | None = None
+        self._skills: list[AgentSkill] = []
+        self._input_modes: tuple[str, ...] = ("text/plain",)
+        self._output_modes: tuple[str, ...] = ("text/plain",)
+        self._authentication: AgentAuthentication | None = None
+        self._streaming = False
+        self._push_notifications = False
+
+    def description(self, value: str) -> AgentCardBuilder:
+        _require_text(value, "agent description")
+        self._description = value
+        return self
+
+    def version(self, value: str) -> AgentCardBuilder:
+        _require_text(value, "agent version")
+        self._version = value
+        return self
+
+    def provider(self, value: AgentProvider) -> AgentCardBuilder:
+        if not isinstance(value, AgentProvider):
+            raise TypeError("provider must be an AgentProvider")
+        self._provider = value
+        return self
+
+    def skill(self, value: AgentSkill) -> AgentCardBuilder:
+        if not isinstance(value, AgentSkill):
+            raise TypeError("skill must be an AgentSkill")
+        self._skills.append(value)
+        return self
+
+    def skills(
+        self, values: list[AgentSkill] | tuple[AgentSkill, ...]
+    ) -> AgentCardBuilder:
+        if not isinstance(values, (list, tuple)) or any(
+            not isinstance(value, AgentSkill) for value in values
+        ):
+            raise TypeError("skills must be an AgentSkill sequence")
+        self._skills.extend(values)
+        return self
+
+    def input_modes(self, values: list[str] | tuple[str, ...]) -> AgentCardBuilder:
+        self._input_modes = _text_list(values, "input modes")
+        return self
+
+    def output_modes(self, values: list[str] | tuple[str, ...]) -> AgentCardBuilder:
+        self._output_modes = _text_list(values, "output modes")
+        return self
+
+    def authentication(self, value: AgentAuthentication) -> AgentCardBuilder:
+        if not isinstance(value, AgentAuthentication):
+            raise TypeError("authentication must be an AgentAuthentication")
+        self._authentication = value
+        return self
+
+    def streaming(self) -> AgentCardBuilder:
+        self._streaming = True
+        return self
+
+    def push_notifications(self) -> AgentCardBuilder:
+        self._push_notifications = True
+        return self
+
+    def build(self) -> AgentCard:
+        return AgentCard(
+            name=self._name,
+            url=self._url,
+            description=self._description,
+            version=self._version,
+            provider=self._provider,
+            skills=tuple(self._skills),
+            default_input_modes=self._input_modes,
+            default_output_modes=self._output_modes,
+            authentication=self._authentication,
+            capabilities=AgentCapabilities(
+                streaming=self._streaming,
+                push_notifications=self._push_notifications,
+            ),
+        )
+
+
 def _text_list(values: list[str] | tuple[str, ...], field: str) -> tuple[str, ...]:
     if not isinstance(values, (list, tuple)) or any(
         not isinstance(value, str) for value in values
     ):
         raise TypeError(f"{field} must be a string sequence")
     return tuple(values)
+
+
+def _require_text(value: Any, field: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be text")
 
 
 class TaskState(str, Enum):

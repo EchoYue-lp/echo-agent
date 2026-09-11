@@ -1802,12 +1802,30 @@ fn language_status_for(
         "echo_agent::a2a::types::AgentSkill::with_examples",
         "echo_agent::a2a::types::AgentSkill::with_tags",
     ];
+    const A2A_AGENT_CARD_IDENTITIES: &[&str] = &[
+        "echo_agent::a2a::types::AgentCard",
+        "echo_agent::a2a::types::AgentCard::builder",
+        "echo_agent::a2a::types::AgentCardBuilder",
+        "echo_agent::a2a::types::AgentCardBuilder::authentication",
+        "echo_agent::a2a::types::AgentCardBuilder::build",
+        "echo_agent::a2a::types::AgentCardBuilder::description",
+        "echo_agent::a2a::types::AgentCardBuilder::input_modes",
+        "echo_agent::a2a::types::AgentCardBuilder::output_modes",
+        "echo_agent::a2a::types::AgentCardBuilder::provider",
+        "echo_agent::a2a::types::AgentCardBuilder::push_notifications",
+        "echo_agent::a2a::types::AgentCardBuilder::skill",
+        "echo_agent::a2a::types::AgentCardBuilder::skills",
+        "echo_agent::a2a::types::AgentCardBuilder::streaming",
+        "echo_agent::a2a::types::AgentCardBuilder::version",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "a2a_task_state")
     } else if A2A_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "a2a_values")
+    } else if A2A_AGENT_CARD_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "a2a_agent_card")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

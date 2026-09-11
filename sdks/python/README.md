@@ -57,6 +57,8 @@ mapping, and ordinary JSON objects are encoded as maps even when they contain
 display semantics as the Rust A2A value.
 `A2AMessage`, `A2ATaskStatus`, `AgentProvider` and `AgentSkill` are immutable
 native values with the corresponding text/status/provider/skill constructors.
+`AgentCard.builder(...)` provides the same local immutable card and fluent
+builder semantics; Agent-backed card discovery remains a Rust authority.
 Session updates and Run events are bounded async iterators with cursor ACKs,
 gap/overflow errors, Host-exit propagation and idempotent close semantics.
 Context compressor calls include a Host-owned tokenizer handle;

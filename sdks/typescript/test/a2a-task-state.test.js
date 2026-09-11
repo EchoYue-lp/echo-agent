@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   A2AMessage,
   A2ATaskStatus,
+  AgentCard,
   AgentProvider,
   AgentSkill,
   TaskState,
@@ -50,4 +51,33 @@ test("A2A value constructors preserve text, status, provider and skill semantics
   assert.throws(() => skill.tags.push("mutate"), TypeError);
   assert.throws(() => message.parts.push({ type: "text", text: "mutate" }), TypeError);
   assert.throws(() => A2AMessage.userText(null), /message text/);
+});
+
+test("A2A Agent Card builder preserves local value semantics", () => {
+  const skill = AgentSkill.new("search", "Search docs");
+  const card = AgentCard.builder("eko", "https://example.test")
+    .description("Local agent")
+    .version("1.0.0")
+    .provider(AgentProvider.new("Echo"))
+    .skill(skill)
+    .inputModes(["text/plain"])
+    .outputModes(["text/plain", "application/json"])
+    .streaming()
+    .pushNotifications()
+    .build();
+  assert.equal(card.name, "eko");
+  assert.equal(card.description, "Local agent");
+  assert.equal(card.url, "https://example.test");
+  assert.equal(card.skills[0], skill);
+  assert.deepEqual(card.defaultOutputModes, ["text/plain", "application/json"]);
+  assert.equal(card.capabilities.streaming, true);
+  assert.equal(card.capabilities.pushNotifications, true);
+  assert.throws(() => card.skills.push(skill), TypeError);
+});
+
+test("A2A Agent Card identities have completed TypeScript mappings", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../../../contracts/sdk/parity-manifest.json", import.meta.url), "utf8"));
+  const entries = manifest.entries.filter((entry) => entry.canonical && entry.languages.typescript.contract_test.endsWith("/a2a_agent_card"));
+  assert.equal(entries.length, 14);
+  for (const entry of entries) assert.equal(entry.languages.typescript.status, "done", entry.path);
 });

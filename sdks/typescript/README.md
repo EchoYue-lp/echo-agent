@@ -51,6 +51,8 @@ The A2A `TaskState` union and `taskStateCanTransitionTo` helper preserve the
 closed terminal and transition table without adding a wire route.
 `A2AMessage`, `A2ATaskStatus`, `AgentProvider` and `AgentSkill` provide the
 same immutable text/status/provider/skill value constructors.
+`AgentCard.builder(...)` provides the immutable card value and fluent local
+builder; it does not synthesize a card from a Host-owned Agent.
 `SessionHandle.updates()` and `RunHandle.events` are bounded async iterables;
 Run events validate stream identity and sequence, acknowledge consumed cursors,
 surface gaps, and fail with `host_exited` if the Host exits unexpectedly.
