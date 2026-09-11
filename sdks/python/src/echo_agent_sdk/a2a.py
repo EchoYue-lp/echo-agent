@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -31,6 +32,63 @@ class A2AMessage:
             for part in self.parts
             if part.get("type") == "text" and isinstance(part.get("text"), str)
         )
+
+
+@dataclass(frozen=True, slots=True)
+class A2AArtifact:
+    parts: tuple[Mapping[str, Any], ...]
+    name: str | None = None
+    index: int | None = None
+    append: bool = False
+
+    def __post_init__(self) -> None:
+        if self.name is not None and not isinstance(self.name, str):
+            raise TypeError("artifact name must be text")
+        if self.index is not None and (
+            isinstance(self.index, bool)
+            or not isinstance(self.index, int)
+            or self.index < 0
+            or self.index > sys.maxsize
+        ):
+            raise TypeError("artifact index must fit Rust usize")
+        if not isinstance(self.append, bool):
+            raise TypeError("artifact append must be boolean")
+        object.__setattr__(
+            self, "parts", tuple(_freeze_part(part) for part in self.parts)
+        )
+
+    @classmethod
+    def new(
+        cls,
+        parts: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+        *,
+        name: str | None = None,
+        index: int | None = None,
+        append: bool = False,
+    ) -> A2AArtifact:
+        if not isinstance(parts, (list, tuple)):
+            raise TypeError("artifact parts must be a sequence")
+        return cls(tuple(parts), name=name, index=index, append=append)
+
+
+@dataclass(frozen=True, slots=True)
+class A2AError:
+    code: int
+    message: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.code, bool)
+            or not isinstance(self.code, int)
+            or not -(1 << 31) <= self.code <= (1 << 31) - 1
+        ):
+            raise TypeError("A2A error code must fit i32")
+        if not isinstance(self.message, str):
+            raise TypeError("A2A error message must be text")
+
+    @classmethod
+    def new(cls, code: int, message: str) -> A2AError:
+        return cls(code, message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +330,22 @@ def _text_list(values: list[str] | tuple[str, ...], field: str) -> tuple[str, ..
 def _require_text(value: Any, field: str) -> None:
     if not isinstance(value, str):
         raise TypeError(f"{field} must be text")
+
+
+def _freeze_part(part: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not isinstance(part, Mapping):
+        raise TypeError("artifact parts must be mappings")
+    part_type = part.get("type")
+    if part_type == "text" and not isinstance(part.get("text"), str):
+        raise TypeError("artifact text must be text")
+    if part_type == "file" and (
+        not isinstance(part.get("mimeType"), str)
+        or not isinstance(part.get("data"), str)
+    ):
+        raise TypeError("artifact file part must contain text mimeType and data")
+    if part_type not in {"text", "file"}:
+        raise TypeError("artifact part type must be text or file")
+    return MappingProxyType(dict(part))
 
 
 class TaskState(str, Enum):

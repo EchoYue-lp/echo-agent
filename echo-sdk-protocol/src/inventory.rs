@@ -1818,6 +1818,16 @@ fn language_status_for(
         "echo_agent::a2a::types::AgentCardBuilder::streaming",
         "echo_agent::a2a::types::AgentCardBuilder::version",
     ];
+    const A2A_WIRE_VALUE_IDENTITIES: &[&str] = &[
+        "echo_agent::a2a::types::A2AArtifact",
+        "echo_agent::a2a::types::A2AArtifact::append",
+        "echo_agent::a2a::types::A2AArtifact::index",
+        "echo_agent::a2a::types::A2AArtifact::name",
+        "echo_agent::a2a::types::A2AArtifact::parts",
+        "echo_agent::a2a::types::A2AError",
+        "echo_agent::a2a::types::A2AError::code",
+        "echo_agent::a2a::types::A2AError::message",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -1826,6 +1836,8 @@ fn language_status_for(
         (LanguageImplementationStatus::Done, "a2a_values")
     } else if A2A_AGENT_CARD_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "a2a_agent_card")
+    } else if A2A_WIRE_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "a2a_wire_values")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

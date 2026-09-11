@@ -11,6 +11,7 @@ export const TaskState = Object.freeze({
 export type TaskState = (typeof TaskState)[keyof typeof TaskState];
 
 const TASK_STATES: ReadonlySet<string> = new Set(Object.values(TaskState));
+const MAX_USIZE_64 = (1n << 64n) - 1n;
 
 export function taskStateIsTerminal(state: TaskState): boolean {
   validateTaskState(state);
@@ -61,6 +62,53 @@ export class A2AMessage {
       .filter((part): part is Extract<A2APart, { readonly type: "text" }> => part.type === "text")
       .map((part) => part.text)
       .join("\n");
+  }
+}
+
+export class A2AArtifact {
+  public readonly name?: string;
+  public readonly index?: bigint;
+  public readonly parts: readonly A2APart[];
+  public readonly append: boolean;
+
+  private constructor(parts: readonly A2APart[], name?: string, index?: bigint, append = false) {
+    if (!Array.isArray(parts)) throw new TypeError("artifact parts must be an array");
+    if (name !== undefined) validateText(name, "artifact name");
+    if (index !== undefined && (index < 0n || index > MAX_USIZE_64)) {
+      throw new TypeError("artifact index must fit Rust usize");
+    }
+    if (typeof append !== "boolean") throw new TypeError("artifact append must be boolean");
+    this.name = name;
+    this.index = index;
+    this.parts = Object.freeze(parts.map((part) => freezePart(part)));
+    this.append = append;
+    Object.freeze(this);
+  }
+
+  public static new(
+    parts: readonly A2APart[],
+    options: { readonly name?: string; readonly index?: number | bigint; readonly append?: boolean } = {},
+  ): A2AArtifact {
+    return new A2AArtifact(parts, options.name, normalizeArtifactIndex(options.index), options.append ?? false);
+  }
+}
+
+export class A2AError {
+  public readonly code: number;
+  public readonly message: string;
+
+  private constructor(code: number, message: string) {
+    if (!Number.isInteger(code) || code < -2147483648 || code > 2147483647) {
+      throw new TypeError("A2A error code must be an i32");
+    }
+    validateText(message, "A2A error message");
+    this.code = code;
+    this.message = message;
+    Object.freeze(this);
+  }
+
+  public static new(code: number, message: string): A2AError {
+    return new A2AError(code, message);
   }
 }
 
@@ -343,4 +391,26 @@ function textList(values: readonly string[], field: string): readonly string[] {
 
 function validateText(value: unknown, field: string): asserts value is string {
   if (typeof value !== "string") throw new TypeError(`${field} must be text`);
+}
+
+function freezePart(part: A2APart): A2APart {
+  if (!part || (part.type !== "text" && part.type !== "file")) {
+    throw new TypeError("artifact parts must be valid A2A parts");
+  }
+  if (part.type === "text") validateText(part.text, "artifact text");
+  if (part.type === "file") {
+    validateText(part.mimeType, "artifact mime type");
+    validateText(part.data, "artifact data");
+  }
+  return Object.freeze({ ...part });
+}
+
+function normalizeArtifactIndex(value: number | bigint | undefined): bigint | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "bigint") {
+    if (value < 0n || value > MAX_USIZE_64) throw new TypeError("artifact index must fit Rust usize");
+    return value;
+  }
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError("artifact index must be a non-negative safe integer");
+  return BigInt(value);
 }

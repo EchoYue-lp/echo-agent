@@ -2,6 +2,7 @@ package com.echoagent.sdk;
 
 import org.junit.jupiter.api.Test;
 
+import java.math.BigInteger;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -85,5 +86,36 @@ class A2AValueTest {
             }
         }
         assertEquals(14, count);
+    }
+
+    @Test
+    void artifactAndErrorValuesPreserveWireFields() {
+        var part = JsonSupport.MAPPER.createObjectNode().put("type", "text").put("text", "chunk");
+        var artifact = A2AArtifact.newArtifact(List.of(part), "answer", BigInteger.valueOf(2), true);
+        assertEquals("answer", artifact.name());
+        assertEquals(BigInteger.valueOf(2), artifact.index());
+        assertTrue(artifact.append());
+        assertEquals("chunk", artifact.parts().get(0).path("text").asText());
+        assertThrows(IllegalArgumentException.class, () -> A2AArtifact.newArtifact(
+                List.of(JsonSupport.MAPPER.createObjectNode().put("type", "unknown")), null, null, false));
+        var error = A2AError.newError(-32001, "missing");
+        assertEquals(-32001, error.code());
+        assertEquals("missing", error.message());
+    }
+
+    @Test
+    void wireValueMappingsAreReady() throws Exception {
+        var manifest = JsonSupport.MAPPER.readTree(java.nio.file.Files.readString(
+                java.nio.file.Path.of("../..", "contracts/sdk/parity-manifest.json")));
+        int count = 0;
+        for (var entry : manifest.path("entries")) {
+            if (entry.path("canonical").asBoolean()
+                    && entry.path("languages").path("java").path("contract_test")
+                    .asText().endsWith("/a2a_wire_values")) {
+                count += 1;
+                assertEquals("done", entry.path("languages").path("java").path("status").asText());
+            }
+        }
+        assertEquals(8, count);
     }
 }

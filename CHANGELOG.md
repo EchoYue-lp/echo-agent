@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fluent builder now preserve Rust defaults and capability flags in all three
   languages; Host-owned `from_agent` derivation remains intentionally open.
 
+- **A2A Artifact and Error values in all source SDKs.** Immutable artifact
+  chunks and typed task errors now preserve their Rust wire fields in all three
+  languages.
+
 - **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
   Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
   capability and lets a host language register Tool, LlmClient, Store,

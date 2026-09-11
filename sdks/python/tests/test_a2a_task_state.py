@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from echo_agent_sdk import (
+    A2AArtifact,
+    A2AError,
     A2AMessage,
     A2ATaskStatus,
     AgentCard,
@@ -112,4 +114,37 @@ def test_a2a_agent_card_identity_mappings_are_ready() -> None:
         and entry["languages"]["python"]["contract_test"].endswith("/a2a_agent_card")
     ]
     assert len(entries) == 14
+    assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)
+
+
+def test_a2a_artifact_and_error_values_preserve_wire_fields() -> None:
+    artifact = A2AArtifact.new(
+        [{"type": "text", "text": "chunk"}],
+        name="answer",
+        index=2,
+        append=True,
+    )
+    assert artifact.name == "answer"
+    assert artifact.index == 2
+    assert artifact.append
+    assert artifact.parts[0]["text"] == "chunk"
+    error = A2AError.new(-32001, "missing")
+    assert error.code == -32001
+    assert error.message == "missing"
+    with pytest.raises(TypeError, match="i32"):
+        A2AError.new(2**31, "overflow")
+    with pytest.raises(TypeError, match="append"):
+        A2AArtifact.new([], append="yes")  # type: ignore[arg-type]
+
+
+def test_a2a_wire_value_mappings_are_ready() -> None:
+    root = Path(__file__).resolve().parents[3]
+    manifest = json.loads((root / "contracts/sdk/parity-manifest.json").read_text())
+    entries = [
+        entry
+        for entry in manifest["entries"]
+        if entry["canonical"]
+        and entry["languages"]["python"]["contract_test"].endswith("/a2a_wire_values")
+    ]
+    assert len(entries) == 8
     assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)

@@ -53,6 +53,8 @@ closed terminal and transition table without adding a wire route.
 same immutable text/status/provider/skill value constructors.
 `AgentCard.builder(...)` provides the immutable card value and fluent local
 builder; it does not synthesize a card from a Host-owned Agent.
+`A2AArtifact.new(...)` and `A2AError.new(...)` preserve the corresponding
+wire fields without adding a network route.
 `SessionHandle.updates()` and `RunHandle.events` are bounded async iterables;
 Run events validate stream identity and sequence, acknowledge consumed cursors,
 surface gaps, and fail with `host_exited` if the Host exits unexpectedly.

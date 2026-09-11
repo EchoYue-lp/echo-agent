@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   A2AMessage,
+  A2AArtifact,
+  A2AError,
   A2ATaskStatus,
   AgentCard,
   AgentProvider,
@@ -79,5 +81,30 @@ test("A2A Agent Card identities have completed TypeScript mappings", () => {
   const manifest = JSON.parse(readFileSync(new URL("../../../contracts/sdk/parity-manifest.json", import.meta.url), "utf8"));
   const entries = manifest.entries.filter((entry) => entry.canonical && entry.languages.typescript.contract_test.endsWith("/a2a_agent_card"));
   assert.equal(entries.length, 14);
+  for (const entry of entries) assert.equal(entry.languages.typescript.status, "done", entry.path);
+});
+
+test("A2A artifact and error values preserve wire fields and immutability", () => {
+  const artifact = A2AArtifact.new([{ type: "text", text: "chunk" }], {
+    name: "answer",
+    index: 2,
+    append: true,
+  });
+  assert.equal(artifact.name, "answer");
+  assert.equal(artifact.index, 2n);
+  assert.equal(artifact.append, true);
+  assert.equal(artifact.parts[0].type, "text");
+  assert.throws(() => artifact.parts.push({ type: "text", text: "mutate" }), TypeError);
+  const error = A2AError.new(-32001, "missing");
+  assert.deepEqual({ code: error.code, message: error.message }, { code: -32001, message: "missing" });
+  assert.throws(() => A2AError.new(2147483648, "overflow"), /i32/);
+  assert.throws(() => A2AArtifact.new([], { append: "yes" }), /append/);
+  assert.throws(() => A2AArtifact.new([], { index: 1n << 64n }), /usize/);
+});
+
+test("A2A wire values have completed TypeScript mappings", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../../../contracts/sdk/parity-manifest.json", import.meta.url), "utf8"));
+  const entries = manifest.entries.filter((entry) => entry.canonical && entry.languages.typescript.contract_test.endsWith("/a2a_wire_values"));
+  assert.equal(entries.length, 8);
   for (const entry of entries) assert.equal(entry.languages.typescript.status, "done", entry.path);
 });

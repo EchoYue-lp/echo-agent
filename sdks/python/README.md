@@ -59,6 +59,8 @@ display semantics as the Rust A2A value.
 native values with the corresponding text/status/provider/skill constructors.
 `AgentCard.builder(...)` provides the same local immutable card and fluent
 builder semantics; Agent-backed card discovery remains a Rust authority.
+`A2AArtifact.new(...)` and `A2AError.new(...)` provide immutable wire DTOs for
+artifact chunks and typed task errors.
 Session updates and Run events are bounded async iterators with cursor ACKs,
 gap/overflow errors, Host-exit propagation and idempotent close semantics.
 Context compressor calls include a Host-owned tokenizer handle;

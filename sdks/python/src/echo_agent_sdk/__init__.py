@@ -1,4 +1,6 @@
 from .a2a import (
+    A2AArtifact,
+    A2AError,
     A2AMessage,
     A2ATaskStatus,
     AgentAuthentication,
@@ -131,6 +133,8 @@ from .wire import (
 )
 
 __all__ = [
+    "A2AArtifact",
+    "A2AError",
     "A2AMessage",
     "A2ATaskStatus",
     "AgentAuthentication",

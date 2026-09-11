@@ -118,6 +118,9 @@ The Agent Card increment closes the local card and fluent builder identities in
 all three SDKs while retaining `from_agent` as an explicit Rust-authority
 boundary.
 
+The A2A Artifact/Error increment closes eight immutable wire-value identities
+without introducing a Host or network route.
+
 ## SDK-Skill-Impact
 
 `update`: `ReactAgent::discover_skills` is now a canonical source operation

@@ -197,6 +197,9 @@ projection in all three SDKs. Its 14 canonical identities are covered by
 focused behavior/mapping tests; `from_agent` stays explicitly unimplemented
 because the card must be derived by the Rust Agent authority.
 
+The A2A Artifact/Error DTO slice adds immutable wire-field projections in all
+three SDKs; its eight canonical identities use a dedicated behavior mapping.
+
 ## SDK-Skill-Impact
 
 `none`: this stage adds language SDK source clients and protocol/catalog

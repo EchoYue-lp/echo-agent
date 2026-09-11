@@ -134,6 +134,8 @@ covered by the same native-only intrinsic boundary.
 The Agent Card and fluent local builder are also available in all three
 languages; `from_agent` remains open because it requires the Rust Agent
 authority.
+The immutable A2A Artifact and Error DTOs preserve their wire fields in all
+three languages as well.
 
 ## For contributors
 
