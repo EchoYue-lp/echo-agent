@@ -101,6 +101,7 @@ from .client import (
     WorkflowRunRequest,
 )
 from .errors import EchoAgentError
+from .intrinsics import ParamValue, ToolCallParams, ToolResult
 from .wire import (
     IncrementalUtf8Decoder,
     WireHandle,
@@ -176,6 +177,7 @@ __all__ = [
     "MemoryPromoterResult",
     "MemoryTriggerRequest",
     "MemoryTriggerResult",
+    "ParamValue",
     "ResolvedOperation",
     "RevisionedTaskCompareAndCommitRequest",
     "RevisionedTaskLoadRequest",
@@ -211,7 +213,9 @@ __all__ = [
     "TokenizerReference",
     "Tool",
     "ToolCall",
+    "ToolCallParams",
     "ToolDescriptor",
+    "ToolResult",
     "WireHandle",
     "WorkflowCheckpointClearRequest",
     "WorkflowCheckpointIdRequest",

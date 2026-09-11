@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Intrinsic tool values in all source SDKs.** TypeScript, Python and Java now
+  expose `ToolCallParams` typed accessors and `ToolResult` construction/update
+  helpers with the same required-type failures, structured data conversion and
+  immutable modifier semantics as the Rust tool facade. The generated parity
+  manifest marks this exact 28-item intrinsic slice complete; the remaining
+  process-local intrinsic surface stays explicitly open.
+
 - **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
   Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
   capability and lets a host language register Tool, LlmClient, Store,

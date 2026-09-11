@@ -61,6 +61,13 @@ and `timestamp` constructors for the extension scalar algebra.
 byte streams without splitting UTF-8 scalars, replaces malformed bytes with
 U+FFFD, and retains incomplete suffixes until `finish()`. These helpers are
 pure Java utilities and do not add Host, ACP or catalog protocol surface.
+`ToolCallParams` provides the Rust parameter getters and required-type checks;
+`ToolResult` adds immutable static factories (`success`, `successJson`,
+`failure`, `invalidArguments`) and `with*` modifiers over the existing JSON
+shape.
+Failure categories are closed and preserve Rust recovery actions; ordinary
+JSON objects passed to `successJson`/`withData` are recursively encoded as
+maps, while the `JsonNode` overload remains the explicit pre-encoded path.
 `RunHandle.status()`, `RunHandle.outcomeStatus()` and `RunHandle.usage()` query
 the Host-owned settled receipt through the canonical Run receiver. They return
 `JsonNode` values directly; `WireU64` counters in usage remain textual nodes so

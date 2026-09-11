@@ -99,6 +99,12 @@ transport, and on-demand notifications are bounded. A no-bridge Host
 combination test proves bridge-dependent source operations return typed
 feature-unavailable rather than the generic fallback.
 
+The first language-native intrinsic slice now covers the 28 canonical
+`ToolCallParams`/`ToolResult` wire-helper entries in TypeScript, Python and
+Java. Each implementation has focused constructor, modifier and validation
+tests, and the manifest marks only this exact slice `done`; process-local
+authority and the remaining intrinsic behavior stay explicitly open.
+
 ## SDK-Skill-Impact
 
 `update`: `ReactAgent::discover_skills` is now a canonical source operation

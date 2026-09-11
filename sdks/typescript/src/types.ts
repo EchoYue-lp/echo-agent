@@ -154,10 +154,28 @@ export type ToolResultKind =
   | { readonly kind: "skill_activation"; readonly name: string }
   | { readonly kind: "structured_error"; readonly error_code: string };
 
+export type ToolFailureCategory =
+  | "invalid_arguments"
+  | "unavailable"
+  | "timeout"
+  | "cancelled"
+  | "transient"
+  | "permanent"
+  | "partial_side_effect";
+
+export type ToolRecoveryAction =
+  | "correct_arguments"
+  | "retry"
+  | "restore_then_retry"
+  | "verify_then_retry"
+  | "stop";
+
+export type ToolSideEffect = "none" | "possible" | "confirmed";
+
 export interface ToolFailure {
-  readonly category: string;
-  readonly recovery: string;
-  readonly side_effect: string;
+  readonly category: ToolFailureCategory;
+  readonly recovery: ToolRecoveryAction;
+  readonly side_effect: ToolSideEffect;
   readonly idempotency_key?: string | null;
   readonly postcondition?: string | null;
   readonly retry_after_ms?: WireU64 | null;
@@ -177,7 +195,7 @@ export interface ToolResultContent {
   readonly detail?: string | null;
 }
 
-export interface ToolResult {
+export interface ToolResultData {
   readonly kind: ToolResultKind;
   readonly output: string;
   readonly success: boolean;
@@ -190,6 +208,9 @@ export interface ToolResult {
   readonly mime_type?: string | null;
   readonly model_content?: readonly ToolResultContent[];
 }
+
+/** Structural ToolResult type; the runtime factory is exported from helpers. */
+export type ToolResult = ToolResultData;
 
 export type LlmReasoningBlock =
   | { readonly kind: "signed"; readonly signature: string; readonly thinking: string }
@@ -615,7 +636,7 @@ export interface ExtensionInvokeCall<I extends ExtensionInvocation = ExtensionIn
 }
 
 export type ToolExtensionResult =
-  | { readonly operation: "tool_execute"; readonly value: ToolResult }
+  | { readonly operation: "tool_execute"; readonly value: ToolResultData }
   | { readonly operation: "tool_validate_parameters"; readonly value: string | null };
 
 export type LlmExtensionResult = { readonly operation: "llm_chat"; readonly value: LlmChatResponse };

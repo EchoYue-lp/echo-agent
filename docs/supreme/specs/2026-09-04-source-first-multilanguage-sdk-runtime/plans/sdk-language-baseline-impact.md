@@ -161,6 +161,21 @@ both examples, while Java's existing `Example.java` remains in the same
 chain. Full intrinsic behavior and Parity complete remain future work, so
 `echo-website` stays unchanged.
 
+## Intrinsic tool-value slice
+
+`update`: the first language-local intrinsic slice is now executable in all
+three source SDKs. TypeScript `ToolCallParams`/`ToolResult` uses immutable
+factory/modifier values, Python exposes typed getters plus immutable
+`ToolResult` factories, and Java adds equivalent typed parameter and result
+helpers over Jackson. Cross-language tests cover successful construction,
+structured data, required-type failures and every one of the 28 canonical
+`intrinsic:language-local-wire-helper` manifest entries. This does not close
+the remaining process-local, builder, cancellation or pure-algorithm intrinsic
+routes, so overall Runnable/Parity complete and the website outcome remain
+closed. Failure recovery tags and optional failure fields are validated as a
+closed lossless DTO, and ordinary JSON objects are force-encoded as maps so
+`kind`/`value` field names cannot be confused with pre-encoded WireValue data.
+
 ## SDK-Skill-Impact
 
 `none`: this stage adds language SDK source clients and protocol/catalog

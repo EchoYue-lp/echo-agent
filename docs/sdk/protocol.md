@@ -8,7 +8,8 @@ source-built stdio Host; the core extension profile and the extension bridge are
 that Host (see [sdk-core-profile.md](sdk-core-profile.md) and
 [sdk-extension-bridge.md](sdk-extension-bridge.md)). Source-built TypeScript,
 Python and Java clients now pass the executable route baseline against that
-Host; intrinsic facade mappings remain follow-up work (see the [status
+Host; the first intrinsic value slice is also implemented in all three SDKs,
+while the remaining intrinsic facade mappings remain follow-up work (see the [status
 ladder](README.md#status-ladder)).
 
 ## Base protocol: official ACP v1

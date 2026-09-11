@@ -46,6 +46,13 @@ Pure local text helpers are available without a Host: `split_utf8_chunks` and
 `IncrementalUtf8Decoder` preserve UTF-8 boundaries under a byte cap, while
 `clean_json` and `extract_json_from_markdown` mirror the framework's JSON
 cleanup and Markdown extraction behavior.
+`ToolCallParams` exposes the same typed getters and required-parameter
+validation. `ToolResult` is an immutable native value with
+`success_result`/`success_json`/`failure_result` factories and `with_*`
+modifiers; structured payloads use the shared lossless WireValue conversion.
+Failure categories are validated as a closed set with the Rust recovery
+mapping, and ordinary JSON objects are encoded as maps even when they contain
+`kind`/`value` keys.
 Session updates and Run events are bounded async iterators with cursor ACKs,
 gap/overflow errors, Host-exit propagation and idempotent close semantics.
 Context compressor calls include a Host-owned tokenizer handle;

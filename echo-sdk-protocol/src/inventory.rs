@@ -1744,39 +1744,73 @@ fn language_status_for(
     classification: SemanticClass,
     route: &RouteObligation,
 ) -> (LanguageImplementationStatus, &'static str) {
-    let (status, suffix) = match identity {
-        "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {
-            (LanguageImplementationStatus::Done, "turn_outcome")
-        }
-        "echo_orchestration::runtime::turn_driver::TurnOutcome::status"
-        | "echo_orchestration::runtime::turn_driver::TurnReceipt::status"
-        | "echo_orchestration::runtime::turn_driver::TurnReceipt::usage" => {
-            (LanguageImplementationStatus::Done, "run_receipt")
-        }
-        "echo_core::utils::json_parse::clean_json"
-        | "echo_core::utils::json_parse::extract_json_from_markdown"
-        | "echo_core::utils::utf8::IncrementalUtf8Decoder"
-        | "echo_core::utils::utf8::IncrementalUtf8Decoder::new"
-        | "echo_core::utils::utf8::IncrementalUtf8Decoder::push"
-        | "echo_core::utils::utf8::IncrementalUtf8Decoder::finish"
-        | "echo_core::utils::utf8::split_utf8_chunks" => {
-            (LanguageImplementationStatus::Done, "local_helpers")
-        }
-        _ => {
-            let suffix = match classification {
-                SemanticClass::WireValue => "wire_value",
-                SemanticClass::Operation => "facade_operation",
-                SemanticClass::Handle => "facade_handle",
-                SemanticClass::Stream => "facade_stream",
-                SemanticClass::Extension => "facade_extension",
-                SemanticClass::LanguageIntrinsic => "language_intrinsic",
-            };
-            let status = if route.surface == "intrinsic" {
-                LanguageImplementationStatus::NotImplemented
-            } else {
-                LanguageImplementationStatus::Done
-            };
-            (status, suffix)
+    const LOCAL_TOOL_VALUE_IDENTITIES: &[&str] = &[
+        "echo_core::tools::ToolCallParams",
+        "echo_core::tools::ToolCallParams::from_params",
+        "echo_core::tools::ToolCallParams::from_value",
+        "echo_core::tools::ToolCallParams::get",
+        "echo_core::tools::ToolCallParams::get_bool",
+        "echo_core::tools::ToolCallParams::get_number",
+        "echo_core::tools::ToolCallParams::get_str",
+        "echo_core::tools::ToolCallParams::has",
+        "echo_core::tools::ToolCallParams::is_empty",
+        "echo_core::tools::ToolCallParams::len",
+        "echo_core::tools::ToolCallParams::validate_required",
+        "echo_core::tools::ToolResult",
+        "echo_core::tools::ToolResult::error",
+        "echo_core::tools::ToolResult::failure",
+        "echo_core::tools::ToolResult::invalid_arguments",
+        "echo_core::tools::ToolResult::success",
+        "echo_core::tools::ToolResult::success_json",
+        "echo_core::tools::ToolResult::success_with_kind",
+        "echo_core::tools::ToolResult::with_artifact",
+        "echo_core::tools::ToolResult::with_data",
+        "echo_core::tools::ToolResult::with_error",
+        "echo_core::tools::ToolResult::with_failure",
+        "echo_core::tools::ToolResult::with_meta",
+        "echo_core::tools::ToolResult::with_metadata",
+        "echo_core::tools::ToolResult::with_mime_type",
+        "echo_core::tools::ToolResult::with_model_content",
+        "echo_core::tools::ToolResult::with_output",
+        "echo_core::tools::ToolResult::with_truncated",
+    ];
+    let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "local_tool_values")
+    } else {
+        match identity {
+            "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {
+                (LanguageImplementationStatus::Done, "turn_outcome")
+            }
+            "echo_orchestration::runtime::turn_driver::TurnOutcome::status"
+            | "echo_orchestration::runtime::turn_driver::TurnReceipt::status"
+            | "echo_orchestration::runtime::turn_driver::TurnReceipt::usage" => {
+                (LanguageImplementationStatus::Done, "run_receipt")
+            }
+            "echo_core::utils::json_parse::clean_json"
+            | "echo_core::utils::json_parse::extract_json_from_markdown"
+            | "echo_core::utils::utf8::IncrementalUtf8Decoder"
+            | "echo_core::utils::utf8::IncrementalUtf8Decoder::new"
+            | "echo_core::utils::utf8::IncrementalUtf8Decoder::push"
+            | "echo_core::utils::utf8::IncrementalUtf8Decoder::finish"
+            | "echo_core::utils::utf8::split_utf8_chunks" => {
+                (LanguageImplementationStatus::Done, "local_helpers")
+            }
+            _ => {
+                let suffix = match classification {
+                    SemanticClass::WireValue => "wire_value",
+                    SemanticClass::Operation => "facade_operation",
+                    SemanticClass::Handle => "facade_handle",
+                    SemanticClass::Stream => "facade_stream",
+                    SemanticClass::Extension => "facade_extension",
+                    SemanticClass::LanguageIntrinsic => "language_intrinsic",
+                };
+                let status = if route.surface == "intrinsic" {
+                    LanguageImplementationStatus::NotImplemented
+                } else {
+                    LanguageImplementationStatus::Done
+                };
+                (status, suffix)
+            }
         }
     };
     debug_assert!(!route.route.is_empty());

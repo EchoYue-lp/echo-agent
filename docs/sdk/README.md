@@ -124,7 +124,9 @@ Only *Parity complete* justifies claiming "all public Rust capabilities are
 available from the SDK". Executable routes currently use the canonical
 resolver and serializable values use the lossless WireValue algebra; the
 manifest keeps process-local mechanisms `not_implemented` until their
-language-native behavior is implemented and tested.
+language-native behavior is implemented and tested. The first intrinsic value
+slice (`ToolCallParams` and `ToolResult`) is now implemented and tested in all
+three languages; the remaining intrinsic route set is still open.
 
 ## For contributors
 

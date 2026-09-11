@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
+observed_at: source:8820387fee1e6a4064330fe817bd4bc2796a93306467c03affe6d02f7a008d75
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -48,8 +48,14 @@ source_refs:
   - sdks/typescript/test/catalog.test.js
   - sdks/typescript/examples/quickstart.ts
   - sdks/typescript/tsconfig.examples.json
+  - sdks/typescript/src/helpers.ts
+  - sdks/typescript/src/index.ts
+  - sdks/typescript/test/intrinsic-tool-values.test.js
   - sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java
+  - sdks/java/src/test/java/com/echoagent/sdk/IntrinsicToolValueTest.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentHandle.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ToolCallParams.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ToolResult.java
   - echo-sdk-host/tests/support/mod.rs
   - sdks/typescript/src/client.ts
   - sdks/typescript/src/types.ts
@@ -57,7 +63,9 @@ source_refs:
   - sdks/typescript/test/typed-bridge.test.js
   - sdks/python/src/echo_agent_sdk/client.py
   - sdks/python/src/echo_agent_sdk/__init__.py
+  - sdks/python/src/echo_agent_sdk/intrinsics.py
   - sdks/python/tests/test_lifecycle.py
+  - sdks/python/tests/test_intrinsic_tool_values.py
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentCall.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentDescriptor.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentHandler.java

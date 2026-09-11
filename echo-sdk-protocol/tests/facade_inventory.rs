@@ -235,6 +235,35 @@ fn language_mapping_status_matches_the_route_boundary() -> TestResult {
 }
 
 #[test]
+fn local_tool_value_intrinsics_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical && entry.route.route == "intrinsic:language-local-wire-helper"
+        })
+        .collect();
+    assert_eq!(entries.len(), 28, "local tool-value intrinsic set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+            assert!(
+                mapping.contract_test.ends_with("/local_tool_values"),
+                "{language}: {} has the wrong contract test",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn known_facade_semantics_are_classified_correctly() -> TestResult {
     let manifest = manifest()?;
     assert_eq!(

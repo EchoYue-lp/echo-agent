@@ -5,27 +5,27 @@ kind: audit
 boundary_ref: boundary.sdk-facade-parity
 lens: contract_evidence
 freshness: examined
-revision: source:c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
+revision: source:8820387fee1e6a4064330fe817bd4bc2796a93306467c03affe6d02f7a008d75
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
 challenges:
   component-stream-terminal:
-    revision: source:c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
+    revision: source:8820387fee1e6a4064330fe817bd4bc2796a93306467c03affe6d02f7a008d75
     source_refs: [echo-sdk-protocol/src/methods.rs, echo-sdk-host/src/core_profile/extension_bridge.rs, echo-sdk-host/tests/extension_bridge_e2e.rs]
     evidence_refs: [evidence.sdk-contracts]
   sandbox-cancellation:
-    revision: source:c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
+    revision: source:8820387fee1e6a4064330fe817bd4bc2796a93306467c03affe6d02f7a008d75
     source_refs: [echo-sdk-host/src/core_profile/extension_bridge.rs, echo-sdk-host/tests/extension_bridge_e2e.rs]
     evidence_refs: [evidence.sdk-contracts]
   mcp-publication-cleanup:
-    revision: source:c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
+    revision: source:8820387fee1e6a4064330fe817bd4bc2796a93306467c03affe6d02f7a008d75
     source_refs: [echo-sdk-host/src/core_profile/facade/source_operations.rs, echo-sdk-host/tests/extension_bridge_e2e.rs]
     evidence_refs: [evidence.sdk-contracts]
   skill-load-policy:
-    revision: source:c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
+    revision: source:8820387fee1e6a4064330fe817bd4bc2796a93306467c03affe6d02f7a008d75
     source_refs: [echo-execution/src/skills/external/loader.rs, echo-sdk-host/src/core_profile/extension_bridge.rs, echo-sdk-host/tests/extension_bridge_e2e.rs]
     evidence_refs: [evidence.sdk-contracts]
   feature-and-ci-boundaries:
-    revision: source:c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
+    revision: source:8820387fee1e6a4064330fe817bd4bc2796a93306467c03affe6d02f7a008d75
     source_refs: [Cargo.toml, echo-sdk-host/Cargo.toml, .github/workflows/rust-ci.yml, echo-sdk-host/tests/facade_feature_adapters_e2e.rs]
     evidence_refs: [evidence.sdk-contracts]
 ---

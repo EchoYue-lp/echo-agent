@@ -39,6 +39,14 @@ Language-local helpers are exported from the SDK root as well: `splitUtf8Chunks`
 and `IncrementalUtf8Decoder` preserve UTF-8 byte boundaries across streamed
 reads, while `cleanJson` and `extractJsonFromMarkdown` match the Rust JSON
 parsing utilities for trailing commas and fenced markdown output.
+`ToolCallParams` preserves the Rust parameter accessors and required-type
+validation. `ToolResult` is available as a factory value (`success`,
+`successJson`, `failure`, `invalidArguments`) with immutable `with*` modifiers;
+its structured data is encoded through the same lossless WireValue helpers.
+Failure categories are closed and preserve Rust recovery (`restore_then_retry`
+for unavailable, `verify_then_retry` for timeout/partial side effects,
+`retry` for transient and `stop` otherwise); ordinary JSON objects are always
+encoded as maps even when they contain `kind`/`value` keys.
 `SessionHandle.updates()` and `RunHandle.events` are bounded async iterables;
 Run events validate stream identity and sequence, acknowledge consumed cursors,
 surface gaps, and fail with `host_exited` if the Host exits unexpectedly.
