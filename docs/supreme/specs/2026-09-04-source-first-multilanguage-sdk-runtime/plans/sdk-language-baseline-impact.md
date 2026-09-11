@@ -185,6 +185,13 @@ Display implementation) have focused tests and `done` mappings. No wire or
 second state authority is introduced; the remaining intrinsic routes stay
 open.
 
+## A2A value intrinsic slice
+
+`update`: Message, TaskStatus, Provider and Skill now have immutable native
+constructors and projections in all three SDKs. The 14 canonical `a2a_values`
+identities are covered by behavior and mapping tests; no network, Host or
+second lifecycle authority is introduced.
+
 ## SDK-Skill-Impact
 
 `none`: this stage adds language SDK source clients and protocol/catalog

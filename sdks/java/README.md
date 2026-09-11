@@ -70,6 +70,8 @@ JSON objects passed to `successJson`/`withData` are recursively encoded as
 maps, while the `JsonNode` overload remains the explicit pre-encoded path.
 `TaskState` is a Java enum with the same terminal, transition and display
 semantics as the Rust A2A value; it does not add a protocol route.
+`A2AMessage`, `A2ATaskStatus`, `AgentProvider` and `AgentSkill` provide the
+corresponding immutable value constructors and text projections.
 `RunHandle.status()`, `RunHandle.outcomeStatus()` and `RunHandle.usage()` query
 the Host-owned settled receipt through the canonical Run receiver. They return
 `JsonNode` values directly; `WireU64` counters in usage remain textual nodes so

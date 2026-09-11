@@ -109,6 +109,11 @@ The same route-baseline increment also closes the 10 canonical A2A `TaskState`
 value identities (terminal/transition behavior and Display) in all three
 language SDKs; no Host or wire authority is introduced.
 
+The follow-on native-only A2A value slice closes 14 canonical Message,
+TaskStatus, Provider and Skill constructor/projection identities in all three
+language SDKs; these values remain immutable projections with no new Host,
+network or lifecycle authority.
+
 ## SDK-Skill-Impact
 
 `update`: `ReactAgent::discover_skills` is now a canonical source operation

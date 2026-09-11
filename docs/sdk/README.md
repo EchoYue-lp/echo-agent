@@ -129,6 +129,8 @@ slice (`ToolCallParams` and `ToolResult`) is now implemented and tested in all
 three languages; the remaining intrinsic route set is still open.
 The closed A2A `TaskState` transition/display slice is also implemented in all
 three languages, without changing the wire surface.
+The related A2A Message, TaskStatus, Provider and Skill value constructors are
+covered by the same native-only intrinsic boundary.
 
 ## For contributors
 

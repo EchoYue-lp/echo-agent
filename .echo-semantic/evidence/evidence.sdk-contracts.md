@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:a15d97994648871ff5b563ad1c41616c9f5f7ba957fafbfb6b62a65328d6e7c4
+observed_at: source:1629189d62d3776c3919e9400e0c73623a1826dc8c89c62c40212d6dd4629846
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -56,10 +56,15 @@ source_refs:
   - sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java
   - sdks/java/src/test/java/com/echoagent/sdk/IntrinsicToolValueTest.java
   - sdks/java/src/test/java/com/echoagent/sdk/A2ATaskStateTest.java
+  - sdks/java/src/test/java/com/echoagent/sdk/A2AValueTest.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentHandle.java
   - sdks/java/src/main/java/com/echoagent/sdk/ToolCallParams.java
   - sdks/java/src/main/java/com/echoagent/sdk/ToolResult.java
   - sdks/java/src/main/java/com/echoagent/sdk/TaskState.java
+  - sdks/java/src/main/java/com/echoagent/sdk/A2AMessage.java
+  - sdks/java/src/main/java/com/echoagent/sdk/A2ATaskStatus.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentProvider.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentSkill.java
   - echo-sdk-host/tests/support/mod.rs
   - sdks/typescript/src/client.ts
   - sdks/typescript/src/types.ts

@@ -1786,10 +1786,28 @@ fn language_status_for(
         "echo_agent::a2a::types::TaskState::impl<Display>",
         "echo_agent::a2a::types::TaskState::is_terminal",
     ];
+    const A2A_VALUE_IDENTITIES: &[&str] = &[
+        "echo_agent::a2a::types::A2AMessage",
+        "echo_agent::a2a::types::A2AMessage::agent_text",
+        "echo_agent::a2a::types::A2AMessage::text_content",
+        "echo_agent::a2a::types::A2AMessage::user_text",
+        "echo_agent::a2a::types::A2ATaskStatus",
+        "echo_agent::a2a::types::A2ATaskStatus::new",
+        "echo_agent::a2a::types::A2ATaskStatus::with_message",
+        "echo_agent::a2a::types::AgentProvider",
+        "echo_agent::a2a::types::AgentProvider::new",
+        "echo_agent::a2a::types::AgentProvider::with_url",
+        "echo_agent::a2a::types::AgentSkill",
+        "echo_agent::a2a::types::AgentSkill::new",
+        "echo_agent::a2a::types::AgentSkill::with_examples",
+        "echo_agent::a2a::types::AgentSkill::with_tags",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "a2a_task_state")
+    } else if A2A_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "a2a_values")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

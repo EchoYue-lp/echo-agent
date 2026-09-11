@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The generated manifest marks the exact 10-item intrinsic identity group;
   remaining intrinsic behavior is still open.
 
+- **A2A value constructors in all source SDKs.** Message, task status, provider
+  and skill values now have equivalent immutable constructors and text
+  projections in TypeScript, Python and Java; the exact 14-item intrinsic
+  identity group is covered by the parity manifest and focused tests.
+
 - **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
   Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
   capability and lets a host language register Tool, LlmClient, Store,

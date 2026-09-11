@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from echo_agent_sdk import TaskState
+from echo_agent_sdk import (
+    A2AMessage,
+    A2ATaskStatus,
+    AgentProvider,
+    AgentSkill,
+    TaskState,
+)
 
 
 def test_a2a_task_state_matches_rust_terminal_and_transition_table() -> None:
@@ -33,4 +39,41 @@ def test_a2a_task_state_intrinsics_have_completed_python_mappings() -> None:
         and entry["languages"]["python"]["contract_test"].endswith("/a2a_task_state")
     ]
     assert len(entries) == 10
+    assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)
+
+
+def test_a2a_value_constructors_preserve_rust_semantics() -> None:
+    message = A2AMessage.user_text("hello")
+    assert message.role == "user"
+    assert message.text_content() == "hello"
+    assert A2AMessage.agent_text("answer").role == "agent"
+    status = A2ATaskStatus.with_message(TaskState.WORKING, message)
+    assert status.state is TaskState.WORKING
+    assert status.message is message
+    assert "T" in status.timestamp
+    provider = AgentProvider.new("Echo").with_url("https://example.test")
+    assert provider.organization == "Echo"
+    assert provider.url == "https://example.test"
+    skill = (
+        AgentSkill.new("search", "Search docs")
+        .with_examples(["rust"])
+        .with_tags(["docs"])
+    )
+    assert skill.id == "search"
+    assert skill.examples == ("rust",)
+    assert skill.tags == ("docs",)
+    with pytest.raises(TypeError, match="message text"):
+        A2AMessage.user_text(None)  # type: ignore[arg-type]
+
+
+def test_a2a_value_identity_mappings_are_ready() -> None:
+    root = Path(__file__).resolve().parents[3]
+    manifest = json.loads((root / "contracts/sdk/parity-manifest.json").read_text())
+    entries = [
+        entry
+        for entry in manifest["entries"]
+        if entry["canonical"]
+        and entry["languages"]["python"]["contract_test"].endswith("/a2a_values")
+    ]
+    assert len(entries) == 14
     assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)

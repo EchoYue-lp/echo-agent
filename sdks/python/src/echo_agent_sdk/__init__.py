@@ -1,4 +1,4 @@
-from .a2a import TaskState
+from .a2a import A2AMessage, A2ATaskStatus, AgentProvider, AgentSkill, TaskState
 from .catalog import FacadeCatalog, ResolvedOperation
 from .client import (
     AgentComponent,
@@ -120,6 +120,8 @@ from .wire import (
 )
 
 __all__ = [
+    "A2AMessage",
+    "A2ATaskStatus",
     "AgentComponent",
     "AgentComponentCall",
     "AgentComponentDescriptor",
@@ -127,6 +129,8 @@ __all__ = [
     "AgentComponentOutcome",
     "AgentComponentRequest",
     "AgentHandle",
+    "AgentProvider",
+    "AgentSkill",
     "AuditLogRequest",
     "AuditLoggerResult",
     "AuditQueryRequest",
