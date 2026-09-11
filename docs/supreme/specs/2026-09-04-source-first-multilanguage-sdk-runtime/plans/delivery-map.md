@@ -45,17 +45,20 @@ outcomes:
       和语言惯用 handle/extension API 覆盖完整 facade，并通过真实 Host 验收。
     depends_on:
       - facade-feature-adapters
+      - facade-public-api-parity
   python-sdk:
     ships: 可从源码构建的 Python ACP Client SDK，以 coroutine、AsyncIterator、取消作用域和 async
       context manager 覆盖完整 facade，并通过真实 Host 验收。
     depends_on:
       - facade-feature-adapters
+      - facade-public-api-parity
   java-sdk:
     ships: 可从源码构建的 Java ACP Client SDK，以
       CompletionStage、Flow.Publisher、AutoCloseable 和语言惯用 extension API 覆盖完整
       facade，并通过真实 Host 验收。
     depends_on:
       - facade-feature-adapters
+      - facade-public-api-parity
   sdk-docs-examples:
     ships: docs/sdk 唯一外部入口、标准 ACP 与完整 SDK 双 profile说明、三语言源码构建/兼容文档、可执行 quickstart 和全
       facade 等价示例，不宣称发布任何预编译或 registry 产物。
@@ -73,6 +76,7 @@ outcomes:
       - sdk-core-profile
       - sdk-extension-bridge
       - facade-feature-adapters
+      - facade-public-api-parity
       - typescript-sdk
       - python-sdk
       - java-sdk
@@ -88,7 +92,7 @@ outcomes:
       生命周期和跨语言合同验证；不重新实现 Agent 核心。
     depends_on:
       - facade-feature-adapters
-design_revision: sha256:10a237f834b9fb9cc8ea2d740d19222b0b5776fb30904e9b8b2df88f12b63227
+design_revision: sha256:21ebbfd71662b6de98246f8dbbf0e2ed2d863cae0da14bf0af328a80d76dcaf5
 ---
 # 交付图说明
 

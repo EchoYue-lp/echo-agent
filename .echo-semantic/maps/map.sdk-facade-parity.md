@@ -4,7 +4,7 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 多语言 SDK facade 对等边界
 risk: high
-observed_at: source:64a3f6010a8c386321bee7ac23bcf0cac3f6cc8bd588d22c1ac2c87d942b317c
+observed_at: source:c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.sdk-facade-routing]
 rule_refs: [rule.sdk-rust-authority]
@@ -77,4 +77,5 @@ ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source 
 
 ## 未展开项
 
-各语言全部manifest条目的`done`状态、可执行示例与最终Parity complete属于后续独立交付结果。
+intrinsic 语言行为、逐项领域/失败语义与最终 Parity complete 属于后续独立交付结果；
+全仓 inventory/behavior model 和 clean-checkout 发布证据也仍保持开放。

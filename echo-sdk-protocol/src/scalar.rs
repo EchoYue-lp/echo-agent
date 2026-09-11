@@ -406,7 +406,9 @@ pub fn is_absolute_windows_path_base64(value: &str) -> bool {
             return false;
         }
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
+            // `as_chunks` would be clearer but requires a newer MSRV than
+            // this crate; the even-length guard above makes `chunks(2)` exact.
+            .chunks(2)
             .filter_map(|pair| {
                 let low = pair.first().copied()?;
                 let high = pair.get(1).copied()?;

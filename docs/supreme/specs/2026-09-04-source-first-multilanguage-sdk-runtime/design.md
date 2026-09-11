@@ -711,6 +711,20 @@ echo-agent/
 
 ## 21. 关键取舍与后果
 
+### 21.0 Multilingual facade route baseline
+
+The source-only TypeScript, Python and Java clients share the generated
+facade operation catalog as their sole route resolver. Every generated facade
+item is classified in each language through one of three boundaries:
+canonical `call`/`family`/`invoke` for executable routes, the lossless
+`WireValue` algebra for serializable values, or a language-native construct
+boundary for process-local Rust mechanisms. The parity manifest marks only
+routes and helpers with real client behavior as `done`; process-local
+intrinsics remain `not_implemented` until their behavior and evidence exist.
+The route-baseline gate runs the three language suites and a source-built
+`sdk-facade-all` Host, while the Rust inventory and Host E2E suites remain
+authoritative for execution semantics.
+
 ### 21.1 收益
 
 - Rust 继续是唯一语义权威，避免四套 Agent 核心漂移。
@@ -741,7 +755,8 @@ echo-agent/
 
 ## 22. 当前状态
 
-本文件描述完整目标状态。当前仓库尚未包含`acp` feature、ACP Agent adapter、
-`echo-sdk-protocol`、`echo-sdk-host`、三语言SDK、parity manifest、ACP conformance或对应
-E2E，因此当前状态仅为 **Design**，不是 Contract、ACP conformant、Runnable或Parity
-complete。
+本文件描述完整目标状态。当前仓库已包含`acp` feature、ACP Agent adapter、
+`echo-sdk-protocol`、`echo-sdk-host`、三语言源码 SDK、parity manifest、ACP conformance
+和对应 E2E；当前状态为 **Design、Contract、ACP conformant**，并已完成可执行 route baseline。
+由于 process-local intrinsic 行为和逐项语言证据仍未闭合，当前不能宣称 **Runnable** 或
+**Parity complete**。`Published` 仍按源代码优先决策明确不适用。

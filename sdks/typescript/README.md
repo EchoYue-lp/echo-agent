@@ -22,6 +22,10 @@ await sdk.close();
 '
 ```
 
+The same flow is checked in as `examples/quickstart.ts`; `npm test` compiles
+it, and the repository language gate runs the emitted example against the
+source-built Host.
+
 `EchoAgentClient.invoke` and `family` resolve signature digests from the
 canonical checked-in catalog. `AgentHandle`, `SessionHandle` and `RunHandle`
 are opaque generation-fenced handles; streams are exposed as `AsyncIterable`.

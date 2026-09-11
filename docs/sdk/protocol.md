@@ -6,9 +6,10 @@ event/replay semantics and versioning. The stable initialize/new/prompt/update/
 cancel subset now has a transport-neutral Rust Agent adapter and a real
 source-built stdio Host; the core extension profile and the extension bridge are delivered in
 that Host (see [sdk-core-profile.md](sdk-core-profile.md) and
-[sdk-extension-bridge.md](sdk-extension-bridge.md)). Source-built language
-client baselines exist; their complete facade/all-feature parity remains a
-later delivery (see the [status ladder](README.md#status-ladder)).
+[sdk-extension-bridge.md](sdk-extension-bridge.md)). Source-built TypeScript,
+Python and Java clients now pass the executable route baseline against that
+Host; intrinsic facade mappings remain follow-up work (see the [status
+ladder](README.md#status-ladder)).
 
 ## Base protocol: official ACP v1
 
@@ -88,7 +89,7 @@ rejected before Session creation. See
 
 | | Standard ACP profile | echo-agent SDK core profile |
 |---|---|---|
-| Consumer | any ACP v1 client | echo-agent SDK (TS/Python/Java, future) |
+| Consumer | any ACP v1 client | echo-agent SDK (TS/Python/Java, executable routes) |
 | Methods | standard ACP only | standard + negotiated `_echo_agent/*` core families |
 | Event view | ACP `session/update` (bounded projection) | full `EventEnvelope` extension stream + ACK/replay |
 | Negotiation | plain `initialize` | `initialize` + `_meta` hello/advertisement match |

@@ -82,7 +82,7 @@ todos:
     verify: 合同无漂移、CI 执行完整 facade 矩阵、单 feature 与 full facade 全绿；只有所有 canonical public
       API 证据齐全后才更新 Plan/Delivery 状态。
 artifact_id: plan:a50f8ef7-4307-4b25-8c8b-9f0f939c28d4
-design_revision: sha256:10a237f834b9fb9cc8ea2d740d19222b0b5776fb30904e9b8b2df88f12b63227
+design_revision: sha256:21ebbfd71662b6de98246f8dbbf0e2ed2d863cae0da14bf0af328a80d76dcaf5
 ---
 ## Context
 

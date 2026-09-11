@@ -1131,9 +1131,10 @@ It uses the root
 explicit product-neutral JSON configuration. Build it with
 `cargo build -p echo-sdk-host --features sdk-facade-all --locked`; no binary
 or language runtime is bundled. Source-built TypeScript/Python/Java clients
-now cover the baseline Agent/Session/facade invoke path against a real Host;
-full per-language extension/all-feature parity is still pending, so overall
-**Runnable** and **Parity complete** are not claimed. Start at
+now cover the executable canonical facade routes and preserve the shared
+WireValue contract against a real Host. TypeScript/Python quickstarts and the
+Java example are part of the source gate; intrinsic mappings remain open
+before the SDK program can claim **Runnable** and **Parity complete**. Start at
 [docs/sdk/README.md](docs/sdk/README.md), the only SDK
 entry point; the core profile reference is
 [docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md).

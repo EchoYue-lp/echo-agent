@@ -31,6 +31,16 @@ java_major=${java_version%%.*}
 
 scripts/export-language-sdk-catalog.sh --check
 
+executable_summary=$(jq -r '
+  [.entries[] | select(.route.surface != "intrinsic") | .languages | to_entries[] | select(.value.status != "done")] | length
+' "$repo_root/contracts/sdk/parity-manifest.json")
+[[ "$executable_summary" == "0" ]] || {
+  echo "error: executable facade routes contain incomplete language mappings" >&2
+  exit 1
+}
+printf 'facade executable mappings: %s items x 3 languages; intrinsic mappings remain explicit\n' \
+  "$(jq -r '[.entries[] | select(.route.surface != "intrinsic")] | length' "$repo_root/contracts/sdk/parity-manifest.json")"
+
 cargo build -q -p echo-sdk-host --features sdk-facade-all --locked
 host_state=$(mktemp -d "${TMPDIR:-/tmp}/echo-sdk-language-state.XXXXXX")
 host_config=$(mktemp "${TMPDIR:-/tmp}/echo-sdk-language-config.XXXXXX")
@@ -39,11 +49,12 @@ jq --arg root "$host_state" '.sdk_profile.state_root = $root | .default_agent.ag
 export ECHO_AGENT_SDK_HOST="$repo_root/target/debug/echo-agent-sdk-host"
 export ECHO_AGENT_SDK_CONFIG="$host_config"
 
-(cd "$repo_root/sdks/typescript" && npm ci && npm test)
+(cd "$repo_root/sdks/typescript" && npm ci && npm test && node dist-examples/examples/quickstart.js)
 (cd "$repo_root/sdks/python" && \
-  PYTHONPATH=src uv run --no-project --with ruff ruff check src tests && \
-  PYTHONPATH=src uv run --no-project --with ruff ruff format --check src tests && \
-  PYTHONPATH=src uv run --no-project --with pytest --with pytest-asyncio --with agent-client-protocol==0.12.1 pytest -q)
+  PYTHONPATH=src uv run --no-project --with ruff ruff check src tests examples && \
+  PYTHONPATH=src uv run --no-project --with ruff ruff format --check src tests examples && \
+  PYTHONPATH=src uv run --no-project --with pytest --with pytest-asyncio --with agent-client-protocol==0.12.1 pytest -q && \
+  PYTHONPATH=src uv run python examples/quickstart.py)
 (cd "$repo_root/sdks/java" && mvn -q test && mvn -q dependency:build-classpath -Dmdep.outputFile="$host_state/java.cp" && java -cp "target/classes:$(cat "$host_state/java.cp")" com.echoagent.sdk.Example "$ECHO_AGENT_SDK_HOST" "$ECHO_AGENT_SDK_CONFIG" "$repo_root/sdks/shared/facade-operation-catalog.json")
 
 printf 'language SDK source checks passed\n'

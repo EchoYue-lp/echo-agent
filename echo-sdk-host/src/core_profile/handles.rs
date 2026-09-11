@@ -1193,6 +1193,7 @@ impl HandleRegistry {
     /// terminal. This is the only terminal transition; the caller can then
     /// return the terminal event and tombstone the handle without another
     /// consumer racing a duplicate terminal.
+    #[allow(dead_code)]
     pub fn settle_facade_stream(
         &self,
         handle: &WireHandle,

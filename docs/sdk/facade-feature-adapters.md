@@ -5,18 +5,18 @@ canonical route catalog, the feature model, the resource/stream lifecycle
 and the error boundaries of the `_echo_agent/*` facade family surfaces
 (plans 07 and 08 of the [SDK design](../supreme/specs/2026-09-04-source-first-multilanguage-sdk-runtime/design.md)).
 
-> **Status: Rust Host facade public-API parity remediation in progress.** Source-built
-> TS/Python/Java client baselines now consume the ACP core and generic facade
+> **Status: Rust Host facade parity complete; language route baseline delivered.** Source-built
+> TS/Python/Java clients consume the ACP core and generic facade
 > invoke surfaces. The Host serves every canonical source operation through a
 > concrete adapter or an evidence-backed language-local boundary, plus the task/subagent/structured-output families and
 > the stateful (memory/workflow/state/delivery/trace/eval/improve),
 > integration (MCP/A2A/LSP/topology) and tool families over the framework's
 > own authorities. Consumer traits have a typed bridge or explicit
 > process-local evidence, and all public stream routes have
-> a concrete lifecycle. Full per-language all-feature parity remains **not
-> complete**; the program still does not claim **Runnable** or **Parity
-> complete**. The Host facade status remains pending until the Plan 08 strict
-> review and final gates pass.
+> a concrete lifecycle. Every executable catalog route is covered by the
+> language contract suites; process-local intrinsic items remain explicit
+> follow-up mappings. The program does not yet claim **Runnable** or **Parity
+> complete**.
 
 ## 1. Canonical route catalog
 

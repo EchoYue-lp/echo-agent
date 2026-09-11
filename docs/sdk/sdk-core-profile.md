@@ -8,10 +8,9 @@ delivery with ACK, durable replay and restart recovery.
 
 > **Status.** The core profile is delivered as a Rust Host capability with
 > real-process E2E coverage (see `echo-sdk-host/tests/core_profile_e2e.rs`).
-> Source-built language clients can now negotiate and consume the baseline
-> profile. The program is still **not Runnable** in the [status
-> ladder](README.md#status-ladder) sense because full extension/all-feature
-> parity has not been demonstrated.
+> Source-built TypeScript, Python and Java clients negotiate and consume the
+> same profile; the executable route baseline is green, while intrinsic
+> facade mappings remain before **Runnable** and **Parity complete**.
 
 ## Enabling the profile
 

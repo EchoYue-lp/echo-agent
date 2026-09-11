@@ -11,10 +11,10 @@
 
 #![cfg(feature = "sdk-core-profile")]
 
+#[cfg(feature = "sdk-facade-adapters")]
+use agent_client_protocol::UntypedMessage;
 use agent_client_protocol::schema::{ProtocolVersion, v1};
-use agent_client_protocol::{
-    BoxFuture, ByteStreams, Client, ConnectionTo, LineDirection, UntypedMessage,
-};
+use agent_client_protocol::{BoxFuture, ByteStreams, Client, ConnectionTo, LineDirection};
 #[cfg(feature = "sdk-facade-adapters")]
 use base64::Engine as _;
 use echo_sdk_protocol::capability::{
@@ -23,12 +23,17 @@ use echo_sdk_protocol::capability::{
 #[cfg(feature = "sdk-facade-adapters")]
 use echo_sdk_protocol::error::ExtensionErrorCode;
 use echo_sdk_protocol::event::{EventAck, EventAckNotification, EventNotification, ReplayRequest};
-use echo_sdk_protocol::handle::{HandleKind, WireHandle};
+use echo_sdk_protocol::handle::HandleKind;
+#[cfg(feature = "sdk-facade-adapters")]
+use echo_sdk_protocol::handle::WireHandle;
 use echo_sdk_protocol::methods::{
-    AgentCloseRequest, AgentConfigWire, AgentCreateRequest, AgentDescribeRequest, RunCancelRequest,
-    RunGetRequest, RunInput, RunStartRequest, RunStatus, RunWaitRequest, SessionCloseRequest,
-    SessionCreateRequest, SessionLoadRequest, TaskCreateRequest, TaskListRequest,
-    TaskUpdateRequest,
+    AgentCloseRequest, AgentConfigWire, AgentCreateRequest, AgentDescribeRequest, RunGetRequest,
+    RunInput, RunStartRequest, RunStatus, RunWaitRequest, SessionCloseRequest,
+    SessionCreateRequest, SessionLoadRequest,
+};
+#[cfg(feature = "sdk-facade-adapters")]
+use echo_sdk_protocol::methods::{
+    RunCancelRequest, TaskCreateRequest, TaskListRequest, TaskUpdateRequest,
 };
 #[cfg(feature = "sdk-facade-adapters")]
 use echo_sdk_protocol::scalar::{
@@ -470,6 +475,8 @@ async fn valid_hello_completes_full_core_lifecycle() -> Result<(), Box<dyn std::
                 .await?;
             assert!(!session.acp_session_id.is_empty());
 
+            #[cfg(feature = "sdk-facade-adapters")]
+            {
             let permission_mode = connection
                 .send_request(UntypedMessage::new(
                     "_echo_agent/permission/op",
@@ -572,6 +579,7 @@ async fn valid_hello_completes_full_core_lifecycle() -> Result<(), Box<dyn std::
             assert_eq!(decoded_facade_response(is_approved).map_err(|error| {
                 agent_client_protocol::Error::internal_error().data(error.to_string())
             })?, serde_json::json!(true));
+            }
 
             let started = connection
                 .send_request(RunStartRequest {

@@ -18,11 +18,12 @@ rewriting the agent framework in any of those languages.
 > integration and tool families over the framework's own authorities
 > ([facade-feature-adapters.md](facade-feature-adapters.md)). Plan 08 closes
 > the Rust Host's canonical source-operation, consumer-trait and public-stream
-> routing, including real Workflow/A2A pull streams. Source-built
-> TypeScript, Python and Java client baselines now exist, but the full
-> facade/all-features extension matrix is not complete. The program therefore
-> still does not claim **Runnable** or full parity. See [Status ladder](#status-ladder)
-> for the exact claims.
+> routing, including real Workflow/A2A pull streams. Source-built TypeScript,
+> Python and Java clients now resolve every canonical source and family
+> operation through the shared catalog and preserve all WireValue shapes. The
+> executable route baseline passes against one source-built Host; process-local
+> intrinsic mappings remain explicit follow-up work. See [Status
+> ladder](#status-ladder) for the exact claims.
 
 ## What the SDK program is
 
@@ -70,11 +71,12 @@ Node.js 20+, Python 3.10+, and JDK 17. The SDKs never install or bundle these
 runtimes.
 
 The cross-language source gate is `./scripts/check-language-sdks.sh`. It builds
-the Host from the current checkout, validates the shared catalog, runs the
-TypeScript/Python/Java unit suites, and exercises Agent/Session, canonical
-family operations and facade invoke against that real Host. This is a baseline
-client gate; full all-feature extension parity remains a separate status
-milestone.
+the Host from the current checkout, validates every executable language mapping
+in the parity manifest, checks all catalog operation identities and signatures,
+compiles and runs the TypeScript/Python quickstarts plus Java example, runs the
+TypeScript/Python/Java suites, and exercises Agent/Session, canonical family
+operations and facade invoke against that real Host. Intrinsic mappings remain
+explicit until their language-native behavior is delivered.
 
 ## Contract artifacts
 
@@ -114,13 +116,15 @@ previous ones.
 | **ACP conformant** | A standard ACP v1 client passes the supported profile against a real source-built Host | ✅ |
 | **Core extension profile** | The negotiated `_echo_agent/*` core families run against a real Host with typed lifecycle, events, replay and recovery | ✅ (Rust Host only) |
 | **Host facade parity** | Every canonical root operation/consumer trait/stream has a concrete Host route or evidence-backed language-local boundary | ✅ Plan 08 complete |
-| **Runnable** | A real Host plus at least one language's full SDK extension path executes end-to-end | ❌ client baselines exist; full extension path pending |
-| **Parity complete** | TypeScript, Python and Java all pass the full facade/all-features parity suite | ❌ full facade matrix pending |
+| **Runnable** | A real Host plus at least one language's full SDK extension path executes end-to-end | ❌ intrinsic facade mappings remain |
+| **Parity complete** | TypeScript, Python and Java all pass the full facade/all-features parity suite | ❌ intrinsic mappings and behavior matrix pending |
 | **Published** | Registry/binary publication — **explicitly out of scope**; this design ships source only | never (by design) |
 
 Only *Parity complete* justifies claiming "all public Rust capabilities are
-available from the SDK". Until then, language coverage rows in the parity
-manifest honestly read `not_implemented`.
+available from the SDK". Executable routes currently use the canonical
+resolver and serializable values use the lossless WireValue algebra; the
+manifest keeps process-local mechanisms `not_implemented` until their
+language-native behavior is implemented and tested.
 
 ## For contributors
 

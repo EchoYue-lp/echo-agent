@@ -312,6 +312,7 @@ fn to_path_buf(
                 .map_err(|error| format!("invalid base64 path encoding: {error}"))?;
             #[cfg(windows)]
             {
+                use std::os::windows::ffi::OsStringExt as _;
                 let units: Vec<u16> = bytes
                     .chunks_exact(2)
                     .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))

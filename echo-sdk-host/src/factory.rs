@@ -1,7 +1,9 @@
 use crate::mcp::translate_mcp_servers;
 use agent_client_protocol::BoxFuture;
 use echo_agent::acp::{AcpSessionContext, AcpSessionFactory};
-use echo_agent::agent::{Agent, AgentConfig, AgentHandle, ReactAgent};
+#[cfg(feature = "sdk-core-profile")]
+use echo_agent::agent::AgentHandle;
+use echo_agent::agent::{Agent, AgentConfig, ReactAgent};
 use echo_agent::config::FrameworkConfig;
 use echo_agent::error::{ReactError, Result};
 use echo_agent::llm::LlmClient;
@@ -98,6 +100,7 @@ impl PreparedAgentDefinition {
     /// `sdk-facade-adapters` the session's task tools operate on a
     /// Host-owned concrete store so the task RPC and the DAG controller
     /// share one graph authority with them (plan 07 todo 3).
+    #[cfg(feature = "sdk-core-profile")]
     pub async fn create_agent_with_task_store(
         &self,
         context: &AcpSessionContext,
@@ -191,9 +194,11 @@ pub(crate) const DEFINITION_META_KEY: &str = "echo_agent_definition_id";
 /// ReactAgent before it is boxed (plan 07 todo 3). RPC surfaces reach the
 /// exact instances the in-conversation tools use — never a second store or
 /// executor.
+#[cfg(feature = "sdk-core-profile")]
 pub(crate) struct SessionAuthorityServices {
     /// The concrete Session Agent shared by ACP's boxed wrapper and facade
     /// source operations; this is one authority, not a second Agent state.
+    #[allow(dead_code)]
     pub agent_handle: AgentHandle,
     #[allow(dead_code)]
     pub task_revision_service: Arc<echo_agent::tasks::TaskRevisionService>,
@@ -232,6 +237,7 @@ pub(crate) struct SessionAuthorityServices {
     pub llm_config: Option<echo_agent::llm::LlmConfig>,
 }
 
+#[cfg(feature = "sdk-core-profile")]
 impl SessionAuthorityServices {
     /// Capture from the concrete agent; called before boxing so the
     /// downcast-free accessors stay on the framework type.
@@ -502,6 +508,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "sdk-core-profile")]
     async fn definition_snapshot_reports_construction_facts() -> Result<()> {
         let snapshot = factory()?.definition().snapshot();
         // AgentSettings::default() names the agent "assistant"; the model

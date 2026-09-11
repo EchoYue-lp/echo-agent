@@ -380,12 +380,13 @@ capabilities.
   connection teardown cancels all live executions/dispatches and awaits
   `McpManager::close_all` inside the bounded shutdown chain.
 - **Honest status.** The Rust Host facade adapters and source-built
-  TypeScript/Python/Java ACP client baselines are delivered; the language
-  SDKs are not yet claimed as full facade parity. `channels` is bound when
-  both the framework channel feature and the typed extension bridge are
-  compiled; `telemetry` has its process-scoped adapter, while `testing`
-  remains deliberately unbound with method-not-found, never simulated
-  results.
+  TypeScript/Python/Java client route baselines are delivered; executable
+  route mappings are complete, while process-local intrinsic items remain
+  explicitly `not_implemented` until their language-native behavior and
+  evidence are delivered. `channels` is bound when both the framework channel
+  feature and the typed extension bridge are compiled; `telemetry` has its
+  process-scoped adapter, while `testing` remains deliberately unbound with
+  method-not-found, never simulated results.
 
 ## Decision: facade public-API parity (plan 08)
 
@@ -440,10 +441,10 @@ capabilities.
   is minted, owner-checked, sequenced and tombstoned by the existing
   `HandleRegistry`. The runtime map stores only receivers and producer tasks,
   never a second stream identity or lifecycle state.
-- **Status remains layered.** Rust Host facade parity can be complete while
-  TypeScript, Python and Java rows remain incomplete. Overall `Parity complete`
-  is not claimed until all three language suites pass the full all-feature
-  matrix.
+- **Status remains layered.** Rust Host facade parity and executable language
+  route mapping are complete, but overall `Parity complete` remains closed
+  until every intrinsic mapping has a real language-native implementation and
+  behavior evidence in all three SDKs.
 
 Plan 08 final validation passed the complete workspace, all-feature,
 single-feature, contract, source-language and real Host ExtensionBridge gates.

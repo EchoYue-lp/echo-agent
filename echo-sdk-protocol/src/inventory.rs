@@ -1734,8 +1734,17 @@ fn language_target(class: SemanticClass) -> &'static str {
     }
 }
 
-fn language_status_for(identity: &str) -> (LanguageImplementationStatus, &'static str) {
-    match identity {
+/// Resolve language coverage from the actual route boundary. Executable and
+/// serializable routes are covered by the shared catalog/WireValue adapters;
+/// only the explicitly implemented pure helpers cross the intrinsic boundary.
+/// Other process-local Rust mechanisms remain `not_implemented` until a real
+/// language-native implementation and behavior evidence exists.
+fn language_status_for(
+    identity: &str,
+    classification: SemanticClass,
+    route: &RouteObligation,
+) -> (LanguageImplementationStatus, &'static str) {
+    let (status, suffix) = match identity {
         "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {
             (LanguageImplementationStatus::Done, "turn_outcome")
         }
@@ -1753,8 +1762,25 @@ fn language_status_for(identity: &str) -> (LanguageImplementationStatus, &'stati
         | "echo_core::utils::utf8::split_utf8_chunks" => {
             (LanguageImplementationStatus::Done, "local_helpers")
         }
-        _ => (LanguageImplementationStatus::NotImplemented, "operation"),
-    }
+        _ => {
+            let suffix = match classification {
+                SemanticClass::WireValue => "wire_value",
+                SemanticClass::Operation => "facade_operation",
+                SemanticClass::Handle => "facade_handle",
+                SemanticClass::Stream => "facade_stream",
+                SemanticClass::Extension => "facade_extension",
+                SemanticClass::LanguageIntrinsic => "language_intrinsic",
+            };
+            let status = if route.surface == "intrinsic" {
+                LanguageImplementationStatus::NotImplemented
+            } else {
+                LanguageImplementationStatus::Done
+            };
+            (status, suffix)
+        }
+    };
+    debug_assert!(!route.route.is_empty());
+    (status, suffix)
 }
 
 pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
@@ -1881,8 +1907,13 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
             let alias_of = canonical_member_of
                 .get(&entry.path)
                 .and_then(|alias| alias.clone());
-            let (language_status, language_contract_suffix) =
-                language_status_for(&crate::facade::canonical_source_identity(entry));
+            let route =
+                route_obligation_for(entry, classification, acp_relationship, semantic_rule);
+            let (language_status, language_contract_suffix) = language_status_for(
+                &crate::facade::canonical_source_identity(entry),
+                classification,
+                &route,
+            );
             ManifestEntry {
                 path: entry.path.clone(),
                 kind: entry.kind,
@@ -1904,7 +1935,7 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
                     .get(&entry.path)
                     .cloned()
                     .unwrap_or_default(),
-                route: route_obligation_for(entry, classification, acp_relationship, semantic_rule),
+                route,
                 canonical: alias_of.is_none(),
                 alias_of,
                 languages: LANGUAGES

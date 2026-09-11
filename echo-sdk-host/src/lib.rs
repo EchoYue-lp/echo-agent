@@ -42,8 +42,10 @@ pub use core_profile::SdkCoreProfile;
 
 #[cfg(feature = "runtime")]
 use agent_client_protocol::{ConnectTo as _, Stdio};
+#[cfg(all(feature = "runtime", feature = "sdk-core-profile"))]
+use echo_agent::acp::AcpAdapterConfig;
 #[cfg(feature = "runtime")]
-use echo_agent::acp::{AcpAdapterConfig, AcpAgentAdapter};
+use echo_agent::acp::AcpAgentAdapter;
 use std::fmt;
 use std::path::PathBuf;
 

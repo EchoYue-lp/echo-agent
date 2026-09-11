@@ -100,9 +100,10 @@ Plan 08 incremental parity work now routes the concrete ReactAgent steering
 identities through the existing RunSteer authority, cascades resource-owned
 facade streams through the unified HandleRegistry, and reports a runtime
 unavailable media tool with its canonical operation identity. These are local
-source/Host fixes with focused Rust evidence; Plan 08 remains open because
-the design revision binding needs reconciliation and most source-operation,
-consumer-trait, and production stream routes still lack parity evidence.
+source/Host fixes with focused Rust evidence; at that intermediate point Plan
+08 remained open because the design revision binding needed reconciliation and
+most source-operation, consumer-trait, and production stream routes still
+lacked parity evidence.
 
 The RAG tool family now owns its embedder and vector index per ACP Session;
 session close and connection teardown drop that state, while missing embedding
@@ -144,6 +145,21 @@ UTF-8 streaming and JSON parsing intrinsic routes. Their tests preserve Rust's
 byte-capped scalar boundaries, malformed-byte replacement, pending suffix
 flush, BOM behavior and quoted trailing-comma rules; these helpers do not add
 wire operations or a second Host authority.
+
+## Multilingual route-baseline closeout
+
+The language mapping generator marks executable catalog routes `done` for all
+three SDKs and keeps process-local intrinsic items explicitly
+`not_implemented`. Source/family routes use the shared catalog resolver and
+wire values use the lossless WireValue algebra; no second execution or state
+authority is introduced. Rust inventory tests and the
+TypeScript/Python/Java suites assert the executable mapping, and
+`scripts/check-language-sdks.sh` validates all catalog identities/signatures
+against a source-built `sdk-facade-all` Host. TypeScript and Python now also
+ship executable `examples/quickstart` sources; the gate compiles and runs
+both examples, while Java's existing `Example.java` remains in the same
+chain. Full intrinsic behavior and Parity complete remain future work, so
+`echo-website` stays unchanged.
 
 ## SDK-Skill-Impact
 

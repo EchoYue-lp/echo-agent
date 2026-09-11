@@ -6,8 +6,9 @@
 operations, source-operation session accessor semantics, and generated catalog
 were changed. The canonical updates are in `docs/sdk/`, the ADR, the README
 status section, CHANGELOG, and the checked-in `contracts/sdk/` artifacts.
-Language SDK documentation remains explicitly `not_implemented`; no Runnable
-or Parity complete claim was added.
+At the time of the Plan 08 Host closeout, language SDK documentation remained
+explicitly `not_implemented`; the current language work closes only the
+executable route baseline and does not change that historical Host outcome.
 
 The typed extension contract now includes the live `ContextCompressor`
 consumption point. TypeScript, Python and Java expose idiomatic typed callbacks
@@ -51,8 +52,22 @@ source identities that reuse a family handler carry an exact, type-scoped
 `handler_operation`; builder/server/transport methods are not matched by name. The
 formal SDK references, ADR, README/README.zh and CHANGELOG were updated. No
 standalone example was added because the new wire behavior is covered by real
-official-Client Host E2E; `echo-website` remains unchanged because overall
-three-language Parity complete is still false.
+official-Client Host E2E; `echo-website` remained unchanged at the Plan 08
+Host closeout because overall three-language Parity complete was still false
+at that point.
+
+## Subsequent multilingual route-baseline closeout
+
+The source-only TypeScript, Python and Java SDKs now map every executable
+catalog route to the canonical resolver and preserve serializable values with
+the lossless WireValue algebra. Process-local intrinsic items remain
+explicitly `not_implemented` until their language-native behavior and evidence
+are delivered. The cross-language gate checks the executable route mapping,
+all catalog operation identities/signatures, and the three source test suites
+against a source-built `sdk-facade-all` Host; it does not yet support an
+overall Runnable or Parity complete claim. TypeScript and Python quickstart
+examples are compiled and run by the same gate; intrinsic operation helpers
+remain the outstanding language outcome.
 
 Consumer traits with a live SDK Host consumption point now use a typed bridge.
 No public `extension` item is relabeled as a same-topic family/core route.

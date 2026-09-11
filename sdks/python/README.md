@@ -24,6 +24,9 @@ asyncio.run(main())
 PY
 ```
 
+The same flow is checked in as `examples/quickstart.py`; the repository
+language gate compiles and runs it against the source-built Host.
+
 The wrapper preserves ACP errors and `_echo_agent/*` typed values. `RunHandle`
 events are exposed as an async iterator; cancellation and close always target
 the Host-issued generation-fenced handle.

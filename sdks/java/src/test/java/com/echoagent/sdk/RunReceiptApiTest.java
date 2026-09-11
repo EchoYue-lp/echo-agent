@@ -22,6 +22,7 @@ class RunReceiptApiTest {
         assertEquals(CompletionStage.class, RunHandle.class.getMethod("status").getReturnType());
         assertEquals(CompletionStage.class, RunHandle.class.getMethod("outcomeStatus").getReturnType());
         assertEquals(CompletionStage.class, RunHandle.class.getMethod("usage").getReturnType());
+        assertEquals(CompletionStage.class, AgentHandle.class.getMethod("closeAsync").getReturnType());
     }
 
     @Test

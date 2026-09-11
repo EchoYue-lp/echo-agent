@@ -146,6 +146,7 @@ jobs:
           cache: npm
           cache-dependency-path: sdks/typescript/package-lock.json
       - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

@@ -17,7 +17,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.js"
+    "build:examples": "tsc -p tsconfig.examples.json",
+    "test": "npm run build && npm run build:examples && node --test test/*.test.js"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",

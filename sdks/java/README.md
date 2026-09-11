@@ -15,6 +15,9 @@ java -cp target/echo-agent-sdk-source-0.1.0.jar:... \
   /absolute/path/to/host.json
 ```
 
+`src/main/java/com/echoagent/sdk/Example.java` is the executable Java
+quickstart and is compiled and run by the repository language gate.
+
 `EchoAgentClient` exposes `CompletionStage` request methods, `Flow.Publisher`
 session updates and run events, `AutoCloseable` Agent/Session/Run handles and typed
 `EchoAgentException` failures. Jackson is used only for `_echo_agent/*`

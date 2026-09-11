@@ -2,8 +2,9 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:64a3f6010a8c386321bee7ac23bcf0cac3f6cc8bd588d22c1ac2c87d942b317c
+observed_at: source:c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
 source_refs:
+  - sdks/typescript/.gitignore
   - Cargo.toml
   - contracts/sdk/parity-manifest.json
   - contracts/sdk/parity-manifest.schema.json
@@ -34,8 +35,21 @@ source_refs:
   - echo-sdk-host/Cargo.toml
   - echo-sdk-host/src/core_profile/facade/memory.rs
   - echo-sdk-host/tests/core_profile_e2e.rs
+  - echo-sdk-host/src/core_profile/wire.rs
+  - echo-sdk-host/src/core_profile/handles.rs
+  - echo-sdk-protocol/src/scalar.rs
   - echo-sdk-host/tests/extension_bridge_e2e.rs
   - echo-sdk-host/tests/facade_feature_adapters_e2e.rs
+  - echo-sdk-host/src/factory.rs
+  - echo-sdk-host/src/lib.rs
+  - echo-sdk-host/tests/core_profile_e2e.rs
+  - sdks/python/tests/test_catalog.py
+  - sdks/python/examples/quickstart.py
+  - sdks/typescript/test/catalog.test.js
+  - sdks/typescript/examples/quickstart.ts
+  - sdks/typescript/tsconfig.examples.json
+  - sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentHandle.java
   - echo-sdk-host/tests/support/mod.rs
   - sdks/typescript/src/client.ts
   - sdks/typescript/src/types.ts
@@ -70,7 +84,7 @@ source_refs:
   - src/improve/loop.rs
 supports: [behavior.sdk-facade-routing, rule.sdk-rust-authority]
 limitations:
-  - 三语言manifest状态尚未达到全部done
+  - Evidence 证明合同、路由和语言 mapping 门禁，不替代各业务 operation 的领域验收
 ---
 
 # SDK 合同与运行证据
@@ -85,4 +99,4 @@ limitations:
 
 ## 已知缺口
 
-机械闭合、第四轮finding修复对应的focused E2E、no-bridge/bridge零告警组合、完整workspace/all-feature/单feature门禁、三语言源码门禁、90个合同artifact和19个ExtensionBridge E2E均已通过；组件流终态、Sandbox取消、MCP发布失败清理及SkillLoadPolicy live路径均有反例。improve单feature显式包含eval；sdk-extension-bridge显式包含其tokenizer所需的唯一facade adapter authority。CI保留Linux lld flags并追加-D warnings，先编译全部bridge test targets，再以明确的--test参数真实执行19个ExtensionBridge E2E；full profile执行23个。第十轮独立复审结论为pass，因此证据支持Plan 8 completed；三语言manifest状态未全部done，仍不能支持总体Parity complete声明。
+机械闭合、第四轮finding修复对应的focused E2E、no-bridge/bridge零告警组合、完整workspace/all-feature/单feature门禁、三语言 route baseline 门禁、90个合同artifact和19个ExtensionBridge E2E均已通过；组件流终态、Sandbox取消、MCP发布失败清理及SkillLoadPolicy live路径均有反例。improve单feature显式包含eval；sdk-extension-bridge显式包含其tokenizer所需的唯一facade adapter authority。CI保留Linux lld flags并追加-D warnings，先编译全部bridge test targets，再以明确的--test参数真实执行19个ExtensionBridge E2E；full profile执行23个。第十轮独立复审结论为pass，当前证据支持 Plan 8 和可执行 language route baseline，不支持总体 Parity complete 声明。

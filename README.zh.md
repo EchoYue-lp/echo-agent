@@ -829,8 +829,9 @@ Plan 08 已完成 Rust Host facade 的 canonical source operation、consumer tra
 独立框架 Agent，并只接受显式、产品无关的 JSON 配置。开发者用
 `cargo build -p echo-sdk-host --features sdk-facade-all --locked` 自行构建；仓库不
 携带 binary 或任何语言 runtime。仓库现在包含可从源码构建的 TypeScript/Python/Java Client
-基线，并已通过真实 Host 的 Agent/Session/facade invoke 验证；完整扩展与 all-feature 对等
-仍需由三种语言分别完成，因此还不能宣称总体 **Runnable** 或 **Parity complete**。唯一 SDK 入口是
+基线，并已通过真实 Host 的 Agent/Session/facade invoke 验证；TypeScript/Python quickstart
+和 Java 示例已纳入源码门禁，但 process-local intrinsic 行为仍需由三种语言分别完成，
+因此还不能宣称总体 **Runnable** 或 **Parity complete**。唯一 SDK 入口是
 [docs/sdk/README.md](docs/sdk/README.md)，核心 Profile 参考见
 [docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md)。
 

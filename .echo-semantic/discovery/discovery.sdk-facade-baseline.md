@@ -3,8 +3,8 @@ schema_version: 1
 id: discovery.sdk-facade-baseline
 kind: discovery
 source_snapshot:
-  base_revision: 617f1b353ea90df3fdb5ad22e5a5e7da946be484
-  content_digest: 64a3f6010a8c386321bee7ac23bcf0cac3f6cc8bd588d22c1ac2c87d942b317c
+  base_revision: 07f860ac168df500423fd93e16581b57603888de
+  content_digest: c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
 scope: root echo_agent facade到ACP与多语言SDK Host适配边界
 inspected_paths:
   - contracts/sdk
@@ -15,8 +15,9 @@ inspected_paths:
   - src/acp
 candidate_refs: [map.sdk-facade-parity]
 unresolved:
-  - Plan 8严格复审与完整workspace/feature验证
-  - 三语言完整manifest状态和最终clean-checkout证据
+  - intrinsic 语言行为与逐项领域/失败语义证据
+  - 三语言整体 Parity complete 状态与最终发布检出证据
+  - 全仓 inventory 与 behavior model closure
 ---
 
 # SDK facade 首次基线发现
@@ -35,4 +36,4 @@ unresolved:
 
 ## 未决项
 
-Plan 8机械闭合、focused运行证据和三语言源码门禁已完成；严格复审、完整门禁与语言SDK后续outcome尚未完成，inventory和behavior model保持开放。
+Plan 8机械闭合、focused运行证据、完整门禁和三语言可执行 route baseline 已完成；intrinsic 语言行为、可执行示例和全仓 inventory/behavior model 仍保持开放。

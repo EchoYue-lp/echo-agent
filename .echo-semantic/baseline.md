@@ -3,8 +3,8 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: 617f1b353ea90df3fdb5ad22e5a5e7da946be484
-  content_digest: 64a3f6010a8c386321bee7ac23bcf0cac3f6cc8bd588d22c1ac2c87d942b317c
+  base_revision: 07f860ac168df500423fd93e16581b57603888de
+  content_digest: c17f03d0cb93a58ebf64ea3cd315bfe20700dfa23d15aa4555bc4e21461d53f1
 inventory_closure: open
 behavior_model_closure: open
 map_refs:
@@ -71,7 +71,7 @@ coverage: []
 
 ## 未知与缺口
 
-除SDK facade外的框架行为尚未建模；SDK facade的source operation、typed consumer trait和stream teardown已有focused证据，严格复审、完整workspace门禁与三语言全部manifest状态仍待闭合。
+除SDK facade外的框架行为尚未建模；SDK facade的source operation、typed consumer trait和stream teardown已有focused证据，三语言可执行 route baseline 已闭合，intrinsic 行为仍待补齐。
 
 ## 闭合结论
 

@@ -10,10 +10,10 @@ That feature also enables `sdk-facade-adapters`, because compressor callbacks
 invoke their temporary Host tokenizer through the canonical facade route;
 feature-surface advertisement therefore reflects both compiled handlers.
 
-Status: delivered in the Rust Host (source-built, real-process E2E). The
-source-built TypeScript/Python/Java clients now expose registration and
-callback boundaries; their full all-feature parity matrix is still pending,
-so the program does not claim **Runnable** or **Parity complete**.
+Status: delivered in the Rust Host and all three source-built language SDKs.
+TypeScript, Python and Java expose the same registration, callback,
+cancellation and stream boundaries; the full intrinsic/all-feature parity
+matrix remains open.
 
 Build the Host from source with `cargo build -p echo-sdk-host
 --features sdk-extension-bridge --locked`; this feature includes the core

@@ -7,6 +7,9 @@ import { FacadeCatalog } from "../dist/catalog.js";
 const catalogDocument = JSON.parse(
   readFileSync(fileURLToPath(new URL("../../shared/facade-operation-catalog.json", import.meta.url)), "utf8"),
 );
+const parityManifest = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../../../contracts/sdk/parity-manifest.json", import.meta.url)), "utf8"),
+);
 
 function expectedOperations() {
   return catalogDocument.routes
@@ -67,4 +70,14 @@ test("families group the same canonical operation identities", () => {
     expected.map((operation) => operation.identity).sort(),
   );
   assert.equal(new Set(catalog.families().map((family) => family.family)).size, catalog.families().length);
+});
+
+test("every executable facade item has a completed TypeScript mapping", () => {
+  assert.ok(parityManifest.entries.length > 0);
+  for (const entry of parityManifest.entries) {
+    if (entry.route.surface !== "intrinsic") {
+      assert.equal(entry.languages.typescript.status, "done", entry.path);
+    }
+    assert.match(entry.languages.typescript.contract_test, /^sdk-parity\//u, entry.path);
+  }
 });

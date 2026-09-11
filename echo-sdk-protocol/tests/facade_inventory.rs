@@ -208,6 +208,33 @@ fn entries_have_complete_mapping_and_language_obligations() -> TestResult {
 }
 
 #[test]
+fn language_mapping_status_matches_the_route_boundary() -> TestResult {
+    let manifest = manifest()?;
+    assert!(
+        !manifest.entries.is_empty(),
+        "facade manifest must not be empty"
+    );
+    for entry in manifest.entries.iter().filter(|entry| entry.canonical) {
+        for (language, mapping) in &entry.languages {
+            if entry.route.surface != "intrinsic" {
+                assert_eq!(
+                    mapping.status,
+                    echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                    "{language}: {}",
+                    entry.path
+                );
+            }
+            assert!(
+                mapping.contract_test.starts_with("sdk-parity/"),
+                "{} has no language parity contract test",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn known_facade_semantics_are_classified_correctly() -> TestResult {
     let manifest = manifest()?;
     assert_eq!(
