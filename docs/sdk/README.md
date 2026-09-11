@@ -136,6 +136,8 @@ languages; `from_agent` remains open because it requires the Rust Agent
 authority.
 The immutable A2A Artifact and Error DTOs preserve their wire fields in all
 three languages as well.
+The A2A status/artifact stream event and JSON-RPC response DTOs are also
+available as local immutable values; stream transport remains Host-owned.
 
 ## For contributors
 

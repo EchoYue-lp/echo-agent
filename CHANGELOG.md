@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chunks and typed task errors now preserve their Rust wire fields in all three
   languages.
 
+- **A2A stream value DTOs in all source SDKs.** Status/artifact update events
+  and JSON-RPC stream responses now preserve the closed local wire union.
+
 - **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
   Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
   capability and lets a host language register Tool, LlmClient, Store,

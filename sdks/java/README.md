@@ -76,6 +76,8 @@ corresponding immutable value constructors and text projections.
 it does not mirror the Host-owned `from_agent` operation.
 `A2AArtifact.newArtifact(...)` and `A2AError.newError(...)` preserve the A2A
 artifact/error wire fields as immutable values.
+`TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent` and `A2AStreamResponse`
+provide the corresponding closed local stream values.
 `RunHandle.status()`, `RunHandle.outcomeStatus()` and `RunHandle.usage()` query
 the Host-owned settled receipt through the canonical Run receiver. They return
 `JsonNode` values directly; `WireU64` counters in usage remain textual nodes so

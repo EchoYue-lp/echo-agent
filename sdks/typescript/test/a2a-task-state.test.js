@@ -5,11 +5,14 @@ import {
   A2AMessage,
   A2AArtifact,
   A2AError,
+  A2AStreamResponse,
   A2ATaskStatus,
   AgentCard,
   AgentProvider,
   AgentSkill,
   TaskState,
+  TaskArtifactUpdateEvent,
+  TaskStatusUpdateEvent,
   taskStateCanTransitionTo,
   taskStateIsTerminal,
 } from "../dist/index.js";
@@ -106,5 +109,28 @@ test("A2A wire values have completed TypeScript mappings", () => {
   const manifest = JSON.parse(readFileSync(new URL("../../../contracts/sdk/parity-manifest.json", import.meta.url), "utf8"));
   const entries = manifest.entries.filter((entry) => entry.canonical && entry.languages.typescript.contract_test.endsWith("/a2a_wire_values"));
   assert.equal(entries.length, 8);
+  for (const entry of entries) assert.equal(entry.languages.typescript.status, "done", entry.path);
+});
+
+test("A2A stream values preserve event and response semantics", () => {
+  const status = TaskStatusUpdateEvent.new("task-1", A2ATaskStatus.new(TaskState.Working));
+  const artifact = TaskArtifactUpdateEvent.new("task-1", A2AArtifact.new([{ type: "text", text: "chunk" }]), true);
+  const wrapper = { type: "status", event: status };
+  const response = A2AStreamResponse.new("1", wrapper);
+  assert.equal(status.taskId, "task-1");
+  assert.equal(status.isFinal, false);
+  assert.equal(artifact.isFinal, true);
+  assert.equal(response.jsonrpc, "2.0");
+  assert.equal(response.result?.type, "status");
+  wrapper.type = "artifact";
+  assert.equal(response.result?.type, "status");
+  assert.throws(() => { response.result.type = "artifact"; }, TypeError);
+  assert.throws(() => A2AStreamResponse.new("bad", { type: "status", event: {} }), /status event/);
+});
+
+test("A2A stream values have completed TypeScript mappings", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../../../contracts/sdk/parity-manifest.json", import.meta.url), "utf8"));
+  const entries = manifest.entries.filter((entry) => entry.canonical && entry.languages.typescript.contract_test.endsWith("/a2a_stream_values"));
+  assert.equal(entries.length, 18);
   for (const entry of entries) assert.equal(entry.languages.typescript.status, "done", entry.path);
 });

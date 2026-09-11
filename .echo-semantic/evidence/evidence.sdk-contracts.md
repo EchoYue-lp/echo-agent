@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:a298b808735ab2ddd9f004d60954a526e2f7673da044b942cb08c1f3228d31ca
+observed_at: source:7a11cd93c326e21cd4def01ba5170873617d5172a23c7f4c86cb7fbbd58d8453
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -60,6 +60,10 @@ source_refs:
   - sdks/java/src/test/java/com/echoagent/sdk/A2AValueTest.java
   - sdks/java/src/main/java/com/echoagent/sdk/A2AArtifact.java
   - sdks/java/src/main/java/com/echoagent/sdk/A2AError.java
+  - sdks/java/src/main/java/com/echoagent/sdk/A2AStreamEvent.java
+  - sdks/java/src/main/java/com/echoagent/sdk/A2AStreamResponse.java
+  - sdks/java/src/main/java/com/echoagent/sdk/TaskArtifactUpdateEvent.java
+  - sdks/java/src/main/java/com/echoagent/sdk/TaskStatusUpdateEvent.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentHandle.java
   - sdks/java/src/main/java/com/echoagent/sdk/ToolCallParams.java
   - sdks/java/src/main/java/com/echoagent/sdk/ToolResult.java

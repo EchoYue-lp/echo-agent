@@ -121,6 +121,9 @@ boundary.
 The A2A Artifact/Error increment closes eight immutable wire-value identities
 without introducing a Host or network route.
 
+The A2A stream value increment closes 18 typed event/response identities while
+leaving stream transport and lifecycle authority in the Host.
+
 ## SDK-Skill-Impact
 
 `update`: `ReactAgent::discover_skills` is now a canonical source operation

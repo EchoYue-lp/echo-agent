@@ -9,11 +9,14 @@ from echo_agent_sdk import (
     A2AArtifact,
     A2AError,
     A2AMessage,
+    A2AStreamResponse,
     A2ATaskStatus,
     AgentCard,
     AgentProvider,
     AgentSkill,
+    TaskArtifactUpdateEvent,
     TaskState,
+    TaskStatusUpdateEvent,
 )
 
 
@@ -147,4 +150,30 @@ def test_a2a_wire_value_mappings_are_ready() -> None:
         and entry["languages"]["python"]["contract_test"].endswith("/a2a_wire_values")
     ]
     assert len(entries) == 8
+    assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)
+
+
+def test_a2a_stream_values_preserve_event_and_response_semantics() -> None:
+    status = TaskStatusUpdateEvent("task-1", A2ATaskStatus.new(TaskState.WORKING))
+    artifact = TaskArtifactUpdateEvent(
+        "task-1", A2AArtifact.new([{"type": "text", "text": "chunk"}]), True
+    )
+    response = A2AStreamResponse("1", status)
+    assert status.task_id == "task-1"
+    assert not status.is_final
+    assert artifact.is_final
+    assert response.jsonrpc == "2.0"
+    assert response.result is status
+
+
+def test_a2a_stream_value_mappings_are_ready() -> None:
+    root = Path(__file__).resolve().parents[3]
+    manifest = json.loads((root / "contracts/sdk/parity-manifest.json").read_text())
+    entries = [
+        entry
+        for entry in manifest["entries"]
+        if entry["canonical"]
+        and entry["languages"]["python"]["contract_test"].endswith("/a2a_stream_values")
+    ]
+    assert len(entries) == 18
     assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)

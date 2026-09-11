@@ -112,6 +112,86 @@ export class A2AError {
   }
 }
 
+export class TaskStatusUpdateEvent {
+  public readonly taskId: string;
+  public readonly status: A2ATaskStatus;
+  public readonly isFinal: boolean;
+
+  private constructor(taskId: string, status: A2ATaskStatus, isFinal: boolean) {
+    validateText(taskId, "task id");
+    if (!(status instanceof A2ATaskStatus)) throw new TypeError("status must be an A2ATaskStatus");
+    if (typeof isFinal !== "boolean") throw new TypeError("final must be boolean");
+    this.taskId = taskId;
+    this.status = status;
+    this.isFinal = isFinal;
+    Object.freeze(this);
+  }
+
+  public static new(taskId: string, status: A2ATaskStatus, isFinal = false): TaskStatusUpdateEvent {
+    return new TaskStatusUpdateEvent(taskId, status, isFinal);
+  }
+}
+
+export class TaskArtifactUpdateEvent {
+  public readonly taskId: string;
+  public readonly artifact: A2AArtifact;
+  public readonly isFinal: boolean;
+
+  private constructor(taskId: string, artifact: A2AArtifact, isFinal: boolean) {
+    validateText(taskId, "task id");
+    if (!(artifact instanceof A2AArtifact)) throw new TypeError("artifact must be an A2AArtifact");
+    if (typeof isFinal !== "boolean") throw new TypeError("final must be boolean");
+    this.taskId = taskId;
+    this.artifact = artifact;
+    this.isFinal = isFinal;
+    Object.freeze(this);
+  }
+
+  public static new(taskId: string, artifact: A2AArtifact, isFinal = false): TaskArtifactUpdateEvent {
+    return new TaskArtifactUpdateEvent(taskId, artifact, isFinal);
+  }
+}
+
+export type A2AStreamEvent =
+  | { readonly type: "status"; readonly event: TaskStatusUpdateEvent }
+  | { readonly type: "artifact"; readonly event: TaskArtifactUpdateEvent };
+
+export class A2AStreamResponse {
+  public readonly jsonrpc: string;
+  public readonly id: string;
+  public readonly result?: A2AStreamEvent;
+  public readonly error?: A2AError;
+
+  private constructor(id: string, result?: A2AStreamEvent, error?: A2AError) {
+    validateText(id, "stream response id");
+    let frozenResult: A2AStreamEvent | undefined;
+    if (result) {
+      if (result.type === "status" && !(result.event instanceof TaskStatusUpdateEvent)) {
+        throw new TypeError("invalid A2A status event");
+      }
+      if (result.type === "artifact" && !(result.event instanceof TaskArtifactUpdateEvent)) {
+        throw new TypeError("invalid A2A artifact event");
+      }
+      if (result.type !== "status" && result.type !== "artifact") {
+        throw new TypeError("invalid A2A stream event");
+      }
+      frozenResult = result.type === "status"
+        ? Object.freeze({ type: "status", event: result.event })
+        : Object.freeze({ type: "artifact", event: result.event });
+    }
+    if (error !== undefined && !(error instanceof A2AError)) throw new TypeError("error must be an A2AError");
+    this.jsonrpc = "2.0";
+    this.id = id;
+    this.result = frozenResult;
+    this.error = error;
+    Object.freeze(this);
+  }
+
+  public static new(id: string, result?: A2AStreamEvent, error?: A2AError): A2AStreamResponse {
+    return new A2AStreamResponse(id, result, error);
+  }
+}
+
 export class A2ATaskStatus {
   public readonly state: TaskState;
   public readonly message?: A2AMessage;

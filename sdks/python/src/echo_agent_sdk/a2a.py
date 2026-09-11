@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeAlias
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +89,54 @@ class A2AError:
     @classmethod
     def new(cls, code: int, message: str) -> A2AError:
         return cls(code, message)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskStatusUpdateEvent:
+    task_id: str
+    status: A2ATaskStatus
+    is_final: bool = False
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "task id")
+        if not isinstance(self.status, A2ATaskStatus):
+            raise TypeError("status must be an A2ATaskStatus")
+        if not isinstance(self.is_final, bool):
+            raise TypeError("final must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskArtifactUpdateEvent:
+    task_id: str
+    artifact: A2AArtifact
+    is_final: bool = False
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "task id")
+        if not isinstance(self.artifact, A2AArtifact):
+            raise TypeError("artifact must be an A2AArtifact")
+        if not isinstance(self.is_final, bool):
+            raise TypeError("final must be boolean")
+
+
+A2AStreamEvent: TypeAlias = TaskStatusUpdateEvent | TaskArtifactUpdateEvent
+
+
+@dataclass(frozen=True, slots=True)
+class A2AStreamResponse:
+    id: str
+    result: A2AStreamEvent | None = None
+    error: A2AError | None = None
+    jsonrpc: str = "2.0"
+
+    def __post_init__(self) -> None:
+        _require_text(self.id, "stream response id")
+        if self.result is not None and not isinstance(
+            self.result, (TaskStatusUpdateEvent, TaskArtifactUpdateEvent)
+        ):
+            raise TypeError("invalid A2A stream event")
+        if self.error is not None and not isinstance(self.error, A2AError):
+            raise TypeError("error must be an A2AError")
 
 
 @dataclass(frozen=True, slots=True)

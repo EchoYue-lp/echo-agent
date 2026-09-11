@@ -2,6 +2,7 @@ from .a2a import (
     A2AArtifact,
     A2AError,
     A2AMessage,
+    A2AStreamResponse,
     A2ATaskStatus,
     AgentAuthentication,
     AgentCapabilities,
@@ -10,7 +11,9 @@ from .a2a import (
     AgentProvider,
     AgentSkill,
     AuthenticationScheme,
+    TaskArtifactUpdateEvent,
     TaskState,
+    TaskStatusUpdateEvent,
 )
 from .catalog import FacadeCatalog, ResolvedOperation
 from .client import (
@@ -136,6 +139,7 @@ __all__ = [
     "A2AArtifact",
     "A2AError",
     "A2AMessage",
+    "A2AStreamResponse",
     "A2ATaskStatus",
     "AgentAuthentication",
     "AgentCapabilities",
@@ -235,7 +239,9 @@ __all__ = [
     "Store",
     "StoreCall",
     "StoreDescriptor",
+    "TaskArtifactUpdateEvent",
     "TaskState",
+    "TaskStatusUpdateEvent",
     "TokenizerReference",
     "Tool",
     "ToolCall",

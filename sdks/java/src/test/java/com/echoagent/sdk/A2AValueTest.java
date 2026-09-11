@@ -118,4 +118,33 @@ class A2AValueTest {
         }
         assertEquals(8, count);
     }
+
+    @Test
+    void streamValuesPreserveEventAndResponseSemantics() {
+        var status = new TaskStatusUpdateEvent("task-1", A2ATaskStatus.newStatus(TaskState.WORKING), false);
+        var artifact = new TaskArtifactUpdateEvent("task-1", A2AArtifact.newArtifact(
+                List.of(JsonSupport.MAPPER.createObjectNode().put("type", "text").put("text", "chunk")),
+                null, null, false), true);
+        var response = A2AStreamResponse.newResponse("1", new A2AStreamEvent.StatusUpdate(status), null);
+        assertEquals("task-1", status.taskId());
+        assertTrue(artifact.isFinal());
+        assertEquals("2.0", response.jsonrpc());
+        assertTrue(response.result() instanceof A2AStreamEvent.StatusUpdate);
+    }
+
+    @Test
+    void streamValueMappingsAreReady() throws Exception {
+        var manifest = JsonSupport.MAPPER.readTree(java.nio.file.Files.readString(
+                java.nio.file.Path.of("../..", "contracts/sdk/parity-manifest.json")));
+        int count = 0;
+        for (var entry : manifest.path("entries")) {
+            if (entry.path("canonical").asBoolean()
+                    && entry.path("languages").path("java").path("contract_test")
+                    .asText().endsWith("/a2a_stream_values")) {
+                count += 1;
+                assertEquals("done", entry.path("languages").path("java").path("status").asText());
+            }
+        }
+        assertEquals(18, count);
+    }
 }

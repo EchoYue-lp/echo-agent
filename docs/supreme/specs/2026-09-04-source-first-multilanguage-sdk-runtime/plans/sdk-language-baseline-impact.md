@@ -200,6 +200,9 @@ because the card must be derived by the Rust Agent authority.
 The A2A Artifact/Error DTO slice adds immutable wire-field projections in all
 three SDKs; its eight canonical identities use a dedicated behavior mapping.
 
+The A2A stream value slice adds typed status/artifact events and response
+wrappers in all three SDKs; its 18 canonical identities remain transport-free.
+
 ## SDK-Skill-Impact
 
 `none`: this stage adds language SDK source clients and protocol/catalog

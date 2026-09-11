@@ -1828,6 +1828,26 @@ fn language_status_for(
         "echo_agent::a2a::types::A2AError::code",
         "echo_agent::a2a::types::A2AError::message",
     ];
+    const A2A_STREAM_VALUE_IDENTITIES: &[&str] = &[
+        "echo_agent::a2a::types::A2AStreamEvent",
+        "echo_agent::a2a::types::A2AStreamEvent::ArtifactUpdate",
+        "echo_agent::a2a::types::A2AStreamEvent::ArtifactUpdate::0",
+        "echo_agent::a2a::types::A2AStreamEvent::StatusUpdate",
+        "echo_agent::a2a::types::A2AStreamEvent::StatusUpdate::0",
+        "echo_agent::a2a::types::A2AStreamResponse",
+        "echo_agent::a2a::types::A2AStreamResponse::error",
+        "echo_agent::a2a::types::A2AStreamResponse::id",
+        "echo_agent::a2a::types::A2AStreamResponse::jsonrpc",
+        "echo_agent::a2a::types::A2AStreamResponse::result",
+        "echo_agent::a2a::types::TaskArtifactUpdateEvent",
+        "echo_agent::a2a::types::TaskArtifactUpdateEvent::artifact",
+        "echo_agent::a2a::types::TaskArtifactUpdateEvent::is_final",
+        "echo_agent::a2a::types::TaskArtifactUpdateEvent::task_id",
+        "echo_agent::a2a::types::TaskStatusUpdateEvent",
+        "echo_agent::a2a::types::TaskStatusUpdateEvent::is_final",
+        "echo_agent::a2a::types::TaskStatusUpdateEvent::status",
+        "echo_agent::a2a::types::TaskStatusUpdateEvent::task_id",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -1838,6 +1858,8 @@ fn language_status_for(
         (LanguageImplementationStatus::Done, "a2a_agent_card")
     } else if A2A_WIRE_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "a2a_wire_values")
+    } else if A2A_STREAM_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "a2a_stream_values")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {
