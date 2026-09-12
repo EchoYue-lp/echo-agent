@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:48ba788cb70ff0bb8476d785900476c14a3db9a96d4583c2d5792583ba6d3556
+observed_at: source:e8e566b9ad73d752fa37977c83f4c9276f93a44fa3149bb9b61d65e56080bbfd
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -186,6 +186,12 @@ source_refs:
   - sdks/python/tests/test_thinking_protocol_values.py
   - sdks/java/src/main/java/com/echoagent/sdk/ThinkingProtocol.java
   - sdks/java/src/test/java/com/echoagent/sdk/ThinkingProtocolTest.java
+  - sdks/typescript/src/sandbox_resource_values.ts
+  - sdks/typescript/test/sandbox-resource-values.test.js
+  - sdks/python/src/echo_agent_sdk/sandbox_resource_values.py
+  - sdks/python/tests/test_sandbox_resource_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/ResourceLimits.java
+  - sdks/java/src/test/java/com/echoagent/sdk/ResourceLimitsTest.java
   - sdks/typescript/src/hook_action_values.ts
   - sdks/typescript/test/hook-action-values.test.js
   - sdks/typescript/src/subagent_usage_values.ts

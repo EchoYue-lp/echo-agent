@@ -2526,6 +2526,12 @@ fn language_status_for(
         "echo_core::llm::thinking::ThinkingProtocol::ThinkingType",
         "echo_core::llm::thinking::ThinkingProtocol::emits_field",
     ];
+    const SANDBOX_RESOURCE_IDENTITIES: &[&str] = &[
+        "echo_core::sandbox::ResourceLimits",
+        "echo_core::sandbox::ResourceLimits::impl<Default>",
+        "echo_core::sandbox::ResourceLimits::strict",
+        "echo_core::sandbox::ResourceLimits::unrestricted",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2660,6 +2666,11 @@ fn language_status_for(
         (
             LanguageImplementationStatus::Done,
             "thinking_protocol_values",
+        )
+    } else if SANDBOX_RESOURCE_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "sandbox_resource_values",
         )
     } else {
         match identity {

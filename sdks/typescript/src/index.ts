@@ -40,6 +40,7 @@ export * from "./retry_policy_values.js";
 export * from "./thinking_config_values.js";
 export * from "./time_values.js";
 export * from "./thinking_protocol_values.js";
+export * from "./sandbox_resource_values.js";
 export * from "./page_info_values.js";
 export * from "./catalog.js";
 export * from "./client.js";

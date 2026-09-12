@@ -363,6 +363,9 @@ and optional null handling without persisted runtime state.
 The ThinkingProtocol slice adds 13 provider-dialect and field-emission
 identities, preserving local configuration semantics without moving provider
 transport out of Rust.
+The sandbox ResourceLimits slice adds four default/strict/unrestricted policy
+identities, preserving resource caps and path lists without creating sandbox
+processes or taking execution ownership.
 The SDKs preserve calculation priority while LLM execution remains in Rust/Host.
 
 The HookAction slice adds 31 tagged variant/field/validation identities. The

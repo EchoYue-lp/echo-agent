@@ -163,6 +163,8 @@ provider effort/budget projections without owning LLM transport.
 round-trips and optional null values without persisted clock state.
 `ThinkingProtocol` preserves provider dialect names and field-emission
 semantics without owning provider transport.
+`ResourceLimits` preserves default, strict and unrestricted sandbox policy
+snapshots without creating sandbox processes.
 `PageInfo` preserves truncation, continuation metadata, and output projection
 while collection state remains framework-owned.
 `SubagentContext` exposes empty/content semantics while context and dispatch

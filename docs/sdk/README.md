@@ -228,6 +228,8 @@ Time helpers preserve Unix timestamps, local-offset RFC3339 serialization,
 UTC round-trips and null option values without owning persisted clock state.
 Thinking protocol values preserve provider dialect names and field-emission
 semantics without owning provider transport.
+Sandbox resource limit values preserve default, strict and unrestricted policy
+snapshots without creating sandbox processes or owning execution lifecycle.
 Page metadata values preserve truncation, continuation metadata, and output
 projection without owning collection state.
 Subagent context snapshots preserve empty/content semantics without owning

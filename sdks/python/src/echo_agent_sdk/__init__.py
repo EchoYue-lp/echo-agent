@@ -155,6 +155,7 @@ from .permission_rule_matcher import RuleMatcher, RuleMatcherKind, ToolPermissio
 from .permission_rule_values import RuleSource
 from .prompt_diagnostics_values import PromptDiagnostics, PromptSectionDiagnostic
 from .retry_policy_values import RetryPolicy
+from .sandbox_resource_values import ResourceLimits
 from .segment_range_values import SegmentRange
 from .skill_content_values import SkillContent, SkillResourceEntry
 from .skill_validation_values import SkillValidationReport
@@ -326,6 +327,7 @@ __all__ = [
     "PromptDiagnostics",
     "PromptSectionDiagnostic",
     "ResolvedOperation",
+    "ResourceLimits",
     "RetryPolicy",
     "RevisionedTaskCompareAndCommitRequest",
     "RevisionedTaskLoadRequest",
