@@ -21,6 +21,7 @@ from echo_agent_sdk import (
     TaskArtifactUpdateEvent,
     TaskState,
     TaskStatusUpdateEvent,
+    ThinkingLevel,
 )
 
 
@@ -209,4 +210,24 @@ def test_a2a_task_envelope_mappings_are_ready() -> None:
         )
     ]
     assert len(entries) == 15
+    assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)
+
+
+def test_thinking_level_parses_rust_aliases() -> None:
+    assert ThinkingLevel.parse(" OFF ") is ThinkingLevel.NONE
+    assert ThinkingLevel.parse("normal") is ThinkingLevel.MEDIUM
+    assert ThinkingLevel.parse("xhigh") is ThinkingLevel.XHIGH
+    assert ThinkingLevel.parse("unknown") is None
+
+
+def test_thinking_level_mappings_are_ready() -> None:
+    root = Path(__file__).resolve().parents[3]
+    manifest = json.loads((root / "contracts/sdk/parity-manifest.json").read_text())
+    entries = [
+        entry
+        for entry in manifest["entries"]
+        if entry["canonical"]
+        and entry["languages"]["python"]["contract_test"].endswith("/thinking_level")
+    ]
+    assert len(entries) == 9
     assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)

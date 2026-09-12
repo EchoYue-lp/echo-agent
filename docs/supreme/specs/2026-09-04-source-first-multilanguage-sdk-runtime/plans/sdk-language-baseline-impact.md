@@ -207,6 +207,170 @@ The task envelope slice adds immutable request/params/task/response DTOs in all
 three SDKs; its 15 canonical identities preserve nested history and artifact
 values without taking execution authority.
 
+The ThinkingLevel slice adds the seven reasoning levels and case-insensitive
+Rust parser aliases in all three SDKs; its nine canonical identities use
+dedicated behavior evidence.
+
+The steering value slice adds accepted/drained/settled state and typed turn
+outcomes without projecting the live receipt handle; its 13 canonical
+identities use dedicated behavior evidence.
+
+The Subagent value slice adds durable command phases and runtime statuses
+without projecting dispatch or message receipt ownership; its 15 canonical
+identities use dedicated behavior evidence.
+
+The content-guard value slice adds six decision/operation identities while
+reusing existing PII payload field contracts and keeping guard execution in
+Rust/Host.
+
+The GuardResult slice uses the language-native `GuardDecision` name to avoid
+colliding with Python's existing component result helper; its six canonical
+identities preserve pass/block/warn/transform payloads.
+
+The delivery value slice adds 16 outcome/phase identities and stable snake-case
+spellings without projecting the durable delivery ledger authority.
+
+The Subagent stop value slice adds six hook status identities without projecting
+hook execution or dispatch authority.
+
+The task terminal value slice adds seven PlanTask terminal status identities
+without projecting task execution authority.
+
+The permission rule source slice adds ten source/parse/display identities,
+preserving source-priority aliases without projecting rule evaluation.
+
+The permission rule behavior slice adds six behavior/parse/decision identities,
+preserving allow/deny/ask payloads without projecting RuleRegistry authority.
+
+The permission mode helper slice adds six parse/display/predicate identities,
+preserving mode policy semantics without projecting evaluation authority.
+
+The permission rule matcher slice adds nine parse/display/matching identities
+without projecting RuleRegistry or evaluation authority.
+
+The command-cell phase slice adds ten phase/string/terminal identities without
+projecting process or sandbox execution authority.
+
+The command-cell status slice adds 15 terminal-cause/artifact-status identities
+without projecting process or artifact-writer execution authority.
+
+The Team strategy slice adds seven strategy/name/description identities without
+projecting Team dispatch or coordination authority.
+
+The ACP runtime value slice adds 13 connection-mode, extension-settlement and
+ledger-limit identities. The SDKs preserve the local values and settlement
+predicate while ACP connection/session and event-ledger authority remains in
+Rust/Host.
+
+The ACP adapter configuration slice adds 13 metadata, resource-limit,
+shutdown-duration and validation identities. It remains a local validated
+snapshot; adapter construction, connection admission and shutdown authority
+remain in Rust/Host.
+
+The ACP lease-error slice adds five enum/display identities for typed admission,
+concurrency and exclusive-conflict failures. The SDKs preserve the display
+contract while lease admission and concurrency authority remain in Rust/Host.
+
+The A2A JWT value slice adds nine configuration/debug/subject identities. The
+SDKs preserve immutable local configuration and claims access while key
+verification, token validation, and A2A server ownership remain in Rust/Host.
+
+The dependency/source value slice adds seven `DepKind` and `SkillSource`
+identities. The SDKs preserve stable local spellings while dependency probing,
+skill loading, and source policy remain in Rust/Host.
+
+The context-inheritance slice adds 11 default/field identities. The SDKs
+preserve inheritance fields and mode presets while Subagent context, memory,
+history and dispatch authority remain in Rust/Host.
+
+The observed-isolation slice adds four value/default/string identities. The
+SDKs preserve trim, empty-default and Unicode-safe 512-scalar bounds while
+isolation provider execution remains in Rust/Host.
+
+The segment-range slice adds three struct/length/emptiness identities. The
+SDKs preserve half-open saturating range semantics while message-cache state
+remains in Rust/Host.
+
+The prompt-diagnostics slice adds three section/record/count identities. The
+SDKs preserve local diagnostic aggregation while prompt compilation remains in
+Rust/Host.
+
+The Subagent command-identity slice adds six command/attempt/validation
+identities. The SDKs preserve durable identity constraints while live-control
+registry and dispatch authority remain in Rust/Host.
+
+The Subagent usage slice adds three cumulative-counter/payload identities. The
+SDKs preserve sticky usage reporting while provider execution remains in
+Rust/Host.
+
+The artifact-config slice adds seven constructor/default/builder identities
+(including generated source aliases). The SDKs preserve retention and limit
+semantics while artifact writing remains in Rust/Host.
+
+The Skill-validation slice adds two report/is-valid identities. The SDKs
+preserve violation gating while Skill validation and loading remain in Rust/Host.
+
+The Skill-content slice adds two struct/render identities. The SDKs preserve
+prompt-block formatting while resource loading and execution remain in Rust/Host.
+
+The MCP JSON-RPC slice adds four request/notification constructor identities.
+The SDKs preserve the local `2.0` value shape while MCP transport remains in
+Rust/Host.
+
+The HookAction slice adds 30 tagged variant/field/validation identities. The
+SDKs preserve configuration validation while command, HTTP, MCP and Subagent
+hook execution remains in Rust/Host.
+
+The PageInfo slice adds two metadata/apply identities. The SDKs preserve
+truncation and continuation projection while pagination state remains in
+Rust/Host.
+
+The Subagent context slice adds three empty/content identities. The SDKs
+preserve local snapshot semantics while tools, messages, stores and dispatch
+remain in Rust/Host.
+
+The Usage slice adds six provider-normalized cache/effective-token identities.
+The HookEvent slice adds 45 stable event/category/ordering/classification
+identities. TypeScript, Python and Java preserve the Rust event names, category
+partition, parser, tool-event and matcher predicates as local values; hook
+dispatch and matcher execution remain Host/framework-owned.
+The EventIdentity slice adds 29 event/stream identity constructor, accessor,
+validation and immutable-update identities. UUID-backed run/chat factories and
+runtime-context projection remain local value behavior; event sequencing and
+stream ownership remain Host-side.
+The InterventionResult slice adds seven local decision identities for allow,
+block, cancel, inject and argument modification. All three languages preserve
+the immutable decision fields while callback dispatch and cancellation remain
+Host-owned.
+The TokenBudget/LlmTimeouts slice adds 35 local policy identities. Percentage
+allocation, compression excess/reporting and zero-as-disabled timeout
+semantics are preserved in each language without moving model execution or
+timeout ownership out of Rust.
+The ExecutionUsage slice adds the duration helper identity, preserving the
+absent-to-zero projection across all three languages without taking over run
+accounting.
+The TurnMode slice adds three chat/execute mode identities, preserving the
+stream flavor locally while the turn driver remains Host/framework-owned.
+The RetryPolicy slice adds nine local construction/backoff identities,
+preserving no-retry/default policies, exponential caps and jitter configuration
+without moving retry execution out of Rust.
+The ThinkingConfig slice adds 14 local variant/parser/provider-projection
+identities, preserving disable/level/budget semantics and provider-specific
+effort mappings without moving provider transport out of Rust.
+The SDKs preserve calculation priority while LLM execution remains in Rust/Host.
+
+The HookAction slice adds 31 tagged variant/field/validation identities. The
+SDKs preserve configuration validation while command, HTTP, MCP and Subagent
+hook execution remains in Rust/Host.
+
+The Subagent usage slice adds three cumulative-counter/payload identities. The
+SDKs preserve sticky usage reporting while provider execution remains in
+Rust/Host.
+
+The Subagent command-identity slice adds six command/attempt/validation
+identities. The SDKs preserve durable identity constraints while live-control
+registry and dispatch authority remain in Rust/Host.
+
 ## SDK-Skill-Impact
 
 `none`: this stage adds language SDK source clients and protocol/catalog

@@ -80,6 +80,97 @@ artifact/error wire fields as immutable values.
 provide the corresponding closed local stream values.
 `A2ATaskParams`, `A2ATaskRequest`, `A2ATask`, and `A2ATaskResponse` provide
 immutable nested task envelope values; task execution remains Host-owned.
+`ThinkingLevel.parse(...)` preserves the Rust reasoning-effort aliases.
+`AgentSteerState` and `AgentSteerTurnOutcome` expose the same local lifecycle
+values while the active receipt remains Host-owned.
+`SubagentCommandPhase` and `SubagentStatus` expose stable phase/status values;
+dispatch ownership remains in the Host.
+`ContentGuardResult` exposes pass/detect/reject/redact values while guard
+execution remains Host-owned.
+`GuardDecision` exposes Rust pass/block/warn/transform outcomes as immutable
+sealed values.
+`DeliveryOutcome` and `DeliveryPhase` expose stable ledger values while the
+durable lifecycle remains framework-owned.
+`SubagentStopStatus` exposes stable hook terminal values while hook execution
+remains framework-owned.
+`TaskTerminalStatus` exposes stable task terminal values while task execution
+remains framework-owned.
+`RuleSource` exposes permission source priority values and alias parsing while
+rule evaluation remains framework-owned.
+`RuleBehavior` exposes allow/deny/ask payloads and decision conversion while
+rule evaluation remains framework-owned.
+`PermissionMode` exposes aliases and policy helpers while mode evaluation
+remains framework-owned.
+`RuleMatcher` exposes pure tool/pattern/permission/all matching semantics while
+registry evaluation remains framework-owned.
+`CommandCellPhase` exposes stable phases and terminal classification while
+command execution remains framework-owned.
+Command-cell terminal causes and artifact statuses expose stable values while
+execution remains framework-owned.
+`TeamStrategy` exposes manager/pipeline/debate/swarm values while Team dispatch
+remains framework-owned.
+`AcpValues.ConnectionMode`, `AcpValues.ExtensionSettlement`, and
+`AcpValues.AcpLedgerLimits` expose ACP runtime values while connection and
+event-ledger ownership remain in the Host/Rust runtime.
+`AcpAdapterConfig.defaults()` and `validate()` preserve adapter limits and
+shutdown-duration validation without constructing the ACP adapter.
+`AcpValues.ExtensionLeaseError` preserves typed lease failure text while the
+Host retains admission and concurrency authority.
+`JwtConfig` and `JwtClaims` preserve local A2A auth configuration and subject
+projection while JWT verification remains Host/Rust-owned.
+`DependencyKind` and `SkillSource` expose dependency/source values while
+probing and skill loading remain framework-owned.
+`ContextInheritance` exposes sync/fresh/fork/teammate/team defaults while
+Subagent context and dispatch remain framework-owned.
+`ObservedIsolation` exposes trim, empty-default, and code-point-safe bounds
+while isolation execution remains framework-owned.
+`SegmentRange` exposes half-open saturating length and emptiness while cache
+state remains framework-owned.
+`PromptDiagnostics` exposes section recording and per-id counts while prompt
+compilation remains framework-owned.
+`SubagentCommandIdentity` preserves durable ID validation and attempt
+projection while live-control registry state remains framework-owned.
+`LlmUsageStats` preserves cumulative token counters and payload projection while
+provider execution remains framework-owned.
+`ToolOutputArtifactConfig` preserves retention, threshold, and max-age builders
+while artifact writing remains framework-owned.
+`SkillValidationReport` preserves violation gating while validation remains
+framework-owned.
+`SkillContent` preserves structured prompt-block rendering while resource
+loading and execution remain framework-owned.
+`JsonRpcValues` preserves MCP `2.0` request/notification constructors while
+transport remains framework-owned.
+`HookAction` preserves tagged configuration and validation while hook
+execution remains framework-owned.
+`HookEvent` and `HookEventCategory` preserve stable names, `ALL` ordering,
+category classification, parsing and matcher predicates while hook dispatch
+remains framework-owned.
+`EventId`, `StreamId` and `EventIdentity` preserve non-empty validation,
+run/chat constructors, correlation fields and immutable `with*` updates.
+`InterventionResult` exposes immutable allow/block/cancel/inject/argument
+modification factories without owning callback execution.
+`TokenBudget`, `TokenBudgetConfig`, `TokenAllocation` and `LlmTimeouts` expose
+the same allocation, compression and zero-disabled timeout policy helpers.
+`ExecutionUsage.durationMillis()` maps absent duration to zero without owning
+run accounting.
+`TurnMode` preserves the chat/execute stream flavor without owning the turn
+driver.
+`RetryPolicy` preserves default/no-retry factories, exponential backoff caps
+and optional jitter configuration without running retries.
+`ThinkingConfig` preserves disabled/level/budget variants, parsing and
+provider effort/budget projections without owning LLM transport.
+`PageInfo` preserves truncation, continuation metadata, and output projection
+while collection state remains framework-owned.
+`SubagentContext` exposes empty/content semantics while context and dispatch
+state remain framework-owned.
+`Usage` preserves provider-normalized cache priority and effective token
+calculations while LLM execution remains framework-owned.
+`HookAction` preserves tagged configuration and validation while hook
+execution remains framework-owned.
+`LlmUsageStats` preserves cumulative token counters and payload projection while
+provider execution remains framework-owned.
+`SubagentCommandIdentity` preserves durable ID validation and attempt
+projection while live-control registry state remains framework-owned.
 `RunHandle.status()`, `RunHandle.outcomeStatus()` and `RunHandle.usage()` query
 the Host-owned settled receipt through the canonical Run receiver. They return
 `JsonNode` values directly; `WireU64` counters in usage remain textual nodes so

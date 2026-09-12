@@ -3,8 +3,8 @@ schema_version: 1
 id: discovery.sdk-facade-baseline
 kind: discovery
 source_snapshot:
-  base_revision: 07f860ac168df500423fd93e16581b57603888de
-  content_digest: ec3da31cc49f3fbe2f426f5f26ba0327fb530af8607bf5340afbc0d3fc3230c0
+  base_revision: 4af71b1d40558436350efd16a6f320c0f2193745
+  content_digest: e28cd89039dec2d12836a93492e0cd1db58369abfd07bb720a4b3008d9bcb4a0
 scope: root echo_agent facade到ACP与多语言SDK Host适配边界
 inspected_paths:
   - contracts/sdk

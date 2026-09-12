@@ -760,3 +760,11 @@ authoritative for execution semantics.
 和对应 E2E；当前状态为 **Design、Contract、ACP conformant**，并已完成可执行 route baseline。
 由于 process-local intrinsic 行为和逐项语言证据仍未闭合，当前不能宣称 **Runnable** 或
 **Parity complete**。`Published` 仍按源代码优先决策明确不适用。
+
+### 22.1 ThinkingLevel 语言值切片
+
+后续 facade parity 切片将 Rust `ThinkingLevel` 的七个 wire value 及其
+大小写不敏感别名映射到 TypeScript、Python、Java 的惯用值类型与解析器。
+该切片继续遵守 source-only 交付：开发者从源码编译 SDK，不随 SDK 携带
+JDK、Python、Node runtime 或任何二进制产物；Rust 仍是唯一语义权威，
+parity manifest 与三语言行为测试共同证明字段和解析别名没有漂移。

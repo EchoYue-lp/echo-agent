@@ -1865,6 +1865,642 @@ fn language_status_for(
         "echo_agent::a2a::types::A2ATaskResponse::jsonrpc",
         "echo_agent::a2a::types::A2ATaskResponse::result",
     ];
+    const THINKING_LEVEL_IDENTITIES: &[&str] = &[
+        "echo_core::llm::thinking::ThinkingLevel",
+        "echo_core::llm::thinking::ThinkingLevel::High",
+        "echo_core::llm::thinking::ThinkingLevel::Low",
+        "echo_core::llm::thinking::ThinkingLevel::Max",
+        "echo_core::llm::thinking::ThinkingLevel::Medium",
+        "echo_core::llm::thinking::ThinkingLevel::Minimal",
+        "echo_core::llm::thinking::ThinkingLevel::None",
+        "echo_core::llm::thinking::ThinkingLevel::Xhigh",
+        "echo_core::llm::thinking::ThinkingLevel::parse",
+        "echo_core::llm::ThinkingLevel",
+        "echo_core::llm::ThinkingLevel::High",
+        "echo_core::llm::ThinkingLevel::Low",
+        "echo_core::llm::ThinkingLevel::Max",
+        "echo_core::llm::ThinkingLevel::Medium",
+        "echo_core::llm::ThinkingLevel::Minimal",
+        "echo_core::llm::ThinkingLevel::None",
+        "echo_core::llm::ThinkingLevel::Xhigh",
+        "echo_core::llm::ThinkingLevel::parse",
+        "echo_agent::llm::ThinkingLevel",
+        "echo_agent::llm::ThinkingLevel::High",
+        "echo_agent::llm::ThinkingLevel::Low",
+        "echo_agent::llm::ThinkingLevel::Max",
+        "echo_agent::llm::ThinkingLevel::Medium",
+        "echo_agent::llm::ThinkingLevel::Minimal",
+        "echo_agent::llm::ThinkingLevel::None",
+        "echo_agent::llm::ThinkingLevel::Xhigh",
+        "echo_agent::llm::ThinkingLevel::parse",
+    ];
+    const STEERING_VALUE_IDENTITIES: &[&str] = &[
+        "echo_core::agent::AgentSteerState",
+        "echo_core::agent::AgentSteerState::Accepted",
+        "echo_core::agent::AgentSteerState::Drained",
+        "echo_core::agent::AgentSteerState::TurnSettled",
+        "echo_core::agent::AgentSteerState::phase",
+        "echo_core::agent::AgentSteerState::was_drained",
+        "echo_core::agent::AgentSteerTurnOutcome",
+        "echo_core::agent::AgentSteerTurnOutcome::Cancelled",
+        "echo_core::agent::AgentSteerTurnOutcome::Completed",
+        "echo_core::agent::AgentSteerTurnOutcome::Dropped",
+        "echo_core::agent::AgentSteerTurnOutcome::Failed",
+        "echo_core::agent::AgentSteerTurnOutcome::as_str",
+        "echo_core::agent::AgentSteerTurnOutcome::parse",
+        "echo_agent::agent::AgentSteerState",
+        "echo_agent::agent::AgentSteerState::Accepted",
+        "echo_agent::agent::AgentSteerState::Drained",
+        "echo_agent::agent::AgentSteerState::TurnSettled",
+        "echo_agent::agent::AgentSteerState::phase",
+        "echo_agent::agent::AgentSteerState::was_drained",
+        "echo_agent::agent::AgentSteerTurnOutcome",
+        "echo_agent::agent::AgentSteerTurnOutcome::Cancelled",
+        "echo_agent::agent::AgentSteerTurnOutcome::Completed",
+        "echo_agent::agent::AgentSteerTurnOutcome::Dropped",
+        "echo_agent::agent::AgentSteerTurnOutcome::Failed",
+        "echo_agent::agent::AgentSteerTurnOutcome::as_str",
+        "echo_agent::agent::AgentSteerTurnOutcome::parse",
+    ];
+    const SUBAGENT_VALUE_IDENTITIES: &[&str] = &[
+        "echo_agent::agent::subagent::SubagentCommandPhase",
+        "echo_agent::agent::subagent::SubagentCommandPhase::Drained",
+        "echo_agent::agent::subagent::SubagentCommandPhase::MailboxAccepted",
+        "echo_agent::agent::subagent::SubagentCommandPhase::Persisted",
+        "echo_agent::agent::subagent::SubagentCommandPhase::TurnSettled",
+        "echo_agent::agent::subagent::SubagentCommandPhase::as_str",
+        "echo_agent::agent::subagent::SubagentCommandPhase::parse",
+        "echo_agent::agent::subagent::SubagentStatus",
+        "echo_agent::agent::subagent::SubagentStatus::Cancelled",
+        "echo_agent::agent::subagent::SubagentStatus::Completed",
+        "echo_agent::agent::subagent::SubagentStatus::Failed",
+        "echo_agent::agent::subagent::SubagentStatus::Running",
+        "echo_agent::agent::subagent::SubagentStatus::TimedOut",
+        "echo_agent::agent::subagent::SubagentStatus::as_str",
+        "echo_agent::agent::subagent::SubagentStatus::impl<FromStr>",
+        "echo_agent::agent::subagent::control::SubagentCommandPhase",
+        "echo_agent::agent::subagent::control::SubagentCommandPhase::Drained",
+        "echo_agent::agent::subagent::control::SubagentCommandPhase::MailboxAccepted",
+        "echo_agent::agent::subagent::control::SubagentCommandPhase::Persisted",
+        "echo_agent::agent::subagent::control::SubagentCommandPhase::TurnSettled",
+        "echo_agent::agent::subagent::control::SubagentCommandPhase::as_str",
+        "echo_agent::agent::subagent::control::SubagentCommandPhase::parse",
+        "echo_agent::agent::subagent::types::SubagentStatus",
+        "echo_agent::agent::subagent::types::SubagentStatus::Cancelled",
+        "echo_agent::agent::subagent::types::SubagentStatus::Completed",
+        "echo_agent::agent::subagent::types::SubagentStatus::Failed",
+        "echo_agent::agent::subagent::types::SubagentStatus::Running",
+        "echo_agent::agent::subagent::types::SubagentStatus::TimedOut",
+        "echo_agent::agent::subagent::types::SubagentStatus::as_str",
+        "echo_agent::agent::subagent::types::SubagentStatus::impl<FromStr>",
+    ];
+    const CONTENT_GUARD_VALUE_IDENTITIES: &[&str] = &[
+        "echo_core::guard::content::ContentGuardResult",
+        "echo_core::guard::content::ContentGuardResult::Detected",
+        "echo_core::guard::content::ContentGuardResult::Pass",
+        "echo_core::guard::content::ContentGuardResult::Redacted",
+        "echo_core::guard::content::ContentGuardResult::Rejected",
+        "echo_core::guard::content::ContentGuardResult::is_rejected",
+        "echo_agent::guard::content::ContentGuardResult",
+        "echo_agent::guard::content::ContentGuardResult::Detected",
+        "echo_agent::guard::content::ContentGuardResult::Pass",
+        "echo_agent::guard::content::ContentGuardResult::Redacted",
+        "echo_agent::guard::content::ContentGuardResult::Rejected",
+        "echo_agent::guard::content::ContentGuardResult::is_rejected",
+    ];
+    const GUARD_VALUE_IDENTITIES: &[&str] = &[
+        "echo_core::guard::GuardResult",
+        "echo_core::guard::GuardResult::Block",
+        "echo_core::guard::GuardResult::Pass",
+        "echo_core::guard::GuardResult::Transform",
+        "echo_core::guard::GuardResult::Warn",
+        "echo_core::guard::GuardResult::is_blocked",
+        "echo_agent::guard::GuardResult",
+        "echo_agent::guard::GuardResult::Block",
+        "echo_agent::guard::GuardResult::Pass",
+        "echo_agent::guard::GuardResult::Transform",
+        "echo_agent::guard::GuardResult::Warn",
+        "echo_agent::guard::GuardResult::is_blocked",
+    ];
+    const DELIVERY_VALUE_IDENTITIES: &[&str] = &[
+        "echo_state::delivery::DeliveryOutcome",
+        "echo_state::delivery::DeliveryOutcome::Cancelled",
+        "echo_state::delivery::DeliveryOutcome::Completed",
+        "echo_state::delivery::DeliveryOutcome::Dropped",
+        "echo_state::delivery::DeliveryOutcome::Failed",
+        "echo_state::delivery::DeliveryOutcome::OutcomeUnknown",
+        "echo_state::delivery::DeliveryOutcome::as_str",
+        "echo_state::delivery::DeliveryPhase",
+        "echo_state::delivery::DeliveryPhase::Claimed",
+        "echo_state::delivery::DeliveryPhase::Deferred",
+        "echo_state::delivery::DeliveryPhase::Drained",
+        "echo_state::delivery::DeliveryPhase::EffectStarted",
+        "echo_state::delivery::DeliveryPhase::MailboxAccepted",
+        "echo_state::delivery::DeliveryPhase::Persisted",
+        "echo_state::delivery::DeliveryPhase::TurnSettled",
+        "echo_state::delivery::DeliveryPhase::as_str",
+        "echo_agent::delivery::DeliveryOutcome",
+        "echo_agent::delivery::DeliveryOutcome::Cancelled",
+        "echo_agent::delivery::DeliveryOutcome::Completed",
+        "echo_agent::delivery::DeliveryOutcome::Dropped",
+        "echo_agent::delivery::DeliveryOutcome::Failed",
+        "echo_agent::delivery::DeliveryOutcome::OutcomeUnknown",
+        "echo_agent::delivery::DeliveryOutcome::as_str",
+        "echo_agent::delivery::DeliveryPhase",
+        "echo_agent::delivery::DeliveryPhase::Claimed",
+        "echo_agent::delivery::DeliveryPhase::Deferred",
+        "echo_agent::delivery::DeliveryPhase::Drained",
+        "echo_agent::delivery::DeliveryPhase::EffectStarted",
+        "echo_agent::delivery::DeliveryPhase::MailboxAccepted",
+        "echo_agent::delivery::DeliveryPhase::Persisted",
+        "echo_agent::delivery::DeliveryPhase::TurnSettled",
+        "echo_agent::delivery::DeliveryPhase::as_str",
+    ];
+    const SUBAGENT_STOP_VALUE_IDENTITIES: &[&str] = &[
+        "echo_core::hooks::types::SubagentStopStatus",
+        "echo_core::hooks::types::SubagentStopStatus::Cancelled",
+        "echo_core::hooks::types::SubagentStopStatus::Completed",
+        "echo_core::hooks::types::SubagentStopStatus::Failed",
+        "echo_core::hooks::types::SubagentStopStatus::TimedOut",
+        "echo_core::hooks::types::SubagentStopStatus::as_str",
+        "echo_agent::hooks::SubagentStopStatus",
+        "echo_agent::hooks::SubagentStopStatus::Cancelled",
+        "echo_agent::hooks::SubagentStopStatus::Completed",
+        "echo_agent::hooks::SubagentStopStatus::Failed",
+        "echo_agent::hooks::SubagentStopStatus::TimedOut",
+        "echo_agent::hooks::SubagentStopStatus::as_str",
+    ];
+    const TASK_TERMINAL_VALUE_IDENTITIES: &[&str] = &[
+        "echo_core::hooks::types::TaskTerminalStatus",
+        "echo_core::hooks::types::TaskTerminalStatus::Cancelled",
+        "echo_core::hooks::types::TaskTerminalStatus::Completed",
+        "echo_core::hooks::types::TaskTerminalStatus::Failed",
+        "echo_core::hooks::types::TaskTerminalStatus::Skipped",
+        "echo_core::hooks::types::TaskTerminalStatus::TimedOut",
+        "echo_core::hooks::types::TaskTerminalStatus::as_str",
+        "echo_agent::hooks::TaskTerminalStatus",
+        "echo_agent::hooks::TaskTerminalStatus::Cancelled",
+        "echo_agent::hooks::TaskTerminalStatus::Completed",
+        "echo_agent::hooks::TaskTerminalStatus::Failed",
+        "echo_agent::hooks::TaskTerminalStatus::Skipped",
+        "echo_agent::hooks::TaskTerminalStatus::TimedOut",
+        "echo_agent::hooks::TaskTerminalStatus::as_str",
+    ];
+    const PERMISSION_RULE_SOURCE_IDENTITIES: &[&str] = &[
+        "echo_core::tools::permission::RuleSource",
+        "echo_core::tools::permission::RuleSource::CliArg",
+        "echo_core::tools::permission::RuleSource::Default",
+        "echo_core::tools::permission::RuleSource::LocalSettings",
+        "echo_core::tools::permission::RuleSource::Managed",
+        "echo_core::tools::permission::RuleSource::ProjectSettings",
+        "echo_core::tools::permission::RuleSource::Session",
+        "echo_core::tools::permission::RuleSource::UserSettings",
+        "echo_core::tools::permission::RuleSource::impl<Display>",
+        "echo_core::tools::permission::RuleSource::impl<FromStr>",
+        "echo_agent::tools::permission::RuleSource",
+        "echo_agent::tools::permission::RuleSource::CliArg",
+        "echo_agent::tools::permission::RuleSource::Default",
+        "echo_agent::tools::permission::RuleSource::LocalSettings",
+        "echo_agent::tools::permission::RuleSource::Managed",
+        "echo_agent::tools::permission::RuleSource::ProjectSettings",
+        "echo_agent::tools::permission::RuleSource::Session",
+        "echo_agent::tools::permission::RuleSource::UserSettings",
+        "echo_agent::tools::permission::RuleSource::impl<Display>",
+        "echo_agent::tools::permission::RuleSource::impl<FromStr>",
+    ];
+    const PERMISSION_RULE_BEHAVIOR_IDENTITIES: &[&str] = &[
+        "echo_core::tools::permission::RuleBehavior",
+        "echo_core::tools::permission::RuleBehavior::Allow",
+        "echo_core::tools::permission::RuleBehavior::Ask",
+        "echo_core::tools::permission::RuleBehavior::Deny",
+        "echo_core::tools::permission::RuleBehavior::impl<FromStr>",
+        "echo_core::tools::permission::RuleBehavior::to_decision",
+        "echo_agent::tools::permission::RuleBehavior",
+        "echo_agent::tools::permission::RuleBehavior::Allow",
+        "echo_agent::tools::permission::RuleBehavior::Ask",
+        "echo_agent::tools::permission::RuleBehavior::Deny",
+        "echo_agent::tools::permission::RuleBehavior::impl<FromStr>",
+        "echo_agent::tools::permission::RuleBehavior::to_decision",
+    ];
+    const PERMISSION_MODE_HELPER_IDENTITIES: &[&str] = &[
+        "echo_core::tools::permission::PermissionMode::allows_write",
+        "echo_core::tools::permission::PermissionMode::id",
+        "echo_core::tools::permission::PermissionMode::impl<Display>",
+        "echo_core::tools::permission::PermissionMode::impl<FromStr>",
+        "echo_core::tools::permission::PermissionMode::requires_interaction",
+        "echo_core::tools::permission::PermissionMode::uses_classifier",
+        "echo_agent::tools::permission::PermissionMode::allows_write",
+        "echo_agent::tools::permission::PermissionMode::id",
+        "echo_agent::tools::permission::PermissionMode::impl<Display>",
+        "echo_agent::tools::permission::PermissionMode::impl<FromStr>",
+        "echo_agent::tools::permission::PermissionMode::requires_interaction",
+        "echo_agent::tools::permission::PermissionMode::uses_classifier",
+    ];
+    const PERMISSION_RULE_MATCHER_IDENTITIES: &[&str] = &[
+        "echo_core::tools::permission::RuleMatcher",
+        "echo_core::tools::permission::RuleMatcher::All",
+        "echo_core::tools::permission::RuleMatcher::Pattern",
+        "echo_core::tools::permission::RuleMatcher::Permission",
+        "echo_core::tools::permission::RuleMatcher::Tool",
+        "echo_core::tools::permission::RuleMatcher::impl<Display>",
+        "echo_core::tools::permission::RuleMatcher::impl<FromStr>",
+        "echo_core::tools::permission::RuleMatcher::matches",
+        "echo_core::tools::permission::RuleMatcher::matches_matcher_str",
+        "echo_agent::tools::permission::RuleMatcher",
+        "echo_agent::tools::permission::RuleMatcher::All",
+        "echo_agent::tools::permission::RuleMatcher::Pattern",
+        "echo_agent::tools::permission::RuleMatcher::Permission",
+        "echo_agent::tools::permission::RuleMatcher::Tool",
+        "echo_agent::tools::permission::RuleMatcher::impl<Display>",
+        "echo_agent::tools::permission::RuleMatcher::impl<FromStr>",
+        "echo_agent::tools::permission::RuleMatcher::matches",
+        "echo_agent::tools::permission::RuleMatcher::matches_matcher_str",
+    ];
+    const COMMAND_CELL_PHASE_IDENTITIES: &[&str] = &[
+        "echo_core::tools::cell::CommandCellPhase",
+        "echo_core::tools::cell::CommandCellPhase::Cancelled",
+        "echo_core::tools::cell::CommandCellPhase::Failed",
+        "echo_core::tools::cell::CommandCellPhase::LaunchFailed",
+        "echo_core::tools::cell::CommandCellPhase::Prepared",
+        "echo_core::tools::cell::CommandCellPhase::Queued",
+        "echo_core::tools::cell::CommandCellPhase::Running",
+        "echo_core::tools::cell::CommandCellPhase::Succeeded",
+        "echo_core::tools::cell::CommandCellPhase::as_str",
+        "echo_core::tools::cell::CommandCellPhase::is_terminal",
+        "echo_agent::tools::cell::CommandCellPhase",
+        "echo_agent::tools::cell::CommandCellPhase::Cancelled",
+        "echo_agent::tools::cell::CommandCellPhase::Failed",
+        "echo_agent::tools::cell::CommandCellPhase::LaunchFailed",
+        "echo_agent::tools::cell::CommandCellPhase::Prepared",
+        "echo_agent::tools::cell::CommandCellPhase::Queued",
+        "echo_agent::tools::cell::CommandCellPhase::Running",
+        "echo_agent::tools::cell::CommandCellPhase::Succeeded",
+        "echo_agent::tools::cell::CommandCellPhase::as_str",
+        "echo_agent::tools::cell::CommandCellPhase::is_terminal",
+    ];
+    const COMMAND_CELL_STATUS_IDENTITIES: &[&str] = &[
+        "echo_core::tools::cell::CommandCellTerminalCause",
+        "echo_core::tools::cell::CommandCellTerminalCause::Cancelled",
+        "echo_core::tools::cell::CommandCellTerminalCause::Exited",
+        "echo_core::tools::cell::CommandCellTerminalCause::LaunchFailed",
+        "echo_core::tools::cell::CommandCellTerminalCause::OutputDrainFailed",
+        "echo_core::tools::cell::CommandCellTerminalCause::TimedOut",
+        "echo_core::tools::cell::CommandCellTerminalCause::WaitFailed",
+        "echo_core::tools::cell::CommandCellTerminalCause::as_str",
+        "echo_core::tools::cell::CommandCellArtifactStatus",
+        "echo_core::tools::cell::CommandCellArtifactStatus::Available",
+        "echo_core::tools::cell::CommandCellArtifactStatus::BelowThreshold",
+        "echo_core::tools::cell::CommandCellArtifactStatus::Failed",
+        "echo_core::tools::cell::CommandCellArtifactStatus::NotRequested",
+        "echo_core::tools::cell::CommandCellArtifactStatus::Writing",
+        "echo_core::tools::cell::CommandCellArtifactStatus::as_str",
+        "echo_agent::tools::cell::CommandCellTerminalCause",
+        "echo_agent::tools::cell::CommandCellTerminalCause::Cancelled",
+        "echo_agent::tools::cell::CommandCellTerminalCause::Exited",
+        "echo_agent::tools::cell::CommandCellTerminalCause::LaunchFailed",
+        "echo_agent::tools::cell::CommandCellTerminalCause::OutputDrainFailed",
+        "echo_agent::tools::cell::CommandCellTerminalCause::TimedOut",
+        "echo_agent::tools::cell::CommandCellTerminalCause::WaitFailed",
+        "echo_agent::tools::cell::CommandCellTerminalCause::as_str",
+        "echo_agent::tools::cell::CommandCellArtifactStatus",
+        "echo_agent::tools::cell::CommandCellArtifactStatus::Available",
+        "echo_agent::tools::cell::CommandCellArtifactStatus::BelowThreshold",
+        "echo_agent::tools::cell::CommandCellArtifactStatus::Failed",
+        "echo_agent::tools::cell::CommandCellArtifactStatus::NotRequested",
+        "echo_agent::tools::cell::CommandCellArtifactStatus::Writing",
+        "echo_agent::tools::cell::CommandCellArtifactStatus::as_str",
+    ];
+    const TEAM_STRATEGY_VALUE_IDENTITIES: &[&str] = &[
+        "echo_agent::agent::subagent::team::TeamStrategy",
+        "echo_agent::agent::subagent::team::TeamStrategy::Debate",
+        "echo_agent::agent::subagent::team::TeamStrategy::ManagerSubagent",
+        "echo_agent::agent::subagent::team::TeamStrategy::Pipeline",
+        "echo_agent::agent::subagent::team::TeamStrategy::Swarm",
+        "echo_agent::agent::subagent::team::TeamStrategy::description",
+        "echo_agent::agent::subagent::team::TeamStrategy::name",
+    ];
+    const ACP_VALUE_IDENTITIES: &[&str] = &[
+        "echo_agent::acp::runtime::AcpLedgerLimits",
+        "echo_agent::acp::runtime::AcpLedgerLimits::impl<Default>",
+        "echo_agent::acp::runtime::AcpLedgerLimits::max_bytes",
+        "echo_agent::acp::runtime::AcpLedgerLimits::max_events",
+        "echo_agent::acp::runtime::ConnectionMode",
+        "echo_agent::acp::runtime::ConnectionMode::Extended",
+        "echo_agent::acp::runtime::ConnectionMode::Standard",
+        "echo_agent::acp::extension::ExtensionSettlement",
+        "echo_agent::acp::extension::ExtensionSettlement::Answered",
+        "echo_agent::acp::extension::ExtensionSettlement::Cancelled",
+        "echo_agent::acp::extension::ExtensionSettlement::Disconnected",
+        "echo_agent::acp::extension::ExtensionSettlement::TimedOut",
+        "echo_agent::acp::extension::ExtensionSettlement::is_answered",
+    ];
+    const ACP_CONFIG_VALUE_IDENTITIES: &[&str] = &[
+        "echo_agent::acp::adapter::AcpAdapterConfig",
+        "echo_agent::acp::adapter::AcpAdapterConfig::impl<Default>",
+        "echo_agent::acp::adapter::AcpAdapterConfig::max_extension_concurrency",
+        "echo_agent::acp::adapter::AcpAdapterConfig::max_prompt_chars",
+        "echo_agent::acp::adapter::AcpAdapterConfig::max_sessions",
+        "echo_agent::acp::adapter::AcpAdapterConfig::max_total_update_chars",
+        "echo_agent::acp::adapter::AcpAdapterConfig::max_update_chars",
+        "echo_agent::acp::adapter::AcpAdapterConfig::max_updates_per_turn",
+        "echo_agent::acp::adapter::AcpAdapterConfig::name",
+        "echo_agent::acp::adapter::AcpAdapterConfig::shutdown_timeout",
+        "echo_agent::acp::adapter::AcpAdapterConfig::title",
+        "echo_agent::acp::adapter::AcpAdapterConfig::validate",
+        "echo_agent::acp::adapter::AcpAdapterConfig::version",
+    ];
+    const ACP_LEASE_VALUE_IDENTITIES: &[&str] = &[
+        "echo_agent::acp::extension::ExtensionLeaseError",
+        "echo_agent::acp::extension::ExtensionLeaseError::AdmissionClosed",
+        "echo_agent::acp::extension::ExtensionLeaseError::ConcurrencyLimit",
+        "echo_agent::acp::extension::ExtensionLeaseError::ExclusiveConflict",
+        "echo_agent::acp::extension::ExtensionLeaseError::impl<Display>",
+    ];
+    const JWT_VALUE_IDENTITIES: &[&str] = &[
+        "echo_agent::a2a::auth::JwtClaims::subject",
+        "echo_agent::a2a::auth::JwtConfig",
+        "echo_agent::a2a::auth::JwtConfig::disabled",
+        "echo_agent::a2a::auth::JwtConfig::hs256",
+        "echo_agent::a2a::auth::JwtConfig::impl<Debug>",
+        "echo_agent::a2a::auth::JwtConfig::is_enabled",
+        "echo_agent::a2a::auth::JwtConfig::rs256",
+        "echo_agent::a2a::auth::JwtConfig::with_audience",
+        "echo_agent::a2a::auth::JwtConfig::with_issuer",
+    ];
+    const DEPENDENCY_VALUE_IDENTITIES: &[&str] = &[
+        "echo_execution::skills::dependency_probe::DepKind",
+        "echo_execution::skills::dependency_probe::DepKind::Binary",
+        "echo_execution::skills::dependency_probe::DepKind::NodeModule",
+        "echo_execution::skills::dependency_probe::DepKind::PythonPkg",
+        "echo_execution::skills::external::prompt_exec::SkillSource",
+        "echo_execution::skills::external::prompt_exec::SkillSource::Local",
+        "echo_execution::skills::external::prompt_exec::SkillSource::Mcp",
+    ];
+    const CONTEXT_INHERITANCE_IDENTITIES: &[&str] = &[
+        "echo_agent::agent::subagent::context::ContextInheritance",
+        "echo_agent::agent::subagent::context::ContextInheritance::for_mode",
+        "echo_agent::agent::subagent::context::ContextInheritance::fork_default",
+        "echo_agent::agent::subagent::context::ContextInheritance::fresh_default",
+        "echo_agent::agent::subagent::context::ContextInheritance::impl<Default>",
+        "echo_agent::agent::subagent::context::ContextInheritance::inherit_history",
+        "echo_agent::agent::subagent::context::ContextInheritance::inherit_memory",
+        "echo_agent::agent::subagent::context::ContextInheritance::inherit_tools",
+        "echo_agent::agent::subagent::context::ContextInheritance::inject_metadata",
+        "echo_agent::agent::subagent::context::ContextInheritance::sync_default",
+        "echo_agent::agent::subagent::context::ContextInheritance::teammate_default",
+    ];
+    const OBSERVED_ISOLATION_IDENTITIES: &[&str] = &[
+        "echo_agent::agent::subagent::types::ObservedIsolation",
+        "echo_agent::agent::subagent::types::ObservedIsolation::as_str",
+        "echo_agent::agent::subagent::types::ObservedIsolation::impl<Default>",
+        "echo_agent::agent::subagent::types::ObservedIsolation::new",
+    ];
+    const SEGMENT_RANGE_IDENTITIES: &[&str] = &[
+        "echo_core::llm::cache::layout::SegmentRange",
+        "echo_core::llm::cache::layout::SegmentRange::is_empty",
+        "echo_core::llm::cache::layout::SegmentRange::len",
+    ];
+    const PROMPT_DIAGNOSTICS_IDENTITIES: &[&str] = &[
+        "echo_agent::agent::subagent::prompt::PromptDiagnostics",
+        "echo_agent::agent::subagent::prompt::PromptDiagnostics::count",
+        "echo_agent::agent::subagent::prompt::PromptDiagnostics::record",
+    ];
+    const SUBAGENT_COMMAND_IDENTITY_IDENTITIES: &[&str] = &[
+        "echo_agent::agent::subagent::control::SubagentCommandIdentity",
+        "echo_agent::agent::subagent::control::SubagentCommandIdentity::attempt_identity",
+        "echo_agent::agent::subagent::control::SubagentCommandIdentity::new",
+        "echo_agent::agent::subagent::control::SubagentCommandIdentity::validate",
+        "echo_agent::agent::subagent::control::SubagentAttemptIdentity",
+        "echo_agent::agent::subagent::control::SubagentAttemptIdentity::new",
+    ];
+    const SUBAGENT_USAGE_IDENTITIES: &[&str] = &[
+        "echo_agent::agent::subagent::usage::LlmUsageStats",
+        "echo_agent::agent::subagent::usage::LlmUsageStats::record",
+        "echo_agent::agent::subagent::usage::LlmUsageStats::to_payload",
+    ];
+    const TOOL_OUTPUT_ARTIFACT_CONFIG_IDENTITIES: &[&str] = &[
+        "echo_core::tools::artifact::ToolOutputArtifactConfig",
+        "echo_core::tools::artifact::ToolOutputArtifactConfig::impl<Default>",
+        "echo_core::tools::artifact::ToolOutputArtifactConfig::max_age_secs",
+        "echo_core::tools::artifact::ToolOutputArtifactConfig::new",
+        "echo_core::tools::artifact::ToolOutputArtifactConfig::threshold_bytes",
+    ];
+    const SKILL_VALIDATION_IDENTITIES: &[&str] = &[
+        "echo_execution::skills::external::validate::SkillValidationReport",
+        "echo_execution::skills::external::validate::SkillValidationReport::is_valid",
+    ];
+    const SKILL_CONTENT_IDENTITIES: &[&str] = &[
+        "echo_execution::skills::external::types::SkillContent",
+        "echo_execution::skills::external::types::SkillContent::to_prompt_block",
+    ];
+    const JSONRPC_VALUE_IDENTITIES: &[&str] = &[
+        "echo_integration::mcp::types::JsonRpcNotification",
+        "echo_integration::mcp::types::JsonRpcNotification::new",
+        "echo_integration::mcp::types::JsonRpcRequest",
+        "echo_integration::mcp::types::JsonRpcRequest::new",
+    ];
+    const SUBAGENT_CONTEXT_IDENTITIES: &[&str] = &[
+        "echo_agent::agent::subagent::context::SubagentContext",
+        "echo_agent::agent::subagent::context::SubagentContext::empty",
+        "echo_agent::agent::subagent::context::SubagentContext::has_content",
+    ];
+    const USAGE_IDENTITIES: &[&str] = &[
+        "echo_core::llm::types::Usage",
+        "echo_core::llm::types::Usage::cache_creation_prompt_tokens",
+        "echo_core::llm::types::Usage::cache_hit_rate",
+        "echo_core::llm::types::Usage::cached_prompt_tokens",
+        "echo_core::llm::types::Usage::effective_prompt_tokens",
+        "echo_core::llm::types::Usage::effective_total_tokens",
+    ];
+    const HOOK_ACTION_IDENTITIES: &[&str] = &[
+        "echo_execution::skills::hooks::HookAction",
+        "echo_execution::skills::hooks::HookAction::ActivateSkill",
+        "echo_execution::skills::hooks::HookAction::ActivateSkill::reason",
+        "echo_execution::skills::hooks::HookAction::ActivateSkill::skill",
+        "echo_execution::skills::hooks::HookAction::Command",
+        "echo_execution::skills::hooks::HookAction::Command::command",
+        "echo_execution::skills::hooks::HookAction::Command::shell",
+        "echo_execution::skills::hooks::HookAction::Command::timeout",
+        "echo_execution::skills::hooks::HookAction::Http",
+        "echo_execution::skills::hooks::HookAction::Http::headers",
+        "echo_execution::skills::hooks::HookAction::Http::method",
+        "echo_execution::skills::hooks::HookAction::Http::timeout",
+        "echo_execution::skills::hooks::HookAction::Http::url",
+        "echo_execution::skills::hooks::HookAction::McpTool",
+        "echo_execution::skills::hooks::HookAction::McpTool::arguments",
+        "echo_execution::skills::hooks::HookAction::McpTool::server",
+        "echo_execution::skills::hooks::HookAction::McpTool::timeout",
+        "echo_execution::skills::hooks::HookAction::McpTool::tool",
+        "echo_execution::skills::hooks::HookAction::Permission",
+        "echo_execution::skills::hooks::HookAction::Permission::decision",
+        "echo_execution::skills::hooks::HookAction::Permission::reason",
+        "echo_execution::skills::hooks::HookAction::Permission::suggestions",
+        "echo_execution::skills::hooks::HookAction::Prompt",
+        "echo_execution::skills::hooks::HookAction::Prompt::prompt",
+        "echo_execution::skills::hooks::HookAction::Subagent",
+        "echo_execution::skills::hooks::HookAction::Subagent::name",
+        "echo_execution::skills::hooks::HookAction::Subagent::task",
+        "echo_execution::skills::hooks::HookAction::Subagent::timeout",
+        "echo_execution::skills::hooks::HookAction::kind",
+        "echo_execution::skills::hooks::HookAction::validate",
+    ];
+    const PAGE_INFO_IDENTITIES: &[&str] = &[
+        "echo_core::tools::pagination::PageInfo",
+        "echo_core::tools::pagination::PageInfo::apply_to",
+    ];
+    const HOOK_EVENT_IDENTITIES: &[&str] = &[
+        "echo_core::hooks::types::HookEvent",
+        "echo_core::hooks::types::HookEvent::ALL",
+        "echo_core::hooks::types::HookEvent::ConfigChange",
+        "echo_core::hooks::types::HookEvent::InstructionsLoaded",
+        "echo_core::hooks::types::HookEvent::MemoryLayerChange",
+        "echo_core::hooks::types::HookEvent::Notification",
+        "echo_core::hooks::types::HookEvent::PermissionDenied",
+        "echo_core::hooks::types::HookEvent::PermissionRequest",
+        "echo_core::hooks::types::HookEvent::PluginDisabled",
+        "echo_core::hooks::types::HookEvent::PluginLoaded",
+        "echo_core::hooks::types::HookEvent::PostCompact",
+        "echo_core::hooks::types::HookEvent::PostMemoryWrite",
+        "echo_core::hooks::types::HookEvent::PostToolBatch",
+        "echo_core::hooks::types::HookEvent::PostToolUse",
+        "echo_core::hooks::types::HookEvent::PostToolUseFailure",
+        "echo_core::hooks::types::HookEvent::PreCompact",
+        "echo_core::hooks::types::HookEvent::PreToolUse",
+        "echo_core::hooks::types::HookEvent::RulePromoted",
+        "echo_core::hooks::types::HookEvent::SessionEnd",
+        "echo_core::hooks::types::HookEvent::SessionStart",
+        "echo_core::hooks::types::HookEvent::SkillCandidateDetected",
+        "echo_core::hooks::types::HookEvent::SkillHealthCheck",
+        "echo_core::hooks::types::HookEvent::SkillLifecycleTransition",
+        "echo_core::hooks::types::HookEvent::SkillMergeApplied",
+        "echo_core::hooks::types::HookEvent::SkillPatchApplied",
+        "echo_core::hooks::types::HookEvent::Stop",
+        "echo_core::hooks::types::HookEvent::StopFailure",
+        "echo_core::hooks::types::HookEvent::SubagentStart",
+        "echo_core::hooks::types::HookEvent::SubagentStop",
+        "echo_core::hooks::types::HookEvent::TaskCompleted",
+        "echo_core::hooks::types::HookEvent::TaskCreated",
+        "echo_core::hooks::types::HookEvent::TaskStarted",
+        "echo_core::hooks::types::HookEvent::UserPromptSubmit",
+        "echo_core::hooks::types::HookEvent::as_str",
+        "echo_core::hooks::types::HookEvent::category",
+        "echo_core::hooks::types::HookEvent::from_name",
+        "echo_core::hooks::types::HookEvent::is_tool_event",
+        "echo_core::hooks::types::HookEvent::supports_matcher",
+        "echo_core::hooks::types::HookEventCategory",
+        "echo_core::hooks::types::HookEventCategory::Error",
+        "echo_core::hooks::types::HookEventCategory::Evolution",
+        "echo_core::hooks::types::HookEventCategory::Lifecycle",
+        "echo_core::hooks::types::HookEventCategory::Subagent",
+        "echo_core::hooks::types::HookEventCategory::Task",
+        "echo_core::hooks::types::HookEventCategory::Tool",
+    ];
+    const EVENT_IDENTITY_IDENTITIES: &[&str] = &[
+        "echo_core::agent::event_envelope::EventId",
+        "echo_core::agent::event_envelope::EventId::as_str",
+        "echo_core::agent::event_envelope::EventId::impl<AsRef>",
+        "echo_core::agent::event_envelope::EventId::impl<Display>",
+        "echo_core::agent::event_envelope::EventId::new",
+        "echo_core::agent::event_envelope::EventIdentity",
+        "echo_core::agent::event_envelope::EventIdentity::conversation_id",
+        "echo_core::agent::event_envelope::EventIdentity::execution_id",
+        "echo_core::agent::event_envelope::EventIdentity::for_chat",
+        "echo_core::agent::event_envelope::EventIdentity::for_run",
+        "echo_core::agent::event_envelope::EventIdentity::from_invocation",
+        "echo_core::agent::event_envelope::EventIdentity::from_runtime_context",
+        "echo_core::agent::event_envelope::EventIdentity::message_id",
+        "echo_core::agent::event_envelope::EventIdentity::new",
+        "echo_core::agent::event_envelope::EventIdentity::parent_event_id",
+        "echo_core::agent::event_envelope::EventIdentity::run_id",
+        "echo_core::agent::event_envelope::EventIdentity::stream_id",
+        "echo_core::agent::event_envelope::EventIdentity::turn_id",
+        "echo_core::agent::event_envelope::EventIdentity::validate",
+        "echo_core::agent::event_envelope::EventIdentity::with_conversation_id",
+        "echo_core::agent::event_envelope::EventIdentity::with_execution_id",
+        "echo_core::agent::event_envelope::EventIdentity::with_message_id",
+        "echo_core::agent::event_envelope::EventIdentity::with_parent_event_id",
+        "echo_core::agent::event_envelope::EventIdentity::with_run_id",
+        "echo_core::agent::event_envelope::StreamId",
+        "echo_core::agent::event_envelope::StreamId::as_str",
+        "echo_core::agent::event_envelope::StreamId::impl<AsRef>",
+        "echo_core::agent::event_envelope::StreamId::impl<Display>",
+        "echo_core::agent::event_envelope::StreamId::new",
+    ];
+    const INTERVENTION_RESULT_IDENTITIES: &[&str] = &[
+        "echo_core::agent::intervention::InterventionResult::allow",
+        "echo_core::agent::intervention::InterventionResult::block",
+        "echo_core::agent::intervention::InterventionResult::cancel",
+        "echo_core::agent::intervention::InterventionResult::inject",
+        "echo_core::agent::intervention::InterventionResult::modify_args",
+    ];
+    const TOKEN_BUDGET_IDENTITIES: &[&str] = &[
+        "echo_core::budget::TokenAllocation::needs_compression",
+        "echo_core::budget::TokenAllocation::ok",
+        "echo_core::budget::TokenBudget",
+        "echo_core::budget::TokenBudget::allocate",
+        "echo_core::budget::TokenBudget::conversation_budget",
+        "echo_core::budget::TokenBudget::impl<Default>",
+        "echo_core::budget::TokenBudget::new",
+        "echo_core::budget::TokenBudget::output_budget",
+        "echo_core::budget::TokenBudget::report",
+        "echo_core::budget::TokenBudget::safety_budget",
+        "echo_core::budget::TokenBudget::system_prompt_budget",
+        "echo_core::budget::TokenBudget::tool_definitions_budget",
+        "echo_core::budget::TokenBudget::total_window",
+        "echo_core::budget::TokenBudget::with_allocations",
+        "echo_core::budget::TokenBudgetConfig",
+        "echo_core::budget::TokenBudgetConfig::build",
+        "echo_core::budget::TokenBudgetConfig::disabled",
+        "echo_core::budget::TokenBudgetConfig::enabled",
+        "echo_core::budget::TokenBudgetConfig::impl<Default>",
+        "echo_core::budget::TokenBudgetConfig::with_total_window",
+        "echo_core::llm::LlmTimeouts",
+        "echo_core::llm::LlmTimeouts::first_chunk_timeout",
+        "echo_core::llm::LlmTimeouts::idle_timeout",
+        "echo_core::llm::LlmTimeouts::impl<Default>",
+        "echo_core::llm::LlmTimeouts::overall_timeout",
+        "echo_core::llm::LlmTimeouts::request_timeout",
+        "echo_core::llm::LlmTimeouts::with_first_chunk_timeout",
+        "echo_core::llm::LlmTimeouts::with_idle_timeout",
+        "echo_core::llm::LlmTimeouts::with_overall_timeout",
+        "echo_core::llm::LlmTimeouts::with_request_timeout",
+        "echo_core::llm::LlmTimeouts::without_first_chunk_timeout",
+        "echo_core::llm::LlmTimeouts::without_idle_timeout",
+        "echo_core::llm::LlmTimeouts::without_overall_timeout",
+        "echo_core::llm::LlmTimeouts::without_request_timeout",
+    ];
+    const EXECUTION_USAGE_IDENTITIES: &[&str] =
+        &["echo_core::agent::ExecutionUsage::duration_millis"];
+    const TURN_MODE_IDENTITIES: &[&str] = &[
+        "echo_orchestration::runtime::turn_driver::TurnMode",
+        "echo_orchestration::runtime::turn_driver::TurnMode::Chat",
+        "echo_orchestration::runtime::turn_driver::TurnMode::Execute",
+    ];
+    const RETRY_POLICY_IDENTITIES: &[&str] = &[
+        "echo_core::retry::RetryPolicy",
+        "echo_core::retry::RetryPolicy::delay_for",
+        "echo_core::retry::RetryPolicy::impl<Default>",
+        "echo_core::retry::RetryPolicy::jitter",
+        "echo_core::retry::RetryPolicy::max_delay",
+        "echo_core::retry::RetryPolicy::new",
+        "echo_core::retry::RetryPolicy::no_retry",
+    ];
+    const THINKING_CONFIG_IDENTITIES: &[&str] = &[
+        "echo_core::llm::thinking::ThinkingConfig",
+        "echo_core::llm::thinking::ThinkingConfig::BudgetTokens",
+        "echo_core::llm::thinking::ThinkingConfig::BudgetTokens::0",
+        "echo_core::llm::thinking::ThinkingConfig::Disabled",
+        "echo_core::llm::thinking::ThinkingConfig::Level",
+        "echo_core::llm::thinking::ThinkingConfig::Level::0",
+        "echo_core::llm::thinking::ThinkingConfig::medium",
+        "echo_core::llm::thinking::ThinkingConfig::parse_spec",
+        "echo_core::llm::thinking::ThinkingConfig::to_anthropic_budget",
+        "echo_core::llm::thinking::ThinkingConfig::to_anthropic_effort",
+        "echo_core::llm::thinking::ThinkingConfig::to_enable_thinking",
+        "echo_core::llm::thinking::ThinkingConfig::to_glm_reasoning_effort",
+        "echo_core::llm::thinking::ThinkingConfig::to_glm_thinking_type",
+        "echo_core::llm::thinking::ThinkingConfig::to_reasoning_effort",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -1879,6 +2515,120 @@ fn language_status_for(
         (LanguageImplementationStatus::Done, "a2a_stream_values")
     } else if A2A_TASK_ENVELOPE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "a2a_task_envelopes")
+    } else if THINKING_LEVEL_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "thinking_level")
+    } else if STEERING_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "steering_values")
+    } else if SUBAGENT_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "subagent_values")
+    } else if CONTENT_GUARD_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "content_guard_values")
+    } else if GUARD_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "guard_values")
+    } else if DELIVERY_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "delivery_values")
+    } else if SUBAGENT_STOP_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "subagent_stop_values")
+    } else if TASK_TERMINAL_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "task_terminal_values")
+    } else if PERMISSION_RULE_SOURCE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "permission_rule_values")
+    } else if PERMISSION_RULE_BEHAVIOR_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "permission_rule_behavior",
+        )
+    } else if PERMISSION_MODE_HELPER_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "permission_mode_values")
+    } else if PERMISSION_RULE_MATCHER_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "permission_rule_matcher",
+        )
+    } else if COMMAND_CELL_PHASE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "command_cell_values")
+    } else if COMMAND_CELL_STATUS_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "command_cell_status_values",
+        )
+    } else if TEAM_STRATEGY_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "team_strategy_values")
+    } else if ACP_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "acp_values")
+    } else if ACP_CONFIG_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "acp_config_values")
+    } else if ACP_LEASE_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "acp_lease_values")
+    } else if JWT_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "jwt_values")
+    } else if DEPENDENCY_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "dependency_values")
+    } else if CONTEXT_INHERITANCE_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "context_inheritance_values",
+        )
+    } else if OBSERVED_ISOLATION_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "observed_isolation_values",
+        )
+    } else if SEGMENT_RANGE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "segment_range_values")
+    } else if PROMPT_DIAGNOSTICS_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "prompt_diagnostics_values",
+        )
+    } else if SUBAGENT_COMMAND_IDENTITY_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "subagent_command_identity_values",
+        )
+    } else if SUBAGENT_USAGE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "subagent_usage_values")
+    } else if TOOL_OUTPUT_ARTIFACT_CONFIG_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "tool_output_artifact_config_values",
+        )
+    } else if SKILL_VALIDATION_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "skill_validation_values",
+        )
+    } else if SKILL_CONTENT_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "skill_content_values")
+    } else if JSONRPC_VALUE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "jsonrpc_values")
+    } else if SUBAGENT_CONTEXT_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "subagent_context_values",
+        )
+    } else if USAGE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "usage_values")
+    } else if HOOK_ACTION_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "hook_action_values")
+    } else if PAGE_INFO_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "page_info_values")
+    } else if HOOK_EVENT_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "hook_event_values")
+    } else if EVENT_IDENTITY_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "event_identity_values")
+    } else if INTERVENTION_RESULT_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "intervention_values")
+    } else if TOKEN_BUDGET_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "token_budget_values")
+    } else if EXECUTION_USAGE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "execution_usage_values")
+    } else if TURN_MODE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "turn_mode_values")
+    } else if RETRY_POLICY_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "retry_policy_values")
+    } else if THINKING_CONFIG_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "thinking_config_values")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

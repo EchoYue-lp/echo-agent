@@ -388,6 +388,17 @@ capabilities.
   process-scoped adapter, while `testing` remains deliberately unbound with
   method-not-found, never simulated results.
 
+## Decision: ThinkingLevel source-only value slice
+
+The multilingual SDKs expose the Rust `ThinkingLevel` wire values as
+language-native enums or frozen values, with the Rust case-insensitive aliases
+(`none`/`off`, `minimal`/`min`, `medium`/`med`/`normal`, and the remaining
+levels) preserved by each parser. This slice is deliberately source-only:
+developers compile the TypeScript, Python, and Java code themselves, and no
+JDK, Python runtime, Node runtime, or binary artifact is bundled. The parity
+manifest records the nine canonical identities and their language-specific
+behavior tests; Rust remains the sole semantic authority.
+
 ## Decision: facade public-API parity (plan 08)
 
 - **No generic source fallback.** Every canonical `source:` operation is
