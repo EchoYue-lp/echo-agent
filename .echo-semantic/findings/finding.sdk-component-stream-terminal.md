@@ -16,7 +16,7 @@ decision_refs: []
 repair_evidence_refs: [evidence.sdk-contracts]
 verification_evidence_refs: [evidence.sdk-contracts]
 rereview_audit_refs: [audit.sdk-facade-plan08-final]
-discovered_at: source:48ba788cb70ff0bb8476d785900476c14a3db9a96d4583c2d5792583ba6d3556
+discovered_at: source:912701f2c1f489d693198433f91a62cd2e6e530c570a73549bd7b753957ab9de
 ---
 
 # AgentComponent stream 终态与事件形状混淆

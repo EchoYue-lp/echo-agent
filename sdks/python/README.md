@@ -145,6 +145,12 @@ The time helpers preserve Unix timestamps, local-offset formatting, instant
 round-trips and optional null values without persisted clock state.
 `ThinkingProtocol` preserves provider dialect names and field-emission
 semantics without owning provider transport.
+`ResourceLimits` preserves default, strict and unrestricted sandbox policy
+snapshots without creating sandbox processes.
+`ProviderCapabilities` preserves OpenAI-compatible, Anthropic and Ollama
+defaults plus provider-name resolution without owning provider transport.
+`ThinkingProfile` and `resolve_thinking_profile` preserve model/provider
+protocol selection and manual control levels without contacting a provider.
 `PageInfo` preserves truncation, continuation metadata, and output projection
 without owning collection state.
 `SubagentContext` preserves empty/content semantics without owning context or

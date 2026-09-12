@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:48ba788cb70ff0bb8476d785900476c14a3db9a96d4583c2d5792583ba6d3556
+observed_at: source:912701f2c1f489d693198433f91a62cd2e6e530c570a73549bd7b753957ab9de
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -186,6 +186,24 @@ source_refs:
   - sdks/python/tests/test_thinking_protocol_values.py
   - sdks/java/src/main/java/com/echoagent/sdk/ThinkingProtocol.java
   - sdks/java/src/test/java/com/echoagent/sdk/ThinkingProtocolTest.java
+  - sdks/typescript/src/sandbox_resource_values.ts
+  - sdks/typescript/test/sandbox-resource-values.test.js
+  - sdks/python/src/echo_agent_sdk/sandbox_resource_values.py
+  - sdks/python/tests/test_sandbox_resource_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/ResourceLimits.java
+  - sdks/java/src/test/java/com/echoagent/sdk/ResourceLimitsTest.java
+  - sdks/typescript/src/provider_capabilities_values.ts
+  - sdks/typescript/test/provider-capabilities-values.test.js
+  - sdks/python/src/echo_agent_sdk/provider_capabilities_values.py
+  - sdks/python/tests/test_provider_capabilities_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/ProviderCapabilities.java
+  - sdks/java/src/test/java/com/echoagent/sdk/ProviderCapabilitiesTest.java
+  - sdks/typescript/src/thinking_profile_values.ts
+  - sdks/typescript/test/thinking-profile-values.test.js
+  - sdks/python/src/echo_agent_sdk/thinking_profile_values.py
+  - sdks/python/tests/test_thinking_profile_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/ThinkingProfile.java
+  - sdks/java/src/test/java/com/echoagent/sdk/ThinkingProfileTest.java
   - sdks/typescript/src/hook_action_values.ts
   - sdks/typescript/test/hook-action-values.test.js
   - sdks/typescript/src/subagent_usage_values.ts
