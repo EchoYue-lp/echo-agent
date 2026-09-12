@@ -2588,6 +2588,15 @@ fn language_status_for(
         "echo_core::llm::LlmApiProtocol::from_endpoint",
         "echo_core::llm::LlmApiProtocol::try_from_endpoint",
     ];
+    const MODEL_INPUT_MODALITY_IDENTITIES: &[&str] = &[
+        "echo_core::llm::ModelInputModality",
+        "echo_core::llm::ModelInputModality::Audio",
+        "echo_core::llm::ModelInputModality::Image",
+        "echo_core::llm::ModelInputModality::Text",
+        "echo_core::llm::ModelInputModality::Video",
+        "echo_core::llm::ModelInputModality::all_supported",
+        "echo_core::llm::ModelInputModality::text_only",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2744,6 +2753,11 @@ fn language_status_for(
         (
             LanguageImplementationStatus::Done,
             "llm_api_protocol_values",
+        )
+    } else if MODEL_INPUT_MODALITY_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "model_input_modality_values",
         )
     } else {
         match identity {
