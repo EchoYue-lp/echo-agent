@@ -38,6 +38,8 @@ export * from "./execution_usage_values.js";
 export * from "./turn_mode_values.js";
 export * from "./retry_policy_values.js";
 export * from "./thinking_config_values.js";
+export * from "./time_values.js";
+export * from "./thinking_protocol_values.js";
 export * from "./page_info_values.js";
 export * from "./catalog.js";
 export * from "./client.js";

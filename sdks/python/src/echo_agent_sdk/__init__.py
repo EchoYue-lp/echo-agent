@@ -171,6 +171,17 @@ from .task_terminal_values import TaskTerminalStatus
 from .team_strategy_values import TeamStrategy, TeamStrategyKind
 from .thinking import ThinkingLevel
 from .thinking_config_values import ThinkingConfig
+from .thinking_protocol_values import ThinkingProtocol
+from .time_values import (
+    local_rfc3339_deserialize,
+    local_rfc3339_serialize,
+    now_local,
+    now_millis,
+    now_secs,
+    option_local_rfc3339_deserialize,
+    option_local_rfc3339_serialize,
+    to_local,
+)
 from .token_budget_values import (
     BudgetReport,
     LlmTimeouts,
@@ -372,6 +383,7 @@ __all__ = [
     "TeamStrategyKind",
     "ThinkingConfig",
     "ThinkingLevel",
+    "ThinkingProtocol",
     "TokenAllocation",
     "TokenBudget",
     "TokenBudgetConfig",
@@ -400,7 +412,15 @@ __all__ = [
     "execution_usage_duration_millis",
     "extract_json_from_markdown",
     "from_wire",
+    "local_rfc3339_deserialize",
+    "local_rfc3339_serialize",
+    "now_local",
+    "now_millis",
+    "now_secs",
+    "option_local_rfc3339_deserialize",
+    "option_local_rfc3339_serialize",
     "split_utf8_chunks",
+    "to_local",
     "to_wire",
     "wire_bytes",
     "wire_duration",

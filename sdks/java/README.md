@@ -159,6 +159,10 @@ driver.
 and optional jitter configuration without running retries.
 `ThinkingConfig` preserves disabled/level/budget variants, parsing and
 provider effort/budget projections without owning LLM transport.
+`TimeValues` preserves Unix timestamps, local-offset formatting, instant
+round-trips and optional null values without persisted clock state.
+`ThinkingProtocol` preserves provider dialect names and field-emission
+semantics without owning provider transport.
 `PageInfo` preserves truncation, continuation metadata, and output projection
 while collection state remains framework-owned.
 `SubagentContext` exposes empty/content semantics while context and dispatch
