@@ -139,6 +139,8 @@ provider capability defaults, model limits, tokenizer selection, and provider
 then exact override precedence without owning provider transport.
 `LlmApiProtocol` and its endpoint helpers preserve path selection and strict
 complete-path detection without opening HTTP connections.
+`ModelInputModality` preserves text-only and historical all-supported ordering
+without owning model transport.
 `PageInfo` preserves truncation, continuation metadata, and output projection
 without owning collection state.
 `SubagentContext` preserves empty/content semantics without owning context or

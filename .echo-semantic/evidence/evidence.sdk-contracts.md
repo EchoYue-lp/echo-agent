@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:524b2f07633e8b5c757b49785e85280c60149f8ff4129632c3cd1e6bfa71d910
+observed_at: source:98de3633aed56a0e9bd67a3eee18dfb0ec005ce6d04472aa872d16c1deb3d4ae
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -218,6 +218,12 @@ source_refs:
   - sdks/python/tests/test_llm_api_protocol_values.py
   - sdks/java/src/main/java/com/echoagent/sdk/LlmApiProtocol.java
   - sdks/java/src/test/java/com/echoagent/sdk/LlmApiProtocolTest.java
+  - sdks/typescript/src/model_input_modality_values.ts
+  - sdks/typescript/test/model-input-modality-values.test.js
+  - sdks/python/src/echo_agent_sdk/model_input_modality_values.py
+  - sdks/python/tests/test_model_input_modality_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/ModelInputModality.java
+  - sdks/java/src/test/java/com/echoagent/sdk/ModelInputModalityTest.java
   - sdks/typescript/src/hook_action_values.ts
   - sdks/typescript/test/hook-action-values.test.js
   - sdks/typescript/src/subagent_usage_values.ts

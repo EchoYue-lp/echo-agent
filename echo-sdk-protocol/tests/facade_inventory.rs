@@ -1811,6 +1811,35 @@ fn llm_api_protocol_values_have_language_behavior_evidence() -> TestResult {
 }
 
 #[test]
+fn model_input_modality_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry.languages.values().all(|mapping| {
+                    mapping
+                        .contract_test
+                        .ends_with("/model_input_modality_values")
+                })
+        })
+        .collect();
+    assert_eq!(entries.len(), 7, "model input modality set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn known_facade_semantics_are_classified_correctly() -> TestResult {
     let manifest = manifest()?;
     assert_eq!(

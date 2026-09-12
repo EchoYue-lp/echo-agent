@@ -148,6 +148,7 @@ from .intrinsics import ParamValue, ToolCallParams, ToolResult
 from .jsonrpc_values import JsonRpcNotification, JsonRpcRequest
 from .jwt_values import JwtClaims, JwtConfig
 from .llm_api_protocol_values import LlmApiProtocol
+from .model_input_modality_values import ModelInputModality
 from .model_profile_values import (
     ModelProfile,
     ModelProfileOverride,
@@ -329,6 +330,7 @@ __all__ = [
     "MemoryPromoterResult",
     "MemoryTriggerRequest",
     "MemoryTriggerResult",
+    "ModelInputModality",
     "ModelProfile",
     "ModelProfileOverride",
     "ModelProfileResolver",
