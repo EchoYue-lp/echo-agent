@@ -237,6 +237,8 @@ control levels without contacting an LLM provider.
 Model profile values preserve provider capability defaults, model limits,
 tokenizer selection, and provider/exact override precedence without owning
 provider transport.
+LLM API protocol values preserve endpoint path selection, strict complete-path
+detection, and Anthropic fallback semantics without opening HTTP connections.
 Page metadata values preserve truncation, continuation metadata, and output
 projection without owning collection state.
 Subagent context snapshots preserve empty/content semantics without owning

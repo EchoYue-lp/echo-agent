@@ -2579,6 +2579,15 @@ fn language_status_for(
         "echo_core::llm::capabilities::ModelProfileResolver::resolve",
         "echo_core::llm::capabilities::infer_context_window",
     ];
+    const LLM_API_PROTOCOL_IDENTITIES: &[&str] = &[
+        "echo_core::llm::LlmApiProtocol",
+        "echo_core::llm::LlmApiProtocol::Anthropic",
+        "echo_core::llm::LlmApiProtocol::ChatCompletions",
+        "echo_core::llm::LlmApiProtocol::Responses",
+        "echo_core::llm::LlmApiProtocol::endpoint_path",
+        "echo_core::llm::LlmApiProtocol::from_endpoint",
+        "echo_core::llm::LlmApiProtocol::try_from_endpoint",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2731,6 +2740,11 @@ fn language_status_for(
         )
     } else if MODEL_PROFILE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "model_profile_values")
+    } else if LLM_API_PROTOCOL_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "llm_api_protocol_values",
+        )
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

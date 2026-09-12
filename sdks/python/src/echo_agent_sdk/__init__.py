@@ -147,6 +147,7 @@ from .intervention_values import InterventionResult
 from .intrinsics import ParamValue, ToolCallParams, ToolResult
 from .jsonrpc_values import JsonRpcNotification, JsonRpcRequest
 from .jwt_values import JwtClaims, JwtConfig
+from .llm_api_protocol_values import LlmApiProtocol
 from .model_profile_values import (
     ModelProfile,
     ModelProfileOverride,
@@ -315,6 +316,7 @@ __all__ = [
     "JsonRpcRequest",
     "JwtClaims",
     "JwtConfig",
+    "LlmApiProtocol",
     "LlmChatCall",
     "LlmClient",
     "LlmClientDescriptor",
