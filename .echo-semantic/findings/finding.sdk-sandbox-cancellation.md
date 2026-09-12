@@ -16,7 +16,7 @@ decision_refs: []
 repair_evidence_refs: [evidence.sdk-contracts]
 verification_evidence_refs: [evidence.sdk-contracts]
 rereview_audit_refs: [audit.sdk-facade-plan08-final]
-discovered_at: source:912701f2c1f489d693198433f91a62cd2e6e530c570a73549bd7b753957ab9de
+discovered_at: source:ccc4d0577720ebe8c3b3229d8ea1c78c7ae7cafd128f2e9bfde196dab612adf2
 ---
 
 # Sandbox bridge 取消分类丢失

@@ -147,6 +147,12 @@ from .intervention_values import InterventionResult
 from .intrinsics import ParamValue, ToolCallParams, ToolResult
 from .jsonrpc_values import JsonRpcNotification, JsonRpcRequest
 from .jwt_values import JwtClaims, JwtConfig
+from .model_profile_values import (
+    ModelProfile,
+    ModelProfileOverride,
+    ModelProfileResolver,
+    infer_context_window,
+)
 from .observed_isolation_values import ObservedIsolation
 from .page_info_values import PageInfo
 from .permission_mode_values import PermissionMode
@@ -321,6 +327,9 @@ __all__ = [
     "MemoryPromoterResult",
     "MemoryTriggerRequest",
     "MemoryTriggerResult",
+    "ModelProfile",
+    "ModelProfileOverride",
+    "ModelProfileResolver",
     "ObservedIsolation",
     "PageInfo",
     "ParamValue",
@@ -418,6 +427,7 @@ __all__ = [
     "execution_usage_duration_millis",
     "extract_json_from_markdown",
     "from_wire",
+    "infer_context_window",
     "local_rfc3339_deserialize",
     "local_rfc3339_serialize",
     "now_local",

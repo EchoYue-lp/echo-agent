@@ -372,6 +372,9 @@ transport out of Rust.
 The ThinkingProfile slice adds five model/provider protocol-resolution
 identities, preserving manual level selection without contacting provider
 transports.
+The ModelProfile slice adds thirty-two provider/model policy identities,
+preserving context limits, tokenizer selection, and provider/exact override
+precedence without moving model policy transport out of Rust.
 The SDKs preserve calculation priority while LLM execution remains in Rust/Host.
 
 The HookAction slice adds 31 tagged variant/field/validation identities. The

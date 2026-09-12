@@ -234,6 +234,9 @@ Provider capability values preserve OpenAI-compatible, Anthropic and Ollama
 defaults plus provider-name resolution without owning provider transport.
 Thinking profile values preserve model/provider protocol selection and manual
 control levels without contacting an LLM provider.
+Model profile values preserve provider capability defaults, model limits,
+tokenizer selection, and provider/exact override precedence without owning
+provider transport.
 Page metadata values preserve truncation, continuation metadata, and output
 projection without owning collection state.
 Subagent context snapshots preserve empty/content semantics without owning

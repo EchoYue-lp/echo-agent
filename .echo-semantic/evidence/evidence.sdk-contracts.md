@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:912701f2c1f489d693198433f91a62cd2e6e530c570a73549bd7b753957ab9de
+observed_at: source:ccc4d0577720ebe8c3b3229d8ea1c78c7ae7cafd128f2e9bfde196dab612adf2
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -204,6 +204,14 @@ source_refs:
   - sdks/python/tests/test_thinking_profile_values.py
   - sdks/java/src/main/java/com/echoagent/sdk/ThinkingProfile.java
   - sdks/java/src/test/java/com/echoagent/sdk/ThinkingProfileTest.java
+  - sdks/typescript/src/model_profile_values.ts
+  - sdks/typescript/test/model-profile-values.test.js
+  - sdks/python/src/echo_agent_sdk/model_profile_values.py
+  - sdks/python/tests/test_model_profile_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/ModelProfile.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ModelProfileOverride.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ModelProfileResolver.java
+  - sdks/java/src/test/java/com/echoagent/sdk/ModelProfileTest.java
   - sdks/typescript/src/hook_action_values.ts
   - sdks/typescript/test/hook-action-values.test.js
   - sdks/typescript/src/subagent_usage_values.ts
