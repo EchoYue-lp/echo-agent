@@ -140,6 +140,102 @@ The A2A status/artifact stream event and JSON-RPC response DTOs are also
 available as local immutable values; stream transport remains Host-owned.
 Task request/params/response and task history envelopes are available as
 immutable nested DTOs; execution remains a Host operation.
+The local `ThinkingLevel` enum and parser preserve Rust reasoning-effort names
+and aliases in all three language SDKs.
+Steering lifecycle state and terminal outcome values are also available as
+local immutable values; receipt and turn ownership remain Host-side.
+Subagent command phases and terminal statuses are available as local values;
+the Subagent dispatch and message receipt remain Host-owned.
+Content-guard pass/detect/reject/redact decisions are available as local
+immutable values; guard execution remains Host/Rust-owned.
+Rust `GuardResult` is exposed as the language-native `GuardDecision` value;
+Python's existing component `GuardResult` remains unchanged.
+Delivery outcomes and phases are available as local values; the durable ledger
+and delivery lifecycle remain framework-owned.
+Subagent hook stop statuses are also local values; hook execution and dispatch
+remain framework-owned.
+Task terminal statuses are local values; PlanTask execution and task lifecycle
+remain framework-owned.
+Permission rule source values are local projections; rule evaluation and
+priority authority remain in Rust/Host.
+Permission rule behaviors are also local projections with decision conversion;
+evaluation and RuleRegistry authority remain in Rust/Host.
+Permission modes expose their canonical IDs, aliases, and policy predicates;
+mode evaluation remains framework-owned.
+Permission rule matchers expose pure parse/display/matching helpers; registry
+and evaluation authority remain in Rust/Host.
+Command-cell phases are local values; command process/sandbox execution remains
+framework-owned.
+Command-cell terminal causes and artifact statuses are local values; process
+and artifact writer ownership remains framework-owned.
+Team strategy values are local projections; Team dispatch and coordination remain
+framework-owned.
+ACP connection mode, extension settlement, and bounded ledger-limit values are
+also available as native local projections; ACP connection/session and ledger
+ownership remain Host/Rust-owned.
+`AcpAdapterConfig` is available as a validated local configuration snapshot;
+constructing or running the ACP adapter remains a Host/Rust responsibility.
+Typed ACP lease errors preserve the Rust display text while lease admission and
+concurrency decisions remain Host/Rust-owned.
+A2A `JwtConfig` and `JwtClaims` are available as local immutable projections;
+JWT verification, key handling, and A2A server ownership remain Host/Rust-owned.
+Skill dependency kinds and skill sources are also local values; probing,
+loading, and source policy remain framework/Host-owned.
+Subagent context inheritance defaults are available as immutable local values;
+message history, tools, memory stores, and dispatch remain framework-owned.
+Observed isolation names preserve trim/default and Unicode-safe 512-scalar
+bounds; isolation provider execution remains framework-owned.
+Segment ranges preserve Rust's half-open, saturating length semantics without
+owning the message cache.
+Prompt diagnostics preserve section recording and per-id counts without owning
+prompt compilation.
+Subagent command/attempt identities preserve validation and attempt projection
+without owning live-control registry state.
+Cumulative Subagent LLM usage values preserve sticky reporting, token
+accumulation, and payload projection without owning provider execution.
+Tool output artifact configuration preserves retention, threshold, and max-age
+defaults without owning artifact writing.
+Skill validation reports preserve violation gating without running Skill
+validation or loading authority.
+Skill content values preserve structured prompt-block rendering without loading
+or executing resources.
+MCP JSON-RPC request and notification values preserve the `2.0` constructors
+without owning MCP transport.
+Hook action values preserve tagged configuration and validation without
+executing commands, HTTP, MCP, or Subagent actions.
+Hook event names and categories preserve the Rust matcher classification,
+stable `ALL` ordering, PascalCase parsing, and tool/matcher predicates without
+owning hook dispatch.
+Event and stream identity values preserve non-empty validation, UUID-backed
+run/chat constructors, optional correlation fields, and immutable updates;
+the Host still owns stream sequencing and lifecycle.
+Intervention result factories preserve allow/block/cancel/inject/argument
+modification decisions as local immutable values; callback execution stays
+with the Host.
+Token budget and LLM timeout policies preserve allocation percentages,
+compression thresholds, report projections, and zero-disables-timeout behavior
+as local configuration values.
+Execution usage duration helpers preserve Rust's absent-to-zero projection
+without owning run accounting.
+Turn mode values preserve the chat/execute stream flavor without owning the
+turn driver.
+Retry policy values preserve no-retry/default construction, exponential
+backoff caps and optional jitter configuration without executing retries.
+Thinking configuration values preserve disabled/level/budget variants,
+flexible parsing and provider effort/budget projections without owning LLM
+transport.
+Page metadata values preserve truncation, continuation metadata, and output
+projection without owning collection state.
+Subagent context snapshots preserve empty/content semantics without owning
+tools, messages, stores, or dispatch.
+Provider-normalized Usage values preserve cache priority and effective token
+calculations without owning LLM execution.
+Hook action values preserve tagged configuration and validation without
+executing commands, HTTP, MCP, or Subagent actions.
+Cumulative Subagent LLM usage values preserve sticky reporting, token
+accumulation, and payload projection without owning provider execution.
+Subagent command/attempt identities preserve validation and attempt projection
+without owning live-control registry state.
 
 ## For contributors
 

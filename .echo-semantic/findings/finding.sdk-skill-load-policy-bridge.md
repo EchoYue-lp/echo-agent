@@ -16,7 +16,7 @@ decision_refs: []
 repair_evidence_refs: [evidence.sdk-contracts]
 verification_evidence_refs: [evidence.sdk-contracts]
 rereview_audit_refs: [audit.sdk-facade-plan08-final]
-discovered_at: source:ec3da31cc49f3fbe2f426f5f26ba0327fb530af8607bf5340afbc0d3fc3230c0
+discovered_at: source:e28cd89039dec2d12836a93492e0cd1db58369abfd07bb720a4b3008d9bcb4a0
 ---
 
 # SkillLoadPolicy 被误归为process-local

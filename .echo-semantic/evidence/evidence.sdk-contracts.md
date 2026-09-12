@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:ec3da31cc49f3fbe2f426f5f26ba0327fb530af8607bf5340afbc0d3fc3230c0
+observed_at: source:e28cd89039dec2d12836a93492e0cd1db58369abfd07bb720a4b3008d9bcb4a0
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -53,6 +53,133 @@ source_refs:
   - sdks/typescript/src/a2a.ts
   - sdks/typescript/test/intrinsic-tool-values.test.js
   - sdks/typescript/test/a2a-task-state.test.js
+  - sdks/typescript/src/thinking.ts
+  - sdks/typescript/test/thinking.test.js
+  - sdks/typescript/src/steering_values.ts
+  - sdks/typescript/test/steering-values.test.js
+  - sdks/typescript/src/subagent_values.ts
+  - sdks/typescript/test/subagent-values.test.js
+  - sdks/typescript/src/content_guard_values.ts
+  - sdks/typescript/test/content-guard-values.test.js
+  - sdks/typescript/src/guard_values.ts
+  - sdks/typescript/test/guard-values.test.js
+  - sdks/typescript/src/delivery_values.ts
+  - sdks/typescript/test/delivery-values.test.js
+  - sdks/typescript/src/subagent_stop_values.ts
+  - sdks/typescript/test/subagent-stop-values.test.js
+  - sdks/typescript/src/task_terminal_values.ts
+  - sdks/typescript/test/task-terminal-values.test.js
+  - sdks/typescript/src/permission_rule_values.ts
+  - sdks/typescript/test/permission-rule-values.test.js
+  - sdks/typescript/src/permission_rule_behavior.ts
+  - sdks/typescript/test/permission-rule-behavior.test.js
+  - sdks/typescript/src/permission_mode_values.ts
+  - sdks/typescript/test/permission-mode-values.test.js
+  - sdks/typescript/src/permission_rule_matcher.ts
+  - sdks/typescript/test/permission-rule-matcher.test.js
+  - sdks/typescript/src/command_cell_values.ts
+  - sdks/typescript/test/command-cell-values.test.js
+  - sdks/typescript/src/command_cell_status_values.ts
+  - sdks/typescript/test/command-cell-status-values.test.js
+  - sdks/typescript/src/team_strategy_values.ts
+  - sdks/typescript/test/team-strategy-values.test.js
+  - sdks/typescript/src/acp_values.ts
+  - sdks/typescript/test/acp-values.test.js
+  - sdks/typescript/src/jwt_values.ts
+  - sdks/typescript/test/jwt-values.test.js
+  - sdks/typescript/src/dependency_values.ts
+  - sdks/typescript/test/dependency-values.test.js
+  - sdks/typescript/src/context_inheritance_values.ts
+  - sdks/typescript/test/context-inheritance-values.test.js
+  - sdks/typescript/src/observed_isolation_values.ts
+  - sdks/typescript/test/observed-isolation-values.test.js
+  - sdks/typescript/src/segment_range_values.ts
+  - sdks/typescript/test/segment-range-values.test.js
+  - sdks/typescript/src/prompt_diagnostics_values.ts
+  - sdks/typescript/test/prompt-diagnostics-values.test.js
+  - sdks/typescript/src/subagent_command_identity_values.ts
+  - sdks/typescript/test/subagent-command-identity-values.test.js
+  - sdks/typescript/src/subagent_usage_values.ts
+  - sdks/typescript/test/subagent-usage-values.test.js
+  - sdks/typescript/src/tool_output_artifact_config_values.ts
+  - sdks/typescript/test/tool-output-artifact-config-values.test.js
+  - sdks/typescript/src/skill_validation_values.ts
+  - sdks/typescript/test/skill-validation-values.test.js
+  - sdks/typescript/src/skill_content_values.ts
+  - sdks/typescript/test/skill-content-values.test.js
+  - sdks/typescript/src/jsonrpc_values.ts
+  - sdks/typescript/test/jsonrpc-values.test.js
+  - sdks/typescript/src/hook_action_values.ts
+  - sdks/typescript/test/hook-action-values.test.js
+  - sdks/typescript/src/page_info_values.ts
+  - sdks/typescript/test/page-info-values.test.js
+  - sdks/typescript/src/subagent_context_values.ts
+  - sdks/typescript/test/subagent-context-values.test.js
+  - sdks/typescript/src/usage_values.ts
+  - sdks/typescript/test/usage-values.test.js
+  - echo-sdk-protocol/src/inventory.rs
+  - echo-sdk-protocol/tests/facade_inventory.rs
+  - sdks/typescript/src/hook_event_values.ts
+  - sdks/typescript/test/hook-event-values.test.js
+  - sdks/python/src/echo_agent_sdk/hook_event_values.py
+  - sdks/python/tests/test_hook_event_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/HookEvent.java
+  - sdks/java/src/main/java/com/echoagent/sdk/HookEventCategory.java
+  - sdks/java/src/test/java/com/echoagent/sdk/HookEventTest.java
+  - sdks/typescript/src/event_identity_values.ts
+  - sdks/typescript/test/event-identity-values.test.js
+  - sdks/python/src/echo_agent_sdk/event_identity_values.py
+  - sdks/python/tests/test_event_identity_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/EventId.java
+  - sdks/java/src/main/java/com/echoagent/sdk/StreamId.java
+  - sdks/java/src/main/java/com/echoagent/sdk/EventIdentity.java
+  - sdks/java/src/test/java/com/echoagent/sdk/EventIdentityTest.java
+  - sdks/typescript/src/intervention_values.ts
+  - sdks/typescript/test/intervention-values.test.js
+  - sdks/python/src/echo_agent_sdk/intervention_values.py
+  - sdks/python/tests/test_intervention_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/InterventionResult.java
+  - sdks/java/src/test/java/com/echoagent/sdk/InterventionResultTest.java
+  - sdks/typescript/src/token_budget_values.ts
+  - sdks/typescript/test/token-budget-values.test.js
+  - sdks/python/src/echo_agent_sdk/token_budget_values.py
+  - sdks/python/tests/test_token_budget_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/TokenAllocation.java
+  - sdks/java/src/main/java/com/echoagent/sdk/BudgetReport.java
+  - sdks/java/src/main/java/com/echoagent/sdk/TokenBudget.java
+  - sdks/java/src/main/java/com/echoagent/sdk/TokenBudgetConfig.java
+  - sdks/java/src/main/java/com/echoagent/sdk/LlmTimeouts.java
+  - sdks/java/src/test/java/com/echoagent/sdk/TokenBudgetTest.java
+  - sdks/typescript/src/execution_usage_values.ts
+  - sdks/typescript/test/execution-usage-values.test.js
+  - sdks/python/src/echo_agent_sdk/execution_usage_values.py
+  - sdks/python/tests/test_execution_usage_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/ExecutionUsage.java
+  - sdks/java/src/test/java/com/echoagent/sdk/ExecutionUsageTest.java
+  - sdks/typescript/src/turn_mode_values.ts
+  - sdks/typescript/test/turn-mode-values.test.js
+  - sdks/python/src/echo_agent_sdk/turn_mode_values.py
+  - sdks/python/tests/test_turn_mode_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/TurnMode.java
+  - sdks/java/src/test/java/com/echoagent/sdk/TurnModeTest.java
+  - sdks/typescript/src/retry_policy_values.ts
+  - sdks/typescript/test/retry-policy-values.test.js
+  - sdks/python/src/echo_agent_sdk/retry_policy_values.py
+  - sdks/python/tests/test_retry_policy_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/RetryPolicy.java
+  - sdks/java/src/test/java/com/echoagent/sdk/RetryPolicyTest.java
+  - sdks/typescript/src/thinking_config_values.ts
+  - sdks/typescript/test/thinking-config-values.test.js
+  - sdks/python/src/echo_agent_sdk/thinking_config_values.py
+  - sdks/python/tests/test_thinking_config_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/ThinkingConfig.java
+  - sdks/java/src/test/java/com/echoagent/sdk/ThinkingConfigTest.java
+  - sdks/typescript/src/hook_action_values.ts
+  - sdks/typescript/test/hook-action-values.test.js
+  - sdks/typescript/src/subagent_usage_values.ts
+  - sdks/typescript/test/subagent-usage-values.test.js
+  - sdks/typescript/src/subagent_command_identity_values.ts
+  - sdks/typescript/test/subagent-command-identity-values.test.js
   - sdks/typescript/README.md
   - sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java
   - sdks/java/src/test/java/com/echoagent/sdk/IntrinsicToolValueTest.java
@@ -81,6 +208,49 @@ source_refs:
   - sdks/java/src/main/java/com/echoagent/sdk/AgentCard.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentCardBuilder.java
   - sdks/java/src/main/java/com/echoagent/sdk/AuthenticationScheme.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ThinkingLevel.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentSteerPhase.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentSteerState.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentSteerTurnOutcome.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SubagentCommandPhase.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SubagentStatus.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ContentGuardResult.java
+  - sdks/java/src/main/java/com/echoagent/sdk/GuardDecision.java
+  - sdks/java/src/main/java/com/echoagent/sdk/DeliveryOutcome.java
+  - sdks/java/src/main/java/com/echoagent/sdk/DeliveryPhase.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SubagentStopStatus.java
+  - sdks/java/src/main/java/com/echoagent/sdk/TaskTerminalStatus.java
+  - sdks/java/src/main/java/com/echoagent/sdk/RuleSource.java
+  - sdks/java/src/main/java/com/echoagent/sdk/RuleBehavior.java
+  - sdks/java/src/main/java/com/echoagent/sdk/PermissionMode.java
+  - sdks/java/src/main/java/com/echoagent/sdk/RuleMatcher.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ToolPermission.java
+  - sdks/java/src/main/java/com/echoagent/sdk/CommandCellPhase.java
+  - sdks/java/src/main/java/com/echoagent/sdk/CommandCellStatus.java
+  - sdks/java/src/main/java/com/echoagent/sdk/TeamStrategy.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AcpValues.java
+  - sdks/java/src/main/java/com/echoagent/sdk/JwtConfig.java
+  - sdks/java/src/main/java/com/echoagent/sdk/JwtClaims.java
+  - sdks/java/src/main/java/com/echoagent/sdk/DependencyKind.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SkillSource.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ContextInheritance.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ObservedIsolation.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SegmentRange.java
+  - sdks/java/src/main/java/com/echoagent/sdk/PromptDiagnostics.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SubagentCommandIdentity.java
+  - sdks/java/src/main/java/com/echoagent/sdk/LlmUsageStats.java
+  - sdks/java/src/main/java/com/echoagent/sdk/ToolOutputArtifactConfig.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SkillValidationReport.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SkillContent.java
+  - sdks/java/src/main/java/com/echoagent/sdk/JsonRpcValues.java
+  - sdks/java/src/main/java/com/echoagent/sdk/HookAction.java
+  - sdks/java/src/main/java/com/echoagent/sdk/PageInfo.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SubagentContext.java
+  - sdks/java/src/main/java/com/echoagent/sdk/Usage.java
+  - sdks/java/src/main/java/com/echoagent/sdk/HookAction.java
+  - sdks/java/src/main/java/com/echoagent/sdk/LlmUsageStats.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SubagentCommandIdentity.java
+  - sdks/java/src/main/java/com/echoagent/sdk/AcpAdapterConfig.java
   - echo-sdk-host/tests/support/mod.rs
   - sdks/typescript/src/client.ts
   - sdks/typescript/src/types.ts
@@ -93,6 +263,78 @@ source_refs:
   - sdks/python/tests/test_lifecycle.py
   - sdks/python/tests/test_intrinsic_tool_values.py
   - sdks/python/tests/test_a2a_task_state.py
+  - sdks/python/src/echo_agent_sdk/thinking.py
+  - sdks/python/src/echo_agent_sdk/steering_values.py
+  - sdks/python/tests/test_steering_values.py
+  - sdks/python/src/echo_agent_sdk/subagent_values.py
+  - sdks/python/tests/test_subagent_values.py
+  - sdks/python/src/echo_agent_sdk/content_guard_values.py
+  - sdks/python/tests/test_content_guard_values.py
+  - sdks/python/src/echo_agent_sdk/guard_values.py
+  - sdks/python/tests/test_guard_values.py
+  - sdks/python/src/echo_agent_sdk/delivery_values.py
+  - sdks/python/tests/test_delivery_values.py
+  - sdks/python/src/echo_agent_sdk/subagent_stop_values.py
+  - sdks/python/tests/test_subagent_stop_values.py
+  - sdks/python/src/echo_agent_sdk/task_terminal_values.py
+  - sdks/python/tests/test_task_terminal_values.py
+  - sdks/python/src/echo_agent_sdk/permission_rule_values.py
+  - sdks/python/tests/test_permission_rule_values.py
+  - sdks/python/src/echo_agent_sdk/permission_rule_behavior.py
+  - sdks/python/tests/test_permission_rule_behavior.py
+  - sdks/python/src/echo_agent_sdk/permission_mode_values.py
+  - sdks/python/tests/test_permission_mode_values.py
+  - sdks/python/src/echo_agent_sdk/permission_rule_matcher.py
+  - sdks/python/tests/test_permission_rule_matcher.py
+  - sdks/python/src/echo_agent_sdk/command_cell_values.py
+  - sdks/python/tests/test_command_cell_values.py
+  - sdks/python/src/echo_agent_sdk/command_cell_status_values.py
+  - sdks/python/tests/test_command_cell_status_values.py
+  - sdks/python/src/echo_agent_sdk/team_strategy_values.py
+  - sdks/python/tests/test_team_strategy_values.py
+  - sdks/python/src/echo_agent_sdk/acp_values.py
+  - sdks/python/tests/test_acp_values.py
+  - sdks/python/src/echo_agent_sdk/acp_config_values.py
+  - sdks/python/tests/test_acp_config_values.py
+  - sdks/python/tests/test_acp_lease_values.py
+  - sdks/python/src/echo_agent_sdk/jwt_values.py
+  - sdks/python/tests/test_jwt_values.py
+  - sdks/python/src/echo_agent_sdk/dependency_values.py
+  - sdks/python/tests/test_dependency_values.py
+  - sdks/python/src/echo_agent_sdk/context_inheritance_values.py
+  - sdks/python/tests/test_context_inheritance_values.py
+  - sdks/python/src/echo_agent_sdk/observed_isolation_values.py
+  - sdks/python/tests/test_observed_isolation_values.py
+  - sdks/python/src/echo_agent_sdk/segment_range_values.py
+  - sdks/python/tests/test_segment_range_values.py
+  - sdks/python/src/echo_agent_sdk/prompt_diagnostics_values.py
+  - sdks/python/tests/test_prompt_diagnostics_values.py
+  - sdks/python/src/echo_agent_sdk/subagent_command_identity_values.py
+  - sdks/python/tests/test_subagent_command_identity_values.py
+  - sdks/python/src/echo_agent_sdk/subagent_usage_values.py
+  - sdks/python/tests/test_subagent_usage_values.py
+  - sdks/python/src/echo_agent_sdk/tool_output_artifact_config_values.py
+  - sdks/python/tests/test_tool_output_artifact_config_values.py
+  - sdks/python/src/echo_agent_sdk/skill_validation_values.py
+  - sdks/python/tests/test_skill_validation_values.py
+  - sdks/python/src/echo_agent_sdk/skill_content_values.py
+  - sdks/python/tests/test_skill_content_values.py
+  - sdks/python/src/echo_agent_sdk/jsonrpc_values.py
+  - sdks/python/tests/test_jsonrpc_values.py
+  - sdks/python/src/echo_agent_sdk/hook_action_values.py
+  - sdks/python/tests/test_hook_action_values.py
+  - sdks/python/src/echo_agent_sdk/page_info_values.py
+  - sdks/python/tests/test_page_info_values.py
+  - sdks/python/src/echo_agent_sdk/subagent_context_values.py
+  - sdks/python/tests/test_subagent_context_values.py
+  - sdks/python/src/echo_agent_sdk/usage_values.py
+  - sdks/python/tests/test_usage_values.py
+  - sdks/python/src/echo_agent_sdk/hook_action_values.py
+  - sdks/python/tests/test_hook_action_values.py
+  - sdks/python/src/echo_agent_sdk/subagent_usage_values.py
+  - sdks/python/tests/test_subagent_usage_values.py
+  - sdks/python/src/echo_agent_sdk/subagent_command_identity_values.py
+  - sdks/python/tests/test_subagent_command_identity_values.py
   - sdks/python/README.md
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentCall.java
   - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentDescriptor.java

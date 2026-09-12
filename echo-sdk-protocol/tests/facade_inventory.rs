@@ -432,6 +432,1188 @@ fn a2a_task_envelopes_have_language_behavior_evidence() -> TestResult {
 }
 
 #[test]
+fn thinking_level_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/thinking_level"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 9, "ThinkingLevel value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn steering_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/steering_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 13, "steering value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/subagent_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 15, "subagent value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn content_guard_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/content_guard_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 6, "content guard value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn guard_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/guard_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 6, "guard value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn delivery_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/delivery_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 16, "delivery value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_stop_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/subagent_stop_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 6, "subagent stop value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn task_terminal_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/task_terminal_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 7, "task terminal value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn permission_rule_sources_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/permission_rule_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 10, "permission rule source set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn permission_rule_behavior_has_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/permission_rule_behavior"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 6, "permission rule behavior set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn permission_mode_helpers_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/permission_mode_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 6, "permission mode helper set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn permission_rule_matcher_has_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/permission_rule_matcher"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 9, "permission rule matcher set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn command_cell_phases_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/command_cell_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 10, "command cell phase set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn command_cell_status_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry.languages.values().all(|mapping| {
+                    mapping
+                        .contract_test
+                        .ends_with("/command_cell_status_values")
+                })
+        })
+        .collect();
+    assert_eq!(entries.len(), 15, "command cell status set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn team_strategy_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/team_strategy_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 7, "team strategy value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn acp_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/acp_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 13, "ACP value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn acp_config_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/acp_config_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 13, "ACP adapter config value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn acp_lease_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/acp_lease_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 5, "ACP lease error value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn jwt_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/jwt_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 9, "JWT value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn dependency_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/dependency_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 7, "dependency value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn context_inheritance_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry.languages.values().all(|mapping| {
+                    mapping
+                        .contract_test
+                        .ends_with("/context_inheritance_values")
+                })
+        })
+        .collect();
+    assert_eq!(entries.len(), 11, "context inheritance set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn observed_isolation_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry.languages.values().all(|mapping| {
+                    mapping
+                        .contract_test
+                        .ends_with("/observed_isolation_values")
+                })
+        })
+        .collect();
+    assert_eq!(entries.len(), 4, "observed isolation set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn segment_range_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/segment_range_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 3, "segment range set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn prompt_diagnostics_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry.languages.values().all(|mapping| {
+                    mapping
+                        .contract_test
+                        .ends_with("/prompt_diagnostics_values")
+                })
+        })
+        .collect();
+    assert_eq!(entries.len(), 3, "prompt diagnostics set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_command_identity_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry.languages.values().all(|mapping| {
+                    mapping
+                        .contract_test
+                        .ends_with("/subagent_command_identity_values")
+                })
+        })
+        .collect();
+    assert_eq!(entries.len(), 6, "Subagent command identity set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_usage_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/subagent_usage_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 3, "Subagent usage set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn tool_output_artifact_config_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry.languages.values().all(|mapping| {
+                    mapping
+                        .contract_test
+                        .ends_with("/tool_output_artifact_config_values")
+                })
+        })
+        .collect();
+    assert_eq!(entries.len(), 7, "artifact config set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn skill_validation_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/skill_validation_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 2, "skill validation set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn skill_content_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/skill_content_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 2, "skill content set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn jsonrpc_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/jsonrpc_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 4, "JSON-RPC value set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_context_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/subagent_context_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 3, "Subagent context set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn usage_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/usage_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 6, "usage set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn hook_action_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/hook_action_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 30, "hook action set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn page_info_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/page_info_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 2, "page info set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn hook_event_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/hook_event_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 45, "hook event set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn event_identity_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/event_identity_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 29, "event identity set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn intervention_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/intervention_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 7, "intervention result set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn token_budget_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/token_budget_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 35, "token budget set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn execution_usage_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/execution_usage_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 1, "execution usage set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn turn_mode_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/turn_mode_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 3, "turn mode set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn retry_policy_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/retry_policy_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 9, "retry policy set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn thinking_config_values_have_language_behavior_evidence() -> TestResult {
+    let manifest = manifest()?;
+    let entries: Vec<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.canonical
+                && entry
+                    .languages
+                    .values()
+                    .all(|mapping| mapping.contract_test.ends_with("/thinking_config_values"))
+        })
+        .collect();
+    assert_eq!(entries.len(), 14, "thinking config set drifted");
+    for entry in entries {
+        for (language, mapping) in &entry.languages {
+            assert_eq!(
+                mapping.status,
+                echo_sdk_protocol::inventory::LanguageImplementationStatus::Done,
+                "{language}: {}",
+                entry.path
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn known_facade_semantics_are_classified_correctly() -> TestResult {
     let manifest = manifest()?;
     assert_eq!(

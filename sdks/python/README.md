@@ -65,6 +65,94 @@ artifact chunks and typed task errors.
 preserve the local typed stream event union without owning transport.
 `A2ATaskParams`, `A2ATaskRequest`, `A2ATask`, and `A2ATaskResponse` provide
 the corresponding immutable nested task envelopes.
+`ThinkingLevel.parse(...)` preserves the Rust reasoning-effort aliases.
+`AgentSteerState` and `AgentSteerTurnOutcome` preserve steering boundaries;
+the live receipt and turn remain Host-owned.
+`SubagentCommandPhase` and `SubagentStatus` preserve stable strings and parse
+errors; dispatch state remains Host-owned.
+`ContentGuardResult` preserves guard decisions and PII payloads; execution
+remains Host-owned.
+Rust `GuardResult` is projected as `GuardDecision` so the existing component
+`GuardResult` helper remains source-compatible.
+`DeliveryOutcome` and `DeliveryPhase` preserve stable ledger spellings without
+owning delivery lifecycle state.
+`SubagentStopStatus` preserves stable hook terminal values without owning hook
+dispatch.
+`TaskTerminalStatus` preserves stable task terminal values without owning task
+execution.
+`RuleSource` preserves permission source priority values and accepted aliases;
+rule evaluation remains Host-owned.
+`RuleBehavior` preserves allow/deny/ask payloads and `to_decision` conversion;
+rule evaluation remains Host-owned.
+`PermissionMode` preserves aliases and write/interaction/classifier helpers;
+mode evaluation remains Host-owned.
+`RuleMatcher` preserves pure tool/pattern/permission/all matching semantics;
+evaluation remains Host-owned.
+`CommandCellPhase` preserves stable phases and terminal classification without
+owning command execution.
+Command-cell terminal causes and artifact statuses preserve stable values
+without owning process or artifact execution.
+`TeamStrategy` preserves manager/pipeline/debate/swarm values without owning
+Team dispatch.
+`ConnectionMode`, `ExtensionSettlement`, and `AcpLedgerLimits` preserve ACP
+runtime values without owning the connection or event ledger.
+`AcpAdapterConfig` and `AcpDuration` preserve adapter limits, validation
+errors, and the shutdown duration without constructing an ACP adapter.
+`ExtensionLeaseError` preserves typed lease failure text while admission and
+concurrency remain Host-owned.
+`JwtConfig` and `JwtClaims` preserve local A2A auth configuration and subject
+projection; token verification remains Host-owned.
+`DependencyKind` and `SkillSource` preserve dependency/source values without
+probing or loading skills.
+`ContextInheritance` preserves the local inheritance defaults without owning
+Subagent context, stores, or dispatch.
+`ObservedIsolation` preserves trim, empty-default, and Unicode-safe bounds
+without owning isolation execution.
+`SegmentRange` preserves half-open saturating length and emptiness without
+owning cache state.
+`PromptDiagnostics` preserves section recording and per-id counts without
+owning prompt compilation.
+`SubagentCommandIdentity` and `SubagentAttemptIdentity` preserve durable ID
+validation and projection without owning live control.
+`LlmUsageStats` preserves cumulative token counters and payload projection
+without owning provider execution.
+`ToolOutputArtifactConfig` preserves retention, threshold, and max-age builders
+without owning artifact writing.
+`SkillValidationReport` preserves violation gating without running validation.
+`SkillContent` preserves structured prompt-block rendering without loading or
+executing resources.
+JSON-RPC request and notification values preserve MCP `2.0` constructors
+without owning transport.
+`HookAction` preserves tagged configuration and validation without executing
+hooks.
+`HookEvent` and `HookEventCategory` preserve stable names, ordering, category
+classification, parsing and matcher predicates without owning hook dispatch.
+`EventId`, `StreamId` and `EventIdentity` preserve non-empty validation,
+run/chat constructors, correlation fields and immutable `with_*` updates.
+`InterventionResult` exposes immutable allow/block/cancel/inject/argument
+modification factories without owning callback execution.
+`TokenBudget`, `TokenBudgetConfig`, `TokenAllocation` and `LlmTimeouts` expose
+the same allocation, compression and zero-disabled timeout policy helpers.
+`execution_usage_duration_millis` maps absent duration to zero without owning
+run accounting.
+`TurnMode` preserves the chat/execute stream flavor without owning the turn
+driver.
+`RetryPolicy` preserves default/no-retry factories, exponential backoff caps
+and optional jitter configuration without running retries.
+`ThinkingConfig` preserves disabled/level/budget variants, parsing and
+provider effort/budget projections without owning LLM transport.
+`PageInfo` preserves truncation, continuation metadata, and output projection
+without owning collection state.
+`SubagentContext` preserves empty/content semantics without owning context or
+dispatch state.
+`Usage` preserves provider-normalized cache priority and effective token
+calculations without owning LLM execution.
+`HookAction` preserves tagged configuration and validation without executing
+hooks.
+`LlmUsageStats` preserves cumulative token counters and payload projection
+without owning provider execution.
+`SubagentCommandIdentity` and `SubagentAttemptIdentity` preserve durable ID
+validation and projection without owning live control.
 Session updates and Run events are bounded async iterators with cursor ACKs,
 gap/overflow errors, Host-exit propagation and idempotent close semantics.
 Context compressor calls include a Host-owned tokenizer handle;

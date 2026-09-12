@@ -41,6 +41,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A2A task envelope DTOs in all source SDKs.** Task request/params/response
   and nested history/artifact values now preserve the local wire contract.
 
+- **ThinkingLevel parsing in all source SDKs.** The seven reasoning levels and
+  Rust-compatible user-facing aliases are now available in each language.
+
+- **Steering lifecycle values in all source SDKs.** Accepted, drained, settled,
+  and typed turn outcomes now preserve the local value semantics.
+
+- **Subagent phase/status values in all source SDKs.** Stable command phases and
+  runtime statuses now preserve their Rust string and parse semantics.
+
+- **Content-guard decision values in all source SDKs.** Pass, detect, reject,
+  and redact outcomes now preserve their local payload semantics.
+
+- **Guard decision values in all source SDKs.** Pass, block, warn, and transform
+  outcomes now preserve their payload semantics without replacing Python's
+  existing component `GuardResult` API.
+
+- **Delivery outcome/phase values in all source SDKs.** Durable delivery enums
+  now preserve their stable snake-case spellings.
+
+- **Subagent stop status values in all source SDKs.** Hook terminal statuses now
+  preserve their stable snake-case spellings without owning hook dispatch.
+
+- **Task terminal status values in all source SDKs.** Completed, failed,
+  cancelled, timed-out, and skipped statuses now preserve their spellings.
+
+- **Permission rule source values in all source SDKs.** Source priority values,
+  aliases, and parse/display semantics are now projected without evaluation.
+
+- **Permission rule behavior values in all source SDKs.** Allow, deny, and ask
+  behavior payloads now preserve parse defaults and decision projection.
+
+- **Permission mode helpers in all source SDKs.** Mode parsing and write,
+  interaction, and classifier predicates now preserve Rust semantics.
+
+- **Permission rule matcher values in all source SDKs.** Tool/pattern/permission
+  matchers now preserve parsing, display, and pure matching semantics.
+
+- **ACP runtime values in all source SDKs.** Connection modes, extension
+  settlement outcomes, and bounded ledger limits now preserve their Rust value
+  semantics without projecting ACP connection or ledger ownership.
+
+- **ACP adapter configuration in all source SDKs.** Adapter metadata, resource
+  limits, lossless shutdown duration, defaults, and validation errors now have
+  native source projections without moving adapter construction into a client.
+
+- **ACP lease errors in all source SDKs.** Admission-closed, concurrency-limit,
+  and exclusive-conflict failures now preserve their Rust display text without
+  moving lease authority into a client.
+
+- **A2A JWT values in all source SDKs.** JWT configuration builders and claims
+  subject projection now preserve local semantics without moving token
+  verification or A2A server ownership into a client.
+
+- **Skill dependency/source values in all source SDKs.** Dependency kinds and
+  skill source values now preserve stable spellings without moving probing,
+  loading, or source policy into a client.
+
+- **Subagent context inheritance values in all source SDKs.** Sync, fresh, fork,
+  teammate, and team defaults now preserve inheritance fields without moving
+  context or dispatch authority into a client.
+
+- **Observed Subagent isolation values in all source SDKs.** Isolation names
+  now preserve trim, empty-default, and Unicode-safe 512-scalar bounds without
+  moving isolation execution into a client.
+
+- **Segment range values in all source SDKs.** Half-open cache segment ranges
+  now preserve Rust's saturating length and emptiness semantics without moving
+  cache state into a client.
+
+- **Prompt diagnostics values in all source SDKs.** Section recording and
+  per-id counts now preserve local diagnostics semantics without moving prompt
+  compilation into a client.
+
+- **Subagent command identity values in all source SDKs.** Durable command and
+  attempt ID validation/projection now preserve local semantics without moving
+  live-control registry state into a client.
+
+- **Subagent LLM usage values in all source SDKs.** Sticky usage reporting,
+  cumulative token counters, and payload projection now preserve local
+  semantics without moving provider execution into a client.
+
+- **Tool output artifact configuration in all source SDKs.** Retention,
+  threshold, max-age defaults, and builder semantics now preserve local values
+  without moving artifact writing into a client.
+
+- **Skill validation reports in all source SDKs.** Violation gating now
+  preserves local report semantics without moving Skill validation into a
+  client.
+
+- **Skill content values in all source SDKs.** Structured prompt-block
+  rendering now preserves local content semantics without moving resource
+  loading or execution into a client.
+
+- **MCP JSON-RPC values in all source SDKs.** Request and notification
+  constructors now preserve the local `2.0` value contract without moving MCP
+  transport into a client.
+
+- **Hook action values in all source SDKs.** Tagged hook configuration and
+  validation now preserve local semantics without moving hook execution into a
+  client.
+
+- **Page metadata values in all source SDKs.** Truncation, continuation
+  metadata, and output projection now preserve local pagination semantics
+  without moving collection state into a client.
+
+- **Subagent context snapshot values in all source SDKs.** Empty/content
+  semantics now preserve local snapshots without moving context or dispatch
+  state into a client.
+
+- **Provider-normalized Usage values in all source SDKs.** Cache priority and
+  effective token calculations now preserve local semantics without moving LLM
+  execution into a client.
+
+- **Hook action values in all source SDKs.** Tagged hook configuration and
+  validation now preserve local semantics without moving hook execution into a
+  client.
+
+- **Subagent LLM usage values in all source SDKs.** Sticky usage reporting,
+  cumulative token counters, and payload projection now preserve local
+  semantics without moving provider execution into a client.
+
+- **Subagent command identity values in all source SDKs.** Durable command and
+  attempt ID validation/projection now preserve local semantics without moving
+  live-control registry state into a client.
+
+- **Command-cell phase values in all source SDKs.** Stable command renderer
+  phases and terminal classification now preserve their Rust semantics.
+
+- **Command-cell terminal/artifact values in all source SDKs.** Terminal causes
+  and artifact writer states now preserve stable spellings.
+
+- **Team strategy values in all source SDKs.** Manager, pipeline, debate, and
+  swarm strategy values now preserve local fields and descriptions.
+
 - **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
   Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
   capability and lets a host language register Tool, LlmClient, Store,
