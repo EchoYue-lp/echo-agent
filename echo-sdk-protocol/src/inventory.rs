@@ -2545,6 +2545,40 @@ fn language_status_for(
         "echo_core::llm::capabilities::ThinkingProfile::unknown",
         "echo_core::llm::capabilities::resolve_thinking_profile",
     ];
+    const MODEL_PROFILE_IDENTITIES: &[&str] = &[
+        "echo_core::llm::capabilities::ModelProfile",
+        "echo_core::llm::capabilities::ModelProfile::capabilities",
+        "echo_core::llm::capabilities::ModelProfile::context_window",
+        "echo_core::llm::capabilities::ModelProfile::excluded_tools",
+        "echo_core::llm::capabilities::ModelProfile::from_provider_name",
+        "echo_core::llm::capabilities::ModelProfile::max_output_tokens",
+        "echo_core::llm::capabilities::ModelProfile::model_name",
+        "echo_core::llm::capabilities::ModelProfile::new",
+        "echo_core::llm::capabilities::ModelProfile::prompt_suffix",
+        "echo_core::llm::capabilities::ModelProfile::provider",
+        "echo_core::llm::capabilities::ModelProfile::supports_images",
+        "echo_core::llm::capabilities::ModelProfile::supports_parallel_tool_calls",
+        "echo_core::llm::capabilities::ModelProfile::supports_reasoning",
+        "echo_core::llm::capabilities::ModelProfile::supports_streaming",
+        "echo_core::llm::capabilities::ModelProfile::supports_tool_choice_none",
+        "echo_core::llm::capabilities::ModelProfile::supports_tools",
+        "echo_core::llm::capabilities::ModelProfile::thinking_levels",
+        "echo_core::llm::capabilities::ModelProfile::thinking_protocol",
+        "echo_core::llm::capabilities::ModelProfile::tokenizer_name",
+        "echo_core::llm::capabilities::ModelProfileOverride",
+        "echo_core::llm::capabilities::ModelProfileOverride::context_window",
+        "echo_core::llm::capabilities::ModelProfileOverride::excluded_tools",
+        "echo_core::llm::capabilities::ModelProfileOverride::prompt_suffix",
+        "echo_core::llm::capabilities::ModelProfileOverride::supports_parallel_tool_calls",
+        "echo_core::llm::capabilities::ModelProfileOverride::supports_structured_output",
+        "echo_core::llm::capabilities::ModelProfileOverride::supports_tool_choice_none",
+        "echo_core::llm::capabilities::ModelProfileResolver",
+        "echo_core::llm::capabilities::ModelProfileResolver::new",
+        "echo_core::llm::capabilities::ModelProfileResolver::register_exact",
+        "echo_core::llm::capabilities::ModelProfileResolver::register_provider_default",
+        "echo_core::llm::capabilities::ModelProfileResolver::resolve",
+        "echo_core::llm::capabilities::infer_context_window",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2695,6 +2729,8 @@ fn language_status_for(
             LanguageImplementationStatus::Done,
             "thinking_profile_values",
         )
+    } else if MODEL_PROFILE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "model_profile_values")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

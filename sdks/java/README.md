@@ -169,6 +169,9 @@ snapshots without creating sandbox processes.
 defaults plus provider-name resolution without owning provider transport.
 `ThinkingProfile.resolveThinkingProfile` preserves model/provider protocol
 selection and manual control levels without contacting a provider.
+`ModelProfile`, `ModelProfileOverride`, and `ModelProfileResolver` preserve
+provider capability defaults, model limits, tokenizer selection, and provider
+then exact override precedence without owning provider transport.
 `PageInfo` preserves truncation, continuation metadata, and output projection
 while collection state remains framework-owned.
 `SubagentContext` exposes empty/content semantics while context and dispatch
