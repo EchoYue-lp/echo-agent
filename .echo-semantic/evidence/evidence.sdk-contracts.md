@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:e28cd89039dec2d12836a93492e0cd1db58369abfd07bb720a4b3008d9bcb4a0
+observed_at: source:48ba788cb70ff0bb8476d785900476c14a3db9a96d4583c2d5792583ba6d3556
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -174,6 +174,18 @@ source_refs:
   - sdks/python/tests/test_thinking_config_values.py
   - sdks/java/src/main/java/com/echoagent/sdk/ThinkingConfig.java
   - sdks/java/src/test/java/com/echoagent/sdk/ThinkingConfigTest.java
+  - sdks/typescript/src/time_values.ts
+  - sdks/typescript/test/time-values.test.js
+  - sdks/python/src/echo_agent_sdk/time_values.py
+  - sdks/python/tests/test_time_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/TimeValues.java
+  - sdks/java/src/test/java/com/echoagent/sdk/TimeValuesTest.java
+  - sdks/typescript/src/thinking_protocol_values.ts
+  - sdks/typescript/test/thinking-protocol-values.test.js
+  - sdks/python/src/echo_agent_sdk/thinking_protocol_values.py
+  - sdks/python/tests/test_thinking_protocol_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/ThinkingProtocol.java
+  - sdks/java/src/test/java/com/echoagent/sdk/ThinkingProtocolTest.java
   - sdks/typescript/src/hook_action_values.ts
   - sdks/typescript/test/hook-action-values.test.js
   - sdks/typescript/src/subagent_usage_values.ts

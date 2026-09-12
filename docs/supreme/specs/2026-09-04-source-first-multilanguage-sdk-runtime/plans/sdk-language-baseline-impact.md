@@ -357,6 +357,12 @@ without moving retry execution out of Rust.
 The ThinkingConfig slice adds 14 local variant/parser/provider-projection
 identities, preserving disable/level/budget semantics and provider-specific
 effort mappings without moving provider transport out of Rust.
+The platform time slice adds eight clock and RFC3339 helper identities,
+preserving Unix timestamps, local-offset formatting, UTC instant round-trips
+and optional null handling without persisted runtime state.
+The ThinkingProtocol slice adds 13 provider-dialect and field-emission
+identities, preserving local configuration semantics without moving provider
+transport out of Rust.
 The SDKs preserve calculation priority while LLM execution remains in Rust/Host.
 
 The HookAction slice adds 31 tagged variant/field/validation identities. The

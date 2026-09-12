@@ -2501,6 +2501,31 @@ fn language_status_for(
         "echo_core::llm::thinking::ThinkingConfig::to_glm_thinking_type",
         "echo_core::llm::thinking::ThinkingConfig::to_reasoning_effort",
     ];
+    const TIME_IDENTITIES: &[&str] = &[
+        "echo_core::utils::time::local_rfc3339::deserialize",
+        "echo_core::utils::time::local_rfc3339::serialize",
+        "echo_core::utils::time::now_local",
+        "echo_core::utils::time::now_millis",
+        "echo_core::utils::time::now_secs",
+        "echo_core::utils::time::option_local_rfc3339::deserialize",
+        "echo_core::utils::time::option_local_rfc3339::serialize",
+        "echo_core::utils::time::to_local",
+    ];
+    const THINKING_PROTOCOL_IDENTITIES: &[&str] = &[
+        "echo_core::llm::thinking::ThinkingProtocol",
+        "echo_core::llm::thinking::ThinkingProtocol::AnthropicAdaptive",
+        "echo_core::llm::thinking::ThinkingProtocol::AnthropicEffort",
+        "echo_core::llm::thinking::ThinkingProtocol::AnthropicThinkingBudget",
+        "echo_core::llm::thinking::ThinkingProtocol::DeepseekReasoningEffort",
+        "echo_core::llm::thinking::ThinkingProtocol::EnableThinkingFlag",
+        "echo_core::llm::thinking::ThinkingProtocol::GlmReasoningEffort",
+        "echo_core::llm::thinking::ThinkingProtocol::ModelManaged",
+        "echo_core::llm::thinking::ThinkingProtocol::None",
+        "echo_core::llm::thinking::ThinkingProtocol::OllamaThink",
+        "echo_core::llm::thinking::ThinkingProtocol::OpenaiReasoningEffort",
+        "echo_core::llm::thinking::ThinkingProtocol::ThinkingType",
+        "echo_core::llm::thinking::ThinkingProtocol::emits_field",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2629,6 +2654,13 @@ fn language_status_for(
         (LanguageImplementationStatus::Done, "retry_policy_values")
     } else if THINKING_CONFIG_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "thinking_config_values")
+    } else if TIME_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "time_values")
+    } else if THINKING_PROTOCOL_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "thinking_protocol_values",
+        )
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {
