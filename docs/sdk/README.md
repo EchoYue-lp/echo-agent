@@ -138,6 +138,8 @@ The immutable A2A Artifact and Error DTOs preserve their wire fields in all
 three languages as well.
 The A2A status/artifact stream event and JSON-RPC response DTOs are also
 available as local immutable values; stream transport remains Host-owned.
+Task request/params/response and task history envelopes are available as
+immutable nested DTOs; execution remains a Host operation.
 
 ## For contributors
 

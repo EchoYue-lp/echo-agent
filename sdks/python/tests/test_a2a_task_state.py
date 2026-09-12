@@ -10,6 +10,10 @@ from echo_agent_sdk import (
     A2AError,
     A2AMessage,
     A2AStreamResponse,
+    A2ATask,
+    A2ATaskParams,
+    A2ATaskRequest,
+    A2ATaskResponse,
     A2ATaskStatus,
     AgentCard,
     AgentProvider,
@@ -176,4 +180,33 @@ def test_a2a_stream_value_mappings_are_ready() -> None:
         and entry["languages"]["python"]["contract_test"].endswith("/a2a_stream_values")
     ]
     assert len(entries) == 18
+    assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)
+
+
+def test_a2a_task_envelopes_preserve_nested_value_semantics() -> None:
+    message = A2AMessage.user_text("hello")
+    params = A2ATaskParams.new(message, "task-1", "session-1")
+    request = A2ATaskRequest.new("request-1", "tasks/send", params)
+    task = A2ATask.new(
+        "task-1", A2ATaskStatus.new(TaskState.WORKING), "session-1", [message]
+    )
+    response = A2ATaskResponse.new("request-1", task)
+    assert request.jsonrpc == "2.0"
+    assert request.params.message.text_content() == "hello"
+    assert task.history == (message,)
+    assert response.result is task
+
+
+def test_a2a_task_envelope_mappings_are_ready() -> None:
+    root = Path(__file__).resolve().parents[3]
+    manifest = json.loads((root / "contracts/sdk/parity-manifest.json").read_text())
+    entries = [
+        entry
+        for entry in manifest["entries"]
+        if entry["canonical"]
+        and entry["languages"]["python"]["contract_test"].endswith(
+            "/a2a_task_envelopes"
+        )
+    ]
+    assert len(entries) == 15
     assert all(entry["languages"]["python"]["status"] == "done" for entry in entries)

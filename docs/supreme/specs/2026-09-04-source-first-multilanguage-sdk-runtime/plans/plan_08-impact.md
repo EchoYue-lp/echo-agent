@@ -124,6 +124,9 @@ without introducing a Host or network route.
 The A2A stream value increment closes 18 typed event/response identities while
 leaving stream transport and lifecycle authority in the Host.
 
+The task envelope increment closes 15 nested request/response identities while
+leaving task execution and lifecycle authority in the Host.
+
 ## SDK-Skill-Impact
 
 `update`: `ReactAgent::discover_skills` is now a canonical source operation

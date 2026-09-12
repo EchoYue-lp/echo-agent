@@ -140,6 +140,103 @@ class A2AStreamResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class A2ATaskParams:
+    message: A2AMessage
+    id: str | None = None
+    session_id: str | None = None
+
+    @classmethod
+    def new(
+        cls, message: A2AMessage, id: str | None = None, session_id: str | None = None
+    ) -> A2ATaskParams:
+        return cls(message, id, session_id)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.message, A2AMessage):
+            raise TypeError("message must be an A2AMessage")
+        if self.id is not None:
+            _require_text(self.id, "task id")
+        if self.session_id is not None:
+            _require_text(self.session_id, "session id")
+
+
+@dataclass(frozen=True, slots=True)
+class A2ATaskRequest:
+    id: str
+    method: str
+    params: A2ATaskParams
+    jsonrpc: str = "2.0"
+
+    @classmethod
+    def new(cls, id: str, method: str, params: A2ATaskParams) -> A2ATaskRequest:
+        return cls(id, method, params)
+
+    def __post_init__(self) -> None:
+        _require_text(self.id, "request id")
+        _require_text(self.method, "request method")
+        if not isinstance(self.params, A2ATaskParams):
+            raise TypeError("params must be A2ATaskParams")
+
+
+@dataclass(frozen=True, slots=True)
+class A2ATask:
+    id: str
+    status: A2ATaskStatus
+    session_id: str | None = None
+    history: tuple[A2AMessage, ...] = ()
+    artifacts: tuple[A2AArtifact, ...] = ()
+
+    @classmethod
+    def new(
+        cls,
+        id: str,
+        status: A2ATaskStatus,
+        session_id: str | None = None,
+        history: list[A2AMessage] | tuple[A2AMessage, ...] = (),
+        artifacts: list[A2AArtifact] | tuple[A2AArtifact, ...] = (),
+    ) -> A2ATask:
+        return cls(id, status, session_id, tuple(history), tuple(artifacts))
+
+    def __post_init__(self) -> None:
+        _require_text(self.id, "task id")
+        if not isinstance(self.status, A2ATaskStatus):
+            raise TypeError("status must be an A2ATaskStatus")
+        if self.session_id is not None:
+            _require_text(self.session_id, "session id")
+        if any(not isinstance(value, A2AMessage) for value in self.history):
+            raise TypeError("history must contain A2AMessage values")
+        if any(not isinstance(value, A2AArtifact) for value in self.artifacts):
+            raise TypeError("artifacts must contain A2AArtifact values")
+        object.__setattr__(self, "history", tuple(self.history))
+        object.__setattr__(self, "artifacts", tuple(self.artifacts))
+
+
+@dataclass(frozen=True, slots=True)
+class A2ATaskResponse:
+    id: str | None = None
+    result: A2ATask | None = None
+    error: A2AError | None = None
+    jsonrpc: str = "2.0"
+
+    @classmethod
+    def new(
+        cls,
+        id: str | None = None,
+        result: A2ATask | None = None,
+        error: A2AError | None = None,
+    ) -> A2ATaskResponse:
+        return cls(id, result, error)
+
+    def __post_init__(self) -> None:
+        if self.id is not None:
+            _require_text(self.id, "response id")
+        if self.result is not None and not isinstance(self.result, A2ATask):
+            raise TypeError("result must be an A2ATask")
+        if self.error is not None and not isinstance(self.error, A2AError):
+            raise TypeError("error must be an A2AError")
+
+
+@dataclass(frozen=True, slots=True)
 class A2ATaskStatus:
     state: TaskState
     message: A2AMessage | None

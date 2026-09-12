@@ -203,6 +203,10 @@ three SDKs; its eight canonical identities use a dedicated behavior mapping.
 The A2A stream value slice adds typed status/artifact events and response
 wrappers in all three SDKs; its 18 canonical identities remain transport-free.
 
+The task envelope slice adds immutable request/params/task/response DTOs in all
+three SDKs; its 15 canonical identities preserve nested history and artifact
+values without taking execution authority.
+
 ## SDK-Skill-Impact
 
 `none`: this stage adds language SDK source clients and protocol/catalog

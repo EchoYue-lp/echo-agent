@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A2A stream value DTOs in all source SDKs.** Status/artifact update events
   and JSON-RPC stream responses now preserve the closed local wire union.
 
+- **A2A task envelope DTOs in all source SDKs.** Task request/params/response
+  and nested history/artifact values now preserve the local wire contract.
+
 - **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
   Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
   capability and lets a host language register Tool, LlmClient, Store,

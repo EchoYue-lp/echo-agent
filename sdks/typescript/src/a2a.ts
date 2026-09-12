@@ -192,6 +192,110 @@ export class A2AStreamResponse {
   }
 }
 
+export class A2ATaskParams {
+  public readonly id?: string;
+  public readonly sessionId?: string;
+  public readonly message: A2AMessage;
+
+  private constructor(message: A2AMessage, id?: string, sessionId?: string) {
+    if (!(message instanceof A2AMessage)) throw new TypeError("message must be an A2AMessage");
+    if (id !== undefined) validateText(id, "task id");
+    if (sessionId !== undefined) validateText(sessionId, "session id");
+    this.id = id;
+    this.sessionId = sessionId;
+    this.message = message;
+    Object.freeze(this);
+  }
+
+  public static new(message: A2AMessage, id?: string, sessionId?: string): A2ATaskParams {
+    return new A2ATaskParams(message, id, sessionId);
+  }
+}
+
+export class A2ATaskRequest {
+  public readonly jsonrpc = "2.0";
+  public readonly id: string;
+  public readonly method: string;
+  public readonly params: A2ATaskParams;
+
+  private constructor(id: string, method: string, params: A2ATaskParams) {
+    validateText(id, "request id");
+    validateText(method, "request method");
+    if (!(params instanceof A2ATaskParams)) throw new TypeError("params must be A2ATaskParams");
+    this.id = id;
+    this.method = method;
+    this.params = params;
+    Object.freeze(this);
+  }
+
+  public static new(id: string, method: string, params: A2ATaskParams): A2ATaskRequest {
+    return new A2ATaskRequest(id, method, params);
+  }
+}
+
+export class A2ATask {
+  public readonly id: string;
+  public readonly sessionId?: string;
+  public readonly status: A2ATaskStatus;
+  public readonly history: readonly A2AMessage[];
+  public readonly artifacts: readonly A2AArtifact[];
+
+  private constructor(
+    id: string,
+    status: A2ATaskStatus,
+    sessionId?: string,
+    history: readonly A2AMessage[] = [],
+    artifacts: readonly A2AArtifact[] = [],
+  ) {
+    validateText(id, "task id");
+    if (sessionId !== undefined) validateText(sessionId, "session id");
+    if (!(status instanceof A2ATaskStatus)) throw new TypeError("status must be an A2ATaskStatus");
+    if (!Array.isArray(history) || history.some((value) => !(value instanceof A2AMessage))) {
+      throw new TypeError("history must contain A2AMessage values");
+    }
+    if (!Array.isArray(artifacts) || artifacts.some((value) => !(value instanceof A2AArtifact))) {
+      throw new TypeError("artifacts must contain A2AArtifact values");
+    }
+    this.id = id;
+    this.sessionId = sessionId;
+    this.status = status;
+    this.history = Object.freeze([...history]);
+    this.artifacts = Object.freeze([...artifacts]);
+    Object.freeze(this);
+  }
+
+  public static new(
+    id: string,
+    status: A2ATaskStatus,
+    sessionId?: string,
+    history: readonly A2AMessage[] = [],
+    artifacts: readonly A2AArtifact[] = [],
+  ): A2ATask {
+    return new A2ATask(id, status, sessionId, history, artifacts);
+  }
+}
+
+export class A2ATaskResponse {
+  public readonly jsonrpc = "2.0";
+  public readonly id?: string;
+  public readonly result?: A2ATask;
+  public readonly error?: A2AError;
+
+  private constructor(id?: string, result?: A2ATask, error?: A2AError) {
+    if (id !== undefined) validateText(id, "response id");
+    if (result !== undefined && !(result instanceof A2ATask)) throw new TypeError("result must be an A2ATask");
+    if (error !== undefined && !(error instanceof A2AError)) throw new TypeError("error must be an A2AError");
+    this.id = id;
+    this.result = result;
+    this.error = error;
+    Object.freeze(this);
+  }
+
+  public static new(id?: string, result?: A2ATask, error?: A2AError): A2ATaskResponse {
+    return new A2ATaskResponse(id, result, error);
+  }
+}
+
 export class A2ATaskStatus {
   public readonly state: TaskState;
   public readonly message?: A2AMessage;

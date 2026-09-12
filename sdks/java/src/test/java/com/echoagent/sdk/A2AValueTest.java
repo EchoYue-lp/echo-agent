@@ -147,4 +147,33 @@ class A2AValueTest {
         }
         assertEquals(18, count);
     }
+
+    @Test
+    void taskEnvelopesPreserveNestedValueSemantics() {
+        var message = A2AMessage.userText("hello");
+        var params = A2ATaskParams.newParams(message, "task-1", "session-1");
+        var request = A2ATaskRequest.newRequest("request-1", "tasks/send", params);
+        var task = A2ATask.newTask("task-1", A2ATaskStatus.newStatus(TaskState.WORKING),
+                "session-1", List.of(message), List.of());
+        var response = A2ATaskResponse.newResponse("request-1", task, null);
+        assertEquals("2.0", request.jsonrpc());
+        assertEquals("hello", request.params().message().textContent());
+        assertEquals("task-1", response.result().id());
+    }
+
+    @Test
+    void taskEnvelopeMappingsAreReady() throws Exception {
+        var manifest = JsonSupport.MAPPER.readTree(java.nio.file.Files.readString(
+                java.nio.file.Path.of("../..", "contracts/sdk/parity-manifest.json")));
+        int count = 0;
+        for (var entry : manifest.path("entries")) {
+            if (entry.path("canonical").asBoolean()
+                    && entry.path("languages").path("java").path("contract_test")
+                    .asText().endsWith("/a2a_task_envelopes")) {
+                count += 1;
+                assertEquals("done", entry.path("languages").path("java").path("status").asText());
+            }
+        }
+        assertEquals(15, count);
+    }
 }

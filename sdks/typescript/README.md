@@ -57,6 +57,8 @@ builder; it does not synthesize a card from a Host-owned Agent.
 wire fields without adding a network route.
 `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent` and `A2AStreamResponse`
 preserve the typed stream event union locally.
+`A2ATaskParams`, `A2ATaskRequest`, `A2ATask`, and `A2ATaskResponse` preserve
+the nested task envelope values without executing a task.
 `SessionHandle.updates()` and `RunHandle.events` are bounded async iterables;
 Run events validate stream identity and sequence, acknowledge consumed cursors,
 surface gaps, and fail with `host_exited` if the Host exits unexpectedly.

@@ -63,6 +63,8 @@ builder semantics; Agent-backed card discovery remains a Rust authority.
 artifact chunks and typed task errors.
 `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent` and `A2AStreamResponse`
 preserve the local typed stream event union without owning transport.
+`A2ATaskParams`, `A2ATaskRequest`, `A2ATask`, and `A2ATaskResponse` provide
+the corresponding immutable nested task envelopes.
 Session updates and Run events are bounded async iterators with cursor ACKs,
 gap/overflow errors, Host-exit propagation and idempotent close semantics.
 Context compressor calls include a Host-owned tokenizer handle;

@@ -1848,6 +1848,23 @@ fn language_status_for(
         "echo_agent::a2a::types::TaskStatusUpdateEvent::status",
         "echo_agent::a2a::types::TaskStatusUpdateEvent::task_id",
     ];
+    const A2A_TASK_ENVELOPE_IDENTITIES: &[&str] = &[
+        "echo_agent::a2a::types::A2ATask",
+        "echo_agent::a2a::types::A2ATaskParams",
+        "echo_agent::a2a::types::A2ATaskParams::id",
+        "echo_agent::a2a::types::A2ATaskParams::message",
+        "echo_agent::a2a::types::A2ATaskParams::session_id",
+        "echo_agent::a2a::types::A2ATaskRequest",
+        "echo_agent::a2a::types::A2ATaskRequest::id",
+        "echo_agent::a2a::types::A2ATaskRequest::jsonrpc",
+        "echo_agent::a2a::types::A2ATaskRequest::method",
+        "echo_agent::a2a::types::A2ATaskRequest::params",
+        "echo_agent::a2a::types::A2ATaskResponse",
+        "echo_agent::a2a::types::A2ATaskResponse::error",
+        "echo_agent::a2a::types::A2ATaskResponse::id",
+        "echo_agent::a2a::types::A2ATaskResponse::jsonrpc",
+        "echo_agent::a2a::types::A2ATaskResponse::result",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -1860,6 +1877,8 @@ fn language_status_for(
         (LanguageImplementationStatus::Done, "a2a_wire_values")
     } else if A2A_STREAM_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "a2a_stream_values")
+    } else if A2A_TASK_ENVELOPE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "a2a_task_envelopes")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

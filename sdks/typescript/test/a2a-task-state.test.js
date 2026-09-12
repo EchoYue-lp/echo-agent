@@ -6,6 +6,10 @@ import {
   A2AArtifact,
   A2AError,
   A2AStreamResponse,
+  A2ATask,
+  A2ATaskParams,
+  A2ATaskRequest,
+  A2ATaskResponse,
   A2ATaskStatus,
   AgentCard,
   AgentProvider,
@@ -132,5 +136,25 @@ test("A2A stream values have completed TypeScript mappings", () => {
   const manifest = JSON.parse(readFileSync(new URL("../../../contracts/sdk/parity-manifest.json", import.meta.url), "utf8"));
   const entries = manifest.entries.filter((entry) => entry.canonical && entry.languages.typescript.contract_test.endsWith("/a2a_stream_values"));
   assert.equal(entries.length, 18);
+  for (const entry of entries) assert.equal(entry.languages.typescript.status, "done", entry.path);
+});
+
+test("A2A task envelopes preserve nested value semantics", () => {
+  const message = A2AMessage.userText("hello");
+  const params = A2ATaskParams.new(message, "task-1", "session-1");
+  const request = A2ATaskRequest.new("request-1", "tasks/send", params);
+  const task = A2ATask.new("task-1", A2ATaskStatus.new(TaskState.Working), "session-1", [message]);
+  const response = A2ATaskResponse.new("request-1", task);
+  assert.equal(request.jsonrpc, "2.0");
+  assert.equal(request.params.message.textContent(), "hello");
+  assert.equal(task.history[0], message);
+  assert.equal(response.result?.id, "task-1");
+  assert.throws(() => task.history.push(message), TypeError);
+});
+
+test("A2A task envelope values have completed TypeScript mappings", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../../../contracts/sdk/parity-manifest.json", import.meta.url), "utf8"));
+  const entries = manifest.entries.filter((entry) => entry.canonical && entry.languages.typescript.contract_test.endsWith("/a2a_task_envelopes"));
+  assert.equal(entries.length, 15);
   for (const entry of entries) assert.equal(entry.languages.typescript.status, "done", entry.path);
 });
