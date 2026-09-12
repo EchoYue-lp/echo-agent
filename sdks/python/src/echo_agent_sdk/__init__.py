@@ -154,6 +154,7 @@ from .permission_rule_behavior import PermissionDecision, RuleBehavior, RuleBeha
 from .permission_rule_matcher import RuleMatcher, RuleMatcherKind, ToolPermission
 from .permission_rule_values import RuleSource
 from .prompt_diagnostics_values import PromptDiagnostics, PromptSectionDiagnostic
+from .provider_capabilities_values import ProviderCapabilities
 from .retry_policy_values import RetryPolicy
 from .sandbox_resource_values import ResourceLimits
 from .segment_range_values import SegmentRange
@@ -172,6 +173,7 @@ from .task_terminal_values import TaskTerminalStatus
 from .team_strategy_values import TeamStrategy, TeamStrategyKind
 from .thinking import ThinkingLevel
 from .thinking_config_values import ThinkingConfig
+from .thinking_profile_values import ThinkingProfile, resolve_thinking_profile
 from .thinking_protocol_values import ThinkingProtocol
 from .time_values import (
     local_rfc3339_deserialize,
@@ -326,6 +328,7 @@ __all__ = [
     "PermissionMode",
     "PromptDiagnostics",
     "PromptSectionDiagnostic",
+    "ProviderCapabilities",
     "ResolvedOperation",
     "ResourceLimits",
     "RetryPolicy",
@@ -385,6 +388,7 @@ __all__ = [
     "TeamStrategyKind",
     "ThinkingConfig",
     "ThinkingLevel",
+    "ThinkingProfile",
     "ThinkingProtocol",
     "TokenAllocation",
     "TokenBudget",
@@ -421,6 +425,7 @@ __all__ = [
     "now_secs",
     "option_local_rfc3339_deserialize",
     "option_local_rfc3339_serialize",
+    "resolve_thinking_profile",
     "split_utf8_chunks",
     "to_local",
     "to_wire",

@@ -165,6 +165,10 @@ round-trips and optional null values without persisted clock state.
 semantics without owning provider transport.
 `ResourceLimits` preserves default, strict and unrestricted sandbox policy
 snapshots without creating sandbox processes.
+`ProviderCapabilities` preserves OpenAI-compatible, Anthropic and Ollama
+defaults plus provider-name resolution without owning provider transport.
+`ThinkingProfile.resolveThinkingProfile` preserves model/provider protocol
+selection and manual control levels without contacting a provider.
 `PageInfo` preserves truncation, continuation metadata, and output projection
 while collection state remains framework-owned.
 `SubagentContext` exposes empty/content semantics while context and dispatch

@@ -2532,6 +2532,19 @@ fn language_status_for(
         "echo_core::sandbox::ResourceLimits::strict",
         "echo_core::sandbox::ResourceLimits::unrestricted",
     ];
+    const PROVIDER_CAPABILITIES_IDENTITIES: &[&str] = &[
+        "echo_core::llm::capabilities::ProviderCapabilities::anthropic",
+        "echo_core::llm::capabilities::ProviderCapabilities::from_provider_name",
+        "echo_core::llm::capabilities::ProviderCapabilities::ollama",
+        "echo_core::llm::capabilities::ProviderCapabilities::openai_compatible",
+    ];
+    const THINKING_PROFILE_IDENTITIES: &[&str] = &[
+        "echo_core::llm::capabilities::ThinkingProfile",
+        "echo_core::llm::capabilities::ThinkingProfile::new",
+        "echo_core::llm::capabilities::ThinkingProfile::supports_manual_control",
+        "echo_core::llm::capabilities::ThinkingProfile::unknown",
+        "echo_core::llm::capabilities::resolve_thinking_profile",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2671,6 +2684,16 @@ fn language_status_for(
         (
             LanguageImplementationStatus::Done,
             "sandbox_resource_values",
+        )
+    } else if PROVIDER_CAPABILITIES_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "provider_capabilities_values",
+        )
+    } else if THINKING_PROFILE_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "thinking_profile_values",
         )
     } else {
         match identity {
