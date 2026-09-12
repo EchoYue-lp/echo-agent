@@ -1,0 +1,26 @@
+{
+  "algorithm": "sha256-length-prefixed-v1",
+  "inputs": [
+    {
+      "path": "Cargo.lock",
+      "bytes": 178396,
+      "sha256": "sha256:1f229c3064231d29943b9d4e3ab4e2868848a2ca4e70bad516d69c1b32e51c1a"
+    },
+    {
+      "path": "contracts/sdk/public-api.txt",
+      "bytes": 16674147,
+      "sha256": "sha256:6f5348656cd4e60d29c836e52c3e24b76a75b040d2055cfac5d1bf0326fa4790"
+    },
+    {
+      "path": "contracts/sdk/parity-manifest.json",
+      "bytes": 32057910,
+      "sha256": "sha256:43b778d3691db980169aa7ee98effcca8813f18f562f1ea2afc9fc10838238da"
+    },
+    {
+      "path": "contracts/sdk/facade-operation-catalog.json",
+      "bytes": 593526,
+      "sha256": "sha256:4a86b212b87eebc92f0fc432454fef61bbd7f86871f84eff4ccca9331eddb9c3"
+    }
+  ],
+  "aggregate_digest": "sha256:e86bad8304a40e95fe624654c06d9b05feadb23fb95e4ecfc4eb4dd4e865484b"
+}

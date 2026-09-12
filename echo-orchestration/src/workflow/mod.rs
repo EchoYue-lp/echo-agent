@@ -84,7 +84,7 @@ pub type SharedAgentMutex = Arc<tokio::sync::Mutex<Box<dyn Agent>>>;
 ///
 /// Obtain a `BoxStream<WorkflowEvent>` via [`Workflow::run_stream`]
 /// for realtime UI updates, progress bars, logging, etc.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum WorkflowEvent {
     /// Node started execution
     NodeStart {
@@ -136,7 +136,7 @@ pub trait Workflow: Send + Sync {
 }
 
 /// Complete output of a workflow execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkflowOutput {
     /// Final result text
     pub result: String,
@@ -147,7 +147,7 @@ pub struct WorkflowOutput {
 }
 
 /// Detailed output of a single step execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StepOutput {
     /// Name of the agent that executed this step
     pub agent_name: String,

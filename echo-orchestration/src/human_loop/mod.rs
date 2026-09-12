@@ -61,7 +61,7 @@ mod webhook;
 #[cfg(feature = "websocket")]
 mod websocket;
 
-pub use approval_cache::SessionApprovalCache;
+pub use approval_cache::{CacheStats, SessionApprovalCache};
 pub use audit::{
     CompositePermissionAuditSink, InMemoryPermissionAuditSink, LoggingPermissionAuditSink,
     PermissionAuditEntry, PermissionAuditSink,
@@ -79,7 +79,7 @@ pub use permission::{
 };
 pub use policy::ApprovalScope;
 pub use protected::{ProtectedPathChecker, ProtectedPathResult};
-pub use service::{PermissionInvocationContext, PermissionService};
+pub use service::{PermissionCheck, PermissionInvocationContext, PermissionService};
 pub use webhook::WebhookHumanLoopProvider;
 #[cfg(feature = "websocket")]
 pub use websocket::WebSocketHumanLoopProvider;

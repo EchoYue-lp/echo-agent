@@ -108,10 +108,14 @@ pub mod web {
     pub use echo_tools::web::*;
 }
 
-/// Media tools (re-export from echo_tools)
+/// Media tools (re-export from echo_tools). Grouped exactly like the
+/// `StandardToolPack` media entry: document readers (PDF/Word/Excel) and
+/// text utilities ship with the media capability, so facade consumers
+/// reach them through the same module without a direct echo_tools dep.
 #[cfg(feature = "media")]
 pub mod media {
     pub use echo_tools::media::*;
+    pub use echo_tools::{excel, image, pdf, text, word};
 }
 
 /// Scholarly search and reference-manager clients (re-export from echo_tools).
@@ -143,6 +147,9 @@ pub mod database {
 #[cfg(feature = "git")]
 pub mod git {
     pub use echo_tools::git::*;
+    // Worktree tools ship with the git capability (same grouping as the
+    // `StandardToolPack`), so facade consumers reach them under one module.
+    pub use echo_tools::worktree_tool::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
 }
 
 #[cfg(feature = "rag")]

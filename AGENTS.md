@@ -4,7 +4,7 @@
 
 ## 仓库定位
 
-通用 Rust Agent 框架 Cargo workspace:根 crate `echo_agent` + 子 crate `echo_core` / `echo_macros` / `echo_execution` / `echo_integration` / `echo_tools` / `echo_state` / `echo_orchestration` / `echo-agent-learning`。crate 名用下划线(`echo_agent`,`cargo check -p echo_agent`)。
+通用 Rust Agent 框架 Cargo workspace:根 crate `echo_agent` + 子 crate `echo_core` / `echo_macros` / `echo_execution` / `echo_integration` / `echo_tools` / `echo_state` / `echo_orchestration` / `echo-sdk-protocol` / `echo-sdk-host` / `echo-agent-learning`。crate 名用下划线(`echo_agent`,`cargo check -p echo_agent`)。
 
 **框架服务所有复用方,不是某个应用的私有库。** 任何"能放框架、也能放应用"的功能,动手前必须先回答分层问题(见下)。
 
@@ -95,7 +95,7 @@ cargo check --workspace --lib --no-default-features --locked
 修改 `Cargo.toml`、feature 定义、`#[cfg(...)]` 分支、可选依赖或跨 crate 公共 API 时,额外逐个编译根 crate 的独立 feature:
 
 ```bash
-for feature in a2a mcp lsp sqlite telemetry topology subagent web media \
+for feature in acp a2a mcp lsp sqlite telemetry topology subagent web media \
   data statistics channels git database rag chart; do
   cargo check -p echo_agent --no-default-features --features "$feature" --locked || exit 1
 done

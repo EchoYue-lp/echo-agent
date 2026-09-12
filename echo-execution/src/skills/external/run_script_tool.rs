@@ -46,7 +46,7 @@ use futures::future::BoxFuture;
 use serde_json::json;
 use tokio::sync::RwLock;
 
-use crate::sandbox::{ResourceLimits, SandboxCommand, SandboxManager};
+use crate::sandbox::{ResourceLimits, SandboxCommand, SandboxExecutor};
 use crate::skills::external::types::SkillSandboxPolicy;
 use crate::skills::minimal_env;
 use crate::skills::registry::SkillRegistry;
@@ -61,7 +61,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// See the [module-level docs](self) for cross-platform behavior and security model.
 pub struct RunSkillScriptTool {
     registry: Arc<RwLock<SkillRegistry>>,
-    sandbox: Option<Arc<SandboxManager>>,
+    sandbox: Option<Arc<dyn SandboxExecutor>>,
     timeout_secs: u64,
 }
 
@@ -102,7 +102,7 @@ impl RunSkillScriptTool {
         }
     }
 
-    pub fn with_sandbox_manager(mut self, manager: Arc<SandboxManager>) -> Self {
+    pub fn with_sandbox_manager(mut self, manager: Arc<dyn SandboxExecutor>) -> Self {
         self.sandbox = Some(manager);
         self
     }

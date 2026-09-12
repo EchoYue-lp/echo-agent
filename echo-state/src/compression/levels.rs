@@ -666,7 +666,7 @@ impl AdaptiveCompressor {
 // ── ContextCompressor trait implementation ──────────────────────────────────────
 
 impl super::ContextCompressor for AdaptiveCompressor {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "Adaptive"
     }
 

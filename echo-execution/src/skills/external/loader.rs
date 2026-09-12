@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use serde_yaml_ng::Value;
 use tracing::{debug, info, warn};
 
@@ -58,7 +59,10 @@ pub enum DiscoveryScope {
 /// state while the loader remains a reusable discovery primitive.
 pub trait SkillLoadPolicy: Send + Sync {
     /// Return `true` when this descriptor may enter the runtime catalog.
-    fn allows(&self, descriptor: &SkillDescriptor) -> bool;
+    ///
+    /// The decision is asynchronous so an embedding application or source SDK
+    /// can remain the live policy authority without blocking the Agent runtime.
+    fn allows<'a>(&'a self, descriptor: &'a SkillDescriptor) -> BoxFuture<'a, bool>;
 }
 
 // -- SkillLoader --
@@ -132,10 +136,8 @@ impl SkillLoader {
                 let found = self.scan_directory(&dir, 0, true).await?;
                 for (document, identity_documents) in found {
                     let desc = document.descriptor().clone();
-                    if self
-                        .policy
-                        .as_ref()
-                        .is_some_and(|policy| !policy.allows(&desc))
+                    if let Some(policy) = &self.policy
+                        && !policy.allows(&desc).await
                     {
                         info!(
                             skill = %desc.name,
@@ -190,10 +192,8 @@ impl SkillLoader {
         let mut results = Vec::new();
         for (document, identity_documents) in found {
             let desc = document.descriptor().clone();
-            if self
-                .policy
-                .as_ref()
-                .is_some_and(|policy| !policy.allows(&desc))
+            if let Some(policy) = &self.policy
+                && !policy.allows(&desc).await
             {
                 info!(
                     skill = %desc.name,
@@ -838,8 +838,8 @@ resources:
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         struct DenyBlocked;
         impl SkillLoadPolicy for DenyBlocked {
-            fn allows(&self, descriptor: &SkillDescriptor) -> bool {
-                descriptor.name != "blocked"
+            fn allows<'a>(&'a self, descriptor: &'a SkillDescriptor) -> BoxFuture<'a, bool> {
+                Box::pin(async move { descriptor.name != "blocked" })
             }
         }
 

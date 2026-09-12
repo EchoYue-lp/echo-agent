@@ -22,7 +22,7 @@ impl SlidingWindowCompressor {
 }
 
 impl ContextCompressor for SlidingWindowCompressor {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "SlidingWindow"
     }
 

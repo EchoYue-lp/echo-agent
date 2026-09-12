@@ -127,6 +127,7 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 | Feature | In `full`? | Description |
 |---------|-----------|-------------|
 | `full` | — | Meta-feature: enables every flag listed below |
+| `acp` | yes | Stable ACP v1 Agent adapter over the canonical turn runtime |
 | `a2a` | yes | Agent-to-Agent protocol server and client |
 | `mcp` | yes | Model Context Protocol client |
 | `lsp` | yes | Language Server Protocol integration |
@@ -229,6 +230,7 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 
 | Feature | Description | API Preview |
 |---------|-------------|-------------|
+| **ACP Agent** | Stable v1 Client-Agent adapter over `AgentTurnDriver` | `AcpAgentAdapter::new(factory)` |
 | **MCP Protocol** | Connect any MCP server (stdio / SSE / HTTP) | `mcp.connect(McpServerConfig::stdio(...))` |
 | **A2A Protocol** | Agent Card publishing, cross-framework collaboration | `A2AServer::bind("0.0.0.0:3000")` |
 | **Skill System** | Progressive disclosure: discover → activate → use | `agent.load_skill("web_research")` |
@@ -1098,6 +1100,44 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Code Search | [EN](docs/en/37-code-search.md) | [ZH](docs/zh/37-code-search.md) |
 | Agent Factory & Model Profiles | [EN](docs/en/38-factory-modes.md) | [ZH](docs/zh/38-factory-modes.md) |
 | Security | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
+| Multilingual SDK (ACP Host available) | [EN](docs/sdk/README.md) | — |
+
+### SDK corner
+
+The source-built `echo-agent-sdk-host` passes the supported standard ACP v1
+profile through the official Client and stdio runtime, and — with the
+`sdk-core-profile` feature and an explicit state root — the negotiated
+`_echo_agent/*` core extension profile (Agent/Session/Run handles, full
+events with ACK/replay, restart recovery). The `sdk-facade-adapters` feature
+can independently serve the facade feature families — task/subagent/structured output,
+memory/workflow/state/delivery/trace/eval/improve, MCP/A2A/LSP/topology and
+the tool families — over the framework's own authorities, with canonical
+catalog routing, frozen feature semantics, advertised resource bounds and
+teardown cascades (see
+[docs/sdk/facade-feature-adapters.md](docs/sdk/facade-feature-adapters.md)).
+The `sdk-extension-bridge` feature includes those adapters and additionally
+serves the negotiated bidirectional extension bridge: host-language Tool,
+LlmClient, Store, HumanLoop, Hook, callback, intervention, factory and
+custom-Agent implementations register over the same connection and are
+reverse-invoked with lease, deadline, cancellation and stream-terminal
+semantics (see
+[docs/sdk/sdk-extension-bridge.md](docs/sdk/sdk-extension-bridge.md)).
+Plan 08 closes the Rust Host facade contract across canonical source
+operations, consumer traits and public streams. Workflow and A2A use real
+Host-issued pull streams rather than buffered pseudo-streams, and the strict
+facade review plus final validation passed.
+It uses the root
+`AcpAgentAdapter`, creates one framework Agent per Session, and accepts an
+explicit product-neutral JSON configuration. Build it with
+`cargo build -p echo-sdk-host --features sdk-facade-all --locked`; no binary
+or language runtime is bundled. Source-built TypeScript/Python/Java clients
+now cover the executable canonical facade routes and preserve the shared
+WireValue contract against a real Host. TypeScript/Python quickstarts and the
+Java example are part of the source gate; intrinsic mappings remain open
+before the SDK program can claim **Runnable** and **Parity complete**. Start at
+[docs/sdk/README.md](docs/sdk/README.md), the only SDK
+entry point; the core profile reference is
+[docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md).
 
 ---
 

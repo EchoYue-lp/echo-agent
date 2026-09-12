@@ -1,0 +1,16 @@
+{
+  "name": "event-ack-valid",
+  "kind": "valid",
+  "target": "EventAckNotification",
+  "description": "Client acknowledges one contiguous cursor on a stream handle.",
+  "payload": {
+    "ack": {
+      "stream": {
+        "id": "stream-1",
+        "generation": "3",
+        "kind": "stream"
+      },
+      "last_processed_sequence": "12"
+    }
+  }
+}

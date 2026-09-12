@@ -922,10 +922,8 @@ impl ReactAgent {
                     .set_sandbox_manager(manager.clone());
             }
             for mut registration in registrations {
-                if self
-                    .skill_load_policy
-                    .as_ref()
-                    .is_some_and(|policy| !policy.allows(registration.descriptor()))
+                if let Some(policy) = &self.skill_load_policy
+                    && !policy.allows(registration.descriptor()).await
                 {
                     info!(
                         agent = %self.config.agent_name,
@@ -1095,14 +1093,13 @@ impl ReactAgent {
         let Some(policy) = &self.skill_load_policy else {
             return Vec::new();
         };
-        let removed: Vec<String> = self
-            .tools
-            .skill_registry
-            .list_descriptors()
-            .into_iter()
-            .filter(|descriptor| !policy.allows(descriptor))
-            .map(|descriptor| descriptor.name.clone())
-            .collect();
+        let descriptors = self.tools.skill_registry.list_descriptors();
+        let mut removed = Vec::new();
+        for descriptor in descriptors {
+            if !policy.allows(descriptor).await {
+                removed.push(descriptor.name.clone());
+            }
+        }
         if removed.is_empty() {
             return removed;
         }
@@ -1384,7 +1381,7 @@ impl ReactAgent {
     }
 
     /// Get the sandbox manager, if configured.
-    pub fn sandbox_manager(&self) -> Option<&Arc<crate::sandbox::SandboxManager>> {
+    pub fn sandbox_manager(&self) -> Option<&Arc<dyn crate::sandbox::SandboxExecutor>> {
         self.tools.sandbox_manager.as_ref()
     }
 

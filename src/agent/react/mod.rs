@@ -420,8 +420,12 @@ impl ReactAgent {
         let canonical = crate::compression::CanonicalContext {
             system_prompt: Some(sp_for_canonical),
             project_rules: {
+                // Mirrors the system-prompt injection gate above: canonical
+                // context only carries workspace rules when the agent opted
+                // in, so `auto_project_rules(false)` fully isolates an agent
+                // from checkout-local rule files.
                 #[cfg(feature = "project-rules")]
-                {
+                if config.auto_project_rules {
                     let wd = config
                         .working_dir
                         .lock()
@@ -432,6 +436,8 @@ impl ReactAgent {
                         &wd,
                         config.project_root.as_deref(),
                     )
+                } else {
+                    None
                 }
                 #[cfg(not(feature = "project-rules"))]
                 None
@@ -456,7 +462,7 @@ impl ReactAgent {
             Arc::new(echo_orchestration::tasks::DefaultTaskToolPolicy::default()),
         ));
         tool_manager.register_tools(echo_orchestration::tasks::build_task_tools(
-            task_revision_service,
+            task_revision_service.clone(),
         ));
 
         // ── Subsystem initialization ──────────────────────────────
@@ -616,6 +622,7 @@ impl ReactAgent {
             config,
             tools: ToolExecutionSubsystem {
                 tool_manager: tool_manager.clone(),
+                task_revision_service,
                 #[cfg(feature = "subagent")]
                 subagent_registry,
                 #[cfg(feature = "subagent")]
@@ -1178,6 +1185,18 @@ impl ReactAgent {
         }
     }
 
+    /// Replace the context-compression memory promoter.
+    pub async fn set_memory_promoter(
+        &self,
+        promoter: Arc<dyn echo_state::compression::MemoryPromoter>,
+    ) {
+        self.memory
+            .context
+            .lock()
+            .await
+            .set_memory_promoter(promoter);
+    }
+
     /// Replace the long-term memory Store and re-register `remember` / `recall` / `forget` tools.
     ///
     /// ```rust,no_run
@@ -1533,6 +1552,13 @@ impl ReactAgent {
 
     /// Set the sandbox manager to provide secure isolation for skill script execution.
     pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
+        self.set_sandbox_executor(manager);
+    }
+
+    /// Set an application-supplied sandbox executor. This is the generic
+    /// consumer boundary used by source SDK bridges; built-in callers keep
+    /// using [`Self::set_sandbox_manager`].
+    pub fn set_sandbox_executor(&mut self, manager: Arc<dyn crate::sandbox::SandboxExecutor>) {
         self.tools
             .skill_registry
             .set_sandbox_manager(manager.clone());
@@ -1566,6 +1592,23 @@ impl ReactAgent {
     /// Replace the tool manager with a shared instance (for AgentPool).
     pub fn set_tool_manager(&mut self, tm: Arc<echo_execution::tools::ToolManager>) {
         self.tools.tool_manager = tm;
+    }
+
+    /// Task revision authority shared by the in-conversation task tools and
+    /// host-side surfaces (SDK task RPC). Replacing the service through
+    /// [`crate::tasks::register_task_tools`] keeps this accessor in sync.
+    pub fn task_revision_service(&self) -> &Arc<echo_orchestration::tasks::TaskRevisionService> {
+        &self.tools.task_revision_service
+    }
+
+    /// Replace the retained task revision authority (called by
+    /// [`crate::tasks::register_task_tools`]); the registered tools are
+    /// swapped by the same caller.
+    pub fn set_task_revision_service(
+        &mut self,
+        service: Arc<echo_orchestration::tasks::TaskRevisionService>,
+    ) {
+        self.tools.task_revision_service = service;
     }
 
     /// Get the subagent registry (for the Tauri subagent-event bridge to

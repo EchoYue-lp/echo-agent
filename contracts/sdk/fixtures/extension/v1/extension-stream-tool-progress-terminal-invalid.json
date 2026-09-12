@@ -1,0 +1,24 @@
+{
+  "name": "extension-stream-tool-progress-terminal-invalid",
+  "kind": "invalid",
+  "target": "ExtensionStreamEvent",
+  "description": "A Tool progress event cannot masquerade as the outer stream terminal.",
+  "payload": {
+    "event": "complete",
+    "stream": {
+      "id": "stream-9",
+      "generation": "2",
+      "kind": "stream"
+    },
+    "sequence": "2",
+    "value": {
+      "kind": "tool",
+      "value": {
+        "event": "progress",
+        "message": "halfway",
+        "percent": 50
+      }
+    }
+  },
+  "expect_error": "invalid_value"
+}

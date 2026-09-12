@@ -147,6 +147,7 @@ fn message_for_summary(message: &Message) -> String {
                     echo_core::utils::hash::fnv1a_64(content.as_bytes()),
                     content.chars().count()
                 ),
+                ContentPart::ResourceLink { resource } => resource.model_text(),
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -322,7 +323,7 @@ impl SummaryCompressor {
 }
 
 impl ContextCompressor for SummaryCompressor {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "Summary"
     }
 
@@ -677,7 +678,7 @@ impl IncrementalSummaryCompressor {
 }
 
 impl ContextCompressor for IncrementalSummaryCompressor {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "IncrementalSummary"
     }
 

@@ -226,7 +226,7 @@ impl Tool for OutlierDetectionTool {
                         tool: "outlier_detection".to_string(),
                         message: format!("Convert '{}' to f64 failed: {}", col_name, e),
                     })?
-                    .into_iter()
+                    .iter()
                     .flatten()
                     .collect();
                 if values.len() < 4 {
@@ -367,7 +367,7 @@ impl Tool for ConsistencyCheckTool {
                     let mut numeric_count = 0usize;
                     let mut empty_count = 0usize;
                     let mut total_valid = 0usize;
-                    for s in ca.into_iter().flatten() {
+                    for s in ca.iter().flatten() {
                         total_valid += 1;
                         if s.trim().parse::<f64>().is_ok() {
                             numeric_count += 1;
@@ -396,7 +396,7 @@ impl Tool for ConsistencyCheckTool {
                             tool: "consistency_check".to_string(),
                             message: format!("Convert '{}' to f64 failed: {}", col_name, e),
                         })?
-                        .into_iter()
+                        .iter()
                         .flatten()
                         .collect();
                     let negatives = values.iter().filter(|&&v| v < 0.0).count();
@@ -456,7 +456,7 @@ impl Tool for ConsistencyCheckTool {
                                     tool: "consistency_check".to_string(),
                                     message: format!("Convert '{}' failed: {}", col_name, e),
                                 })?
-                                .into_iter()
+                                .iter()
                                 .collect();
                             let min = rule.get("min").and_then(|v| v.as_f64());
                             let max = rule.get("max").and_then(|v| v.as_f64());
@@ -489,7 +489,7 @@ impl Tool for ConsistencyCheckTool {
                                 message: format!("Get string column '{}' failed: {}", col_name, e),
                             })?;
                             let violations = ca
-                                .into_iter()
+                                .iter()
                                 .filter(|opt| {
                                     if let Some(s) = opt {
                                         !s.contains(pattern)

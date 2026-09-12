@@ -1,0 +1,12 @@
+{
+  "name": "error-feature-unavailable-valid",
+  "kind": "valid",
+  "target": "EchoSdkError",
+  "description": "Missing compiled feature fails closed.",
+  "payload": {
+    "code": "feature_unavailable",
+    "message": "feature `mcp` is not compiled into this host",
+    "retryable": "never",
+    "operation": "memory/op"
+  }
+}

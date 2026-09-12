@@ -124,7 +124,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
-use crate::sandbox::{SandboxCommand, SandboxManager};
+use crate::sandbox::{SandboxCommand, SandboxExecutor};
 use crate::skills::minimal_hook_env_with_context;
 
 // ── (HookEvent, HookContext, HookResult, CompressHookStats, HookSource are now in echo-core) ──
@@ -486,6 +486,17 @@ pub type SubagentExecutorFn = Arc<
         + Sync,
 >;
 
+/// Type-erased programmatic hook executor.
+///
+/// Embedders (for example the SDK extension bridge, which forwards hook
+/// events to a host-language implementation) inject closures this way so
+/// programmatic hooks run with the same merging, mutation and
+/// short-circuit semantics as data-driven rules — without echo-execution
+/// depending on any specific host. Mirrors the existing
+/// [`McpExecutorFn`]/[`SubagentExecutorFn`] injection pattern.
+pub type ProgrammaticHookFn =
+    Arc<dyn Fn(HookContext) -> Pin<Box<dyn Future<Output = HookResult> + Send>> + Send + Sync>;
+
 tokio::task_local! {
     static SUBAGENT_HOOK_DEPTH: u8;
 }
@@ -499,13 +510,25 @@ pub struct HookRegistry {
     /// Source -> hooks definition.
     sources: HashMap<HookSource, RegisteredHook>,
     /// Optional sandbox manager for executing hook commands.
-    sandbox: Option<Arc<SandboxManager>>,
+    sandbox: Option<Arc<dyn SandboxExecutor>>,
     /// Optional HTTP client for Http hook actions.
     http_client: Option<reqwest::Client>,
     /// Optional MCP tool executor for McpTool hook actions.
     mcp_executor: Option<McpExecutorFn>,
     /// Optional subagent executor for Subagent hook actions.
     subagent_executor: Option<SubagentExecutorFn>,
+    /// Programmatic (closure) hooks, kept sorted by name for deterministic
+    /// execution order.
+    programmatic: Vec<ProgrammaticHookEntry>,
+}
+
+/// One registered programmatic hook: a named closure plus the events it
+/// subscribes to (empty = every event).
+#[derive(Clone)]
+struct ProgrammaticHookEntry {
+    name: String,
+    events: Vec<HookEvent>,
+    executor: ProgrammaticHookFn,
 }
 
 impl Clone for HookRegistry {
@@ -516,6 +539,7 @@ impl Clone for HookRegistry {
             http_client: self.http_client.clone(),
             mcp_executor: self.mcp_executor.clone(),
             subagent_executor: self.subagent_executor.clone(),
+            programmatic: self.programmatic.clone(),
         }
     }
 }
@@ -548,13 +572,13 @@ impl HookRegistry {
     }
 
     /// Attach a sandbox manager for executing hook commands.
-    pub fn with_sandbox_manager(mut self, manager: Arc<SandboxManager>) -> Self {
+    pub fn with_sandbox_manager(mut self, manager: Arc<dyn SandboxExecutor>) -> Self {
         self.sandbox = Some(manager);
         self
     }
 
     /// Attach or replace the sandbox manager.
-    pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
+    pub fn set_sandbox_manager(&mut self, manager: Arc<dyn SandboxExecutor>) {
         self.sandbox = Some(manager);
     }
 
@@ -660,6 +684,42 @@ impl HookRegistry {
         self.sources.remove(source).is_some()
     }
 
+    /// Register (or replace) one programmatic hook by name. `events` limits
+    /// the events the executor observes; an empty slice subscribes to every
+    /// event. Programmatic hooks run after data-driven sources in name
+    /// order, with identical merging and short-circuit semantics.
+    pub fn set_programmatic_hook(
+        &mut self,
+        name: &str,
+        events: &[HookEvent],
+        executor: ProgrammaticHookFn,
+    ) {
+        let entry = ProgrammaticHookEntry {
+            name: name.to_string(),
+            events: events.to_vec(),
+            executor,
+        };
+        match self
+            .programmatic
+            .iter_mut()
+            .find(|existing| existing.name == entry.name)
+        {
+            Some(existing) => *existing = entry,
+            None => {
+                self.programmatic.push(entry);
+                self.programmatic
+                    .sort_by(|left, right| left.name.cmp(&right.name));
+            }
+        }
+    }
+
+    /// Remove a programmatic hook by name; true when it was registered.
+    pub fn remove_programmatic_hook(&mut self, name: &str) -> bool {
+        let before = self.programmatic.len();
+        self.programmatic.retain(|entry| entry.name != name);
+        before != self.programmatic.len()
+    }
+
     /// Clear all user-configured hooks (keeps skill hooks intact).
     pub fn clear_user_hooks(&mut self) -> bool {
         self.sources.remove(&HookSource::UserConfig).is_some()
@@ -683,7 +743,7 @@ impl HookRegistry {
 
     /// Check if any hooks are registered.
     pub fn is_empty(&self) -> bool {
-        self.sources.is_empty()
+        self.sources.is_empty() && self.programmatic.is_empty()
     }
 
     /// Check if any hooks are registered for a specific event.
@@ -691,6 +751,10 @@ impl HookRegistry {
         self.sources
             .values()
             .any(|r| !r.definition.rules_for(event).is_empty())
+            || self
+                .programmatic
+                .iter()
+                .any(|entry| entry.events.is_empty() || entry.events.contains(&event))
     }
 
     /// Match hooks for a concrete context without executing any action.
@@ -842,6 +906,20 @@ impl HookRegistry {
             }
         }
 
+        // Programmatic hooks run after every data-driven source, in name
+        // order, with the same merge/short-circuit semantics. An empty
+        // event subscription observes everything.
+        for entry in &self.programmatic {
+            if !entry.events.is_empty() && !entry.events.contains(&event) {
+                continue;
+            }
+            let result = (entry.executor)(context.clone()).await;
+            merge_result(&mut combined, result);
+            if combined.stop_propagation || combined.block {
+                return combined;
+            }
+        }
+
         combined
     }
 }
@@ -924,7 +1002,7 @@ fn matches_tool_name(matcher: &str, tool_name: &str) -> bool {
 
 struct HookActionRuntime<'a> {
     plugin_data_dir: Option<&'a str>,
-    sandbox: Option<&'a Arc<SandboxManager>>,
+    sandbox: Option<&'a Arc<dyn SandboxExecutor>>,
     http_client: Option<&'a reqwest::Client>,
     mcp_executor: Option<&'a McpExecutorFn>,
     subagent_executor: Option<&'a SubagentExecutorFn>,
@@ -1119,7 +1197,7 @@ async fn execute_command_hook(
     source_dir: &str,
     plugin_data_dir: Option<&str>,
     context: &HookContext,
-    sandbox: Option<&Arc<SandboxManager>>,
+    sandbox: Option<&Arc<dyn SandboxExecutor>>,
 ) -> HookResult {
     // Build JSON context for stdin (include hook_event_name for compatibility)
     let mut stdin_value = serde_json::to_value(context).unwrap_or_default();

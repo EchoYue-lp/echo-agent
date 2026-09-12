@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use echo_core::agent::ExecutionAdmission;
 use echo_core::error::{ReactError, Result};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -27,7 +28,7 @@ use super::runtime_service::{
 use crate::planning::PlanValidator;
 
 /// One coherent plan revision loaded from the runtime authority.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePlanSnapshot {
     pub revision: u64,
     pub tasks: Vec<Task>,

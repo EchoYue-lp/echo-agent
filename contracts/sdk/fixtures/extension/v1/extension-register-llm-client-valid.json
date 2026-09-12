@@ -1,0 +1,16 @@
+{
+  "name": "extension-register-llm-client-valid",
+  "kind": "valid",
+  "target": "ExtensionRegisterRequest",
+  "description": "An LlmClient registration names the model it implements.",
+  "payload": {
+    "kind": "llm_client",
+    "implementation_id": "sdk-llm-1",
+    "descriptor": {
+      "kind": "llm_client",
+      "descriptor_version": 1,
+      "model_name": "fixture-chat",
+      "supports_streaming": true
+    }
+  }
+}

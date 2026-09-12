@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "source_only": true,
+  "typescript": {
+    "node": ">=20",
+    "language": "TypeScript 5.8.3"
+  },
+  "python": {
+    "python": ">=3.10",
+    "language": "Python"
+  },
+  "java": {
+    "jdk": "17",
+    "language": "Java 17"
+  }
+}

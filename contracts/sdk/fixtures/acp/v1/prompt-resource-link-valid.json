@@ -1,0 +1,25 @@
+{
+  "sessionId": "sess_fixture",
+  "prompt": [
+    {
+      "type": "text",
+      "text": "Inspect the linked source."
+    },
+    {
+      "type": "resource_link",
+      "name": "source",
+      "uri": "file:///workspace/src/lib.rs",
+      "description": "Primary Rust source",
+      "mimeType": "text/rust",
+      "size": 42,
+      "title": "Library source",
+      "annotations": {
+        "audience": ["assistant"],
+        "priority": 0.8
+      },
+      "_meta": {
+        "example.trace": "fixture-1"
+      }
+    }
+  ]
+}

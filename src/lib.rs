@@ -102,6 +102,10 @@ pub mod subagent {
 
 // ── Optional modules (feature-gated) ────────────────────────────────────────
 
+#[cfg(feature = "acp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "acp")))]
+pub mod acp;
+
 #[cfg(feature = "a2a")]
 #[cfg_attr(docsrs, doc(cfg(feature = "a2a")))]
 pub mod a2a;
@@ -198,7 +202,9 @@ pub mod prelude {
     pub type AgentBuilder = ReactAgentBuilder;
 
     // LLM
-    pub use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
+    pub use crate::llm::types::{
+        ContentPart, ImageUrl, LinkedResource, Message, MessageContent, Role, ToolCall,
+    };
     pub use crate::llm::{
         AnthropicClient, ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmApiProtocol,
         LlmClient, LlmConfig, LlmTimeouts, ModelInputModality, ModelProfile, ModelProfileOverride,

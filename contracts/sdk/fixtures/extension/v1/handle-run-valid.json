@@ -1,0 +1,11 @@
+{
+  "name": "handle-run-valid",
+  "kind": "valid",
+  "target": "WireHandle",
+  "description": "Run handle with generation fence.",
+  "payload": {
+    "id": "run-42",
+    "generation": "7",
+    "kind": "run"
+  }
+}

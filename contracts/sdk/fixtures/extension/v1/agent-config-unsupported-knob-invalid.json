@@ -1,0 +1,25 @@
+{
+  "name": "agent-config-unsupported-knob-invalid",
+  "kind": "invalid",
+  "target": "AgentCreateRequest",
+  "description": "Unsupported builder knobs fail closed via deny_unknown_fields.",
+  "payload": {
+    "config": {
+      "variant": "explicit",
+      "config_version": 1,
+      "model": {
+        "provider": "openai",
+        "name": "g-test",
+        "base_url": "https://api.example.com/v1/chat/completions",
+        "api_protocol": "chat_completions"
+      },
+      "agent": {
+        "name": "worker",
+        "system_prompt": "Do the task.",
+        "max_iterations": 8,
+        "enable_memory": true
+      }
+    }
+  },
+  "expect_error": "invalid_value"
+}

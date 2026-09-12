@@ -63,6 +63,7 @@ The current runnable demos are:
 - `demo61_agent_factory.rs`
 - `demo68_human_gate.rs`
 - `demo70_scheduler.rs`
+- `demo72_acp_agent_adapter.rs`
 
 ## Comprehensive Examples
 

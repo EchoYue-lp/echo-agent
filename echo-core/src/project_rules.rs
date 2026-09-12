@@ -25,7 +25,7 @@ enum InstructionFileSet {
 }
 
 /// One instruction file included in the resolved chain.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstructionSource {
     pub path: PathBuf,
     pub kind: String,

@@ -891,6 +891,14 @@ pub trait Tool: Send + Sync {
     fn required_input_modalities(&self) -> &'static [crate::llm::ModelInputModality] {
         &[]
     }
+
+    /// Owned modality projection for runtime-defined tools whose required
+    /// modalities are negotiated over a wire connection. Static tool
+    /// implementations keep using [`Self::required_input_modalities`].
+    #[doc(hidden)]
+    fn required_input_modalities_owned(&self) -> Vec<crate::llm::ModelInputModality> {
+        self.required_input_modalities().to_vec()
+    }
     /// Execute the tool with untyped JSON parameters.
     ///
     /// **Default implementation** delegates to [`Self::execute_with_context`]

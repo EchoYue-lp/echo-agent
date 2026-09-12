@@ -185,6 +185,7 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 
 | 能力 | 描述 | API 预览 |
 |------|------|---------|
+| **ACP Agent** | 基于 `AgentTurnDriver` 的稳定 v1 Client-Agent adapter | `AcpAgentAdapter::new(factory)` |
 | **MCP 协议** | 接入任意 MCP 服务器（stdio/SSE/HTTP） | `mcp.connect(McpServerConfig::stdio(...))` |
 | **A2A 协议** | Agent Card 发布、跨框架协作 | `A2AServer::bind("0.0.0.0:3000")` |
 | **Skill 系统** | 渐进式披露：发现 → 激活 → 使用 | `agent.load_skill("web_research")` |
@@ -219,6 +220,7 @@ echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "
 | Feature | 启用 | 关键依赖 |
 |---------|------|---------|
 | `full` | 启用下列全部 feature | — |
+| `acp` | 稳定 ACP v1 Agent adapter | `agent-client-protocol` |
 | `a2a` | Agent-to-Agent 协议 | `axum`, `jsonwebtoken` |
 | `mcp` | MCP 协议客户端 | — |
 | `lsp` | Language Server Protocol 集成 | — |
@@ -804,6 +806,34 @@ agent.set_circuit_breaker(cb_config);
 | 配置参考 | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
 | 运行时与任务系统 | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
 | 安全指南 | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
+| 多语言 SDK（ACP Host 已可用） | [EN](docs/sdk/README.md) | — |
+
+### SDK 入口
+
+可从源码构建的 `echo-agent-sdk-host` 已通过官方 Client 与 stdio runtime 的标准
+ACP v1 支持面验证；在 `sdk-core-profile` feature 与显式 state root 下，还支持协商式
+`_echo_agent/*` 核心扩展 Profile（Agent/Session/Run handle、完整事件与 ACK/replay、
+重启恢复）。`sdk-facade-adapters` feature 可独立在同一连接上提供 facade feature
+家族——task/subagent/结构化输出、memory/workflow/state/delivery/
+trace/eval/improve、MCP/A2A/LSP/topology 与各工具家族——全部落到框架既有权威，
+并带有 canonical catalog 路由、冻结的 feature 语义、与广告一致的资源上限和
+teardown 级联（见 [docs/sdk/facade-feature-adapters.md](docs/sdk/facade-feature-adapters.md)）。
+`sdk-extension-bridge` 会自动包含这些 facade adapters，并进一步提供协商式双向扩展桥：
+宿主语言实现的 Tool、LlmClient、Store、HumanLoop、Hook、回调/干预、工厂与自定义
+Agent 在同一连接上注册，并由 Host 以租约、截止时间、取消与流终态语义反向调用
+（见 [docs/sdk/sdk-extension-bridge.md](docs/sdk/sdk-extension-bridge.md)）。
+Plan 08 已完成 Rust Host facade 的 canonical source operation、consumer trait
+与公共 stream 路由；Workflow 和 A2A 使用真实 Host-issued pull stream，而不是把完整
+结果缓存后伪装成流，严格 facade 复审和最终门禁均已通过。
+它复用根 crate 的 `AcpAgentAdapter`，每个 Session 创建一个
+独立框架 Agent，并只接受显式、产品无关的 JSON 配置。开发者用
+`cargo build -p echo-sdk-host --features sdk-facade-all --locked` 自行构建；仓库不
+携带 binary 或任何语言 runtime。仓库现在包含可从源码构建的 TypeScript/Python/Java Client
+基线，并已通过真实 Host 的 Agent/Session/facade invoke 验证；TypeScript/Python quickstart
+和 Java 示例已纳入源码门禁，但 process-local intrinsic 行为仍需由三种语言分别完成，
+因此还不能宣称总体 **Runnable** 或 **Parity complete**。唯一 SDK 入口是
+[docs/sdk/README.md](docs/sdk/README.md)，核心 Profile 参考见
+[docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md)。
 
 ---
 

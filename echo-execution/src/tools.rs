@@ -789,7 +789,7 @@ impl ToolManager {
             .filter(|entry| {
                 !entry
                     .value()
-                    .required_input_modalities()
+                    .required_input_modalities_owned()
                     .iter()
                     .all(|required| available.contains(required))
             })

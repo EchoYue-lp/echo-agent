@@ -1,0 +1,11 @@
+{
+  "name": "scalar-path-unix-relative-encoded-invalid",
+  "kind": "invalid",
+  "target": "WirePath",
+  "description": "Canonical base64 is still invalid when its Unix path is relative.",
+  "payload": {
+    "encoding": "unix",
+    "bytes_base64": "cmVsYXRpdmU"
+  },
+  "expect_error": "invalid_value"
+}

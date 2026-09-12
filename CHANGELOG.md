@@ -7,7 +7,181 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Intrinsic tool values in all source SDKs.** TypeScript, Python and Java now
+  expose `ToolCallParams` typed accessors and `ToolResult` construction/update
+  helpers with the same required-type failures, structured data conversion and
+  immutable modifier semantics as the Rust tool facade. The generated parity
+  manifest marks this exact 28-item intrinsic slice complete; the remaining
+  process-local intrinsic surface stays explicitly open.
+
+- **A2A TaskState intrinsic in all source SDKs.** The closed terminal and
+  transition table is available as a TypeScript union, Python string enum and
+  Java enum, with matching display values and fail-fast invalid-state checks.
+  The generated manifest marks the exact 10-item intrinsic identity group;
+  remaining intrinsic behavior is still open.
+
+- **A2A value constructors in all source SDKs.** Message, task status, provider
+  and skill values now have equivalent immutable constructors and text
+  projections in TypeScript, Python and Java; the exact 14-item intrinsic
+  identity group is covered by the parity manifest and focused tests.
+
+- **A2A Agent Card builder in all source SDKs.** The local card projection and
+  fluent builder now preserve Rust defaults and capability flags in all three
+  languages; Host-owned `from_agent` derivation remains intentionally open.
+
+- **A2A Artifact and Error values in all source SDKs.** Immutable artifact
+  chunks and typed task errors now preserve their Rust wire fields in all three
+  languages.
+
+- **A2A stream value DTOs in all source SDKs.** Status/artifact update events
+  and JSON-RPC stream responses now preserve the closed local wire union.
+
+- **A2A task envelope DTOs in all source SDKs.** Task request/params/response
+  and nested history/artifact values now preserve the local wire contract.
+
+- **Bidirectional `_echo_agent/extension/*` bridge.** The source-built SDK
+  Host (feature `sdk-extension-bridge`) negotiates an `extension_bridge`
+  capability and lets a host language register Tool, LlmClient, Store,
+  HumanLoopProvider, Hook, AgentCallback, InterventionCallback,
+  AgentFactory and custom-Agent implementations. The framework calls them
+  through thin proxies on the same ACP connection: every reverse invocation
+  takes a lease from the connection-scoped
+  `ExtensionInvocationAuthority` (bounded concurrency, exclusive-lease
+  re-entry conflicts, exactly-once settlement), carries its own invocation
+  identity and deadline, settles typed outcomes on timeout / cancellation /
+  disconnect, and discards late answers with bounded diagnostics. Streaming
+  callbacks deliver Host-minted stream handles with monotonic sequences and
+  exactly one terminal. Failure never falls back to a built-in
+  implementation. Real-process E2E covers the tool round trip with
+  callbacks, interventions and hooks, streaming LlmClient, the registration
+  deadline, framework cancellation notices and the plain-client
+  fail-closed ladder.
+
+- **Negotiated `_echo_agent/*` SDK core profile.** The echo-agent SDK Host
+  now serves an explicitly negotiated core extension profile over the same
+  standard ACP v1 connection: capability hello/advertisement under
+  `initialize._meta`, typed JSON-RPC handlers for the Agent/Session/Run
+  families (`_echo_agent/agent|session|run/*`, `_echo_agent/run/replay`,
+  `_echo_agent/event`, `_echo_agent/event/ack`, `_echo_agent/gap`),
+  generation-fenced Agent/Session/Run/Stream handles with fixed
+  shape→kind→generation→issued/closed validation and idempotent create, one
+  fixed extension error code (`-32050`) carrying a bounded `EchoSdkError`,
+  ACK-bounded live event delivery with typed gaps, durable per-run journals
+  with bounded replay, explicit state-root persistence with Host generation
+  counters, session recovery and honest `interrupted` semantics for runs
+  active across a crash, and a stdin newline-frame byte limiter ahead of the
+  official parser. Standard and extension entries share one connection-level
+  Session/Run/event authority, so a standard Prompt and an extension Run are
+  the same object with one active-run slot. Real-process E2E covers the
+  valid-hello lifecycle, the fail-closed matrix, restart recovery, crash
+  interruption and oversized-frame rejection. Full language SDK parity remains
+  a later delivery; source client baselines are tracked separately below.
+
+- **Facade feature adapters (`sdk-facade-adapters` / `sdk-facade-all`).**
+  The SDK Host now serves the `_echo_agent/*` facade feature families over
+  the same negotiated connection: task/subagent/structured-output bind the
+  Session Agent's own `TaskRevisionService`/`RuntimeTaskService`/
+  `SubagentExecutor`, and the stateful (memory/workflow/state/delivery/
+  trace/eval/improve), integration (MCP/A2A/LSP/topology/channels) and tool families
+  route their closed operation lists to the framework services. The
+  generated `facade-operation-catalog.json` is the executable route
+  authority: exact operation identities, frozen per-operation sha256
+  signature digests and frozen all-of/any-of feature requirements all fail
+  closed at admission, and the generic invoke surface executes the same
+  closed family operations as the `<family>/op` methods.
+  TaskRun/PlanTask handles are Host-issued and generation-fenced; a second
+  `task/execute` of a live run is a typed conflict; live subagent dispatch
+  records obey the advertised `max_open_handles` bound; family resources
+  are Host-issued generation-fenced handles under one authority with a
+  connection-wide `max_facade_resources` global bound; channels are
+  advertised only with the typed channel/extension bridge adapter, testing
+  remains unbound; and
+  session close / connection teardown cancel task executions and subagent
+  dispatches, wait for their bounded settlement and await
+  `McpManager::close_all` inside the bounded shutdown chain. Consumer
+  traits resolve to a live typed bridge or an exact documented process-local
+  language boundary; they are never relabeled as a same-topic family/core
+  route. Stateful Eval/Improve/PluginRegistry/Store methods use Rust resources
+  and exact source operations. The
+  `sdk-facade-adapters` feature now implies `framework-subagent` so the
+  `task_graph` capability is never advertised without its handlers.
+  Real-process E2E (`core_profile_e2e`, `facade_feature_adapters_e2e`),
+  contract drift gates and a CI facade job cover the family matrix. See
+  [docs/sdk/facade-feature-adapters.md](docs/sdk/facade-feature-adapters.md).
+
+- **Facade public-API parity work.** Canonical source operations no longer
+  have an unbound generic fallback: filesystem I/O and Session-owned
+  lease/identity guards call the Rust authority, and all live `SkillRegistry`
+  operations address the Session Agent. Consumer traits and stream routes are
+  mechanically audited. Workflow `run_stream` and A2A SSE now expose real
+  Host-issued pull streams with capacity-one backpressure, monotonic sequence,
+  typed cancellation, owner/generation checks and idempotent close. This closes
+  the Rust Host facade contract only; per-language full parity remains a
+  separate gate. Plan 08 strict review and final validation have passed.
+
+- **Source language SDK baselines.** Added source-only TypeScript, Python and
+  Java ACP clients using the official language runtimes, shared canonical
+  facade catalog, lossless i64/u64 wire values, typed extension registration,
+  source/family operation routing, Host-issued stream writers and real Host
+  smoke coverage for Agent, Session, memory, telemetry and Run settlement.
+  Full extension/all-feature parity is intentionally not claimed yet; no Host
+  binary, language runtime or registry artifact is published.
+
+- **Source-built standard ACP v1 Host.** Added the non-published
+  `echo-sdk-host` workspace crate and `echo-agent-sdk-host` executable. It
+  loads one explicit, bounded schema-v1 JSON configuration, constructs a new
+  framework Agent per ACP Session over a shared model client, translates only
+  declared stdio MCP servers, and connects the existing `AcpAgentAdapter` to
+  the official ACP stdio transport. Real subprocess tests use the official
+  Client to cover initialize/new/prompt/update/cancel, clean stdin EOF,
+  JSON-RPC-only stdout, bounded configuration failure, and credential
+  redaction. The repository still ships source only; full language SDK parity
+  and the `_echo_agent/*` runtime profile remain later deliveries.
+
+- **Stable ACP v1 Agent adapter.** The root `echo_agent` facade now exposes a
+  source-built, transport-neutral ACP Agent behind the optional `acp` feature.
+  It composes the official Rust SDK with `AgentTurnDriver`, gives each ACP
+  Session an independent framework Agent, projects accepted framework events
+  into standard `session/update` notifications, and routes both
+  `session/cancel` and `$/cancel_request` into the same cancellation token.
+  ACP ResourceLink inputs remain typed as provider-neutral `LinkedResource`
+  content parts until the provider boundary, preserving field identity without
+  embedding a private marker in user text.
+  The current adapter supports the stable initialize/new/prompt/update/cancel
+  baseline and is used by the source-built standard Host. `_echo_agent/*` and
+  the language SDKs remain later delivery stages.
+
+- **SDK contract stage (ACP-first, source-only).** Frozen the multilingual
+  SDK program's contract layer over the official stable ACP v1 baseline:
+  `contracts/sdk/` now pins the official `agent-client-protocol` 2.1.0 /
+  `agent-client-protocol-schema` =1.7.0 artifacts and wire `protocolVersion`
+  1 (draft v2 excluded), carries a deterministic per-feature-profile public
+  facade inventory (`public-api.txt`), a full parity manifest classifying
+  every public item by semantic class, ACP relationship and per-language
+  status (`parity-manifest.json`), the generated
+  `_echo_agent/*` extension JSON Schema with a stable contract digest, and
+  golden fixtures with mandatory lossless round-trips. The new workspace
+  member `echo-sdk-protocol` (`publish = false`) owns the extension DTOs
+  (capability, method catalog, typed errors, lossless scalars, handles,
+  full event/replay views) and the deterministic `export_schema`
+  check/update generator; `scripts/check-sdk-contracts.sh` plus a dedicated
+  CI job block any facade or contract drift. SDK docs live at
+  `docs/sdk/` and honestly declare the Contract stage (no adapter, Host, or
+  language SDK yet). See
+  [docs/sdk/README.md](docs/sdk/README.md) and
+  [ADR 0028](docs/adr/0028-source-first-multilanguage-sdk-runtime.md).
+
 ### Changed
+
+- Upgraded `polars` 0.53 → 0.55 (via `echo-tools`): polars-ops 0.55 vendors
+  the Unicode tables that 0.46–0.53 read from the removed
+  `core::unicode` API, restoring nightly/rustdoc compilability of the
+  `data` feature. Iterator call sites adapted to the owned
+  `ChunkedArray::iter` API, and the shared quantile helper moved into a
+  feature-neutral module so `--no-default-features --features data`
+  compiles without the `statistics` feature.
 
 - File-based skill frontmatter now accepts **official agentskills.io fields
   only**: `name`, `description`, `license`, `compatibility`, `metadata`

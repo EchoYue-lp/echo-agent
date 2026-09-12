@@ -193,6 +193,69 @@ impl Agent for RwLockAgentWrapper {
         &self.system_prompt
     }
 
+    fn tool_names(&self) -> Vec<String> {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|agent| agent.tool_names())
+            .unwrap_or_default()
+    }
+
+    fn tool_definitions(&self) -> Vec<crate::llm::ToolDefinition> {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|agent| agent.tool_definitions())
+            .unwrap_or_default()
+    }
+
+    fn disabled_tool_names(&self) -> std::collections::HashSet<String> {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|agent| agent.disabled_tool_names())
+            .unwrap_or_default()
+    }
+
+    fn tool_visibility_policy(&self) -> crate::agent::ToolVisibilityPolicy {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|agent| agent.tool_visibility_policy())
+            .unwrap_or_default()
+    }
+
+    fn working_dir(&self) -> Option<std::path::PathBuf> {
+        self.inner
+            .try_read()
+            .ok()
+            .and_then(|agent| agent.working_dir())
+    }
+
+    fn skill_names(&self) -> Vec<String> {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|agent| agent.skill_names())
+            .unwrap_or_default()
+    }
+
+    fn mcp_server_names(&self) -> Vec<String> {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|agent| agent.mcp_server_names())
+            .unwrap_or_default()
+    }
+
+    fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let guard = inner.read().await;
+            guard.close().await
+        })
+    }
+
     fn steer_input(
         &self,
         expected_turn_id: Option<&str>,
@@ -328,6 +391,83 @@ impl Agent for RwLockAgentWrapper {
         Box::pin(async move {
             let guard = inner.read().await;
             guard.reset().await;
+        })
+    }
+
+    fn current_run_id(&self) -> Option<String> {
+        self.inner
+            .try_read()
+            .ok()
+            .and_then(|agent| agent.current_run_id())
+    }
+
+    fn token_usage_summary(&self) -> crate::tokenizer::UsageSummary {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|agent| agent.token_usage_summary())
+            .unwrap_or_default()
+    }
+
+    fn set_external_context(&self, context: &crate::tools::ExternalRunContext) {
+        if let Ok(agent) = self.inner.try_read() {
+            agent.set_external_context(context);
+        }
+    }
+
+    fn clear_external_context(&self) {
+        if let Ok(agent) = self.inner.try_read() {
+            agent.clear_external_context();
+        }
+    }
+
+    fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
+        if let Ok(agent) = self.inner.try_read() {
+            agent.set_working_dir(path);
+        }
+    }
+
+    fn clear_working_dir(&self) {
+        if let Ok(agent) = self.inner.try_read() {
+            agent.clear_working_dir();
+        }
+    }
+
+    fn register_tool(&self, tool: Box<dyn crate::tools::Tool>) {
+        if let Ok(agent) = self.inner.try_read() {
+            agent.register_tool(tool);
+        }
+    }
+
+    fn remove_tool(&self, name: &str) -> bool {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|agent| agent.remove_tool(name))
+            .unwrap_or(false)
+    }
+
+    fn messages(&self) -> Vec<Message> {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|agent| agent.messages())
+            .unwrap_or_default()
+    }
+
+    fn set_system_prompt(&self, prompt: &str) {
+        if let Ok(agent) = self.inner.try_read() {
+            agent.set_system_prompt(prompt);
+        }
+    }
+
+    fn delegate_to<'a>(&'a self, target: &'a str, task: &'a str) -> BoxFuture<'a, Result<String>> {
+        let inner = self.inner.clone();
+        let target = target.to_string();
+        let task = task.to_string();
+        Box::pin(async move {
+            let guard = inner.read().await;
+            guard.delegate_to(&target, &task).await
         })
     }
 }

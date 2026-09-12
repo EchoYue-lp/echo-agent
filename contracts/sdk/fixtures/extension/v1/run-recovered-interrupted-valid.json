@@ -1,0 +1,20 @@
+{
+  "name": "run-recovered-interrupted-valid",
+  "kind": "valid",
+  "target": "RecoveredRunWire",
+  "description": "Interrupted runs expose fresh-generation handles without terminal.",
+  "payload": {
+    "run": {
+      "id": "run-9",
+      "generation": "4",
+      "kind": "run"
+    },
+    "stream": {
+      "id": "stream-9",
+      "generation": "4",
+      "kind": "stream"
+    },
+    "status": "interrupted",
+    "last_sequence": "21"
+  }
+}

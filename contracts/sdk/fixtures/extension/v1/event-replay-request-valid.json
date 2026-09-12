@@ -1,0 +1,15 @@
+{
+  "name": "event-replay-request-valid",
+  "kind": "valid",
+  "target": "ReplayRequest",
+  "description": "Replay is addressed by a generation-fenced stream handle.",
+  "payload": {
+    "stream": {
+      "id": "stream-1",
+      "generation": "3",
+      "kind": "stream"
+    },
+    "after_sequence": "0",
+    "max_events": "16"
+  }
+}

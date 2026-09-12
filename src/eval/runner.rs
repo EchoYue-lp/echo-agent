@@ -11,6 +11,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Runs eval cases against agents.
+#[derive(Clone)]
 pub struct EvalRunner {
     /// Root directory for temporary workspaces (fixtures copied here).
     pub workspace_root: PathBuf,
@@ -184,9 +185,24 @@ impl EvalRunner {
         cases: &[EvalCase],
         mut agent_factory: impl FnMut() -> Box<dyn Agent>,
     ) -> EvalReport {
+        self.run_all_async(cases, || std::future::ready(agent_factory()))
+            .await
+    }
+
+    /// Run every case with an Agent created lazily by an asynchronous factory.
+    /// This shares the per-case execution path with [`Self::run_all`].
+    pub async fn run_all_async<F, Fut>(
+        &self,
+        cases: &[EvalCase],
+        mut agent_factory: F,
+    ) -> EvalReport
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Box<dyn Agent>>,
+    {
         let mut results = Vec::with_capacity(cases.len());
         for case in cases {
-            let agent = agent_factory();
+            let agent = agent_factory().await;
             let result = self.run(case, &*agent).await;
             results.push(result);
         }

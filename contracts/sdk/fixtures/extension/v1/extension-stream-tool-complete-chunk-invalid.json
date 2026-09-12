@@ -1,0 +1,32 @@
+{
+  "name": "extension-stream-tool-complete-chunk-invalid",
+  "kind": "invalid",
+  "target": "ExtensionStreamEvent",
+  "description": "A Tool terminal result cannot be emitted as an ordinary chunk.",
+  "payload": {
+    "event": "chunk",
+    "stream": {
+      "id": "stream-9",
+      "generation": "2",
+      "kind": "stream"
+    },
+    "sequence": "2",
+    "value": {
+      "kind": "tool",
+      "value": {
+        "event": "complete",
+        "result": {
+          "kind": {
+            "kind": "text"
+          },
+          "success": true,
+          "output": "done",
+          "truncated": false,
+          "metadata": {},
+          "model_content": []
+        }
+      }
+    }
+  },
+  "expect_error": "invalid_value"
+}

@@ -1,0 +1,326 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ParityManifest",
+  "type": "object",
+  "required": [
+    "entries",
+    "extension_protocol_version",
+    "generated",
+    "schema_version"
+  ],
+  "properties": {
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ManifestEntry"
+      }
+    },
+    "extension_protocol_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "generated": {
+      "$ref": "#/definitions/ManifestGenerated"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "AcpRelationship": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "standard_projection",
+        "echo_extension",
+        "language_intrinsic"
+      ]
+    },
+    "FeatureSemantics": {
+      "type": "string",
+      "enum": [
+        "default",
+        "any_of",
+        "all_of"
+      ]
+    },
+    "ItemKind": {
+      "type": "string",
+      "enum": [
+        "module",
+        "function",
+        "method",
+        "struct",
+        "struct_field",
+        "enum",
+        "variant",
+        "union",
+        "trait",
+        "trait_impl",
+        "trait_alias",
+        "type_alias",
+        "macro",
+        "proc_macro",
+        "constant",
+        "static",
+        "extern_type",
+        "primitive"
+      ]
+    },
+    "LanguageImplementationStatus": {
+      "type": "string",
+      "enum": [
+        "not_implemented",
+        "in_progress",
+        "done"
+      ]
+    },
+    "LanguageStatusRecord": {
+      "type": "object",
+      "required": [
+        "contract_test",
+        "status",
+        "target"
+      ],
+      "properties": {
+        "contract_test": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/LanguageImplementationStatus"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManifestEntry": {
+      "type": "object",
+      "required": [
+        "acp_relationship",
+        "canonical",
+        "classification",
+        "derived_traits",
+        "feature_semantics",
+        "features",
+        "full_only",
+        "kind",
+        "languages",
+        "path",
+        "route",
+        "semantic_rule",
+        "signatures",
+        "source_paths"
+      ],
+      "properties": {
+        "acp_relationship": {
+          "$ref": "#/definitions/AcpRelationship"
+        },
+        "alias_of": {
+          "description": "Canonical facade path this entry re-exports; aliases share the source identity, signature, feature and handler of the canonical member, so the Host registers exactly one handler per route.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "canonical": {
+          "description": "Whether this facade path is the canonical member of its alias group (same canonical source identity). Aliases carry `alias_of` instead.",
+          "type": "boolean"
+        },
+        "classification": {
+          "$ref": "#/definitions/SemanticClass"
+        },
+        "derived_traits": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "feature_semantics": {
+          "$ref": "#/definitions/FeatureSemantics"
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "full_only": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/definitions/ItemKind"
+        },
+        "languages": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/LanguageStatusRecord"
+          }
+        },
+        "path": {
+          "type": "string"
+        },
+        "route": {
+          "$ref": "#/definitions/RouteObligation"
+        },
+        "semantic_rule": {
+          "type": "string"
+        },
+        "signatures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManifestSignature"
+          }
+        },
+        "source_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManifestGenerated": {
+      "type": "object",
+      "required": [
+        "inventory_digest",
+        "profiles",
+        "rustdoc_format_version"
+      ],
+      "properties": {
+        "inventory_digest": {
+          "type": "string"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rustdoc_format_version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManifestSignature": {
+      "type": "object",
+      "required": [
+        "digest"
+      ],
+      "properties": {
+        "digest": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RouteObligation": {
+      "description": "Canonical adapter obligation of one facade item: exactly one route from `facade.rs`, the wire surface it rides, and the real validation references. Route ids never contain wildcards; re-export aliases share the source identity and therefore the same route (see `ManifestEntry::alias_of`).",
+      "type": "object",
+      "required": [
+        "feature_semantics",
+        "mapping",
+        "required_features",
+        "route",
+        "surface",
+        "validation"
+      ],
+      "properties": {
+        "family": {
+          "description": "Adapter family name, when the route belongs to one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "feature_semantics": {
+          "$ref": "#/definitions/FeatureSemantics"
+        },
+        "handler_operation": {
+          "description": "Closed family operation the Host executes after admitting an exact source identity. Present only for operation-level family adapters.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mapping": {
+          "type": "string"
+        },
+        "method": {
+          "description": "Primary wire method owned by the route, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "description": "Exact operation identity (generic invoke routes only).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_feature": {
+          "description": "Root leaf feature required by the route's family.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_features": {
+          "description": "Complete feature requirement inherited from the canonical inventory item. `AllOf` is used for root `full` entries; `AnyOf` is used when an item exists in one of several feature profiles.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "route": {
+          "description": "Canonical route id (`family:memory`, `core:task`, `source:<source identity>`, `bridge:tool`, `value`, `intrinsic:<reason>`, `standard:<acp method>`).",
+          "type": "string"
+        },
+        "signatures": {
+          "description": "Exact signature digests accepted for an executable invoke route. Family/value routes may legitimately carry no operation signature.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManifestSignature"
+          }
+        },
+        "surface": {
+          "description": "Wire surface kind: standard/core/family/bridge/invoke/value/intrinsic.",
+          "type": "string"
+        },
+        "validation": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SemanticClass": {
+      "type": "string",
+      "enum": [
+        "wire_value",
+        "operation",
+        "handle",
+        "stream",
+        "extension",
+        "language_intrinsic"
+      ]
+    }
+  }
+}

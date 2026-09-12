@@ -1,0 +1,31 @@
+{
+  "name": "@echo-agent/sdk-typescript-source",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Source-built TypeScript ACP client for echo-agent",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "../shared/facade-operation-catalog.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:examples": "tsc -p tsconfig.examples.json",
+    "test": "npm run build && npm run build:examples && node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.8.3"
+  }
+}

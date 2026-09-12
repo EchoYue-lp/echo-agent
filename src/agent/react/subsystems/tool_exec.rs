@@ -9,7 +9,6 @@ use crate::agent::InterventionCallback;
 use crate::agent::subagent::SubagentRegistry;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
-use crate::sandbox::SandboxManager;
 use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
 use crate::skills::registry::SharedRegistry;
@@ -24,6 +23,11 @@ use std::sync::Arc;
 pub(crate) struct ToolExecutionSubsystem {
     /// Tool registry (Arc for sharing with StreamRunner).
     pub(crate) tool_manager: Arc<ToolManager>,
+    /// Task revision authority this agent's task tools operate through.
+    /// Retained so host-side surfaces (SDK task RPC, EKO TUI/GUI) share the
+    /// exact service the in-conversation `task_*` tools use instead of
+    /// constructing a second, divergent store.
+    pub(crate) task_revision_service: Arc<echo_orchestration::tasks::TaskRevisionService>,
     #[cfg(feature = "subagent")]
     pub(crate) subagent_registry: Arc<SubagentRegistry>,
     /// Shared subagent executor (with hook configuration) — reused by
@@ -36,7 +40,7 @@ pub(crate) struct ToolExecutionSubsystem {
     pub(crate) hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
     #[cfg(feature = "mcp")]
     pub(crate) mcp_manager: McpManager,
-    pub(crate) sandbox_manager: Option<Arc<SandboxManager>>,
+    pub(crate) sandbox_manager: Option<Arc<dyn crate::sandbox::SandboxExecutor>>,
     /// Intervention callbacks that can influence agent behavior before
     /// tool calls, LLM reasoning, and final answers.
     pub(crate) intervention_callbacks: Vec<Arc<dyn InterventionCallback>>,

@@ -338,6 +338,10 @@ fn content_to_responses(content: &MessageContent) -> Value {
                         "filename": name,
                         "file_data": format!("data:application/octet-stream;base64,{content}"),
                     }),
+                    ContentPart::ResourceLink { resource } => json!({
+                        "type": "input_text",
+                        "text": resource.model_text(),
+                    }),
                 })
                 .collect(),
         ),

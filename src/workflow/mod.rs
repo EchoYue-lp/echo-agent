@@ -71,3 +71,9 @@ pub mod dsl;
 pub mod loader;
 
 pub use loader::WorkflowDefinition;
+
+// The `Graph::resume` decision parameter lives in the orchestration-level
+// human-loop module; re-export it with the workflow surface so consumers
+// of `echo_agent::workflow` reach the full run/resume API without a
+// direct echo-orchestration dependency.
+pub use echo_orchestration::human_loop::ApprovalDecision;

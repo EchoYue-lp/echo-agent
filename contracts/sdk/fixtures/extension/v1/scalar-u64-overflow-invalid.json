@@ -1,0 +1,8 @@
+{
+  "name": "scalar-u64-overflow-invalid",
+  "kind": "invalid",
+  "target": "WireU64",
+  "description": "Decimal strings above u64::MAX are rejected by Rust and JSON Schema.",
+  "payload": "18446744073709551616",
+  "expect_error": "invalid_value"
+}

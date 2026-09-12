@@ -309,7 +309,6 @@ impl PermissionService {
 
     /// 应用权限更新
     pub async fn apply_update(&self, update: PermissionUpdate) {
-        let mut rules = self.rules.write().await;
         match update {
             PermissionUpdate::AddRule {
                 matcher,
@@ -317,9 +316,11 @@ impl PermissionService {
                 source,
             } => {
                 let rule = Self::parse_rule(matcher, behavior, source);
+                let mut rules = self.rules.write().await;
                 rules.add_rule(rule);
             }
             PermissionUpdate::RemoveRule { matcher } => {
+                let mut rules = self.rules.write().await;
                 rules.remove_by_matcher(&matcher);
             }
             PermissionUpdate::SetMode { mode } => {
@@ -401,6 +402,35 @@ impl PermissionService {
     /// 撤销某工具的会话级审批缓存
     pub fn revoke_cache(&self, scope_id: &str, tool_name: &str) {
         self.cache.revoke(scope_id, tool_name);
+    }
+
+    /// 检查会话级审批缓存是否覆盖一次具体的工具调用。
+    ///
+    /// 这是 `SessionApprovalCache` 的 service-owned 薄封装；权限匹配、TTL
+    /// 和缓存范围仍由缓存本身决定，调用方不应复制这些规则。
+    pub fn is_approved(&self, scope_id: &str, tool_name: &str, args: &Value) -> bool {
+        self.cache.is_approved(scope_id, tool_name, args)
+    }
+
+    /// 记录一次会话级审批缓存。
+    pub fn record_approval(
+        &self,
+        scope_id: &str,
+        tool_name: &str,
+        args: &Value,
+        scope: ApprovalScope,
+    ) {
+        self.cache.record_approval(scope_id, tool_name, args, scope);
+    }
+
+    /// 清理已过期的会话级审批缓存，并返回移除条目数。
+    pub fn cleanup_expired(&self) -> usize {
+        self.cache.cleanup_expired()
+    }
+
+    /// 返回会话级审批缓存统计信息。
+    pub fn stats(&self) -> super::approval_cache::CacheStats {
+        self.cache.stats()
     }
 
     /// 清空所有审批缓存
@@ -513,7 +543,11 @@ impl PermissionService {
         invocation: Option<&PermissionInvocationContext>,
     ) -> Result<PermissionCheck> {
         let pipeline_start = std::time::Instant::now();
-        let config = self.config.read().await;
+        // Snapshot configuration before touching rules, the denial tracker or
+        // a user-provided handler. Holding the read guard across those awaits
+        // would deadlock a concurrent `apply_update(SetMode)` (rules -> config)
+        // or a re-entrant permission update from a HumanLoopProvider callback.
+        let config = self.config.read().await.clone();
         let effective_mode = mode_override.unwrap_or(config.mode);
         let scope_id = invocation.and_then(|context| context.scope_id.as_deref());
 
@@ -867,6 +901,12 @@ impl PermissionService {
             _ => RuleBehavior::Allow,
         };
         let rule_source = match source.as_str() {
+            "default" => RuleSource::Default,
+            "local_settings" => RuleSource::LocalSettings,
+            "project_settings" => RuleSource::ProjectSettings,
+            "user_settings" => RuleSource::UserSettings,
+            "managed" => RuleSource::Managed,
+            "cli_arg" => RuleSource::CliArg,
             "session" => RuleSource::Session,
             "cliArg" => RuleSource::CliArg,
             "userSettings" => RuleSource::UserSettings,

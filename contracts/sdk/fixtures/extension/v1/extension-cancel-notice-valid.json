@@ -1,0 +1,10 @@
+{
+  "name": "extension-cancel-notice-valid",
+  "kind": "valid",
+  "target": "ExtensionCancelNotice",
+  "description": "Cancellation names the invocation identity and a stable reason.",
+  "payload": {
+    "invocation_id": "invocation-41",
+    "reason": "cancelled"
+  }
+}

@@ -39,7 +39,7 @@ pub struct TaskGraphContext {
 }
 
 /// One coherent task graph revision plus plan-level context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevisionedTaskGraph {
     pub snapshot: RuntimePlanSnapshot,
     pub context: TaskGraphContext,
@@ -195,7 +195,7 @@ pub struct TaskPatchEffects {
 }
 
 /// Already-computed candidate handed to a persistence adapter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskGraphCommit {
     pub expected_revision: Option<u64>,
     pub next: RevisionedTaskGraph,

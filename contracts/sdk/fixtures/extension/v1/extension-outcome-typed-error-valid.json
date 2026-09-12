@@ -1,0 +1,14 @@
+{
+  "name": "extension-outcome-typed-error-valid",
+  "kind": "valid",
+  "target": "ExtensionInvokeOutcome",
+  "description": "Callback failures use the typed extension error contract without fallback.",
+  "payload": {
+    "outcome": "error",
+    "error": {
+      "code": "extension_failed",
+      "message": "implementation raised before producing a value",
+      "retryable": "never"
+    }
+  }
+}

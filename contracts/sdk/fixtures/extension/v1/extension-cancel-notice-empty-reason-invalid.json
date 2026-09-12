@@ -1,0 +1,11 @@
+{
+  "name": "extension-cancel-notice-empty-reason-invalid",
+  "kind": "invalid",
+  "target": "ExtensionCancelNotice",
+  "description": "Cancel reasons are bounded non-empty diagnostics.",
+  "payload": {
+    "invocation_id": "invocation-41",
+    "reason": ""
+  },
+  "expect_error": "invalid_value"
+}

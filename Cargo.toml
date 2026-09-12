@@ -8,6 +8,8 @@ members = [
     "echo-tools",
     "echo-state",
     "echo-orchestration",
+    "echo-sdk-protocol",
+    "echo-sdk-host",
 ]
 default-members = [
     ".",
@@ -19,6 +21,8 @@ default-members = [
     "echo-tools",
     "echo-state",
     "echo-orchestration",
+    "echo-sdk-protocol",
+    "echo-sdk-host",
 ]
 resolver = "3"
 
@@ -54,17 +58,20 @@ exclude = [
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
+features = ["acp", "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
 rustdoc-args = ["--cfg", "docsrs"]
-# NOTE: `data` feature (polars) is excluded because polars-ops 0.46–0.53 has a build.rs that
-# unconditionally enables `feature="nightly"` on nightly compilers, then uses
-# `core::unicode::{Case_Ignorable, Cased}` which was removed in Rust nightly 1.97+.
-# Upstream fix: https://github.com/pola-rs/polars/commit/67422be6 (not yet published to crates.io).
-# Re-enable `data` once polars releases a version containing this fix.
+# NOTE: `data` (polars) is still excluded from docs.rs. polars-ops 0.46–0.53
+# broke nightly builds by unconditionally enabling its `nightly` cfg and then
+# using `core::unicode::{Case_Ignorable, Cased}` (removed in Rust 1.97);
+# polars 0.55 vendors those tables (upstream fix polars#67422be6) and compiles
+# on nightly again — contracts/sdk/toolchain.json pins a nightly toolchain for
+# the SDK facade inventory, which covers `data`. Re-enabling `data` on docs.rs
+# still needs its own verification against the docs.rs builder before shipping.
 
 [features]
 default = []
-full = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics", "testing"]
+full = ["acp", "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics", "testing"]
+acp = ["dep:agent-client-protocol"]
 a2a = ["dep:axum", "dep:jsonwebtoken"]
 mcp = ["echo_integration/mcp"]
 lsp = ["echo_core/lsp", "echo_integration/lsp"]
@@ -89,7 +96,7 @@ shell = ["echo_tools/shell"]
 files = ["echo_tools/files"]
 research = ["echo_tools/research"]
 eval = []
-improve = []
+improve = ["eval"]
 testing = []
 
 [dependencies]
@@ -100,6 +107,7 @@ echo_integration = { version = "0.2.0", path = "echo-integration" }
 echo_tools = { version = "0.2.0", path = "echo-tools" }
 echo_state = { version = "0.2.0", path = "echo-state" }
 echo_orchestration = { version = "0.2.0", path = "echo-orchestration" }
+agent-client-protocol = { version = "=2.1.0", optional = true }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "io-util", "fs", "signal", "process"] }

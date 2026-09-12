@@ -52,6 +52,8 @@ impl From<FrameworkConfig> for AgentConfig {
             .enable_tool(agent.enable_tools)
             .enable_memory(agent.enable_memory)
             .enable_human_in_loop(agent.enable_human_in_loop)
+            .enable_subagent(agent.enable_subagent)
+            .register_agent_dispatch_tool(agent.register_agent_dispatch_tool)
             .max_iterations(agent.max_iterations)
             .subagent_timeout_secs(agent.subagent_timeout_secs)
             .memory_path(&agent.memory_path)
@@ -193,6 +195,10 @@ pub struct AgentSettings {
     pub enable_tools: bool,
     pub enable_memory: bool,
     pub enable_human_in_loop: bool,
+    /// Enable framework-level Subagent registration and dispatch support.
+    pub enable_subagent: bool,
+    /// Expose the model-callable `agent_tool` dispatcher.
+    pub register_agent_dispatch_tool: bool,
     pub memory_path: String,
     pub tool_timeout_ms: u64,
     pub max_tool_output_tokens: usize,
@@ -211,6 +217,8 @@ impl Default for AgentSettings {
             enable_tools: false,
             enable_memory: false,
             enable_human_in_loop: false,
+            enable_subagent: false,
+            register_agent_dispatch_tool: false,
             memory_path: String::new(),
             tool_timeout_ms: 120_000,
             max_tool_output_tokens: 0,

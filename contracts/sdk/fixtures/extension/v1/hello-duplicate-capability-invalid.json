@@ -1,0 +1,17 @@
+{
+  "name": "hello-duplicate-capability-invalid",
+  "kind": "invalid",
+  "target": "EchoAgentClientHello",
+  "description": "Required capabilities must be unique.",
+  "payload": {
+    "extension_protocol_version": 1,
+    "contract_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "source_contract_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "required_features": [],
+    "required_capabilities": [
+      "runs",
+      "runs"
+    ]
+  },
+  "expect_error": "invalid_value"
+}
