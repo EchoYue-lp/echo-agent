@@ -10,7 +10,7 @@ focus: [failure_concurrency, result_side_effect]
 boundary_ref: boundary.eval-evolution
 behavior_refs: [behavior.eval-evolution, behavior.agent-turn-lifecycle]
 rule_refs: [rule.quality-observation-boundary, rule.turn-terminal-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.agent-context-execution]
+evidence_refs: [evidence.provider-protocol-quality, evidence.agent-context-execution, evidence.eval-workspace-generation-verification]
 audit_refs: [audit.eval-evolution.failure-concurrency]
 decision_refs: []
 repair_evidence_refs: []
@@ -39,4 +39,4 @@ Timeout 后 tool/file effect 可能继续运行并污染 fixture，评分与 cle
 
 ## 处理记录
 
-Discovery 记录；下一阶段让 Eval 消费 bounded Turn settlement 后再评分/清理。
+Discovery 记录；workspace generation修复在timeout后保留隔离目录而不抢先清理。本Finding仍需让Eval消费bounded Turn settlement后再评分并决定回收。

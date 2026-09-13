@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: failure_concurrency
 freshness: examined
-revision: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
+revision: e59fe773d92bca409fe0606b608c4812f87f7ac2
 finding_refs: [finding.tool-registry-mutation-active-call-deadlock]
 challenges:
   guard-lifetime:
-    revision: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
+    revision: e59fe773d92bca409fe0606b608c4812f87f7ac2
     source_refs: [echo-execution/src/tools.rs]
     evidence_refs: [evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification]
   generation-and-cache-fence:
-    revision: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
+    revision: e59fe773d92bca409fe0606b608c4812f87f7ac2
     source_refs: [echo-execution/src/tools.rs]
     evidence_refs: [evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.tool-read-cache-authority-verification]
   public-contract-scope:
-    revision: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
+    revision: e59fe773d92bca409fe0606b608c4812f87f7ac2
     source_refs: [src/agent/react/capabilities.rs, contracts/sdk/parity-manifest.json, contracts/sdk/public-api.txt, docs/adr/0035-owned-tool-registry-handles.md]
     evidence_refs: [evidence.tool-registry-owned-handle-verification, evidence.sdk-contracts]
 ---

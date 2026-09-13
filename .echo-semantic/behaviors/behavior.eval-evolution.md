@@ -8,11 +8,11 @@ risk: medium
 primary_focus: contract_evidence
 focus: [result_side_effect, data_durability, permission_external, failure_concurrency]
 boundary: boundary.eval-evolution
-observed_at: 57066461ddbe8a32ce63f1b75dd40603530e786e
+observed_at: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
 code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/eval/replay.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, echo-state/src/skill_telemetry.rs]
 rule_refs: [rule.quality-observation-boundary]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification]
-finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.evolution-audit-atomicity, finding.evolution-skill-promotion-audit, finding.evolution-doc-namespace]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification]
+finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.eval-workspace-generation-isolation, finding.improve-iteration-config, finding.improve-single-case-panic, finding.evolution-audit-atomicity, finding.evolution-skill-promotion-audit, finding.evolution-doc-namespace]
 ---
 
 # Eval、Improve 与 Evolution
@@ -23,7 +23,7 @@ Quality pipeline 消费 trace、test 和人工裁决证据；它可以提出或�
 
 ## 当前行为
 
-EvalRunner执行cases并评分，Replay/Analyzer读取RunStore，Improve生成离线建议/轨迹；criteria单例采用train-only disposition，EvalDrivenImprovement把public max_iterations直接传入唯一ImprovementLoop。Evolution分为Background Review/Dreaming、memory mutation、Skill candidate/draft/review/promote/merge/patch与仅有安全检查的rule-promotion surface。
+EvalRunner为每次case创建唯一workspace generation后执行和评分，settled显式close、timeout/caller-drop保留；Replay/Analyzer读取RunStore，Improve复用同一runner generation生成离线建议/轨迹。Criteria单例采用train-only disposition，EvalDrivenImprovement把public max_iterations直接传入唯一ImprovementLoop。Evolution分为Background Review/Dreaming、memory mutation、Skill candidate/draft/review/promote/merge/patch与仅有安全检查的rule-promotion surface。
 
 ## 期望行为
 

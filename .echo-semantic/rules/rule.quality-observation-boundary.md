@@ -7,11 +7,11 @@ expectation: inferred
 risk: medium
 primary_focus: result_side_effect
 focus: [contract_evidence, data_durability, permission_external]
-observed_at: 57066461ddbe8a32ce63f1b75dd40603530e786e
+observed_at: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
 behavior_refs: [behavior.eval-evolution]
 code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification]
-finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.evolution-audit-atomicity, finding.evolution-skill-promotion-audit, finding.evolution-doc-namespace]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification]
+finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.eval-workspace-generation-isolation, finding.improve-iteration-config, finding.improve-single-case-panic, finding.evolution-audit-atomicity, finding.evolution-skill-promotion-audit, finding.evolution-doc-namespace]
 ---
 
 # Quality Observation 不替代业务权威
@@ -26,7 +26,7 @@ Trace/Eval/Improve 观察和评价执行；Evolution 的持久 mutation 仍需�
 
 ## 当前实现
 
-Eval/Improve显式消费Agent/trace；ImprovementLoop按criteria分组并保持训练case与独立holdout不重复，EvalDrivenImprovement只把既有配置传给这一loop。Evolution runtime integration可生成或写入memory/skill artifacts，并记录change log。
+Eval/Improve显式消费Agent/trace；EvalRunner唯一拥有per-run workspace generation，settled cleanup不与未settled timeout混淆。ImprovementLoop按criteria分组并保持训练case与独立holdout不重复，EvalDrivenImprovement只把既有配置传给这一loop。Evolution runtime integration可生成或写入memory/skill artifacts，并记录change log。
 
 ## 期望行为
 

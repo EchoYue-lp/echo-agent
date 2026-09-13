@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.tool-registry-owned-handle-verification
 kind: evidence
-observed_at: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
+observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
 source_refs:
   - echo-execution/src/tools.rs
   - src/agent/react/capabilities.rs

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.provider-protocol-quality
 kind: evidence
-observed_at: 57066461ddbe8a32ce63f1b75dd40603530e786e
+observed_at: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
 source_refs:
   - echo-core/src/llm/mod.rs
   - echo-core/src/llm/capabilities.rs
@@ -78,7 +78,7 @@ limitations:
 
 ## 支持的结论
 
-LLM provider adapter、模型能力/预算/超时构成 typed framework 边界；ACP、A2A、Channels、Headless 和 SDK Host 是不同入口投影；Trace/Eval/Improve 与分层 Evolution 能力的已知行为和反例均可从本 Evidence 复核。
+LLM provider adapter、模型能力/预算/超时构成 typed framework 边界；ACP、A2A、Channels、Headless 和 SDK Host 是不同入口投影；Trace/Eval/Improve的per-run workspace generation、timeout retain与分层 Evolution 能力的已知行为和反例均可从本 Evidence 复核。
 
 ## 来源与范围
 

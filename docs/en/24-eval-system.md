@@ -91,6 +91,7 @@ The runner executes cases against an agent and collects results:
 use echo_agent::eval::EvalRunner;
 use std::path::PathBuf;
 
+// This path is a parent; every run receives a unique child workspace.
 let runner = EvalRunner::new(PathBuf::from("/tmp/eval_workspace"))
     .with_run_store(run_store)  // For trace linkage
     .with_grader(grader, grading_agent);  // For LlmGraded criteria
@@ -105,10 +106,19 @@ println!("Passed: {}/{}", report.passed, report.total);
 ```
 
 The runner automatically:
-- Copies `project_fixture` to a temporary workspace before each run
+- Creates a unique workspace generation for every run, including cases without fixtures
+- Copies `project_fixture` into that generation without reusing or deleting a case-ID path
 - Links results to execution traces via `run_id`
 - Populates metrics from traces (tool calls, tokens, file changes)
 - Evaluates constraints against the trace
+- Explicitly removes settled generations and reports cleanup failures in `EvalResult`
+
+`workspace_root` is never the Agent working directory; it is only the parent
+for random `eval-` generations. A timeout cancels the invocation but does not
+yet prove that the stream producer has settled, so the runner retains that
+generation and adds its path to `violations`. Caller cancellation likewise
+retains the directory and logs a warning. This keeps later cases isolated while
+Turn settlement remains an explicit lifecycle responsibility.
 
 ---
 
@@ -313,6 +323,7 @@ async fn main() -> Result<()> {
     ];
 
     // 2. Create runner
+    // /tmp/eval is the parent for isolated per-run generations.
     let runner = EvalRunner::new(PathBuf::from("/tmp/eval"));
 
     // 3. Run with factory
@@ -342,6 +353,8 @@ async fn main() -> Result<()> {
 │  │ EvalCase  │  │ Fixture  │  │ SuccessCriteria  │   │
 │  │  (task)   │  │  (copy)  │  │  (judge)         │   │
 │  └──────────┘  └──────────┘  └──────────────────┘   │
+│                     │                                 │
+│  workspace_root ──▶ unique eval-* generation (cwd)   │
 │                                                      │
 │  ┌──────────────────────────────────────────────┐    │
 │  │              Agent.execute(task)               │    │
@@ -406,5 +419,9 @@ Construct the production Agent with `ReactAgentBuilder`, then pass that Agent to
 `EvalRunner::run` or provide a fresh-Agent factory to `run_all`. This keeps eval
 execution explicit and prevents production turns from silently acquiring a
 second lifecycle or persistence owner.
+
+`ImprovementLoop` and `AbComparator` reuse this same per-run generation
+authority. They do not create fixed iteration directories or independently
+delete Eval workspaces.
 
 See also: [25 - Self-Improvement](./25-self-improvement.md) for how eval feeds into the improvement loop.

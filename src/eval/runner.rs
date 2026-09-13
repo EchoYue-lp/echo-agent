@@ -10,10 +10,52 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+struct EvalWorkspaceGeneration {
+    directory: Option<tempfile::TempDir>,
+}
+
+impl EvalWorkspaceGeneration {
+    fn create(parent: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(parent)?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("eval-").disable_cleanup(true);
+        let directory = builder.tempdir_in(parent)?;
+        Ok(Self {
+            directory: Some(directory),
+        })
+    }
+
+    fn path(&self) -> Option<&Path> {
+        self.directory.as_ref().map(tempfile::TempDir::path)
+    }
+
+    fn close(mut self) -> std::io::Result<()> {
+        match self.directory.take() {
+            Some(directory) => directory.close(),
+            None => Ok(()),
+        }
+    }
+
+    fn retain(mut self) -> Option<PathBuf> {
+        self.directory.take().map(tempfile::TempDir::keep)
+    }
+}
+
+impl Drop for EvalWorkspaceGeneration {
+    fn drop(&mut self) {
+        if let Some(directory) = self.directory.as_ref() {
+            tracing::warn!(
+                path = %directory.path().display(),
+                "Retaining unsettled eval workspace generation"
+            );
+        }
+    }
+}
+
 /// Runs eval cases against agents.
 #[derive(Clone)]
 pub struct EvalRunner {
-    /// Root directory for temporary workspaces (fixtures copied here).
+    /// Parent directory for unique per-run workspace generations.
     pub workspace_root: PathBuf,
     /// Maximum time per eval case in seconds.
     pub timeout_secs: u64,
@@ -54,23 +96,34 @@ impl EvalRunner {
     /// Run a single eval case against the given agent.
     pub async fn run(&self, case: &EvalCase, agent: &dyn Agent) -> EvalResult {
         let started = Instant::now();
-        let work_dir = match self.setup_fixture(case).await {
-            Ok(work_dir) => work_dir,
+        let generation = match EvalWorkspaceGeneration::create(&self.workspace_root) {
+            Ok(generation) => generation,
             Err(error) => {
                 let mut result = EvalResult::new(&case.id, false);
                 result
                     .violations
-                    .push(format!("Fixture setup failed: {error}"));
+                    .push(format!("Workspace generation failed: {error}"));
                 return result;
             }
         };
+        let Some(cwd) = generation.path().map(Path::to_path_buf) else {
+            let mut result = EvalResult::new(&case.id, false);
+            result
+                .violations
+                .push("Workspace generation has no active directory".to_string());
+            return result;
+        };
+        if let Err(error) = self.setup_fixture(case, &cwd) {
+            let mut result = EvalResult::new(&case.id, false);
+            result
+                .violations
+                .push(format!("Fixture setup failed: {error}"));
+            Self::record_workspace_cleanup(&mut result, generation.close());
+            result.recompute_score();
+            return result;
+        }
         let mut result = EvalResult::new(&case.id, true);
         let mut final_output = None;
-
-        // Execute the task — pass workspace dir explicitly, never change global cwd
-        let cwd = work_dir
-            .clone()
-            .unwrap_or_else(|| self.workspace_root.clone());
 
         let cancel = CancellationToken::new();
         let invocation = AgentInvocationContext {
@@ -83,6 +136,7 @@ impl EvalRunner {
             execute_for_final_answer(agent, &case.task, cancel.clone(), invocation),
         )
         .await;
+        let mut timed_out = false;
 
         // Capture run_id from agent for trace linkage (all branches)
         result.run_id = agent.current_run_id();
@@ -101,6 +155,7 @@ impl EvalRunner {
             }
             Err(_) => {
                 cancel.cancel();
+                timed_out = true;
                 result.duration_ms =
                     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 result.success = false;
@@ -174,6 +229,16 @@ impl EvalRunner {
             result.file_changes = replay.written_files().len();
         }
 
+        if timed_out {
+            if let Some(path) = generation.retain() {
+                result.violations.push(format!(
+                    "Workspace retained after timeout: {}",
+                    path.display()
+                ));
+            }
+        } else {
+            Self::record_workspace_cleanup(&mut result, generation.close());
+        }
         result.recompute_score();
         result
     }
@@ -211,24 +276,30 @@ impl EvalRunner {
 
     // ── Private helpers ────────────────────────────────────────────
 
-    async fn setup_fixture(&self, case: &EvalCase) -> std::result::Result<Option<PathBuf>, String> {
+    fn setup_fixture(
+        &self,
+        case: &EvalCase,
+        destination: &Path,
+    ) -> std::result::Result<(), String> {
         let Some(fixture) = case.project_fixture.as_ref() else {
-            return Ok(None);
+            return Ok(());
         };
         if !fixture.exists() {
             return Err(format!("fixture does not exist: {}", fixture.display()));
         }
-        let dest = echo_core::utils::fs::join_path_segment(&self.workspace_root, &case.id)
-            .map_err(|error| format!("unsafe eval case id {:?}: {error}", case.id))?;
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest)
-                .map_err(|error| format!("failed to reset {}: {error}", dest.display()))?;
-        }
-        // Simple recursive copy
-        if let Err(e) = copy_dir(fixture, &dest) {
+        if let Err(e) = copy_dir(fixture, destination) {
             return Err(format!("failed to copy fixture {}: {e}", fixture.display()));
         }
-        Ok(Some(dest))
+        Ok(())
+    }
+
+    fn record_workspace_cleanup(result: &mut EvalResult, cleanup: std::io::Result<()>) {
+        if let Err(error) = cleanup {
+            result.success = false;
+            result
+                .violations
+                .push(format!("Workspace cleanup failed: {error}"));
+        }
     }
 
     async fn check_criteria(
@@ -834,6 +905,356 @@ mod tests {
     use crate::eval::EvalCase;
     use crate::trace::{RunEvent, RunStatus, RunTimings, TokenUsage};
     use chrono::Utc;
+    struct WorkspaceRecordingAgent {
+        cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
+        release: Option<Arc<tokio::sync::Notify>>,
+        fail_after_recording: bool,
+    }
+
+    impl WorkspaceRecordingAgent {
+        fn new(
+            cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
+            release: Option<Arc<tokio::sync::Notify>>,
+        ) -> Self {
+            Self {
+                cwd_tx,
+                release,
+                fail_after_recording: false,
+            }
+        }
+
+        fn failing(cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>) -> Self {
+            Self {
+                cwd_tx,
+                release: None,
+                fail_after_recording: true,
+            }
+        }
+
+        fn final_stream<'a>() -> futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>> {
+            Box::pin(futures::stream::once(async {
+                Ok(AgentEvent::FinalAnswer("done".to_string()))
+            }))
+        }
+    }
+
+    impl Agent for WorkspaceRecordingAgent {
+        fn name(&self) -> &str {
+            "workspace-recorder"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "record workspace"
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async { Ok(Self::final_stream()) })
+        }
+
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                let cwd = invocation.working_dir.ok_or_else(|| {
+                    crate::error::ReactError::Other(
+                        "eval invocation did not contain a working directory".to_string(),
+                    )
+                })?;
+                self.cwd_tx.send(cwd).map_err(|_| {
+                    crate::error::ReactError::Other(
+                        "workspace observation receiver closed".to_string(),
+                    )
+                })?;
+                if let Some(release) = self.release.as_ref() {
+                    release.notified().await;
+                }
+                if self.fail_after_recording {
+                    return Err(crate::error::ReactError::Other(
+                        "forced typed Agent error".to_string(),
+                    ));
+                }
+                Ok(Self::final_stream())
+            })
+        }
+    }
+
+    fn workspace_case(id: &str, fixture: Option<PathBuf>) -> EvalCase {
+        EvalCase {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            domain: None,
+            task: "record the workspace".to_string(),
+            project_fixture: fixture,
+            success_criteria: SuccessCriteria::OutputContains {
+                substring: "done".to_string(),
+            },
+            constraints: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_case_runs_use_distinct_workspace_generations() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let fixture = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(fixture.path().join("marker.txt"), "fixture")
+            .map_err(|error| error.to_string())?;
+        let runner = EvalRunner::new(parent.path().join("runs"));
+        let case = workspace_case("same-case", Some(fixture.path().to_path_buf()));
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agent = Arc::new(WorkspaceRecordingAgent::new(
+            cwd_tx,
+            Some(Arc::clone(&release)),
+        ));
+
+        let first_runner = runner.clone();
+        let first_case = case.clone();
+        let first_agent = Arc::clone(&agent);
+        let first =
+            tokio::spawn(async move { first_runner.run(&first_case, first_agent.as_ref()).await });
+        let first_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "first eval did not report its workspace".to_string())?;
+
+        let second_runner = runner.clone();
+        let second_case = case.clone();
+        let second_agent = Arc::clone(&agent);
+        let second =
+            tokio::spawn(
+                async move { second_runner.run(&second_case, second_agent.as_ref()).await },
+            );
+        let second_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "second eval did not report its workspace".to_string())?;
+
+        if first_cwd == second_cwd {
+            return Err(format!(
+                "concurrent same-ID evals shared workspace {}",
+                first_cwd.display()
+            ));
+        }
+        if !first_cwd.join("marker.txt").is_file() || !second_cwd.join("marker.txt").is_file() {
+            return Err("fixture was not independently copied into both generations".to_string());
+        }
+        release.notify_waiters();
+        let first_result = first.await.map_err(|error| error.to_string())?;
+        let second_result = second.await.map_err(|error| error.to_string())?;
+
+        if !first_result.success || !second_result.success {
+            return Err("concurrent eval generation unexpectedly failed".to_string());
+        }
+        if first_cwd.exists() || second_cwd.exists() {
+            return Err("settled eval generation was not removed".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixture_free_runs_do_not_use_the_shared_workspace_parent() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_root = parent.path().join("runs");
+        let runner = EvalRunner::new(workspace_root.clone());
+        let case = workspace_case("fixture-free", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = WorkspaceRecordingAgent::new(cwd_tx, None);
+
+        let (first_result, second_result) =
+            tokio::join!(runner.run(&case, &agent), runner.run(&case, &agent));
+        let first_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "first fixture-free eval did not report cwd".to_string())?;
+        let second_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "second fixture-free eval did not report cwd".to_string())?;
+
+        if first_cwd == workspace_root || second_cwd == workspace_root || first_cwd == second_cwd {
+            return Err("fixture-free evals did not receive unique child generations".to_string());
+        }
+        if !first_result.success || !second_result.success {
+            return Err("fixture-free eval generation unexpectedly failed".to_string());
+        }
+        if first_cwd.exists() || second_cwd.exists() {
+            return Err("settled fixture-free generation was not removed".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timeout_retains_the_unsettled_workspace_generation() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut runner = EvalRunner::new(parent.path().join("runs"));
+        runner.timeout_secs = 1;
+        let case = workspace_case("timeout", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agent = WorkspaceRecordingAgent::new(cwd_tx, Some(release));
+
+        let result = runner.run(&case, &agent).await;
+        let observed_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "timed out eval did not report its workspace".to_string())?;
+        let retained = result
+            .violations
+            .iter()
+            .find_map(|violation| {
+                violation
+                    .strip_prefix("Workspace retained after timeout: ")
+                    .map(PathBuf::from)
+            })
+            .ok_or_else(|| "timeout result did not report a retained workspace".to_string())?;
+
+        if result.success || !result.violations.iter().any(|value| value == "Timeout") {
+            return Err("timed out eval did not retain its failure outcome".to_string());
+        }
+        if retained != observed_cwd || !retained.is_dir() {
+            return Err("reported timeout generation was not retained".to_string());
+        }
+        std::fs::remove_dir_all(&retained).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_an_active_run_future_retains_its_real_workspace() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let runner = EvalRunner::new(parent.path().join("runs"));
+        let case = workspace_case("caller-drop", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agent = Arc::new(WorkspaceRecordingAgent::new(cwd_tx, Some(release)));
+        let run_agent = Arc::clone(&agent);
+        let run = tokio::spawn(async move { runner.run(&case, run_agent.as_ref()).await });
+        let path = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "active eval did not report its workspace".to_string())?;
+
+        run.abort();
+        let join_error = run
+            .await
+            .err()
+            .ok_or_else(|| "aborted eval run unexpectedly completed".to_string())?;
+        if !join_error.is_cancelled() {
+            return Err(format!(
+                "aborted eval returned unexpected error: {join_error}"
+            ));
+        }
+        if !path.is_dir() {
+            return Err("active run workspace was deleted on caller drop".to_string());
+        }
+        std::fs::remove_dir_all(path).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn typed_agent_error_closes_the_settled_generation() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let runner = EvalRunner::new(parent.path().join("runs"));
+        let case = workspace_case("agent-error", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = WorkspaceRecordingAgent::failing(cwd_tx);
+
+        let result = runner.run(&case, &agent).await;
+        let path = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "failed eval did not report its workspace".to_string())?;
+
+        if result.success
+            || !result
+                .violations
+                .iter()
+                .any(|value| value.contains("forced typed Agent error"))
+        {
+            return Err("typed Agent error was not projected into EvalResult".to_string());
+        }
+        if path.exists() {
+            return Err("typed Agent error did not close its settled generation".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_failure_is_visible_in_the_eval_result() -> Result<(), String> {
+        let mut result = EvalResult::new("cleanup", true).with_metric("quality", 0.75, "graded");
+
+        EvalRunner::record_workspace_cleanup(
+            &mut result,
+            Err(std::io::Error::other("forced cleanup failure")),
+        );
+        result.recompute_score();
+
+        if result.success
+            || result.score != 0.75
+            || !result
+                .violations
+                .iter()
+                .any(|value| value.contains("forced cleanup failure"))
+        {
+            return Err("cleanup failure was not projected into EvalResult".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixture_setup_failure_closes_its_generation() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_root = parent.path().join("runs");
+        let runner = EvalRunner::new(workspace_root.clone());
+        let case = workspace_case(
+            "missing-fixture",
+            Some(parent.path().join("does-not-exist")),
+        );
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = WorkspaceRecordingAgent::new(cwd_tx, None);
+
+        let result = runner.run(&case, &agent).await;
+
+        if result.success
+            || !result
+                .violations
+                .iter()
+                .any(|value| value.contains("Fixture setup failed"))
+        {
+            return Err("fixture setup failure was not reported".to_string());
+        }
+        if cwd_rx.try_recv().is_ok() {
+            return Err("Agent started after fixture setup failed".to_string());
+        }
+        let mut entries = std::fs::read_dir(workspace_root).map_err(|error| error.to_string())?;
+        if entries.next().is_some() {
+            return Err("failed fixture generation was not cleaned up".to_string());
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_runner_output_contains() {

@@ -4,13 +4,13 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: 57066461ddbe8a32ce63f1b75dd40603530e786e
+observed_at: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
-audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview]
+audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
 scenarios:
   trace-record-and-analysis:
@@ -20,17 +20,17 @@ scenarios:
     rule_refs: [rule.fact-projection-separation]
   eval-run-grade-report:
     status: mapped
-    source_refs: [src/eval/runner.rs, src/eval/mod.rs, src/eval/replay.rs]
+    source_refs: [src/eval/runner.rs, src/eval/comparator.rs, src/eval/mod.rs, src/eval/replay.rs]
     finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.eval-workspace-generation-isolation]
     behavior_refs: [behavior.eval-evolution]
+    evidence_refs: [evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification]
+    audit_refs: [audit.eval-workspace-generation-rereview]
   improve-loop-and-trajectory:
-    status: needs_review
+    status: mapped
     source_refs: [src/improve/loop.rs, src/improve/eval_improvement.rs, src/improve/trajectory.rs]
     finding_refs: [finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation]
-    evidence_refs: [evidence.provider-protocol-quality, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification]
-    audit_refs: [audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview]
-    unknown: single case panic与max_iterations wiring已关闭；共享临时路径与cleanup仍需复核
-    next_step: 修复workspace generation lifecycle
+    evidence_refs: [evidence.provider-protocol-quality, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification]
+    audit_refs: [audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview]
   evolution-background-review-and-dreaming:
     status: needs_review
     source_refs: [src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/runtime_integration.rs, src/evolution/review.rs]
@@ -81,7 +81,7 @@ Trace 是 observation，Eval/Improve 消费但不驱动业务 commit；Evolution
 
 ## 状态与数据流
 
-RunStore 保存 trace，EvalResult/Report 保存评分，ImprovementLoop 保存迭代结果，MemoryLayer/Curator/ChangeLog 保存演化状态。
+RunStore 保存 trace，EvalWorkspaceGeneration持有每次run的临时目录与cleanup disposition，EvalResult/Report 保存评分，ImprovementLoop 保存迭代结果，MemoryLayer/Curator/ChangeLog 保存演化状态。
 
 ## 策略来源与优先级
 
@@ -101,7 +101,7 @@ Report/dashboard/suggestions 是质量投影，不等同产品成功或允许自
 
 ## 场景处置清单
 
-Trace/Eval/Improve、Background Review/Dreaming、Memory mutation、Skill lifecycle与Rule promotion已分别路由；singleton panic和iteration config已关闭，其余十个Finding与runtime/human coordination保持needs_review。
+Trace/Eval/Improve、Background Review/Dreaming、Memory mutation、Skill lifecycle与Rule promotion已分别路由；singleton panic和iteration config已关闭，workspace generation等待复审，timeout settlement及其它Finding保持open。
 
 ## 未展开项
 

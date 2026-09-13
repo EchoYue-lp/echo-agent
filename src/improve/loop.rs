@@ -150,12 +150,12 @@ impl ImprovementLoop {
 
         // Stratified split by criteria type to prevent overfitting
         let (train_cases, test_cases) = Self::stratified_split(cases, self.holdout_ratio);
+        let runner = EvalRunner::new(std::env::temp_dir());
 
         for i in 0..self.max_iterations {
             let iter_start = Instant::now();
 
             // a. Evaluate on train set
-            let runner = EvalRunner::new(std::env::temp_dir().join(format!("improve_{i}")));
             let train_cases_vec: Vec<EvalCase> = train_cases.iter().map(|c| (*c).clone()).collect();
             let train_report = runner.run_all_async(&train_cases_vec, &agent_factory).await;
 
@@ -205,9 +205,6 @@ impl ImprovementLoop {
             if best_score >= self.improvement_threshold {
                 break;
             }
-
-            // Clean up
-            let _ = std::fs::remove_dir_all(runner.workspace_root);
         }
 
         LoopResult {
@@ -222,6 +219,7 @@ impl ImprovementLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::MockAgent;
 
     fn eval_case(id: &str, success_criteria: SuccessCriteria) -> EvalCase {
         EvalCase {
@@ -335,5 +333,66 @@ mod tests {
                 assert_eq!(occurrences, 1);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn concurrent_early_stop_loops_use_distinct_cleaned_generations()
+    -> std::result::Result<(), String> {
+        let cases = vec![eval_case(
+            "early-stop",
+            SuccessCriteria::OutputContains {
+                substring: "done".to_string(),
+            },
+        )];
+        let loop_config = ImprovementLoop {
+            max_iterations: 3,
+            improvement_threshold: 0.0,
+            holdout_ratio: 0.4,
+        };
+        let first_observer = MockAgent::new("first-loop").with_default_success("done".to_string());
+        let first_factory_agent = first_observer.clone();
+        let second_observer =
+            MockAgent::new("second-loop").with_default_success("done".to_string());
+        let second_factory_agent = second_observer.clone();
+        let run_store = None;
+
+        let first_loop = loop_config.run_async(
+            &cases,
+            move || {
+                let agent = first_factory_agent.clone();
+                std::future::ready(Box::new(agent) as Box<dyn crate::agent::Agent>)
+            },
+            &run_store,
+        );
+        let second_loop = loop_config.run_async(
+            &cases,
+            move || {
+                let agent = second_factory_agent.clone();
+                std::future::ready(Box::new(agent) as Box<dyn crate::agent::Agent>)
+            },
+            &run_store,
+        );
+        let (first_result, second_result) = tokio::join!(first_loop, second_loop);
+        let first_cwd = first_observer
+            .invocation_contexts()
+            .first()
+            .and_then(|context| context.working_dir.clone())
+            .ok_or_else(|| "first early-stop loop did not record a workspace".to_string())?;
+        let second_cwd = second_observer
+            .invocation_contexts()
+            .first()
+            .and_then(|context| context.working_dir.clone())
+            .ok_or_else(|| "second early-stop loop did not record a workspace".to_string())?;
+
+        if first_result.iterations.len() != 1 || second_result.iterations.len() != 1 {
+            return Err("improvement loops did not stop after the first iteration".to_string());
+        }
+        if first_cwd == second_cwd {
+            return Err("concurrent improvement loops shared a workspace".to_string());
+        }
+        if first_cwd.exists() || second_cwd.exists() {
+            return Err("early-stop improvement workspace was not cleaned up".to_string());
+        }
+        Ok(())
     }
 }
