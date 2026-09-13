@@ -4,11 +4,11 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 多语言 SDK facade 对等边界
 risk: high
-observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
+observed_at: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.sdk-facade-routing]
 rule_refs: [rule.sdk-rust-authority]
-evidence_refs: [evidence.sdk-contracts]
+evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
 audit_refs: [audit.sdk-facade-plan08-final, audit.sdk-facade-scope-contract]
 related_map_refs: [map.protocol-surfaces]
@@ -25,7 +25,7 @@ scenarios:
     status: mapped
     source_refs: [echo-sdk-host/src/core_profile/facade/source_operations.rs]
     behavior_refs: [behavior.sdk-facade-routing]
-    evidence_refs: [evidence.sdk-contracts]
+    evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
   extension-bridge:
     status: mapped
     source_refs: [echo-sdk-host/src/core_profile/extension_bridge.rs]

@@ -4,13 +4,13 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
+observed_at: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
 boundary_refs: [boundary.tool-permission-sandbox]
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification]
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification]
 finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass, finding.approval-authority, finding.hook-protected-path, finding.hook-permission-precedence, finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement, finding.tool-terminal-observation-divergence, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.tool-pipeline-example-drift]
-audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview]
+audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview]
 related_map_refs: [map.agent-session-turn, map.task-subagent-workflow, map.observation-persistence-delivery, map.extension-lifecycle]
 scenarios:
   agent-automated-policy-pipeline:
@@ -23,13 +23,11 @@ scenarios:
     unknown: ReactAgent自动工具路径有确定stage顺序，streaming validation已关闭；permission precedence、secret retention与示例合同尚未闭合
     next_step: 沿真实 15-stage pipeline 执行 focused audit，不以静态示例数组作为权威
   programmatic-tool-manager:
-    status: needs_review
+    status: mapped
     source_refs: [echo-core/src/tools/mod.rs, echo-execution/src/tools.rs]
     finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation]
-    evidence_refs: [evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification]
-    audit_refs: [audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview]
-    unknown: 公开ToolManager是caller-owned primitive；stream validation与read cache authority已关闭，跨await持有registry Ref仍可能阻塞同步mutation
-    next_step: 按Issue #115消除registry guard跨await生命周期，并保持cache generation fence
+    evidence_refs: [evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification]
+    audit_refs: [audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview]
   trusted-hook-effects:
     status: mapped
     source_refs: [echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs]
@@ -96,7 +94,7 @@ ToolManager 管执行 primitive，ReactAgent pipeline 组合自动工具策略�
 
 ## 状态与数据流
 
-ReactAgent requested/effective invocation在执行前固定；permit/cache/retry由ToolManager管理。Stream validation已闭合，read cache以effective workspace/invocation key与write-lifetime epoch约束freshness；resource guard/artifact保存完整输出与cleanup信息。
+ReactAgent requested/effective invocation在执行前固定；owned Arc Tool generation脱离registry guard后进入异步执行，permit/cache/retry由ToolManager管理。Stream validation已闭合，read cache以effective workspace/invocation key与write-lifetime epoch约束freshness；resource guard/artifact保存完整输出与cleanup信息。
 
 ## 策略来源与优先级
 

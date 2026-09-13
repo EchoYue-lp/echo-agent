@@ -8,7 +8,7 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, failure_concurrency]
 boundary: boundary.sdk-facade-parity
-observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
+observed_at: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
 code_refs:
   - echo-sdk-protocol/src/inventory.rs
   - echo-sdk-protocol/src/facade.rs
@@ -16,7 +16,7 @@ code_refs:
   - echo-sdk-host/src/core_profile/facade/stream.rs
   - echo-sdk-host/src/core_profile/extension_bridge.rs
 rule_refs: [rule.sdk-rust-authority]
-evidence_refs: [evidence.sdk-contracts]
+evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
 ---
 

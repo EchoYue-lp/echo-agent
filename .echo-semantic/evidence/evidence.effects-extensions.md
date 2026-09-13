@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.effects-extensions
 kind: evidence
-observed_at: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
+observed_at: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
 source_refs:
   - echo-core/src/tools/mod.rs
   - echo-core/src/tools/permission.rs
@@ -49,6 +49,7 @@ source_refs:
   - docs/adr/0023-current-skill-frontmatter.md
   - docs/adr/0026-official-skill-frontmatter-only.md
   - docs/adr/0025-deterministic-command-cell-watcher.md
+  - docs/adr/0035-owned-tool-registry-handles.md
 supports: [behavior.effect-permission-execution, behavior.extension-publication, rule.permission-effect-order, rule.extension-generation-authority]
 limitations:
   - 应用层的直接用户交互、Workspace policy 和 Device sync 不在 framework 源码中，由适配边界记录
@@ -58,7 +59,7 @@ limitations:
 
 ## 支持的结论
 
-Tool contract、ToolManager、permission service、sandbox、artifact 和 invocation guard 共同构成外部 effect 路径；MCP、Hook、Skill、Plugin 与 LSP 有各自的发现、注册、发布、撤销和清理 owner。
+Tool contract、ToolManager owned registry generation、permission service、sandbox、artifact 和 invocation guard 共同构成外部 effect 路径；MCP、Hook、Skill、Plugin 与 LSP 有各自的发现、注册、发布、撤销和清理 owner。
 
 ## 来源与范围
 

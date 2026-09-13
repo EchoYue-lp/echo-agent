@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: failure_concurrency
 freshness: examined
-revision: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
+revision: 745a3f87fd51019aa3a96988e995dfd24bd1ff2f
 finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock]
 challenges:
   context-and-artifact-scope:
-    revision: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
+    revision: 745a3f87fd51019aa3a96988e995dfd24bd1ff2f
     source_refs: [echo-execution/src/tools.rs, echo-core/src/tools/artifact.rs, echo-tools/src/files/artifact.rs]
     evidence_refs: [evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification]
   write-and-registration-generation:
-    revision: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
+    revision: 745a3f87fd51019aa3a96988e995dfd24bd1ff2f
     source_refs: [echo-execution/src/tools.rs]
     evidence_refs: [evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification]
   omitted-context-consumers:
-    revision: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
+    revision: 745a3f87fd51019aa3a96988e995dfd24bd1ff2f
     source_refs: [echo-core/src/tools/mod.rs, echo-execution/src/tools.rs, echo-execution/src/skills/external/activate_tool.rs, echo-tools/src/code.rs, src/tools/builtin/agent_dispatch.rs, src/tools/builtin/subagent_message.rs]
     evidence_refs: [evidence.tool-read-cache-authority-verification]
 ---

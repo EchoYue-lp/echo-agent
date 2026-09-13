@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.tool-registry-mutation-active-call-deadlock
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: failure_concurrency
 focus: [time_lifecycle, state_authority, contract_evidence]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.tool-read-cache-authority-verification]
-audit_refs: [audit.tool-permission-sandbox.failure-concurrency, audit.tool-read-cache-authority-rereview]
+evidence_refs: [evidence.effects-extensions, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification]
+audit_refs: [audit.tool-permission-sandbox.failure-concurrency, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.tool-registry-owned-handle-repair]
+verification_evidence_refs: [evidence.tool-registry-owned-handle-verification]
+rereview_audit_refs: [audit.tool-registry-owned-handle-rereview]
 discovered_at: 50890faac10ab91c90dc45769854c4b6e35f8376
 ---
 
@@ -39,4 +39,4 @@ ToolManager执行路径把DashMap Tool Ref持有到完整异步执行和cache pu
 
 ## 处理记录
 
-第三轮Tool cache复审确认该问题独立于cache freshness并要求保留为后续Finding；#28与#30的epoch/key修复不关闭本Finding。
+第三轮Tool cache复审确认该问题独立于cache freshness。Issue #115先于修复建立；Arc owned handle以red/green、ADR、SDK生成和独立复审闭合本Finding。GitHub Issue保持open，等待本地修复进入远端main后关闭。

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.tool-read-cache-authority-repair
 kind: evidence
-observed_at: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
+observed_at: 745a3f87fd51019aa3a96988e995dfd24bd1ff2f
 source_refs:
   - echo-execution/src/tools.rs
   - echo-core/src/tools/mod.rs

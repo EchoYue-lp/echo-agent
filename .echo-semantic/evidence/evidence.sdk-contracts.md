@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
+observed_at: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -456,7 +456,9 @@ limitations:
 
 当前合同可确定列出root facade、route、signature、feature和语言状态；真实Host测试已覆盖ACP、core、family、extension、全部canonical source adapter、typed compressor/AgentComponent consumer trait及Workflow/A2A facade stream的显式关闭、Session关闭和connection EOF。
 
-Manifest schema v2新增identity级`sdk_scope`。非intrinsic route或具名intrinsic capability group独立决定external acceptance，language status随后提供实现证据并可让gate失败，不能反向降级scope。当前9,682个canonical identity分为5,606个external contract、1,765个Host/Rust-only、780个language intrinsic、90个internal helper和1,441个deferred；551个intrinsic route仍属于external contract。Alias显式继承canonical scope，四套catalog gate均要求external contract三语言done。
+Manifest schema v2新增identity级`sdk_scope`。非intrinsic route或具名intrinsic capability group独立决定external acceptance，language status随后提供实现证据并可让gate失败，不能反向降级scope。当前9,683个canonical identity分为5,607个external contract、1,765个Host/Rust-only、780个language intrinsic、90个internal helper和1,441个deferred；551个intrinsic route仍属于external contract。Alias显式继承canonical scope，四套catalog gate均要求external contract三语言done。
+
+本轮ToolManager/ReactAgent动态registry的12个Rust public路径（5个canonical与7个re-export alias）只把借用Ref或Box返回改为owned Arc signature，canonical数量与scope不变且全部属于Host/Rust-only。Public API、parity manifest、source contract与shared source digest由唯一generator更新；operation catalog、extension schema、fixtures和三语言facade保持不变。
 
 本轮新增的 `PromptCacheLayout`/`SegmentRanges` 仅复现 Rust 的只读分段投影和半开区间，缓存状态与 provider placement 仍由 Rust/Host 持有；TypeScript、Python、Java 行为测试分别覆盖典型分段、无 canonical 标记和范围计算。前一轮 Linux fake-Docker 测试夹具改为临时文件写入后原子重命名，避免执行文件写入竞争触发 `ETXTBSY`，生产 Docker 执行路径未改变。
 
@@ -470,4 +472,4 @@ Manifest schema v2新增identity级`sdk_scope`。非intrinsic route或具名intr
 
 ## 已知缺口
 
-机械闭合、90个合同artifact byte-stability、Rust scope测试和三语言source/Host gate均已通过；operation catalog保持字节不变。当前证据支持已声明external contract完整，不支持“所有Rust public identity均在三语言可用”的总体声明。1,441个deferred identity仍需按capability判断；组件流终态、Sandbox取消、MCP发布失败清理、SkillLoadPolicy live路径和SDK gap generation等现有Finding均未因scope重分类关闭。
+机械闭合、90个合同artifact byte-stability、Rust scope测试和三语言source/Host gate均已通过；TypeScript 156、Python 168测试与Java真实Host连接成功，operation catalog保持字节不变。当前证据支持已声明external contract完整，不支持“所有Rust public identity均在三语言可用”的总体声明。1,441个deferred identity仍需按capability判断；组件流终态、Sandbox取消、MCP发布失败清理、SkillLoadPolicy live路径和SDK gap generation等现有Finding均未因scope重分类关闭。

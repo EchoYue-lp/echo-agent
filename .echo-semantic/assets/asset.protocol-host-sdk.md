@@ -6,13 +6,13 @@ title: ACP、A2A、Channels、Headless 与 SDK Host
 asset_type: protocol
 status: needs_review
 risk: high
-observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
+observed_at: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
 boundary_refs: [boundary.protocol-surfaces, boundary.sdk-facade-parity]
-code_refs: [src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, src/channels.rs, src/headless.rs, echo-sdk-protocol/src/lib.rs, echo-sdk-host/src/lib.rs]
+code_refs: [src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, src/channels.rs, src/headless.rs, echo-sdk-protocol/src/lib.rs, echo-sdk-host/src/lib.rs, contracts/sdk/parity-manifest.json]
 consumer_refs: [tests/acp_agent_adapter.rs, echo-sdk-host/tests/core_profile_e2e.rs, sdks/typescript/src/client.ts, sdks/python/src/echo_agent_sdk/client.py]
 behavior_refs: [behavior.protocol-projection, behavior.sdk-facade-routing]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
 finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.channel-attachment-projection, finding.turn-driver-entry-coverage]
 candidate_refs: []
 ---

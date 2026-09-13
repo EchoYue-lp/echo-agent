@@ -231,7 +231,7 @@ type CachedToolDefinitions = Option<((u64, u64), Vec<ToolDefinition>)>;
 
 /// 工具管理器 — thread-safe tool registry and executor.
 pub struct ToolManager {
-    tools: DashMap<String, Box<dyn Tool>>,
+    tools: DashMap<String, Arc<dyn Tool>>,
     registration_lock: parking_lot::Mutex<()>,
     config: ToolExecutionConfig,
     /// Write/execute semaphore (limits concurrent write/execute tools).
@@ -750,7 +750,7 @@ impl ToolManager {
                 )),
             ))),
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(tool);
+                entry.insert(Arc::from(tool));
                 self.invalidate_cache();
                 Ok(())
             }
@@ -780,21 +780,21 @@ impl ToolManager {
             }
         }
         for tool in tools {
-            self.tools.insert(tool.name().to_string(), tool);
+            self.tools.insert(tool.name().to_string(), Arc::from(tool));
         }
         self.invalidate_cache();
         Ok(())
     }
 
     /// Explicitly replace a tool and return the displaced implementation.
-    pub fn replace(&self, tool: Box<dyn Tool>) -> Option<Box<dyn Tool>> {
+    pub fn replace(&self, tool: Box<dyn Tool>) -> Option<Arc<dyn Tool>> {
         let _registration = self.registration_lock.lock();
-        let old = self.tools.insert(tool.name().to_string(), tool);
+        let old = self.tools.insert(tool.name().to_string(), Arc::from(tool));
         self.invalidate_cache();
         old
     }
 
-    pub fn unregister(&self, tool_name: &str) -> Option<Box<dyn Tool>> {
+    pub fn unregister(&self, tool_name: &str) -> Option<Arc<dyn Tool>> {
         let _registration = self.registration_lock.lock();
         let tool = self.tools.remove(tool_name).map(|(_, v)| v);
         if tool.is_some() {
@@ -811,15 +811,15 @@ impl ToolManager {
 
     /// Inject a sandbox executor into all registered tools that support it.
     ///
-    /// Iterates the [`DashMap`] with `iter_mut()`, calling
+    /// Iterates the [`DashMap`], calling
     /// [`Tool::set_sandbox`] on each tool. Tools that override the method
     /// (currently `ShellTool` and `RunCodeTool`) accept the executor;
     /// all others ignore it via the default `false` implementation.
     ///
     /// Called by the agent builder at setup time after selecting a sandbox manager.
     pub fn apply_sandbox(&self, sandbox: Arc<dyn SandboxExecutor>) {
-        for mut entry in self.tools.iter_mut() {
-            entry.value_mut().set_sandbox(sandbox.clone());
+        for entry in &self.tools {
+            entry.value().set_sandbox(sandbox.clone());
         }
     }
 
@@ -828,19 +828,21 @@ impl ToolManager {
         &self,
         resolver: Arc<dyn ScriptExecutionProfileResolver>,
     ) {
-        for mut entry in self.tools.iter_mut() {
+        for entry in &self.tools {
             entry
-                .value_mut()
+                .value()
                 .set_script_execution_profile_resolver(resolver.clone());
         }
     }
 
-    /// Get a reference to a tool (via DashMap's Ref).
-    pub fn get_tool(
-        &self,
-        tool_name: &str,
-    ) -> Option<dashmap::mapref::one::Ref<'_, String, Box<dyn Tool>>> {
-        self.tools.get(tool_name)
+    /// Get an owned handle to the current tool generation.
+    ///
+    /// The DashMap reference is released before this method returns, so callers
+    /// may hold the handle across `.await` without blocking registry mutation.
+    pub fn get_tool(&self, tool_name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools
+            .get(tool_name)
+            .map(|entry| Arc::clone(entry.value()))
     }
 
     pub fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -2572,7 +2574,7 @@ mod execute_with_context_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn replacing_a_read_tool_fences_its_inflight_generation() -> echo_core::error::Result<()>
     {
         let old_value = Arc::new(AtomicUsize::new(0));
@@ -2599,24 +2601,13 @@ mod execute_with_context_tests {
             tool: "coordinated_read".to_string(),
             message: "old read did not start".to_string(),
         })?;
-        let replace_manager = Arc::clone(&manager);
-        let replacement_calls = Arc::clone(&new_calls);
-        let (replace_started_tx, replace_started_rx) = tokio::sync::oneshot::channel();
-        let replacement = tokio::task::spawn_blocking(move || {
-            let _ = replace_started_tx.send(());
-            replace_manager.replace(Box::new(CoordinatedReadTool {
-                value: new_value,
-                calls: replacement_calls,
-                started: tokio::sync::Mutex::new(None),
-                release: tokio::sync::Mutex::new(None),
-            }))
-        });
-        replace_started_rx
-            .await
-            .map_err(|_| ToolError::ExecutionFailed {
-                tool: "coordinated_read".to_string(),
-                message: "replacement did not start".to_string(),
-            })?;
+        let replaced = manager.replace(Box::new(CoordinatedReadTool {
+            value: new_value,
+            calls: Arc::clone(&new_calls),
+            started: tokio::sync::Mutex::new(None),
+            release: tokio::sync::Mutex::new(None),
+        }));
+        assert!(replaced.is_some());
         release_tx
             .send(())
             .map_err(|_| ToolError::ExecutionFailed {
@@ -2630,13 +2621,6 @@ mod execute_with_context_tests {
                 message: format!("old read task failed: {error}"),
             })??;
         assert_eq!(stale.output, "0");
-        let replaced = replacement
-            .await
-            .map_err(|error| ToolError::ExecutionFailed {
-                tool: "coordinated_read".to_string(),
-                message: format!("replacement task failed: {error}"),
-            })?;
-        assert!(replaced.is_some());
 
         let current = manager
             .execute_tool("coordinated_read", ToolParameters::new())
@@ -2644,6 +2628,52 @@ mod execute_with_context_tests {
         assert_eq!(current.output, "1");
         assert_eq!(old_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(new_calls.load(AtomicOrdering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unregistering_a_read_tool_does_not_wait_for_its_inflight_generation()
+    -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let manager = Arc::new(ToolManager::new());
+        manager.register(Box::new(CoordinatedReadTool {
+            value: Arc::new(AtomicUsize::new(0)),
+            calls: Arc::clone(&calls),
+            started: tokio::sync::Mutex::new(Some(started_tx)),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+        }));
+
+        let read_manager = Arc::clone(&manager);
+        let old_read = tokio::spawn(async move {
+            read_manager
+                .execute_tool("coordinated_read", ToolParameters::new())
+                .await
+        });
+        started_rx.await.map_err(|_| ToolError::ExecutionFailed {
+            tool: "coordinated_read".to_string(),
+            message: "old read did not start".to_string(),
+        })?;
+
+        let removed = manager.unregister("coordinated_read");
+        assert!(removed.is_some());
+        assert!(manager.get_tool("coordinated_read").is_none());
+        release_tx
+            .send(())
+            .map_err(|_| ToolError::ExecutionFailed {
+                tool: "coordinated_read".to_string(),
+                message: "old read release receiver closed".to_string(),
+            })?;
+        let old = old_read
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: "coordinated_read".to_string(),
+                message: format!("old read task failed: {error}"),
+            })??;
+
+        assert_eq!(old.output, "0");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         Ok(())
     }
 

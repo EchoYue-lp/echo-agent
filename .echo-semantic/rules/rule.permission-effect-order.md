@@ -7,10 +7,10 @@ expectation: human_confirmed
 risk: high
 primary_focus: permission_external
 focus: [result_side_effect, state_authority, failure_concurrency, time_lifecycle]
-observed_at: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
+observed_at: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
 behavior_refs: [behavior.effect-permission-execution]
 code_refs: [echo-core/src/tools/permission.rs, echo-orchestration/src/human_loop/service.rs, echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs, echo-execution/src/tools.rs]
-evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification]
+evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification]
 finding_refs: [finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.tool-pipeline-example-drift]
 ---
 
@@ -26,7 +26,7 @@ ReactAgent 的 LLM 驱动自动 Tool effect 必须先完成该入口定义的可
 
 ## 当前实现
 
-PermissionPolicy/Service、Hook/Guard与ToolExecutionPipeline分层影响ReactAgent自动调用；ToolManager在stream/non-stream的effect前完成统一validation，并用context key与write-lifetime epoch限制read result复用，Sandbox/具体Tool持有资源。
+PermissionPolicy/Service、Hook/Guard与ToolExecutionPipeline分层影响ReactAgent自动调用；ToolManager以owned Arc generation进入stream/non-stream，在effect前完成统一validation，并用context key与write-lifetime epoch限制read result复用，Sandbox/具体Tool持有资源。
 
 ## 期望行为
 

@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [contract_evidence, failure_concurrency, time_lifecycle]
-observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
+observed_at: source:35a8d39143d7569cc99181972c94f487d02a37b82ae8cfcec3548838b871c28f
 behavior_refs: [behavior.sdk-facade-routing]
 code_refs:
   - docs/supreme/specs/2026-09-04-source-first-multilanguage-sdk-runtime/design.md
@@ -19,7 +19,7 @@ code_refs:
   - echo-sdk-host/src/core_profile/handles.rs
   - echo-sdk-host/src/core_profile/facade/source_operations.rs
   - echo-sdk-host/src/core_profile/facade/stream.rs
-evidence_refs: [evidence.sdk-contracts]
+evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
 ---
 
