@@ -389,6 +389,9 @@ moving cache state or provider placement out of Rust.
 The MemoryScope slice adds twelve lifetime-policy identities, preserving scope
 ordering, persistence classification, wire names and parser aliases without
 moving memory storage or cleanup out of Rust.
+The MemoryType/MemorySource slice adds twenty-three policy identities,
+preserving stability, promotion eligibility, confidence and recall-weight
+defaults without moving memory persistence or evolution out of Rust.
 The SDKs preserve calculation priority while LLM execution remains in Rust/Host.
 
 The HookAction slice adds 31 tagged variant/field/validation identities. The

@@ -148,6 +148,15 @@ from .intrinsics import ParamValue, ToolCallParams, ToolResult
 from .jsonrpc_values import JsonRpcNotification, JsonRpcRequest
 from .jwt_values import JwtClaims, JwtConfig
 from .llm_api_protocol_values import LlmApiProtocol
+from .memory_policy_values import (
+    MemorySource,
+    MemoryType,
+    memory_source_default_confidence,
+    memory_source_default_recall_weight,
+    memory_type_default_stability,
+    memory_type_is_rule_eligible,
+    memory_type_is_skill_eligible,
+)
 from .memory_scope_values import (
     MemoryScope,
     memory_scope_all,
@@ -340,8 +349,10 @@ __all__ = [
     "MemoryPromoterPromoteRequest",
     "MemoryPromoterResult",
     "MemoryScope",
+    "MemorySource",
     "MemoryTriggerRequest",
     "MemoryTriggerResult",
+    "MemoryType",
     "ModelInputModality",
     "ModelProfile",
     "ModelProfileOverride",
@@ -453,6 +464,11 @@ __all__ = [
     "memory_scope_is_persistent",
     "memory_scope_name",
     "memory_scope_priority",
+    "memory_source_default_confidence",
+    "memory_source_default_recall_weight",
+    "memory_type_default_stability",
+    "memory_type_is_rule_eligible",
+    "memory_type_is_skill_eligible",
     "now_local",
     "now_millis",
     "now_secs",

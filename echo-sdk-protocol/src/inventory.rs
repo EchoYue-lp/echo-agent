@@ -2624,6 +2624,33 @@ fn language_status_for(
         "echo_core::memory::scope::MemoryScope::name",
         "echo_core::memory::scope::MemoryScope::priority",
     ];
+    const MEMORY_TYPE_IDENTITIES: &[&str] = &[
+        "echo_core::memory::types::MemoryType",
+        "echo_core::memory::types::MemoryType::ArchitectureDecision",
+        "echo_core::memory::types::MemoryType::CommandPattern",
+        "echo_core::memory::types::MemoryType::DebuggingLesson",
+        "echo_core::memory::types::MemoryType::DeprecatedNote",
+        "echo_core::memory::types::MemoryType::ErrorResolution",
+        "echo_core::memory::types::MemoryType::ProjectFact",
+        "echo_core::memory::types::MemoryType::SkillCandidate",
+        "echo_core::memory::types::MemoryType::ToolUsage",
+        "echo_core::memory::types::MemoryType::UserPreference",
+        "echo_core::memory::types::MemoryType::WorkflowPattern",
+        "echo_core::memory::types::MemoryType::default_stability",
+        "echo_core::memory::types::MemoryType::is_rule_eligible",
+        "echo_core::memory::types::MemoryType::is_skill_eligible",
+    ];
+    const MEMORY_SOURCE_IDENTITIES: &[&str] = &[
+        "echo_core::memory::types::MemorySource",
+        "echo_core::memory::types::MemorySource::AutoExtracted",
+        "echo_core::memory::types::MemorySource::ErrorResolution",
+        "echo_core::memory::types::MemorySource::ExplicitSave",
+        "echo_core::memory::types::MemorySource::L3Promotion",
+        "echo_core::memory::types::MemorySource::RepeatedWorkflow",
+        "echo_core::memory::types::MemorySource::UserCorrection",
+        "echo_core::memory::types::MemorySource::default_confidence",
+        "echo_core::memory::types::MemorySource::default_recall_weight",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2795,6 +2822,10 @@ fn language_status_for(
         )
     } else if MEMORY_SCOPE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "memory_scope_values")
+    } else if MEMORY_TYPE_IDENTITIES.contains(&identity)
+        || MEMORY_SOURCE_IDENTITIES.contains(&identity)
+    {
+        (LanguageImplementationStatus::Done, "memory_policy_values")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

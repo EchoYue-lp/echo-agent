@@ -183,6 +183,8 @@ history/runtime segment projection and half-open indexes without owning cache
 state or provider placement.
 `MemoryScope` preserves lifetime ordering, persistence classification, wire names
 and parser aliases without owning memory storage or cleanup.
+`MemoryType` and `MemorySource` preserve stability, promotion eligibility,
+confidence and recall-weight defaults without owning memory persistence.
 `PageInfo` preserves truncation, continuation metadata, and output projection
 while collection state remains framework-owned.
 `SubagentContext` exposes empty/content semantics while context and dispatch

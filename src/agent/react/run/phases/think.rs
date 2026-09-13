@@ -136,6 +136,20 @@ pub(crate) async fn run_think(
         let chunk = match cr {
             Ok(chunk) => chunk,
             Err(error) => {
+                if snap
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(crate::agent::CancellationToken::is_cancelled)
+                {
+                    snap.finalize_run(
+                        crate::trace::RunStatus::Cancelled,
+                        None,
+                        Some("Agent execution cancelled during model response"),
+                    )
+                    .await;
+                    let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
+                    return Ok(ThinkOutcome::Cancelled);
+                }
                 emit_partial_content_before_failure(tx, &content_buffer).await;
                 let _ = tx
                     .send(Ok(AgentEvent::from_error("react_loop", &error)))
