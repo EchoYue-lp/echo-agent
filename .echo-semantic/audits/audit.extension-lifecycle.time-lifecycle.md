@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.extension-lifecycle
 lens: time_lifecycle
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.plugin-lifecycle-coordination, finding.plugin-lifecycle-reconcile-overlap, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.mcp-client-capability-advertisement]
 challenges:
   plugin-reconcile-and-withdraw:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-core/src/plugin/registry.rs, echo-core/src/plugin/lifecycle.rs, src/plugin/prepared.rs, echo-sdk-host/src/core_profile/facade/source_operations.rs]
     evidence_refs: [evidence.effects-extensions]
   mcp-session-close:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-integration/src/mcp/client.rs, echo-integration/src/mcp/transport/mod.rs, echo-integration/src/mcp/transport/sse.rs, echo-integration/src/mcp/transport/stdio.rs]
     evidence_refs: [evidence.effects-extensions]
   lsp-manager-and-derived-client:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-integration/src/lsp/client.rs, echo-integration/src/lsp/manager.rs, echo-sdk-host/src/core_profile/facade/integrations.rs, echo-sdk-host/src/core_profile/facade/mod.rs]
     evidence_refs: [evidence.effects-extensions]
 ---

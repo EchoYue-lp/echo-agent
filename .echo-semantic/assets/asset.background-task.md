@@ -6,7 +6,7 @@ title: Process-local BackgroundTask
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+observed_at: f1e9027246760661144786e9e35615cd46d580c6
 boundary_refs: [boundary.task-subagent-workflow]
 code_refs: [echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/background_state.rs]
 consumer_refs: [docs/en/16-background-tasks.md]

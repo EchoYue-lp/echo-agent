@@ -3,7 +3,7 @@ schema_version: 1
 id: discovery.workspace-baseline
 kind: discovery
 source_snapshot:
-  base_revision: f7a4df6a3de6d0538d6ea93a868006da07ed391d
+  base_revision: f1e9027246760661144786e9e35615cd46d580c6
   content_digest: 8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
 scope: echo-agent 11-package workspace 的架构、入口、状态权威、生命周期、副作用、协议、持久化和验证消费者
 inspected_paths: [Cargo.toml, src, echo-core, echo-execution, echo-integration, echo-macros, echo-orchestration, echo-state, echo-tools, echo-sdk-protocol, echo-sdk-host, contracts, sdks, tests, echo-agent-learning, docs, scripts, .github]

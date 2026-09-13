@@ -6,7 +6,7 @@ title: Trace Run 与 RunStore
 asset_type: state_authority
 status: active
 risk: medium
-observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+observed_at: f1e9027246760661144786e9e35615cd46d580c6
 boundary_refs: [boundary.observation-persistence-delivery, boundary.eval-evolution]
 code_refs: [src/trace/mod.rs, src/trace/analyzer.rs]
 consumer_refs: [src/eval/runner.rs, src/improve/mod.rs, docs/en/27-tracing.md]

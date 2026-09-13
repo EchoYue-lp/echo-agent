@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: time_lifecycle
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.background-task-wait, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement]
 challenges:
   background-wait-and-panic:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-orchestration/src/tasks/background_task.rs]
     evidence_refs: [evidence.task-subagent-workflow]
   command-cell-retention:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-core/src/tools/cell.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0025-deterministic-command-cell-watcher.md]
     evidence_refs: [evidence.task-subagent-workflow, evidence.effects-extensions]
   cancel-and-artifact-finalization:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-orchestration/src/tasks/command_cell.rs]
     evidence_refs: [evidence.task-subagent-workflow]
 ---

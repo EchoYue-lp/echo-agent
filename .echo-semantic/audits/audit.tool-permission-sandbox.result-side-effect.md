@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: result_side_effect
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement, finding.tool-terminal-observation-divergence, finding.trace-effect-event-producers, finding.tool-pipeline-example-drift]
 challenges:
   artifact-sandbox-worktree-cleanup:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-core/src/tools/artifact.rs, echo-execution/src/sandbox/manager.rs, echo-tools/src/git_worktree.rs]
     evidence_refs: [evidence.effects-extensions]
   k8s-caller-drop:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-execution/src/sandbox/k8s.rs, echo-execution/src/sandbox/manager.rs]
     evidence_refs: [evidence.effects-extensions]
   tool-terminal-observation:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/react/run/pipeline.rs, echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs]
     evidence_refs: [evidence.effects-extensions, evidence.persistence-observation]
 ---

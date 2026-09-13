@@ -6,7 +6,7 @@ title: 两类 AgentFactory 合同
 asset_type: symbol
 status: needs_review
 risk: medium
-observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+observed_at: f1e9027246760661144786e9e35615cd46d580c6
 boundary_refs: [boundary.agent-session-turn, boundary.workspace-architecture]
 code_refs: [echo-core/src/agent/factory.rs, src/agent/subagent/registry.rs]
 consumer_refs: [src/agent/default_factory.rs, src/agent/subagent/executor.rs]

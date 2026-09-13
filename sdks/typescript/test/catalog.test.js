@@ -72,12 +72,28 @@ test("families group the same canonical operation identities", () => {
   assert.equal(new Set(catalog.families().map((family) => family.family)).size, catalog.families().length);
 });
 
-test("every executable facade item has a completed TypeScript mapping", () => {
+test("every external SDK contract has a completed TypeScript mapping", () => {
   assert.ok(parityManifest.entries.length > 0);
+  const counts = new Map();
   for (const entry of parityManifest.entries) {
-    if (entry.route.surface !== "intrinsic") {
+    assert.ok(
+      ["external_contract", "host_or_rust_only", "language_intrinsic", "internal_helper", "deferred"]
+        .includes(entry.sdk_scope),
+      entry.path,
+    );
+    if (entry.canonical) {
+      counts.set(entry.sdk_scope, (counts.get(entry.sdk_scope) ?? 0) + 1);
+    }
+    if (entry.sdk_scope === "external_contract") {
       assert.equal(entry.languages.typescript.status, "done", entry.path);
     }
     assert.match(entry.languages.typescript.contract_test, /^sdk-parity\//u, entry.path);
   }
+  assert.deepEqual(Object.fromEntries(counts), {
+    deferred: 1441,
+    external_contract: 5606,
+    host_or_rust_only: 1765,
+    internal_helper: 90,
+    language_intrinsic: 780,
+  });
 });

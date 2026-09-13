@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.observation-persistence-delivery
 lens: data_durability
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.trace-audit-secret-boundary, finding.checkpoint-journal-binding, finding.diagnostic-persistence-failure-visibility]
 challenges:
   checkpoint-source-binding:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/delivery.rs]
     evidence_refs: [evidence.persistence-observation]
   diagnostic-failure-visibility:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/trace/mod.rs, src/agent/react/mod.rs, src/agent/snapshot.rs, echo-state/src/audit/mod.rs, echo-state/src/audit/file.rs]
     evidence_refs: [evidence.persistence-observation, evidence.effects-extensions]
   journal-delivery-recovery:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, echo-state/src/delivery.rs]
     evidence_refs: [evidence.persistence-observation]
 ---

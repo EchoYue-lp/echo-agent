@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: state_authority
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.subagent-definition-catalog]
 challenges:
   relation-patch-versus-live-claim:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs]
     evidence_refs: [evidence.task-subagent-workflow]
   task-claim-to-subagent-attempt:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/subagent/team/mod.rs, echo-sdk-host/src/core_profile/facade/task_runtime.rs, src/agent/subagent/executor.rs, echo-core/src/agent/event_envelope.rs]
     evidence_refs: [evidence.task-subagent-workflow]
   subagent-factory-publication:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/subagent/registry.rs, echo-orchestration/src/tasks/runtime_executor.rs]
     evidence_refs: [evidence.task-subagent-workflow]
 ---

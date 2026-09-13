@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.protocol-surfaces
 lens: state_authority
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.a2a-terminal-authority, finding.a2a-task-id-admission-authority, finding.turn-driver-entry-coverage, finding.channel-attachment-projection, finding.turn-terminal-commit-projection-order]
 challenges:
   surface-authority-matrix:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/acp/session.rs, src/acp/runtime.rs, src/headless.rs, src/a2a/server.rs, src/a2a/types.rs, src/channels.rs, echo-integration/src/channels/session.rs, echo-sdk-host/src/core_profile/handler.rs]
     evidence_refs: [evidence.provider-protocol-quality, evidence.agent-context-execution]
   a2a-terminal-and-admission:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/a2a/server.rs, src/a2a/types.rs]
     evidence_refs: [evidence.provider-protocol-quality]
   channel-turn-and-attachments:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/channels.rs, echo-integration/src/channels/types.rs, echo-integration/src/channels/session.rs]
     evidence_refs: [evidence.provider-protocol-quality]
 ---

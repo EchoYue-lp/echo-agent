@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.agent-session-turn
 lens: state_authority
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement]
 challenges:
   raw-versus-driven-turn:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-core/src/agent/mod.rs, src/agent/react/run/react_loop.rs, echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs]
     evidence_refs: [evidence.agent-context-execution]
   channel-terminal-projection:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/channels.rs, echo-integration/src/channels/session.rs]
     evidence_refs: [evidence.agent-context-execution, evidence.provider-protocol-quality]
   adapter-close-settlement:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-integration/src/channels/manager.rs, echo-integration/src/channels/types.rs, src/agent/react/mod.rs]
     evidence_refs: [evidence.agent-context-execution]
 ---

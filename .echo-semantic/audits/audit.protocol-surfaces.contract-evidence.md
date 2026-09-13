@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.protocol-surfaces
 lens: contract_evidence
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-advertised-capability-binding, finding.channel-attachment-projection, finding.turn-driver-entry-coverage, finding.sdk-gap-generation-validation-parity]
 challenges:
   protocol-role-and-capability:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/a2a/server.rs, src/a2a/types.rs, src/channels.rs, echo-integration/src/channels/types.rs, src/headless.rs]
     evidence_refs: [evidence.provider-protocol-quality]
   sdk-handle-gap-and-replay:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-sdk-host/src/core_profile/handles.rs, echo-sdk-host/src/core_profile/handler.rs, echo-sdk-host/tests/core_profile_e2e.rs, sdks/typescript/src/client.ts, sdks/python/src/echo_agent_sdk/client.py, sdks/java/src/main/java/com/echoagent/sdk/EchoAgentClient.java, sdks/java/src/main/java/com/echoagent/sdk/BoundedPublisher.java]
     evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts]
   sdk-inventory-scope:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [contracts/sdk/parity-manifest.json, docs/adr/0031-sdk-identity-governance-scope.md]
     evidence_refs: [evidence.sdk-contracts, evidence.sdk-pr23-squash-continuity]
 ---

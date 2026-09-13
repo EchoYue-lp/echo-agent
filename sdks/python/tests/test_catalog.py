@@ -29,15 +29,33 @@ def test_catalog_enumerates_every_canonical_operation() -> None:
     )
 
 
-def test_every_executable_facade_item_has_a_completed_python_mapping() -> None:
+def test_every_external_sdk_contract_has_a_completed_python_mapping() -> None:
     manifest = json.loads(
         (_repo_root() / "contracts/sdk/parity-manifest.json").read_text(
             encoding="utf-8"
         )
     )
     assert manifest["entries"]
+    counts: dict[str, int] = {}
+    expected_scopes = {
+        "external_contract",
+        "host_or_rust_only",
+        "language_intrinsic",
+        "internal_helper",
+        "deferred",
+    }
     for entry in manifest["entries"]:
         mapping = entry["languages"]["python"]
-        if entry["route"]["surface"] != "intrinsic":
+        assert entry["sdk_scope"] in expected_scopes, entry["path"]
+        if entry["canonical"]:
+            counts[entry["sdk_scope"]] = counts.get(entry["sdk_scope"], 0) + 1
+        if entry["sdk_scope"] == "external_contract":
             assert mapping["status"] == "done", entry["path"]
         assert mapping["contract_test"].startswith("sdk-parity/"), entry["path"]
+    assert counts == {
+        "external_contract": 5606,
+        "host_or_rust_only": 1765,
+        "language_intrinsic": 780,
+        "internal_helper": 90,
+        "deferred": 1441,
+    }

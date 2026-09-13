@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: failure_concurrency
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement]
 challenges:
   workflow-entry-parity:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-orchestration/src/workflow/mod.rs, echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/dag.rs]
     evidence_refs: [evidence.task-subagent-workflow]
   checkpoint-claim-and-resurrection:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-orchestration/src/workflow/checkpoint_store.rs, echo-orchestration/src/workflow/graph.rs]
     evidence_refs: [evidence.task-subagent-workflow]
   parallel-failure-settlement:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/dag.rs]
     evidence_refs: [evidence.task-subagent-workflow]
 ---

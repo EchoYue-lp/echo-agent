@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.extension-lifecycle
 lens: state_authority
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.skill-activation-authority, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.plugin-generation-publication-authority, finding.hook-event-producer-contract]
 challenges:
   skill-activation-authority:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/react/subsystems/tool_exec.rs, src/agent/react/capabilities.rs, src/agent/react/mod.rs, src/agent/snapshot.rs, echo-execution/src/skills/external/activate_tool.rs, echo-execution/src/skills/external/resource_tool.rs]
     evidence_refs: [evidence.effects-extensions]
   plugin-mcp-owner-and-generation:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-integration/src/mcp/mod.rs, src/plugin/prepared.rs]
     evidence_refs: [evidence.effects-extensions]
   plugin-state-and-failure-isolation:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-core/src/plugin/registry.rs, echo-core/src/plugin/lifecycle.rs, src/plugin/prepared.rs, echo-sdk-host/src/core_profile/facade/source_operations.rs, docs/adr/0012-immutable-plugin-preparation.md, docs/en/32-plugin-system.md]
     evidence_refs: [evidence.effects-extensions]
 ---

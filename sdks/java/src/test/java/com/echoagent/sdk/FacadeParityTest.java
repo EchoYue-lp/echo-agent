@@ -5,7 +5,9 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -18,18 +20,32 @@ class FacadeParityTest {
     }
 
     @Test
-    void everyExecutableFacadeItemHasACompletedJavaMapping() throws Exception {
+    void everyExternalSdkContractHasACompletedJavaMapping() throws Exception {
         JsonNode manifest = JsonSupport.MAPPER.readTree(
                 Files.readString(repoPath("contracts/sdk/parity-manifest.json")));
         assertTrue(manifest.path("entries").isArray());
         assertFalse(manifest.path("entries").isEmpty());
+        Set<String> expectedScopes = Set.of(
+                "external_contract", "host_or_rust_only", "language_intrinsic", "internal_helper", "deferred");
+        Map<String, Integer> counts = new HashMap<>();
         for (JsonNode entry : manifest.path("entries")) {
             JsonNode mapping = entry.path("languages").path("java");
-            if (!"intrinsic".equals(entry.path("route").path("surface").asText())) {
+            String scope = entry.path("sdk_scope").asText();
+            assertTrue(expectedScopes.contains(scope), entry.path("path").asText());
+            if (entry.path("canonical").asBoolean()) {
+                counts.merge(scope, 1, Integer::sum);
+            }
+            if ("external_contract".equals(scope)) {
                 assertEquals("done", mapping.path("status").asText(), entry.path("path").asText());
             }
             assertTrue(mapping.path("contract_test").asText().startsWith("sdk-parity/"));
         }
+        assertEquals(Map.of(
+                "external_contract", 5606,
+                "host_or_rust_only", 1765,
+                "language_intrinsic", 780,
+                "internal_helper", 90,
+                "deferred", 1441), counts);
     }
 
     @Test

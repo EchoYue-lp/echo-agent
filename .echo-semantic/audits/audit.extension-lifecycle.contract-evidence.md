@@ -5,11 +5,11 @@ kind: audit
 boundary_ref: boundary.extension-lifecycle
 lens: contract_evidence
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.mcp-version-doc-drift]
 challenges:
   mcp-version-doc-and-negotiation:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-integration/src/mcp/types.rs, echo-integration/src/mcp/client.rs, echo-integration/src/mcp/server.rs, docs/en/08-mcp.md, docs/zh/08-mcp.md, scripts/verify.sh]
     evidence_refs: [evidence.effects-extensions, evidence.workspace-structure]
 ---

@@ -21,8 +21,9 @@ rewriting the agent framework in any of those languages.
 > routing, including real Workflow/A2A pull streams. Source-built TypeScript,
 > Python and Java clients now resolve every canonical source and family
 > operation through the shared catalog and preserve all WireValue shapes. The
-> executable route baseline passes against one source-built Host; process-local
-> intrinsic mappings remain explicit follow-up work. See [Status
+> executable route baseline passes against one source-built Host. Manifest
+> schema v2 separates the current external contract from Host/Rust-only,
+> language-intrinsic, helper and deferred identities. See [Status
 > ladder](#status-ladder) for the exact claims.
 
 ## What the SDK program is
@@ -85,8 +86,8 @@ explicit until their language-native behavior is delivered.
 | `contracts/sdk/acp-baseline.json` | Pinned official ACP wire version (1), crate and schema artifact versions; tests assert the lockfile matches. |
 | `contracts/sdk/toolchain.json` | The exact nightly toolchain used for rustdoc-JSON inventory generation. Contributors only; normal builds never need it. |
 | `contracts/sdk/public-api.txt` | Deterministic root-facade snapshot with expanded workspace re-exports, members, fields, variants and API-shape digests. |
-| `contracts/sdk/parity-manifest.schema.json` | Machine schema for facade identities, signatures, feature availability, adapter obligations and language mappings. |
-| `contracts/sdk/parity-manifest.json` | Every facade item classified by an explicit semantic rule, ACP relationship, feature condition, adapter operation and per-language mapping/test status. Entries use one JSON line each so diffs remain reviewable. |
+| `contracts/sdk/parity-manifest.schema.json` | Machine schema for facade identities, SDK scope, signatures, feature availability, adapter obligations and language mappings. |
+| `contracts/sdk/parity-manifest.json` | Every facade item classified by consumer-facing `sdk_scope`, semantic rule, ACP relationship, feature condition, adapter operation and per-language mapping/test status. Entries use one JSON line each so diffs remain reviewable. |
 | `contracts/sdk/schema/echo-agent-extension-v1.schema.json` | Generated JSON Schema of the `_echo_agent/*` extension DTOs and method catalog. |
 | `contracts/sdk/fixtures/extension/v1/` | Golden fixtures: valid samples must round-trip losslessly, invalid samples must be rejected deterministically. |
 | `contracts/sdk/source-contract.json` | Small generated source-compatibility digest (Cargo.lock + facade inventory + parity manifest) embedded by the Host and matched by the Client hello. |
@@ -116,8 +117,9 @@ previous ones.
 | **ACP conformant** | A standard ACP v1 client passes the supported profile against a real source-built Host | ✅ |
 | **Core extension profile** | The negotiated `_echo_agent/*` core families run against a real Host with typed lifecycle, events, replay and recovery | ✅ (Rust Host only) |
 | **Host facade parity** | Every canonical root operation/consumer trait/stream has a concrete Host route or evidence-backed language-local boundary | ✅ Plan 08 complete |
-| **Runnable** | A real Host plus at least one language's full SDK extension path executes end-to-end | ❌ intrinsic facade mappings remain |
-| **Parity complete** | TypeScript, Python and Java all pass the full facade/all-features parity suite | ❌ intrinsic mappings and behavior matrix pending |
+| **Runnable** | A real Host plus each language's declared external SDK path executes end-to-end | ✅ source-built Host and language gates |
+| **External contract complete** | TypeScript, Python and Java pass every identity currently classified as `external_contract` | ✅ 5,606 canonical identities |
+| **Deferred capabilities dispositioned** | Every `deferred` capability has a product-level contract decision | ❌ 1,441 identities await capability grouping and review |
 | **Published** | Registry/binary publication — **explicitly out of scope**; this design ships source only | never (by design) |
 
 ### Identity inventory scope
@@ -136,13 +138,30 @@ governance is measured through Capability, Behavior, Rule, state authority,
 lifecycle, Finding, and Evidence coverage. See
 [ADR 0031](../adr/0031-sdk-identity-governance-scope.md).
 
-Only *Parity complete* justifies claiming "all public Rust capabilities are
-available from the SDK". Executable routes currently use the canonical
-resolver and serializable values use the lossless WireValue algebra; the
-manifest keeps process-local mechanisms `not_implemented` until their
-language-native behavior is implemented and tested. The first intrinsic value
-slice (`ToolCallParams` and `ToolResult`) is now implemented and tested in all
-three languages; the remaining intrinsic route set is still open.
+Manifest schema v2 adds an identity-level `sdk_scope` that is independent from
+the adapter route and per-language status:
+
+| `sdk_scope` | Canonical items | Current meaning |
+|---|---:|---|
+| `external_contract` | 5,606 | Delivered TypeScript, Python and Java behavior with named contract tests. |
+| `host_or_rust_only` | 1,765 | Process-local or Host-owned runtime authority. |
+| `language_intrinsic` | 780 | Rust syntax, trait implementations and callback types represented idiomatically. |
+| `internal_helper` | 90 | Rust testing support, not an SDK product surface. |
+| `deferred` | 1,441 | Potential capabilities awaiting capability-level contract review. |
+
+The scope is generated, aliases inherit their canonical identity, and no row
+is manually promoted. A delivered intrinsic route remains an external contract;
+a deferred item is not rejected, but it does not become thousands of separate
+tasks. See [ADR 0032](../adr/0032-sdk-contract-scope-classification.md).
+
+External contract completion supports claims only about the declared external
+SDK surface. It does not justify claiming that every public Rust identity is
+available in every language. Executable routes use the canonical resolver and
+serializable values use the lossless WireValue algebra; Host/Rust-only,
+language-intrinsic, helper and deferred identities remain explicit inventory
+dispositions. The first intrinsic value slice (`ToolCallParams` and
+`ToolResult`) is implemented and tested in all three languages; the remaining
+deferred set is reviewed only in externally useful capability groups.
 The closed A2A `TaskState` transition/display slice is also implemented in all
 three languages, without changing the wire surface.
 The related A2A Message, TaskStatus, Provider and Skill value constructors are

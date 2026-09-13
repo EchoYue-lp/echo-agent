@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: failure_concurrency
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.streaming-tool-validation, finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.guard-direction-contract]
 challenges:
   tool-cache-and-validation:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-execution/src/tools.rs, echo-tools/src/files/files.rs, src/agent/react/run/pipeline.rs, echo-sdk-host/src/core_profile/extension_bridge.rs]
     evidence_refs: [evidence.effects-extensions]
   sandbox-selection-and-stream:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-core/src/sandbox.rs, echo-execution/src/sandbox/policy.rs, echo-execution/src/sandbox/manager.rs]
     evidence_refs: [evidence.effects-extensions]
   guard-direction-and-error:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-core/src/guard/mod.rs, src/agent/react/run/react_loop.rs, src/agent/snapshot.rs]
     evidence_refs: [evidence.effects-extensions]
 ---

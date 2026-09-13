@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.protocol-surfaces
 lens: time_lifecycle
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.channel-reset-stale-generation-delivery]
 challenges:
   a2a-stream-cancel-and-drop:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/a2a/server.rs, src/a2a/serve.rs]
     evidence_refs: [evidence.provider-protocol-quality]
   adapter-agent-close:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/acp/adapter.rs, src/acp/session.rs, src/headless.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, echo-integration/src/channels/types.rs, src/agent/react/mod.rs]
     evidence_refs: [evidence.agent-context-execution, evidence.provider-protocol-quality]
   channel-reset-generation:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-integration/src/channels/session.rs, echo-integration/src/channels/types.rs, echo-integration/src/channels/channels/mod.rs]
     evidence_refs: [evidence.provider-protocol-quality]
 ---

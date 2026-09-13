@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: data_durability
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.evolution-audit-atomicity, finding.evolution-doc-namespace, finding.evolution-skill-promotion-audit, finding.evolution-changelog-rollback-authority, finding.skill-candidate-reinforcement-audit-gap]
 challenges:
   memory-mutation-and-audit:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/evolution/layer.rs, src/evolution/audit.rs, src/evolution/review.rs]
     evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation]
   namespace-and-cold-tier:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/evolution/layer.rs, docs/en/25-self-improvement.md, docs/zh/25-self-improvement.md]
     evidence_refs: [evidence.provider-protocol-quality]
   skill-and-candidate-durability:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/evolution/curator.rs, src/evolution/candidate.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs]
     evidence_refs: [evidence.provider-protocol-quality]
 ---

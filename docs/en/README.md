@@ -106,6 +106,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [0029 - Shared Subagent Execution Admission](../adr/0029-shared-subagent-execution-admission.md) | Proposed shared admission composes Task and direct Subagent execution |
 | [0030 - Versioned Subagent Event Envelope](../adr/0030-versioned-subagent-event-envelope.md) | One versioned envelope owns Subagent event identity, order, and replay |
 | [0031 - SDK Identity Governance Scope](../adr/0031-sdk-identity-governance-scope.md) | SDK identity inventory monitors drift but does not measure project semantic completion |
+| [0032 - SDK Contract Scope Classification](../adr/0032-sdk-contract-scope-classification.md) | Identity-level scope separates the current external contract from Host/Rust-only, language, helper, and deferred surfaces |
 
 ---
 

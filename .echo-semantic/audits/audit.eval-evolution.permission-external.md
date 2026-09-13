@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: permission_external
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.evolution-skill-promotion-audit, finding.pre-compaction-memory-trust-provenance]
 challenges:
   skill-mutation-authorization:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/evolution/curator.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/security.rs]
     evidence_refs: [evidence.provider-protocol-quality]
   background-review-policy:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/evolution/background_review.rs, src/evolution/review.rs, src/evolution/runtime_integration.rs]
     evidence_refs: [evidence.provider-protocol-quality]
   pre-compaction-memory-provenance:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/react/run/phases/compact.rs, src/agent/react/run/context.rs, src/evolution/recall.rs]
     evidence_refs: [evidence.provider-protocol-quality]
 ---

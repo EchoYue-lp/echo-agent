@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: permission_external
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass, finding.approval-authority, finding.hook-protected-path, finding.hook-permission-precedence]
 challenges:
   plan-and-readonly-gates:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/snapshot.rs, src/agent/react/run/pipeline.rs, src/agent/react/builder.rs, src/agent/react/mod.rs, echo-tools/src/registry.rs]
     evidence_refs: [evidence.effects-extensions]
   approval-authority:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-orchestration/src/human_loop/service.rs, echo-core/src/tools/mod.rs, echo-tools/src/shell.rs, src/agent/react/run/pipeline.rs]
     evidence_refs: [evidence.effects-extensions]
   hook-permission-precedence:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs, docs/en/07-skills.md]
     evidence_refs: [evidence.effects-extensions]
 ---

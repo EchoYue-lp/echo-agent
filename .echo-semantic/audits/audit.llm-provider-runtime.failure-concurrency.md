@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: failure_concurrency
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity]
 challenges:
   nonstream-cancellation:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-integration/src/providers/client.rs, echo-integration/src/providers/openai.rs, echo-integration/src/providers/responses.rs, echo-integration/src/providers/anthropic.rs, echo-state/src/compression/compressor/summary.rs]
     evidence_refs: [evidence.provider-protocol-quality]
   sse-eof-framing:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-integration/src/providers/client.rs]
     evidence_refs: [evidence.provider-protocol-quality]
   provider-semantic-terminal:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-integration/src/providers/responses.rs, echo-integration/src/providers/openai.rs, echo-integration/src/providers/anthropic.rs, src/agent/react/run/phases/think.rs]
     evidence_refs: [evidence.provider-protocol-quality]
 ---

@@ -8,8 +8,9 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, failure_concurrency]
 boundary: boundary.sdk-facade-parity
-observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+observed_at: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
 code_refs:
+  - echo-sdk-protocol/src/inventory.rs
   - echo-sdk-protocol/src/facade.rs
   - echo-sdk-host/src/core_profile/facade/source_operations.rs
   - echo-sdk-host/src/core_profile/facade/stream.rs
@@ -23,7 +24,7 @@ finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancel
 
 ## 重要承诺
 
-每个canonical facade项只能映射到一个真实标准方法、typed family、Host adapter、extension bridge或有证据的语言本地实现。
+每个canonical facade项只能映射到一个真实route和一个identity级SDK scope；route与具名capability group独立决定contract acceptance，language status只说明实现证据。
 
 ## 当前行为
 
@@ -31,7 +32,7 @@ finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancel
 
 ## 期望行为
 
-所有canonical route有可执行或可复核依据；`feature_unavailable`、`intrinsic`和空handler不能掩盖缺失实现。
+所有canonical route有可执行或可复核依据；`external_contract`必须三语言done，Host/Rust-only、language intrinsic、helper和deferred必须保留显式disposition，不能以scope或空handler掩盖缺失实现。
 
 ## 触发、结果与副作用
 
@@ -47,4 +48,4 @@ Client发送operation和signature后，Host先核对协商能力、feature、sig
 
 ## 裁决记录
 
-用户确认功能与语义全部对等、语言API保持惯用表达，并要求Plan 8独立折叠为一个任务级提交。
+用户确认语言API保持惯用表达；ADR 0031/0032进一步确认Rust identity inventory不等于外部合同，deferred只按capability推进。

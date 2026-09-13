@@ -113,6 +113,7 @@
         "languages",
         "path",
         "route",
+        "sdk_scope",
         "semantic_rule",
         "signatures",
         "source_paths"
@@ -169,6 +170,14 @@
         },
         "route": {
           "$ref": "#/definitions/RouteObligation"
+        },
+        "sdk_scope": {
+          "description": "Consumer-facing SDK contract scope for this facade identity.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SdkScope"
+            }
+          ]
         },
         "semantic_rule": {
           "type": "string"
@@ -310,6 +319,17 @@
         }
       },
       "additionalProperties": false
+    },
+    "SdkScope": {
+      "description": "Consumer-facing disposition of one Rust facade identity.\n\nThis is intentionally independent from [`SemanticClass`], the adapter route, and per-language implementation status. It answers whether an item belongs to the cross-language SDK contract, not how it is represented or whether a particular language implementation is complete.",
+      "type": "string",
+      "enum": [
+        "external_contract",
+        "host_or_rust_only",
+        "language_intrinsic",
+        "internal_helper",
+        "deferred"
+      ]
     },
     "SemanticClass": {
       "type": "string",

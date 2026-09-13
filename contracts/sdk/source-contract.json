@@ -13,8 +13,8 @@
     },
     {
       "path": "contracts/sdk/parity-manifest.json",
-      "bytes": 32047881,
-      "sha256": "sha256:fb9558861fd7c0804ffa045d8724c47a859215a176caa6c999f6468a39747ffe"
+      "bytes": 32769258,
+      "sha256": "sha256:62c3bc39d8d72d6b1f224ac40ed105e14971fe977e7dc878b244ea5de108336d"
     },
     {
       "path": "contracts/sdk/facade-operation-catalog.json",
@@ -22,5 +22,5 @@
       "sha256": "sha256:4a86b212b87eebc92f0fc432454fef61bbd7f86871f84eff4ccca9331eddb9c3"
     }
   ],
-  "aggregate_digest": "sha256:c8887757a3baa50e1ad5f92009b41fa2daf7b89a4d528aa88dca1e6eeb04dee0"
+  "aggregate_digest": "sha256:ad1cb1c13d114dc679b0fdab17fab8235b3aa5f22a7c752c178f91ca81146c69"
 }

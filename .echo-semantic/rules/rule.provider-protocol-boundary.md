@@ -7,7 +7,7 @@ expectation: inferred
 risk: high
 primary_focus: contract_evidence
 focus: [failure_concurrency, time_lifecycle, trigger_input]
-observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+observed_at: f1e9027246760661144786e9e35615cd46d580c6
 behavior_refs: [behavior.llm-provider-execution]
 code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/client.rs, docs/adr/0022-typed-llm-timeouts.md]
 evidence_refs: [evidence.provider-protocol-quality]

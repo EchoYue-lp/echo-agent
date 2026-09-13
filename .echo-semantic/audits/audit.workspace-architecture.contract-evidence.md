@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift]
 challenges:
   workspace-topology-docs:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [Cargo.toml, README.md, README.zh.md]
     evidence_refs: [evidence.workspace-structure]
   public-feature-table:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [Cargo.toml, README.md, README.zh.md]
     evidence_refs: [evidence.workspace-structure]
   readme-cargo-targets:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [README.md, README.zh.md, echo-agent-learning/tests/example_contracts/demo34_workflow_stream.rs, echo-agent-learning/tests/example_contracts.rs, echo-agent-learning/tests/documentation_contract.rs]
     evidence_refs: [evidence.workspace-structure]
 ---

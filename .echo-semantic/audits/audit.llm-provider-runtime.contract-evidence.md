@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: contract_evidence
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.structured-output-main-path, finding.structured-output-schema-validation-contract, finding.provider-capability-authority, finding.model-fact-freshness-authority]
 challenges:
   structured-output-main-path:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/react/builder.rs, src/agent/snapshot.rs, src/agent/react/run/phases/think.rs, src/agent/react/extract.rs, docs/en/11-structured-output.md, echo-agent-learning/examples/demo15_structured_output.rs]
     evidence_refs: [evidence.provider-protocol-quality]
   capability-owner:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/anthropic.rs, echo-state/src/compression/compressor/summary.rs, echo-state/src/compression/levels.rs]
     evidence_refs: [evidence.provider-protocol-quality]
   model-fact-freshness:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-core/src/llm/capabilities.rs, docs/en/38-factory-modes.md]
     evidence_refs: [evidence.provider-protocol-quality]
 ---

@@ -4,13 +4,13 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 多语言 SDK facade 对等边界
 risk: high
-observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+observed_at: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.sdk-facade-routing]
 rule_refs: [rule.sdk-rust-authority]
 evidence_refs: [evidence.sdk-contracts]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
-audit_refs: [audit.sdk-facade-plan08-final]
+audit_refs: [audit.sdk-facade-plan08-final, audit.sdk-facade-scope-contract]
 related_map_refs: [map.protocol-surfaces]
 scenarios:
   standard-acp:
@@ -35,6 +35,12 @@ scenarios:
     source_refs: [echo-sdk-host/src/core_profile/facade/stream.rs]
     behavior_refs: [behavior.sdk-facade-routing]
     evidence_refs: [evidence.sdk-contracts]
+  sdk-contract-scope:
+    status: mapped
+    source_refs: [echo-sdk-protocol/src/inventory.rs, contracts/sdk/parity-manifest.schema.json, contracts/sdk/parity-manifest.json, echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh, docs/adr/0032-sdk-contract-scope-classification.md]
+    behavior_refs: [behavior.sdk-facade-routing]
+    rule_refs: [rule.sdk-rust-authority]
+    evidence_refs: [evidence.sdk-contracts]
 ---
 
 # 多语言 SDK facade 对等边界
@@ -57,7 +63,7 @@ Host只保存寻址、handle owner/generation和有界投递状态；Agent、Run
 
 ## 策略来源与优先级
 
-正式design与ADR 0028定义边界；parity manifest和operation catalog定义机器清单；Rust服务定义运行语义。
+正式design与ADR 0028定义运行边界；ADR 0031/0032定义inventory与consumer scope；parity manifest和operation catalog定义机器清单；Rust服务定义运行语义。
 
 ## 生命周期与失败路径
 
@@ -73,9 +79,8 @@ permission operation复用Session Agent的`PermissionService`。Host不得引入
 
 ## 场景处置清单
 
-ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter，live consumer trait进入typed compressor或AgentComponent bridge，Workflow/A2A stream复用统一HandleRegistry并覆盖Session/connection teardown。
+ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5606个当前external contract、1765个Host/Rust-only、780个language intrinsic、90个internal helper与1441个deferred；551个已完成intrinsic仍属于external contract。
 
 ## 未展开项
 
-intrinsic 语言行为、逐项领域/失败语义与最终 Parity complete 属于后续独立 SDK 交付结果；
-全仓 inventory/behavior model 由父级能力图闭合，不以本 map 的 identity 数量衡量。
+deferred identity只按externally useful capability进入后续合同决策；Host/Rust-only、language intrinsic和helper不是逐identity语言任务。全仓inventory/behavior model由父级能力图闭合，不以本map的identity数量衡量。

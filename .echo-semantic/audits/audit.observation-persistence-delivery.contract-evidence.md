@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.observation-persistence-delivery
 lens: contract_evidence
 freshness: examined
-revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.trace-audit-secret-boundary, finding.trace-effect-event-producers, finding.tool-pipeline-example-drift, finding.workflow-entry-loop-drift, finding.hook-event-producer-contract, finding.in-memory-audit-successful-drop]
 challenges:
   trace-and-audit-contract:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/react/run/stream_channel.rs, src/agent/react/mod.rs, src/agent/react/run/pipeline.rs, src/trace/mod.rs, echo-state/src/audit/memory.rs, echo-state/src/audit/file.rs]
     evidence_refs: [evidence.persistence-observation, evidence.effects-extensions]
   event-producer-matrix:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/trace/mod.rs, echo-core/src/hooks/types.rs, echo-orchestration/src/workflow/mod.rs, docs/en/27-tracing.md]
     evidence_refs: [evidence.persistence-observation]
   executable-pipeline-contract:
-    revision: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+    revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/react/run/pipeline.rs, echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs]
     evidence_refs: [evidence.effects-extensions, evidence.workspace-structure]
 ---

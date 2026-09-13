@@ -7,11 +7,14 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [contract_evidence, failure_concurrency, time_lifecycle]
-observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+observed_at: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
 behavior_refs: [behavior.sdk-facade-routing]
 code_refs:
   - docs/supreme/specs/2026-09-04-source-first-multilanguage-sdk-runtime/design.md
   - docs/adr/0028-source-first-multilanguage-sdk-runtime.md
+  - docs/adr/0031-sdk-identity-governance-scope.md
+  - docs/adr/0032-sdk-contract-scope-classification.md
+  - echo-sdk-protocol/src/inventory.rs
   - echo-sdk-host/src/core_profile/handler.rs
   - echo-sdk-host/src/core_profile/handles.rs
   - echo-sdk-host/src/core_profile/facade/source_operations.rs
@@ -28,7 +31,7 @@ Rust `echo-agent`继续唯一拥有Agent、Run、Task、Subagent、事件、重�
 
 ## 适用行为
 
-适用于ACP标准投影、`_echo_agent/*` core/family/source operation、extension bridge及三语言Client。
+适用于ACP标准投影、`_echo_agent/*` core/family/source operation、extension bridge、identity级SDK scope及三语言Client。
 
 ## 当前实现
 
@@ -36,11 +39,11 @@ Host adapter只做typed值转换、handle寻址、generation fencing和调用现
 
 ## 期望行为
 
-新增facade能力必须扩展现有权威；不得在Host或语言SDK建立第二状态机、重试器、终态归约或持久化事实源。
+新增facade能力必须扩展现有权威；`sdk_scope`不能替代route或language evidence，也不能授权删除Rust API；不得在Host或语言SDK建立第二状态机、重试器、终态归约或持久化事实源。
 
 ## 证据
 
-设计、ADR、parity manifest、operation catalog及真实Host测试共同约束该边界。
+设计、ADR 0028/0031/0032、schema v2 parity manifest、operation catalog及真实Host/三语言测试共同约束该边界。
 
 ## 裁决记录
 
