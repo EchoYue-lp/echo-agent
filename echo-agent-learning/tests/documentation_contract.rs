@@ -17,6 +17,13 @@ struct WorkspacePackage {
     name: String,
     manifest_path: PathBuf,
     features: BTreeMap<String, Vec<String>>,
+    targets: Vec<WorkspaceTarget>,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceTarget {
+    name: String,
+    kind: Vec<String>,
 }
 
 fn collect_markdown_files(directory: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -156,6 +163,28 @@ fn feature_table_entries(section: &str) -> Result<Vec<String>, Box<dyn std::erro
     } else {
         Ok(entries)
     }
+}
+
+fn command_option<'a>(tokens: &'a [String], flag: &str) -> Option<&'a str> {
+    tokens.windows(2).find_map(|pair| {
+        pair.first()
+            .is_some_and(|value| value == flag)
+            .then(|| pair.get(1).map(String::as_str))
+            .flatten()
+    })
+}
+
+fn contract_filter_defined(learning_root: &Path, filter: &str) -> Result<bool, std::io::Error> {
+    let marker = format!("fn {filter}(");
+    for entry in std::fs::read_dir(learning_root.join("tests/example_contracts"))? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("rs")
+            && std::fs::read_to_string(path)?.contains(&marker)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[test]
@@ -303,6 +332,117 @@ fn root_readme_feature_tables_match_cargo_metadata() -> Result<(), Box<dyn std::
     } else {
         Err(std::io::Error::other(format!(
             "README feature table drift:\n{}",
+            violations.join("\n")
+        ))
+        .into())
+    }
+}
+
+#[test]
+fn root_readme_learning_commands_reference_cargo_targets() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (workspace_root, packages) = workspace_packages()?;
+    let learning_package = packages
+        .iter()
+        .find(|package| package.name == "echo-agent-learning")
+        .ok_or_else(|| std::io::Error::other("cargo metadata is missing echo-agent-learning"))?;
+    let example_targets = learning_package
+        .targets
+        .iter()
+        .filter(|target| target.kind.iter().any(|kind| kind == "example"))
+        .map(|target| target.name.clone())
+        .collect::<BTreeSet<_>>();
+    let test_targets = learning_package
+        .targets
+        .iter()
+        .filter(|target| target.kind.iter().any(|kind| kind == "test"))
+        .map(|target| target.name.clone())
+        .collect::<BTreeSet<_>>();
+    let learning_root = learning_package
+        .manifest_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("learning manifest has no parent directory"))?;
+    let mut violations = Vec::new();
+
+    for path in ["README.md", "README.zh.md"] {
+        let content = std::fs::read_to_string(workspace_root.join(path))?;
+        let mut learning_commands = 0_usize;
+        for line in content.lines().map(str::trim) {
+            if !line.starts_with("cargo ") {
+                continue;
+            }
+            let tokens = shlex::split(line).ok_or_else(|| {
+                std::io::Error::other(format!("{path} contains an invalid shell command: {line}"))
+            })?;
+            let package =
+                command_option(&tokens, "-p").or_else(|| command_option(&tokens, "--package"));
+            if package != Some("echo-agent-learning") {
+                continue;
+            }
+            learning_commands = learning_commands.saturating_add(1);
+            match tokens.get(1).map(String::as_str) {
+                Some("run") => {
+                    let Some(target) = command_option(&tokens, "--example") else {
+                        violations.push(format!(
+                            "{path} learning run command has no --example target: {line}"
+                        ));
+                        continue;
+                    };
+                    if !example_targets.contains(target) {
+                        violations.push(format!(
+                            "{path} references missing learning example target {target}"
+                        ));
+                    }
+                }
+                Some("test") => {
+                    let Some(target) = command_option(&tokens, "--test") else {
+                        violations.push(format!(
+                            "{path} learning test command has no --test target: {line}"
+                        ));
+                        continue;
+                    };
+                    if !test_targets.contains(target) {
+                        violations.push(format!(
+                            "{path} references missing learning test target {target}"
+                        ));
+                        continue;
+                    }
+                    if target == "example_contracts" {
+                        let filters = tokens
+                            .iter()
+                            .filter(|token| token.starts_with("contract_"))
+                            .collect::<Vec<_>>();
+                        let filter = match filters.as_slice() {
+                            [filter] => filter.as_str(),
+                            _ => {
+                                violations.push(format!(
+                                    "{path} example_contracts command must have one contract_* filter: {line}"
+                                ));
+                                continue;
+                            }
+                        };
+                        if !contract_filter_defined(learning_root, filter)? {
+                            violations.push(format!(
+                                "{path} references missing example contract filter {filter}"
+                            ));
+                        }
+                    }
+                }
+                action => violations.push(format!(
+                    "{path} uses unsupported learning cargo action {action:?}: {line}"
+                )),
+            }
+        }
+        if learning_commands == 0 {
+            violations.push(format!("{path} contains no echo-agent-learning commands"));
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "README learning command target drift:\n{}",
             violations.join("\n")
         ))
         .into())

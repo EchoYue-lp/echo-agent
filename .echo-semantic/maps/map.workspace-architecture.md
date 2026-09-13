@@ -4,13 +4,13 @@ id: map.workspace-architecture
 kind: capability_map
 title: Workspace 架构与公共组合
 risk: high
-observed_at: source:6e60a383df15fb93d0e89c262fa8ab7d422dda09f237089492f92896ed96c6ca
+observed_at: source:e5875d2d355e903b53de984f1f399ba10a08d50a8d5d42a03418a2264c09f3b9
 boundary_refs: [boundary.workspace-architecture]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification]
+evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification]
 finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift]
-audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview, audit.feature-table-doc-rereview]
+audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview, audit.feature-table-doc-rereview, audit.readme-example-target-rereview]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.tool-permission-sandbox, map.extension-lifecycle, map.llm-provider-runtime, map.protocol-surfaces, map.eval-evolution]
 scenarios:
   crate-dag-and-layering:
@@ -29,13 +29,12 @@ scenarios:
     finding_refs: [finding.public-feature-table-drift]
     audit_refs: [audit.feature-table-doc-rereview]
   public-and-background-entrypoints:
-    status: needs_review
+    status: mapped
     source_refs: [src/lib.rs, echo-sdk-host/src/main.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/tasks/background_task.rs]
     behavior_refs: [behavior.workspace-composition]
-    evidence_refs: [evidence.workspace-structure]
+    evidence_refs: [evidence.workspace-structure, evidence.readme-example-target-repair, evidence.readme-example-target-verification]
     finding_refs: [finding.readme-example-target-drift]
-    unknown: README把test contract写成不存在的Cargo example target
-    next_step: 修正命令并让root README target进入documentation contract
+    audit_refs: [audit.readme-example-target-rereview]
   dynamic-registration-inventory:
     status: needs_review
     source_refs: [echo-macros/src/lib.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/workflow/loader.rs]

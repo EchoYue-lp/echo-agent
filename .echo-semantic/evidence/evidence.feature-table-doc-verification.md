@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.feature-table-doc-verification
 kind: evidence
-observed_at: source:6e60a383df15fb93d0e89c262fa8ab7d422dda09f237089492f92896ed96c6ca
+observed_at: 8ab20d1157c4e4fdeb3a805a32b5dcc3bc8324f5
 source_refs:
   - Cargo.toml
   - README.md

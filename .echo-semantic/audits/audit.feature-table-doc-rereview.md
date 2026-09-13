@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: examined
-revision: source:6e60a383df15fb93d0e89c262fa8ab7d422dda09f237089492f92896ed96c6ca
+revision: 8ab20d1157c4e4fdeb3a805a32b5dcc3bc8324f5
 finding_refs: [finding.public-feature-table-drift]
 challenges:
   root-feature-authority:
-    revision: source:6e60a383df15fb93d0e89c262fa8ab7d422dda09f237089492f92896ed96c6ca
+    revision: 8ab20d1157c4e4fdeb3a805a32b5dcc3bc8324f5
     source_refs: [Cargo.toml, echo-agent-learning/tests/documentation_contract.rs]
     evidence_refs: [evidence.workspace-structure, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification]
   bilingual-exact-set-table:
-    revision: source:6e60a383df15fb93d0e89c262fa8ab7d422dda09f237089492f92896ed96c6ca
+    revision: 8ab20d1157c4e4fdeb3a805a32b5dcc3bc8324f5
     source_refs: [README.md, README.zh.md, Cargo.toml]
     evidence_refs: [evidence.feature-table-doc-repair, evidence.feature-table-doc-verification]
   task-core-and-adjacent-scope:
-    revision: source:6e60a383df15fb93d0e89c262fa8ab7d422dda09f237089492f92896ed96c6ca
+    revision: 8ab20d1157c4e4fdeb3a805a32b5dcc3bc8324f5
     source_refs: [README.md, README.zh.md, .echo-semantic/findings/finding.readme-example-target-drift.md]
     evidence_refs: [evidence.feature-table-doc-verification]
 ---

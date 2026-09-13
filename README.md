@@ -108,7 +108,7 @@ manager.start_all(handler).await?;
 ```bash
 cargo run -p echo-agent-learning --example demo01_tools          # Custom tools
 cargo run -p echo-agent-learning --example demo25_macros         # Macro system
-cargo run -p echo-agent-learning --example demo34_workflow_stream # Workflow streaming
+cargo test -p echo-agent-learning --test example_contracts --all-features --locked contract_demo34_workflow_stream # Workflow streaming
 cargo run -p echo-agent-learning --example demo36_multimodal     # Multi-modal messages
 cargo run -p echo-agent-learning --example demo38_im_channels --features channels  # IM channels
 ```

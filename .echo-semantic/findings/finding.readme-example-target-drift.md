@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.readme-example-target-drift
 kind: finding
 type: evidence_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: contract_evidence
 focus: [trigger_input]
 boundary_ref: boundary.workspace-architecture
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure]
-audit_refs: [audit.workspace-architecture.contract-evidence]
+evidence_refs: [evidence.workspace-structure, evidence.readme-example-target-repair, evidence.readme-example-target-verification]
+audit_refs: [audit.workspace-architecture.contract-evidence, audit.readme-example-target-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.readme-example-target-repair]
+verification_evidence_refs: [evidence.readme-example-target-verification]
+rereview_audit_refs: [audit.readme-example-target-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,4 @@ README命令、demo34源码、tests/example_contracts.rs与documentation_contrac
 
 ## 处理记录
 
-Workspace Contract Audit确认；属于双语文档/测试合同修复，不改runtime。
+Workspace Contract Audit确认。双语README demo34命令已改为真实`example_contracts` test/filter；Cargo-derived command contract在旧README上red、修复后green，且README原样命令真实通过。Repair、verification与独立复审已闭合本Finding。GitHub Issue保持open，等待远程main交付。

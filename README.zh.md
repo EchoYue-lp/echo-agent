@@ -105,7 +105,7 @@ manager.start_all(handler).await?;
 ```bash
 cargo run -p echo-agent-learning --example demo01_tools          # 自定义工具
 cargo run -p echo-agent-learning --example demo25_macros         # 宏系统
-cargo run -p echo-agent-learning --example demo34_workflow_stream # 工作流流式
+cargo test -p echo-agent-learning --test example_contracts --all-features --locked contract_demo34_workflow_stream # 工作流流式
 cargo run -p echo-agent-learning --example demo36_multimodal     # 多模态消息
 cargo run -p echo-agent-learning --example demo38_im_channels --features channels  # IM 通道
 ```

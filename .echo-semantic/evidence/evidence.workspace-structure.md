@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.workspace-structure
 kind: evidence
-observed_at: source:6e60a383df15fb93d0e89c262fa8ab7d422dda09f237089492f92896ed96c6ca
+observed_at: source:e5875d2d355e903b53de984f1f399ba10a08d50a8d5d42a03418a2264c09f3b9
 source_refs:
   - Cargo.toml
   - README.md
@@ -49,4 +49,4 @@ limitations:
 
 ## 已知缺口
 
-双语README feature表现由Cargo metadata exact-set contract检查。动态注册、feature 组合的完整运行语义和每个后台任务的资源清理由其它边界建模；本 Evidence 不把当前采用量当作 framework API 存废依据。
+双语README feature表现由Cargo metadata exact-set contract检查，learning run/test命令现由Cargo target/filter contract检查。动态注册、feature 组合的完整运行语义和每个后台任务的资源清理由其它边界建模；本 Evidence 不把当前采用量当作 framework API 存废依据。
