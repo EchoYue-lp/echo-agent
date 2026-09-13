@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: examined
-revision: source:1edd0f8dd43db91c544af47174e3f57154b9598d3bd78d9a3e7859a422f24a91
+revision: 53accbac880639a58a639a56f25c72dc36c90ca4
 finding_refs: [finding.workspace-topology-doc-drift]
 challenges:
   cargo-derived-package-closure:
-    revision: source:1edd0f8dd43db91c544af47174e3f57154b9598d3bd78d9a3e7859a422f24a91
+    revision: 53accbac880639a58a639a56f25c72dc36c90ca4
     source_refs: [Cargo.toml, echo-agent-learning/tests/documentation_contract.rs]
     evidence_refs: [evidence.workspace-structure, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification]
   bilingual-topology-and-classification:
-    revision: source:1edd0f8dd43db91c544af47174e3f57154b9598d3bd78d9a3e7859a422f24a91
+    revision: 53accbac880639a58a639a56f25c72dc36c90ca4
     source_refs: [README.md, README.zh.md, Cargo.toml]
     evidence_refs: [evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification]
   adjacent-finding-isolation:
-    revision: source:1edd0f8dd43db91c544af47174e3f57154b9598d3bd78d9a3e7859a422f24a91
+    revision: 53accbac880639a58a639a56f25c72dc36c90ca4
     source_refs: [README.md, README.zh.md, .echo-semantic/findings/finding.public-feature-table-drift.md, .echo-semantic/findings/finding.readme-example-target-drift.md]
     evidence_refs: [evidence.workspace-topology-doc-verification]
 ---

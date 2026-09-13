@@ -4,13 +4,13 @@ id: map.workspace-architecture
 kind: capability_map
 title: Workspace 架构与公共组合
 risk: high
-observed_at: source:1edd0f8dd43db91c544af47174e3f57154b9598d3bd78d9a3e7859a422f24a91
+observed_at: source:6e60a383df15fb93d0e89c262fa8ab7d422dda09f237089492f92896ed96c6ca
 boundary_refs: [boundary.workspace-architecture]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification]
+evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification]
 finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift]
-audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview]
+audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview, audit.feature-table-doc-rereview]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.tool-permission-sandbox, map.extension-lifecycle, map.llm-provider-runtime, map.protocol-surfaces, map.eval-evolution]
 scenarios:
   crate-dag-and-layering:
@@ -22,13 +22,12 @@ scenarios:
     evidence_refs: [evidence.workspace-structure, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification]
     audit_refs: [audit.workspace-topology-doc-rereview]
   feature-topology:
-    status: needs_review
+    status: mapped
     source_refs: [Cargo.toml, echo-core/Cargo.toml, echo-execution/Cargo.toml, echo-integration/Cargo.toml, echo-macros/Cargo.toml, echo-orchestration/Cargo.toml, echo-state/Cargo.toml, echo-tools/Cargo.toml, echo-sdk-protocol/Cargo.toml, echo-sdk-host/Cargo.toml, echo-agent-learning/Cargo.toml]
     rule_refs: [rule.framework-layer-ownership]
-    evidence_refs: [evidence.workspace-structure]
+    evidence_refs: [evidence.workspace-structure, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification]
     finding_refs: [finding.public-feature-table-drift]
-    unknown: Manifest feature权威已映射，但双语README公开不存在的tasks feature
-    next_step: 修复双语feature表并增加manifest-derived contract check
+    audit_refs: [audit.feature-table-doc-rereview]
   public-and-background-entrypoints:
     status: needs_review
     source_refs: [src/lib.rs, echo-sdk-host/src/main.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/tasks/background_task.rs]

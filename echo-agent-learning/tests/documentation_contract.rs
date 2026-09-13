@@ -16,6 +16,7 @@ struct WorkspacePackage {
     id: String,
     name: String,
     manifest_path: PathBuf,
+    features: BTreeMap<String, Vec<String>>,
 }
 
 fn collect_markdown_files(directory: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -139,6 +140,24 @@ fn markdown_section(content: &str, heading: &str) -> Result<String, std::io::Err
     }
 }
 
+fn feature_table_entries(section: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let feature_row = Regex::new(r"^\|\s*`([^`]+)`\s*\|")?;
+    let entries = section
+        .lines()
+        .filter_map(|line| {
+            feature_row
+                .captures(line)
+                .and_then(|captures| captures.get(1))
+                .map(|value| value.as_str().to_string())
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        Err(std::io::Error::other("feature table contains no feature rows").into())
+    } else {
+        Ok(entries)
+    }
+}
+
 #[test]
 fn root_readmes_match_workspace_package_topology() -> Result<(), Box<dyn std::error::Error>> {
     let (workspace_root, packages) = workspace_packages()?;
@@ -230,6 +249,60 @@ fn root_readmes_match_workspace_package_topology() -> Result<(), Box<dyn std::er
     } else {
         Err(std::io::Error::other(format!(
             "workspace documentation topology drift:\n{}",
+            violations.join("\n")
+        ))
+        .into())
+    }
+}
+
+#[test]
+fn root_readme_feature_tables_match_cargo_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    let (workspace_root, packages) = workspace_packages()?;
+    let root_manifest = workspace_root.join("Cargo.toml");
+    let root_package = packages
+        .iter()
+        .find(|package| package.manifest_path == root_manifest)
+        .ok_or_else(|| std::io::Error::other("cargo metadata is missing the root package"))?;
+    let expected = root_package
+        .features
+        .keys()
+        .filter(|feature| feature.as_str() != "default")
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if expected.len() != 27 || expected.contains("tasks") {
+        return Err(std::io::Error::other(format!(
+            "unexpected root feature set: expected 27 public rows without tasks, found {expected:?}"
+        ))
+        .into());
+    }
+
+    let readmes = [
+        ("README.md", "### Feature Flags"),
+        ("README.zh.md", "## Feature Flags"),
+    ];
+    let mut violations = Vec::new();
+    for (path, heading) in readmes {
+        let content = std::fs::read_to_string(workspace_root.join(path))?;
+        let section = markdown_section(&content, heading)?;
+        let entries = feature_table_entries(&section)?;
+        let actual = entries.iter().cloned().collect::<BTreeSet<_>>();
+        if actual.len() != entries.len() {
+            violations.push(format!("{path} feature table contains duplicate rows"));
+        }
+        let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+        let extra = actual.difference(&expected).cloned().collect::<Vec<_>>();
+        if !missing.is_empty() || !extra.is_empty() {
+            violations.push(format!(
+                "{path} feature table differs from Cargo metadata: missing={missing:?}, extra={extra:?}"
+            ));
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "README feature table drift:\n{}",
             violations.join("\n")
         ))
         .into())

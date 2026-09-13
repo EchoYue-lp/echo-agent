@@ -124,6 +124,8 @@ echo-agent = { version = "0.2", features = ["full"] }
 echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 ```
 
+Task APIs are part of the framework core and do not have a separate feature flag.
+
 | Feature | In `full`? | Description |
 |---------|-----------|-------------|
 | `full` | — | Meta-feature: enables every flag listed below |
@@ -135,7 +137,6 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 | `telemetry` | yes | OpenTelemetry tracing and metrics |
 | `human-loop` | yes | Human-in-the-loop approval (Console/Webhook/WebSocket) |
 | `topology` | yes | Multi-agent topology tracking |
-| `tasks` | yes | DAG task scheduling |
 | `subagent` | yes | Subagent orchestration |
 | `web` | yes | Web search and page fetch |
 | `media` | yes | PDF/Excel/Word/image extraction |

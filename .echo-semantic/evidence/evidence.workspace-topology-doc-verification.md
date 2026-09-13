@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.workspace-topology-doc-verification
 kind: evidence
-observed_at: source:1edd0f8dd43db91c544af47174e3f57154b9598d3bd78d9a3e7859a422f24a91
+observed_at: 53accbac880639a58a639a56f25c72dc36c90ca4
 source_refs:
   - Cargo.toml
   - README.md

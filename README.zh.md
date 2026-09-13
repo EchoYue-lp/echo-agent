@@ -217,6 +217,8 @@ echo-agent = { version = "0.2.0", features = ["full"] }
 echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "web"] }
 ```
 
+任务 API 属于框架核心，没有需要单独启用的 feature。
+
 | Feature | 启用 | 关键依赖 |
 |---------|------|---------|
 | `full` | 启用下列全部 feature | — |
@@ -228,7 +230,6 @@ echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "
 | `telemetry` | OpenTelemetry 追踪与指标 | `opentelemetry` |
 | `human-loop` | 人工审批 | `tokio-tungstenite` |
 | `topology` | Agent 拓扑 | — |
-| `tasks` | DAG 任务管理 | — |
 | `subagent` | Subagent 编排 | — |
 | `web` | Web 搜索 + 获取工具 | `scraper`, `html2text` |
 | `media` | PDF、Excel、Word、图片工具 | `lopdf`, `calamine`, `docx-rs` |

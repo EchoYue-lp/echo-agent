@@ -8,10 +8,10 @@ risk: high
 primary_focus: state_authority
 focus: [contract_evidence, permission_external, time_lifecycle]
 boundary: boundary.workspace-architecture
-observed_at: source:1edd0f8dd43db91c544af47174e3f57154b9598d3bd78d9a3e7859a422f24a91
+observed_at: source:6e60a383df15fb93d0e89c262fa8ab7d422dda09f237089492f92896ed96c6ca
 code_refs: [Cargo.toml, src/lib.rs, echo-core/src/lib.rs, echo-execution/src/lib.rs, echo-integration/src/lib.rs, echo-state/src/lib.rs, echo-orchestration/src/lib.rs, echo-tools/src/lib.rs]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification]
+evidence_refs: [evidence.workspace-structure, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification]
 finding_refs: []
 ---
 
