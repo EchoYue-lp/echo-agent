@@ -2605,6 +2605,11 @@ fn language_status_for(
         "echo_core::llm::types::ResponseFormat::is_json",
         "echo_core::llm::types::ResponseFormat::json_schema",
     ];
+    const PROMPT_CACHE_LAYOUT_IDENTITIES: &[&str] = &[
+        "echo_core::llm::cache::layout::PromptCacheLayout",
+        "echo_core::llm::cache::layout::PromptCacheLayout::from_messages",
+        "echo_core::llm::cache::layout::PromptCacheLayout::segment_ranges",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2769,6 +2774,11 @@ fn language_status_for(
         )
     } else if RESPONSE_FORMAT_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "response_format_values")
+    } else if PROMPT_CACHE_LAYOUT_IDENTITIES.contains(&identity) {
+        (
+            LanguageImplementationStatus::Done,
+            "prompt_cache_layout_values",
+        )
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

@@ -161,6 +161,7 @@ from .permission_mode_values import PermissionMode
 from .permission_rule_behavior import PermissionDecision, RuleBehavior, RuleBehaviorKind
 from .permission_rule_matcher import RuleMatcher, RuleMatcherKind, ToolPermission
 from .permission_rule_values import RuleSource
+from .prompt_cache_layout_values import PromptCacheLayout, SegmentRanges
 from .prompt_diagnostics_values import PromptDiagnostics, PromptSectionDiagnostic
 from .provider_capabilities_values import ProviderCapabilities
 from .response_format_values import JsonSchemaSpec, ResponseFormat
@@ -341,6 +342,7 @@ __all__ = [
     "ParamValue",
     "PermissionDecision",
     "PermissionMode",
+    "PromptCacheLayout",
     "PromptDiagnostics",
     "PromptSectionDiagnostic",
     "ProviderCapabilities",
@@ -379,6 +381,7 @@ __all__ = [
     "SearchProviderResult",
     "SearchProviderSearchRequest",
     "SegmentRange",
+    "SegmentRanges",
     "SessionHandle",
     "SkillContent",
     "SkillLoadAllowsRequest",

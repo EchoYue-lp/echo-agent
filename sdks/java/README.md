@@ -178,6 +178,9 @@ detection without opening HTTP connections.
 without owning model transport.
 `ResponseFormat` preserves text, JSON object, and strict JSON Schema tagged
 values without validating or executing provider responses.
+`PromptCacheLayout` and `SegmentRanges` preserve the Rust system/canonical/
+history/runtime segment projection and half-open indexes without owning cache
+state or provider placement.
 `PageInfo` preserves truncation, continuation metadata, and output projection
 while collection state remains framework-owned.
 `SubagentContext` exposes empty/content semantics while context and dispatch

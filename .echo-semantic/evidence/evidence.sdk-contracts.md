@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:d7ba0cfc0af9a51108f22065b5d198eb70e172a9cd361923fe2077290796269f
+observed_at: source:385c413d4058aa4224078a94c93eeb3b1b0d3e3e92e0ceb31b63a20ee17a4a47
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -417,6 +417,14 @@ source_refs:
   - src/eval/grader.rs
   - src/eval/runner.rs
   - src/improve/loop.rs
+  - echo-execution/src/sandbox/docker.rs
+  - sdks/typescript/src/prompt_cache_layout_values.ts
+  - sdks/typescript/test/prompt-cache-layout-values.test.js
+  - sdks/python/src/echo_agent_sdk/prompt_cache_layout_values.py
+  - sdks/python/tests/test_prompt_cache_layout_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/PromptCacheLayout.java
+  - sdks/java/src/main/java/com/echoagent/sdk/SegmentRanges.java
+  - sdks/java/src/test/java/com/echoagent/sdk/PromptCacheLayoutTest.java
 supports: [behavior.sdk-facade-routing, rule.sdk-rust-authority]
 limitations:
   - Evidence 证明合同、路由和语言 mapping 门禁，不替代各业务 operation 的领域验收
@@ -427,6 +435,8 @@ limitations:
 ## 支持的结论
 
 当前合同可确定列出root facade、route、signature、feature和语言状态；真实Host测试已覆盖ACP、core、family、extension、全部canonical source adapter、typed compressor/AgentComponent consumer trait及Workflow/A2A facade stream的显式关闭、Session关闭和connection EOF。
+
+本轮新增的 `PromptCacheLayout`/`SegmentRanges` 仅复现 Rust 的只读分段投影和半开区间，缓存状态与 provider placement 仍由 Rust/Host 持有；TypeScript、Python、Java 行为测试分别覆盖典型分段、无 canonical 标记和范围计算。前一轮 Linux fake-Docker 测试夹具改为临时文件写入后原子重命名，避免执行文件写入竞争触发 `ETXTBSY`，生产 Docker 执行路径未改变。
 
 ## 来源与范围
 
