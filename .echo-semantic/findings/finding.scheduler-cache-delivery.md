@@ -11,7 +11,7 @@ boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: []
+audit_refs: [audit.task-subagent-workflow.data-durability]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -35,4 +35,4 @@ Fire 后只更新 CronTaskStore 而不刷新 runner cache，list 可返回旧 la
 
 ## 处理记录
 
-Discovery 记录；delivery guarantee 预期尚未由 ADR 确定，下一阶段 audit 后需要人的裁决。
+Data-durability Audit 确认 cache/migration 缺口；跨 crash missed occurrence、retry 与 delivery guarantee 仍需 semantic-decide。

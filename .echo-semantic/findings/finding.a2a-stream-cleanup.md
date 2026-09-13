@@ -11,7 +11,7 @@ boundary_ref: boundary.protocol-surfaces
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation]
 evidence_refs: [evidence.provider-protocol-quality]
-audit_refs: []
+audit_refs: [audit.protocol-surfaces.time-lifecycle, audit.protocol-surfaces.contract-evidence]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []

@@ -29,6 +29,8 @@ source_refs:
   - src/agent/react/mod.rs
   - src/agent/react/run/pipeline.rs
   - echo-state/src/audit/memory.rs
+  - echo-state/src/audit/mod.rs
+  - echo-state/src/audit/file.rs
   - src/agent/subagent/events.rs
   - echo-orchestration/src/tasks/events.rs
   - echo-orchestration/src/workflow/graph.rs

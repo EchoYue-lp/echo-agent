@@ -11,7 +11,7 @@ boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution, behavior.extension-publication]
 rule_refs: [rule.permission-effect-order, rule.extension-generation-authority]
 evidence_refs: [evidence.effects-extensions]
-audit_refs: []
+audit_refs: [audit.tool-permission-sandbox.permission-external, audit.extension-lifecycle.permission-external]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []

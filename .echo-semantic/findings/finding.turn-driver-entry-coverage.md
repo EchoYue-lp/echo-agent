@@ -11,7 +11,7 @@ boundary_ref: boundary.agent-session-turn
 behavior_refs: [behavior.agent-turn-lifecycle, behavior.protocol-projection]
 rule_refs: [rule.turn-terminal-authority, rule.protocol-role-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.provider-protocol-quality]
-audit_refs: []
+audit_refs: [audit.agent-session-turn.state-authority, audit.protocol-surfaces.state-authority, audit.protocol-surfaces.contract-evidence]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -19,20 +19,20 @@ rereview_audit_refs: []
 discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
 ---
 
-# Channel 与 direct Rust 绕过 driven Turn authority
+# Channel adapter 绕过 driven Turn authority
 
 ## 问题
 
-Headless、ACP 与经 ACP 的 SDK 使用 `AgentTurnDriver`/`TurnReceipt`，但 Channel handler 直接调用 `ReactAgent::chat`，raw execute/chat 也直接进入 ReAct run path。
+Headless、ACP 与经 ACP 的 SDK 使用 `AgentTurnDriver`/`TurnReceipt`，但 Channel handler 作为外部 adapter 只调用 `ReactAgent::chat`，没有投影 driven Turn identity/receipt。Raw execute/chat 是合理低层 public API，本身不构成缺陷。
 
 ## 触发条件与影响
 
-Channel 或直接 Rust invocation 遇到 EOF、sink failure、cancel、usage accounting 或 close 时，没有共享 TurnReceipt 作为统一终态事实。
+Channel invocation 遇到 EOF、sink failure、cancel、usage accounting 或 close 时，没有共享 TurnReceipt 作为 adapter terminal 事实。
 
 ## 证据
 
-`src/headless.rs`、`src/acp/runtime.rs` 展示 driven path；`src/channels.rs` 与 `src/agent/react/mod.rs` 展示 bypass path。
+`src/headless.rs`、`src/acp/runtime.rs` 展示 driven path；`src/channels.rs` 展示 Channel bypass，raw API 合同由 `echo-core/src/agent/mod.rs` 限定。
 
 ## 处理记录
 
-Discovery 记录；后续 audit 必须建立逐入口 route matrix，并区分 raw Agent API 与应统一的产品 adapter。
+状态权威 Audit 已收窄问题；后续 repair/decision 只处理承诺有限 Turn 生命周期的 Channel adapter，不强迫低层 Agent API生成 receipt。

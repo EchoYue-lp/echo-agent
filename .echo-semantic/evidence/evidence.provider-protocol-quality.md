@@ -12,15 +12,37 @@ source_refs:
   - echo-integration/src/providers/openai.rs
   - echo-integration/src/providers/anthropic.rs
   - echo-integration/src/providers/responses.rs
+  - echo-state/src/compression/compressor/summary.rs
+  - echo-state/src/compression/levels.rs
+  - src/agent/react/builder.rs
+  - src/agent/snapshot.rs
+  - src/agent/react/run/phases/think.rs
+  - src/agent/react/extract.rs
+  - echo-agent-learning/examples/demo15_structured_output.rs
+  - docs/en/11-structured-output.md
+  - docs/en/38-factory-modes.md
+  - tests/react_smoke.rs
   - src/acp/adapter.rs
+  - src/acp/session.rs
   - src/acp/runtime.rs
   - src/a2a/server.rs
+  - src/a2a/types.rs
+  - src/a2a/serve.rs
   - echo-integration/src/channels/manager.rs
+  - echo-integration/src/channels/session.rs
+  - echo-integration/src/channels/types.rs
+  - echo-integration/src/channels/channels/mod.rs
   - src/channels.rs
   - src/headless.rs
   - echo-sdk-protocol/src/lib.rs
   - echo-sdk-host/src/lib.rs
+  - echo-sdk-host/src/core_profile/handles.rs
+  - echo-sdk-host/src/core_profile/handler.rs
   - echo-sdk-host/tests/core_profile_e2e.rs
+  - sdks/typescript/src/client.ts
+  - sdks/python/src/echo_agent_sdk/client.py
+  - sdks/java/src/main/java/com/echoagent/sdk/EchoAgentClient.java
+  - sdks/java/src/main/java/com/echoagent/sdk/BoundedPublisher.java
   - src/eval/runner.rs
   - src/eval/replay.rs
   - src/improve/mod.rs
@@ -33,11 +55,17 @@ source_refs:
   - src/evolution/layer.rs
   - src/evolution/audit.rs
   - src/evolution/curator.rs
+  - src/evolution/candidate.rs
   - src/evolution/draft.rs
   - src/evolution/merge.rs
   - src/evolution/patch.rs
   - src/evolution/review.rs
   - src/evolution/security.rs
+  - src/evolution/recall.rs
+  - src/agent/react/run/phases/compact.rs
+  - src/agent/react/run/context.rs
+  - docs/en/25-self-improvement.md
+  - docs/zh/25-self-improvement.md
   - docs/adr/0022-typed-llm-timeouts.md
   - docs/adr/0028-source-first-multilanguage-sdk-runtime.md
   - docs/adr/0031-sdk-identity-governance-scope.md

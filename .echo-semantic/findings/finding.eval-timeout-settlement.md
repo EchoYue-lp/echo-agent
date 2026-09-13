@@ -11,7 +11,7 @@ boundary_ref: boundary.eval-evolution
 behavior_refs: [behavior.eval-evolution, behavior.agent-turn-lifecycle]
 rule_refs: [rule.quality-observation-boundary, rule.turn-terminal-authority]
 evidence_refs: [evidence.provider-protocol-quality, evidence.agent-context-execution]
-audit_refs: []
+audit_refs: [audit.eval-evolution.failure-concurrency]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []

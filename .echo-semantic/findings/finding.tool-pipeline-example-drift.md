@@ -11,7 +11,7 @@ boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution, behavior.workspace-composition]
 rule_refs: [rule.permission-effect-order]
 evidence_refs: [evidence.effects-extensions, evidence.workspace-structure]
-audit_refs: []
+audit_refs: [audit.observation-persistence-delivery.contract-evidence, audit.tool-permission-sandbox.result-side-effect]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -23,7 +23,7 @@ discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f
 
 ## 问题
 
-Executable contract 仍声明 13 stages、包含已不存在的 ParseValidateStage，并把 Trace 放在 PostHook 前；生产 pipeline 当前是 15 stages 且顺序不同。
+Executable contract 仍声明 13 stages、包含已不存在的 ParseValidateStage，并把 Trace 放在 PostHook 前；生产 pipeline 当前是 16 stages 且顺序不同。
 
 ## 触发条件与影响
 

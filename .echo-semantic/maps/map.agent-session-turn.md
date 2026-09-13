@@ -8,9 +8,9 @@ observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71
 boundary_refs: [boundary.agent-session-turn]
 behavior_refs: [behavior.agent-turn-lifecycle]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution]
-finding_refs: [finding.turn-driver-entry-coverage]
-audit_refs: []
+evidence_refs: [evidence.agent-context-execution, evidence.high-risk-audit-frontier]
+finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement]
+audit_refs: [audit.agent-session-turn.state-authority]
 related_map_refs: [map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.protocol-surfaces]
 scenarios:
   agent-definition-and-instance:
@@ -31,9 +31,9 @@ scenarios:
   direct-and-channel-execution:
     status: needs_review
     source_refs: [src/agent/react/mod.rs, src/channels.rs]
-    finding_refs: [finding.turn-driver-entry-coverage]
-    unknown: ReactAgent direct execute/chat 与 Channel handler 绕过 AgentTurnDriver，不生成 TurnReceipt；这些入口是否必须采用 driven Turn 尚无统一合同
-    next_step: 在 turn authority audit 中建立逐入口 route matrix，并裁决 direct framework API 与 Channel adapter 的 terminal contract
+    finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement]
+    unknown: Raw ReactAgent API 是合理低层 contract；Channel adapter 绕过 AgentTurnDriver，且 adapter close/Agent resource settlement 尚无统一合同
+    next_step: 对 Channel terminal projection 与各 adapter awaited close 分别形成 repair/decision
   agent-revision:
     status: needs_review
     source_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/workflow/graph.rs, echo-core/src/plugin/registry.rs, echo-sdk-host/src/core_profile/state.rs]

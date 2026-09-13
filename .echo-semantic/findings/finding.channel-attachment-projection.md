@@ -11,7 +11,7 @@ boundary_ref: boundary.protocol-surfaces
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation]
 evidence_refs: [evidence.provider-protocol-quality]
-audit_refs: []
+audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.contract-evidence]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -23,7 +23,7 @@ discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f
 
 ## 问题
 
-InboundMessage 保存 attachments，AgentChannelHandler 只调用 `agent.chat(&msg.text)`，没有传递多模态内容。
+InboundMessage 保存 attachments，AgentChannelHandler 只调用 `agent.chat(&msg.text)`，没有传递多模态内容；当前内建 QQ/飞书声明不支持 media，custom/future media channel 才会即时触发。
 
 ## 触发条件与影响
 

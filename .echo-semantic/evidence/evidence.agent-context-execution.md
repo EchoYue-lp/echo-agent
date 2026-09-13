@@ -19,11 +19,15 @@ source_refs:
   - src/acp/session.rs
   - src/headless.rs
   - src/channels.rs
+  - echo-integration/src/channels/manager.rs
+  - echo-integration/src/channels/types.rs
   - echo-integration/src/channels/session.rs
   - echo-state/src/compression/mod.rs
   - src/context/mod.rs
   - src/state/mod.rs
   - src/state/file.rs
+  - src/state/sqlite.rs
+  - src/agent/react/tests.rs
   - docs/adr/0001-channel-session-sender-scope.md
   - docs/adr/0005-invocation-resource-lifetime.md
   - docs/adr/0006-runtime-state-scope-lineage.md

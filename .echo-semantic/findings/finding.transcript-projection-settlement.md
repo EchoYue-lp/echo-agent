@@ -11,7 +11,7 @@ boundary_ref: boundary.context-memory
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation]
-audit_refs: []
+audit_refs: [audit.context-memory.data-durability]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []

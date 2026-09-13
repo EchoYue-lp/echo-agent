@@ -11,7 +11,7 @@ boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: []
+audit_refs: [audit.task-subagent-workflow.time-lifecycle]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -35,4 +35,4 @@ Result 检查与 Notify waiter 注册之间存在 lost-wakeup 窗口；首个 wa
 
 ## 处理记录
 
-Discovery 记录；下一阶段以确定性调度测试复核并修复单一 terminal authority。
+Time-lifecycle Audit 确认；TaskSpawner admission 不监听 cancel/deadline且允许零并发也纳入本 Finding repair 范围，后续用确定性调度测试修复单一 terminal authority。

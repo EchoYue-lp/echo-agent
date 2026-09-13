@@ -8,9 +8,9 @@ observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71
 boundary_refs: [boundary.tool-permission-sandbox]
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions]
-finding_refs: [finding.tool-read-cache-scope, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.tool-pipeline-example-drift]
-audit_refs: []
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier]
+finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass, finding.approval-authority, finding.hook-protected-path, finding.hook-permission-precedence, finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement, finding.tool-terminal-observation-divergence, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.tool-pipeline-example-drift]
+audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect]
 related_map_refs: [map.agent-session-turn, map.task-subagent-workflow, map.observation-persistence-delivery, map.extension-lifecycle]
 scenarios:
   agent-automated-policy-pipeline:
@@ -18,15 +18,15 @@ scenarios:
     source_refs: [echo-core/src/tools/mod.rs, echo-execution/src/tools.rs, src/agent/react/run/pipeline.rs, src/agent/snapshot.rs]
     behavior_refs: [behavior.effect-permission-execution]
     evidence_refs: [evidence.effects-extensions]
-    finding_refs: [finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.trace-audit-secret-boundary, finding.tool-pipeline-example-drift]
+    finding_refs: [finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.trace-audit-secret-boundary, finding.tool-terminal-observation-divergence, finding.tool-pipeline-example-drift]
     unknown: ReactAgent 自动工具路径有确定 stage 顺序，但 streaming validation、permission precedence、secret retention 与示例合同尚未闭合
     next_step: 沿真实 15-stage pipeline 执行 focused audit，不以静态示例数组作为权威
   programmatic-tool-manager:
     status: needs_review
     source_refs: [echo-core/src/tools/mod.rs, echo-execution/src/tools.rs]
-    finding_refs: [finding.tool-read-cache-scope, finding.streaming-tool-validation]
-    unknown: 公开 ToolManager 是 caller-owned primitive；read cache 缺 workspace/invocation identity 且 streaming path 跳过统一 validation
-    next_step: 审计 cache scope 与 stream/non-stream execution kernel，对 caller-owned 权限策略不作产品假设
+    finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.streaming-tool-validation]
+    unknown: 公开 ToolManager 是 caller-owned primitive；read cache 缺 workspace/invocation identity、in-flight invalidation CAS，且 streaming path 跳过统一 validation
+    next_step: repair cache scope/epoch 与 stream/non-stream validation kernel，对 caller-owned 权限策略不作产品假设
   trusted-hook-effects:
     status: mapped
     source_refs: [echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs]
@@ -34,18 +34,20 @@ scenarios:
     rule_refs: [rule.permission-effect-order]
     evidence_refs: [evidence.effects-extensions]
   plan-and-readonly-surface:
-    status: mapped
+    status: needs_review
     source_refs: [src/agent/react/mod.rs, src/agent/react/run/pipeline.rs, echo-tools/src/registry.rs]
-    finding_refs: [finding.plan-mode-write-surface]
+    finding_refs: [finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass]
+    unknown: 运行期 Plan gate 与构造期 readonly_tools 都可漏 Write/Execute Tool
+    next_step: 复用 typed ToolPermission/visibility 建立同一 mutation classification，不影响 direct-user surface
   permission-and-approval:
     status: mapped
     source_refs: [echo-core/src/tools/permission.rs, echo-orchestration/src/human_loop/service.rs, echo-tools/src/shell.rs]
-    finding_refs: [finding.approval-authority, finding.hook-protected-path]
+    finding_refs: [finding.approval-authority, finding.hook-protected-path, finding.hook-permission-precedence]
     rule_refs: [rule.permission-effect-order]
   sandbox-and-resource-cleanup:
     status: mapped
     source_refs: [echo-core/src/sandbox.rs, echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/local.rs, echo-core/src/tools/artifact.rs, echo-tools/src/git_worktree.rs]
-    finding_refs: [finding.sandbox-minimum-isolation, finding.effect-cleanup-owner]
+    finding_refs: [finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement]
     evidence_refs: [evidence.effects-extensions]
   guard-and-trace-projection:
     status: needs_review
@@ -54,15 +56,19 @@ scenarios:
     unknown: Guard directions/event producers 未闭合，trace 与 in-memory audit 原样保存输入，不能作全局 secret-redaction 保证
     next_step: audit 每个 observation backend 的 retention/redaction contract
   command-cell-runtime:
-    status: mapped
+    status: needs_review
     source_refs: [echo-core/src/tools/cell.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0025-deterministic-command-cell-watcher.md]
     behavior_refs: [behavior.effect-permission-execution]
     evidence_refs: [evidence.effects-extensions, evidence.task-subagent-workflow]
+    finding_refs: [finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement]
+    unknown: retention lease prune 与普通 cancel artifact settlement 存在确认的生命周期缺口
+    next_step: task runtime repair 分别闭合 lease-aware prune 与 cancellation-bounded finalization
   k8s-caller-drop:
     status: needs_review
     source_refs: [echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/k8s.rs]
     unknown: stream consumer drop 是否可中断 Pod 创建并跳过 delete 尚无故障注入证据
-    next_step: 在真实或 deterministic K8s fake backend 上验证 caller-drop cleanup
+    finding_refs: [finding.k8s-sandbox-cleanup-settlement]
+    next_step: owner gap 已由源码确认；在 deterministic K8s fake backend 上验证 caller-drop 与 delete failure settlement
   direct-user-surface:
     status: excluded
     source_refs: [docs/en/39-framework-application-boundary.md]

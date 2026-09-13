@@ -11,7 +11,7 @@ boundary_ref: boundary.llm-provider-runtime
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
 evidence_refs: [evidence.provider-protocol-quality]
-audit_refs: []
+audit_refs: [audit.llm-provider-runtime.failure-concurrency, audit.llm-provider-runtime.time-lifecycle]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -23,7 +23,7 @@ discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f
 
 ## 问题
 
-ChatRequest cancel_token 声称中止 in-flight request；Anthropic non-stream 监听，OpenAI Chat 与 Responses non-stream 未监听。
+ChatRequest cancel_token 声称中止 in-flight request；OpenAI Chat 与 Responses non-stream 完全未监听，Anthropic 只在响应头前监听、body JSON 读取不可取消。
 
 ## 触发条件与影响
 

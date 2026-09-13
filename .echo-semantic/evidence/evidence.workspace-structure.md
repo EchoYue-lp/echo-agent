@@ -5,6 +5,8 @@ kind: evidence
 observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
 source_refs:
   - Cargo.toml
+  - README.md
+  - README.zh.md
   - echo-core/Cargo.toml
   - echo-execution/Cargo.toml
   - echo-integration/Cargo.toml

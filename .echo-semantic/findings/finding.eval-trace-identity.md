@@ -11,7 +11,7 @@ boundary_ref: boundary.eval-evolution
 behavior_refs: [behavior.eval-evolution, behavior.observation-persistence]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
 evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation]
-audit_refs: []
+audit_refs: [audit.observation-persistence-delivery.state-authority]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []

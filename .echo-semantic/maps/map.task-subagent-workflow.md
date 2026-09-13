@@ -8,9 +8,9 @@ observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71
 boundary_refs: [boundary.task-subagent-workflow]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow]
-finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.scheduler-cache-delivery, finding.background-task-wait, finding.subagent-definition-catalog]
-audit_refs: []
+evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier]
+finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement, finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race, finding.background-task-wait, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.subagent-definition-catalog]
+audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.tool-permission-sandbox]
 scenarios:
   revisioned-task-graph:
@@ -26,21 +26,21 @@ scenarios:
   subagent-attempt-control:
     status: needs_review
     source_refs: [src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, src/agent/subagent/control.rs, src/agent/subagent/events.rs]
-    finding_refs: [finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-definition-catalog]
+    finding_refs: [finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.subagent-definition-catalog]
     rule_refs: [rule.task-subagent-authority]
-    unknown: lazy factory dispatch 取消可遗留 instantiating 名称，TaskClaim 与 SubagentAttempt identity 也未闭合
-    next_step: audit factory publication guard 与 Task/Subagent attempt route 后再确认 terminal/control contract
+    unknown: lazy factory 取消可遗留 instantiating，publication gap 可双创建，TaskClaim 与 SubagentAttempt identity 也未闭合
+    next_step: 分别 repair factory publication guard 与 Task/Subagent attempt route，再确认 terminal/control contract
   workflow-graph-and-events:
     status: needs_review
     source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/checkpoint_store.rs, echo-orchestration/src/workflow/dag.rs]
-    finding_refs: [finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery]
+    finding_refs: [finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement]
     evidence_refs: [evidence.task-subagent-workflow]
     unknown: Graph/DagWorkflow authority、四执行入口事件对等与 checkpoint claim recovery 尚未闭合
     next_step: 分别执行 consolidation、entry parity 与 crash-cut audit
   cron-scheduler:
     status: needs_review
     source_refs: [echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs]
-    finding_refs: [finding.scheduler-cache-delivery]
+    finding_refs: [finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race]
     evidence_refs: [evidence.task-subagent-workflow]
     unknown: store/cache 可见状态、migration overwrite 与 callback delivery guarantee 未闭合
     next_step: audit cache refresh、持久 claim/ledger 与 migration target collision
@@ -51,10 +51,13 @@ scenarios:
     unknown: wait lost-wakeup、多观察者结果与 panic settlement 未闭合
     next_step: 用确定性调度测试审计 process-local terminal authority
   command-cell-runtime:
-    status: mapped
+    status: needs_review
     source_refs: [echo-core/src/tools/cell.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0025-deterministic-command-cell-watcher.md]
     evidence_refs: [evidence.task-subagent-workflow, evidence.effects-extensions]
     behavior_refs: [behavior.task-subagent-execution, behavior.effect-permission-execution]
+    finding_refs: [finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement]
+    unknown: retained lease prune 与普通 cancel artifact settlement 存在确认的生命周期竞态
+    next_step: 分别 repair lease-aware prune 与 cancellation-bounded finalization
 ---
 
 # Task、Subagent、Workflow 与 Scheduler
@@ -93,7 +96,7 @@ TaskEvent/progress、Subagent envelopes、Workflow events 和 command snapshots 
 
 ## 场景处置清单
 
-所有主要入口已映射；九个当前缺口分别进入 Finding/needs_review，Workflow、Scheduler、BackgroundTask 与 CommandCell 不再合成一个 authority。
+所有主要入口已映射；十六个当前缺口分别进入 Finding/needs_review，Workflow、Scheduler、BackgroundTask 与 CommandCell 不再合成一个 authority。
 
 ## 未展开项
 

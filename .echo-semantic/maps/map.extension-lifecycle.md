@@ -8,15 +8,15 @@ observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71
 boundary_refs: [boundary.extension-lifecycle]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority, rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions]
-finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.extension-cleanup-settlement, finding.mcp-version-doc-drift]
-audit_refs: []
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier]
+finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.hook-protected-path, finding.hook-event-producer-contract, finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.plugin-generation-publication-authority, finding.plugin-lifecycle-reconcile-overlap, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
+audit_refs: [audit.extension-lifecycle.state-authority, audit.extension-lifecycle.time-lifecycle, audit.extension-lifecycle.permission-external, audit.extension-lifecycle.contract-evidence]
 related_map_refs: [map.workspace-architecture, map.context-memory, map.tool-permission-sandbox, map.protocol-surfaces]
 scenarios:
   mcp-connect-discover-close:
     status: mapped
     source_refs: [echo-integration/src/mcp/client.rs, echo-integration/src/mcp/mod.rs, echo-integration/src/mcp/transport/sse.rs]
-    finding_refs: [finding.mcp-client-capability-advertisement, finding.extension-cleanup-settlement, finding.mcp-version-doc-drift]
+    finding_refs: [finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
     evidence_refs: [evidence.effects-extensions]
   hook-source-and-reduction:
     status: mapped
@@ -31,12 +31,12 @@ scenarios:
   plugin-prepare-publish-withdraw:
     status: mapped
     source_refs: [echo-core/src/plugin/registry.rs, echo-core/src/plugin/lifecycle.rs, src/plugin/prepared.rs]
-    finding_refs: [finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination]
+    finding_refs: [finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.plugin-generation-publication-authority, finding.plugin-lifecycle-reconcile-overlap]
     rule_refs: [rule.extension-generation-authority]
   lsp-process-routing:
     status: mapped
     source_refs: [echo-core/src/lsp/client.rs, echo-integration/src/lsp/client.rs, echo-integration/src/lsp/manager.rs]
-    finding_refs: [finding.lsp-runtime-state, finding.extension-cleanup-settlement]
+    finding_refs: [finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement]
   host-production-coordination:
     status: needs_review
     source_refs: [src/plugin/prepared.rs, echo-core/src/plugin/lifecycle.rs, echo-sdk-host/src/core_profile/facade/integrations.rs]
@@ -46,7 +46,8 @@ scenarios:
     status: needs_review
     source_refs: [echo-integration/src/mcp/config_loader.rs, echo-integration/src/channels/channels/qq/channel.rs, echo-integration/src/channels/channels/feishu/channel.rs]
     unknown: credential-bearing config 派生或实现 Debug 时是否对 secret 一致脱敏尚未形成跨 extension 合同
-    next_step: audit MCP/QQ/Feishu config 的 Debug/logging 调用点并建立 backend-specific redaction evidence
+    finding_refs: [finding.extension-credential-debug-redaction]
+    next_step: repair MCP/QQ/Feishu config 的 redacted Debug/Secret wrapper，并补 backend-specific evidence
 ---
 
 # MCP、Hook、Skill、Plugin 与 LSP 生命周期
@@ -85,7 +86,7 @@ Catalog/status/tool list 是 registry projection；仅可执行且当前 generat
 
 ## 场景处置清单
 
-五类生命周期和九个 Finding 已映射；跨 Host 统一编排与 credential Debug/redaction 保持 needs_review。
+五类生命周期和十六个 Finding 已映射；跨 Host 统一编排与需裁决合同保持 needs_review。
 
 ## 未展开项
 

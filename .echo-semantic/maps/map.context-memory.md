@@ -8,9 +8,9 @@ observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation]
-finding_refs: [finding.transcript-projection-settlement]
-audit_refs: []
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier]
+finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority]
+audit_refs: [audit.context-memory.data-durability]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
 scenarios:
   active-context-and-compression:
@@ -34,6 +34,12 @@ scenarios:
     source_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, docs/adr/0006-runtime-state-scope-lineage.md]
     behavior_refs: [behavior.context-memory-lifecycle]
     evidence_refs: [evidence.agent-context-execution]
+  runtime-transcript-identity:
+    status: needs_review
+    source_refs: [src/agent/snapshot.rs, src/state/mod.rs, src/agent/react/run/stream_channel.rs]
+    finding_refs: [finding.transcript-generation-runtime-identity]
+    unknown: invocation 可配置不相等的 runtime state 与 transcript generation identity，保存成功但恢复要求相等
+    next_step: repair 接纳/保存前 identity invariant，并补重启组合测试
   assembler-manager-alignment:
     status: needs_review
     source_refs: [src/context/mod.rs, echo-state/src/compression/mod.rs]
@@ -42,8 +48,9 @@ scenarios:
   checkpoint-current-plan:
     status: needs_review
     source_refs: [src/agent/snapshot.rs, src/agent/react/mod.rs, src/state/mod.rs]
-    unknown: AgentCheckpoint.current_plan 可保存恢复，但未发现 production writer 建立 plan_state
-    next_step: 追踪所有写入点并决定接通 canonical Task artifact 或退役该 checkpoint 字段
+    finding_refs: [finding.checkpoint-current-plan-orphan-authority]
+    unknown: AgentCheckpoint.current_plan 可保存恢复，但未发现 production writer 建立 canonical Task plan state
+    next_step: consolidation/decision 选择接通 canonical Task artifact 或退役该 checkpoint 字段
 ---
 
 # Context、Memory、Compression 与 Checkpoint

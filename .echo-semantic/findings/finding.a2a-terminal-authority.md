@@ -11,7 +11,7 @@ boundary_ref: boundary.protocol-surfaces
 behavior_refs: [behavior.protocol-projection, behavior.agent-turn-lifecycle]
 rule_refs: [rule.protocol-role-separation, rule.turn-terminal-authority]
 evidence_refs: [evidence.provider-protocol-quality, evidence.agent-context-execution]
-audit_refs: []
+audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.contract-evidence]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -23,7 +23,7 @@ discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f
 
 ## 问题
 
-A2AServer 维护 TaskState/task map/cancel map，直接消费 Agent stream 并自行判定 completed/failed/canceled，未复用 AgentTurnDriver/TurnReceipt。
+A2AServer 维护 TaskState/task map/cancel map，直接消费 Agent stream 并自行判定 completed/failed/canceled；stream completion 还可覆盖已写入 Canceled，未复用 AgentTurnDriver/TurnReceipt。
 
 ## 触发条件与影响
 

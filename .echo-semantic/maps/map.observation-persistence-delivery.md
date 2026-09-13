@@ -8,9 +8,9 @@ observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71
 boundary_refs: [boundary.observation-persistence-delivery]
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation]
-finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary]
-audit_refs: []
+evidence_refs: [evidence.persistence-observation, evidence.high-risk-audit-frontier]
+finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.checkpoint-journal-binding, finding.diagnostic-persistence-failure-visibility, finding.hook-event-producer-contract, finding.in-memory-audit-successful-drop]
+audit_refs: [audit.observation-persistence-delivery.state-authority, audit.observation-persistence-delivery.data-durability, audit.observation-persistence-delivery.contract-evidence]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.protocol-surfaces, map.eval-evolution]
 scenarios:
   versioned-agent-subagent-events:
@@ -19,10 +19,13 @@ scenarios:
     behavior_refs: [behavior.observation-persistence]
     rule_refs: [rule.fact-projection-separation]
   journal-checkpoint-recovery:
-    status: mapped
+    status: needs_review
     source_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs]
     rule_refs: [rule.fact-projection-separation]
     evidence_refs: [evidence.persistence-observation]
+    finding_refs: [finding.checkpoint-journal-binding]
+    unknown: checkpoint 未绑定来源 Journal identity，合法异源 state 可通过序号检查
+    next_step: repair checkpoint source/scope binding 并补异源恢复测试
   store-role-separation:
     status: mapped
     source_refs: [src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, src/trace/mod.rs]
@@ -36,15 +39,16 @@ scenarios:
   trace-event-and-identity-coverage:
     status: needs_review
     source_refs: [src/trace/mod.rs, src/eval/runner.rs, src/agent/react/mod.rs, src/agent/react/run/pipeline.rs, echo-state/src/audit/memory.rs]
-    finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary]
+    finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.diagnostic-persistence-failure-visibility, finding.in-memory-audit-successful-drop]
     evidence_refs: [evidence.persistence-observation]
-    unknown: trace producer/identity 与各 audit backend 的原始输入 retention/redaction contract 未闭合
-    next_step: observation audit 逐 producer/backend 验证 identity、secret boundary 和 failure visibility
+    unknown: trace producer/identity、terminal commit order 与各 audit backend 的 retention/redaction/failure visibility 未闭合
+    next_step: 分别 repair identity/producer/commit order，并裁决诊断 backend failure policy
   complete-event-family-classification:
     status: needs_review
     source_refs: [echo-core/src/hooks/types.rs, echo-orchestration/src/tasks/events.rs, echo-orchestration/src/workflow/mod.rs, src/trace/mod.rs]
+    finding_refs: [finding.trace-effect-event-producers, finding.hook-event-producer-contract, finding.workflow-entry-loop-drift]
     unknown: 全部 Agent/Task/Subagent/Workflow/Hook/Trace/Delivery events 的 durable、versioned、lossy、diagnostic 与 replay 属性尚未逐项反证
-    next_step: high-risk observation audit 逐 family 验证 producer、ordering、retention、terminal 和 consumer
+    next_step: producer matrix 已建立；逐 family 决定补生产路径或收窄 enum/docs，并增加 lag/terminal 合同测试
 ---
 
 # Observation、Persistence、Projection 与 Delivery

@@ -11,7 +11,7 @@ boundary_ref: boundary.eval-evolution
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary]
 evidence_refs: [evidence.provider-protocol-quality]
-audit_refs: []
+audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.permission-external]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -23,7 +23,7 @@ discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f
 
 ## 问题
 
-`Curator::promote_to_active` 是公开持久 mutation，可直接改变 Skill lifecycle 状态，但没有 `ChangeLog` 参数或可验证 human approval input；这与 Evolution 全 mutation 可审计、高风险变更需 review 的合同冲突。
+Curator promotion/touch可直接Active且无approval/ChangeLog/security；SkillMerger可合入allowed_tools，SkillPatcher可直接写SKILL.md，security check未接生产；这与全mutation可审计、高风险变更需review的合同冲突。
 
 ## 触发条件与影响
 

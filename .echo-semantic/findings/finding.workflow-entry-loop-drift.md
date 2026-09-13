@@ -11,7 +11,7 @@ boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: []
+audit_refs: [audit.task-subagent-workflow.failure-concurrency, audit.observation-persistence-delivery.contract-evidence]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -23,7 +23,7 @@ discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f
 
 ## 问题
 
-Graph 的 run、run-until-interrupt、resume 和 stream 分别实现循环；`WorkflowEvent::NodeError` 被公开定义，但生产 stream 对错误直接返回 Err，未发现该事件生产点。
+Graph 的 run、run-until-interrupt、resume 和 stream 分别实现循环；`WorkflowEvent::NodeError` 与 `Token` 被公开定义，但未发现内建生产点，stream 对 node error 直接返回 Err。
 
 ## 触发条件与影响
 

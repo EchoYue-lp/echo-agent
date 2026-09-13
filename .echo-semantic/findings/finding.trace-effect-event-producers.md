@@ -11,7 +11,7 @@ boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution, behavior.observation-persistence]
 rule_refs: [rule.permission-effect-order, rule.fact-projection-separation]
 evidence_refs: [evidence.effects-extensions, evidence.persistence-observation]
-audit_refs: []
+audit_refs: [audit.observation-persistence-delivery.state-authority, audit.observation-persistence-delivery.contract-evidence, audit.tool-permission-sandbox.result-side-effect]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -23,7 +23,7 @@ discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f
 
 ## 问题
 
-RunEvent 定义并在文档承诺 PermissionDecision、FileEdit、TestRun，但全仓未发现对应构造点；permission audit 另以 fire-and-forget 写入。
+RunEvent 定义并在文档承诺 PermissionDecision、FileEdit、TestRun、Error、SubagentRun，但全仓未发现对应构造点；文档称 11 类而源码有 14 类，permission audit 另以 fire-and-forget 写入。
 
 ## 触发条件与影响
 

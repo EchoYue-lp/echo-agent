@@ -11,7 +11,7 @@ boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: []
+audit_refs: [audit.task-subagent-workflow.failure-concurrency]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -37,4 +37,4 @@ Revisioned Task graph、Workflow Graph 与 DagWorkflow 各自拥有节点、边�
 
 ## 处理记录
 
-Decision 暂为 defer；下一阶段执行 consolidation audit 后决定 keep、共享 kernel 或迁移，不据当前采用量删除。
+Failure-concurrency Audit 已确认三者合同不同，不支持直接归并；下一步以 ADR 决定 keep-separate，并仅审查可共享的纯算法，不据当前采用量删除。

@@ -11,7 +11,7 @@ boundary_ref: boundary.observation-persistence-delivery
 behavior_refs: [behavior.observation-persistence, behavior.effect-permission-execution]
 rule_refs: [rule.fact-projection-separation, rule.permission-effect-order]
 evidence_refs: [evidence.persistence-observation, evidence.effects-extensions]
-audit_refs: []
+audit_refs: [audit.observation-persistence-delivery.data-durability, audit.observation-persistence-delivery.contract-evidence]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -23,7 +23,7 @@ discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f
 
 ## 问题
 
-ReactAgent trace 保存原始 input，AuditStage 提交原始 tool input，in-memory RunStore/AuditLogger 不做清洗；只有部分持久 backend 有 retention sanitization。
+ReactAgent trace 保存 guard 转换后的 effective input，AuditStage 提交完整 tool input；in-memory RunStore/AuditLogger 不做清洗或统一容量限制，只有 JSONL/File 等部分持久 backend 有 retention sanitization。
 
 ## 触发条件与影响
 

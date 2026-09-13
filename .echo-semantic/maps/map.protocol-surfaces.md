@@ -8,9 +8,9 @@ observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71
 boundary_refs: [boundary.protocol-surfaces]
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts]
-finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.channel-attachment-projection, finding.turn-driver-entry-coverage]
-audit_refs: []
+evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.high-risk-audit-frontier]
+finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding, finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.sdk-gap-generation-validation-parity]
+audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.time-lifecycle, audit.protocol-surfaces.contract-evidence]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.extension-lifecycle, map.sdk-facade-parity]
 scenarios:
   acp-session-run-projection:
@@ -19,27 +19,32 @@ scenarios:
     behavior_refs: [behavior.protocol-projection]
     rule_refs: [rule.turn-terminal-authority, rule.protocol-role-separation]
   a2a-task-and-stream:
-    status: mapped
+    status: needs_review
     source_refs: [src/a2a/server.rs, src/a2a/types.rs]
-    finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup]
+    finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding]
+    unknown: A2A 自持 terminal、重复 ID 无 generation、stream cleanup 与宣告 capability 均未闭合
+    next_step: 分别 repair admission/cleanup/terminal，并 semantic-decide text+SSE 或 file/push 合同
   channel-session-and-message:
     status: needs_review
     source_refs: [echo-integration/src/channels/session.rs, echo-integration/src/channels/types.rs, src/channels.rs]
-    finding_refs: [finding.channel-attachment-projection, finding.turn-driver-entry-coverage]
+    finding_refs: [finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement]
     evidence_refs: [evidence.provider-protocol-quality]
-    unknown: Channel session/incarnation 已映射，但 handler 丢弃 attachments 且直接调用 raw Agent chat，不产生 driven TurnReceipt
-    next_step: protocol/turn audit 裁决 Channel adapter 的 multimodal 与 terminal projection contract
+    unknown: Channel session/incarnation 已映射，但 handler 丢弃 attachments、直接 raw chat、reset 旧输出无法 fence 且 close 不结算 Agent
+    next_step: semantic-decide multimodal/reset 合同，并分别 repair driven Turn projection、generation fencing 与 close owner
   headless-turn:
     status: mapped
     source_refs: [src/headless.rs, echo-orchestration/src/runtime/turn_driver.rs]
     behavior_refs: [behavior.protocol-projection]
     rule_refs: [rule.turn-terminal-authority]
   sdk-host-and-language-clients:
-    status: mapped
+    status: needs_review
     source_refs: [echo-sdk-protocol/src/lib.rs, echo-sdk-host/src/lib.rs, contracts/sdk/parity-manifest.json]
     behavior_refs: [behavior.sdk-facade-routing]
     rule_refs: [rule.sdk-rust-authority]
     evidence_refs: [evidence.sdk-contracts]
+    finding_refs: [finding.sdk-gap-generation-validation-parity]
+    unknown: Host handle generation 正确，但三语言 gap 通知未一致校验完整 WireHandle generation
+    next_step: SDK contract repair 统一 gap generation 反例测试，不扩大到 intrinsic identity 门禁
   sdk-intrinsic-backlog:
     status: needs_review
     source_refs: [contracts/sdk/parity-manifest.json, docs/adr/0031-sdk-identity-governance-scope.md]
@@ -89,7 +94,7 @@ ACP permission 与 Agent policy 只在协商后调用；channel/provider credent
 
 ## 场景处置清单
 
-五类入口均有路由；A2A/Channel 保持 needs_review 并进入 Finding，SDK intrinsic backlog needs_review，产品层 excluded。
+五类入口均有路由；A2A/Channel/SDK gap 保持 needs_review 并进入 Finding，SDK intrinsic backlog 独立 needs_review，产品层 excluded。
 
 ## 未展开项
 

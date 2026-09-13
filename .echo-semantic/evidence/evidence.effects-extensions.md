@@ -10,20 +10,39 @@ source_refs:
   - echo-core/src/tools/cell.rs
   - echo-execution/src/tools.rs
   - echo-execution/src/sandbox/mod.rs
+  - echo-execution/src/sandbox/manager.rs
   - echo-execution/src/sandbox/local.rs
+  - echo-execution/src/sandbox/k8s.rs
   - echo-orchestration/src/human_loop/service.rs
   - echo-orchestration/src/tasks/command_cell.rs
   - src/agent/react/run/pipeline.rs
+  - src/agent/react/builder.rs
   - src/agent/react/subsystems/tool_exec.rs
   - echo-integration/src/mcp/client.rs
   - echo-integration/src/mcp/mod.rs
+  - echo-integration/src/mcp/tool_adapter.rs
+  - echo-integration/src/mcp/server_config.rs
+  - echo-integration/src/mcp/config_loader.rs
+  - echo-integration/src/mcp/transport/mod.rs
+  - echo-integration/src/mcp/transport/sse.rs
+  - echo-integration/src/mcp/transport/stdio.rs
+  - echo-integration/src/mcp/transport/http.rs
   - echo-execution/src/skills/hooks.rs
   - echo-execution/src/skills/registry.rs
   - echo-execution/src/skills/external/loader.rs
   - echo-core/src/plugin/registry.rs
   - echo-core/src/plugin/lifecycle.rs
   - src/plugin/prepared.rs
+  - echo-integration/src/lsp/client.rs
   - echo-integration/src/lsp/manager.rs
+  - echo-integration/src/channels/channels/qq/channel.rs
+  - echo-integration/src/channels/channels/feishu/channel.rs
+  - echo-sdk-host/src/core_profile/facade/source_operations.rs
+  - echo-sdk-host/src/core_profile/facade/integrations.rs
+  - echo-sdk-host/src/core_profile/facade/mod.rs
+  - echo-tools/src/registry.rs
+  - echo-tools/src/shell.rs
+  - echo-tools/src/git_worktree.rs
   - echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs
   - docs/adr/0002-sandbox-cancellation-cleanup.md
   - docs/adr/0012-immutable-plugin-preparation.md

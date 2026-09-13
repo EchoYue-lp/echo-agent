@@ -11,7 +11,7 @@ boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: []
+audit_refs: [audit.task-subagent-workflow.state-authority]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []

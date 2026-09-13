@@ -8,27 +8,36 @@ observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71
 boundary_refs: [boundary.workspace-architecture]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure]
-finding_refs: []
-audit_refs: []
+evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier]
+finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift]
+audit_refs: [audit.workspace-architecture.contract-evidence]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.tool-permission-sandbox, map.extension-lifecycle, map.llm-provider-runtime, map.protocol-surfaces, map.eval-evolution]
 scenarios:
   crate-dag-and-layering:
-    status: mapped
+    status: needs_review
     source_refs: [Cargo.toml, src/lib.rs, echo-core/src/lib.rs]
     behavior_refs: [behavior.workspace-composition]
     rule_refs: [rule.framework-layer-ownership]
     evidence_refs: [evidence.workspace-structure]
+    finding_refs: [finding.workspace-topology-doc-drift]
+    unknown: Cargo拓扑已闭合，但双语README遗漏SDK crates并报告错误package数量
+    next_step: 修复双语拓扑并让文档合同从Cargo metadata校验成员集合
   feature-topology:
-    status: mapped
+    status: needs_review
     source_refs: [Cargo.toml, echo-core/Cargo.toml, echo-execution/Cargo.toml, echo-integration/Cargo.toml, echo-macros/Cargo.toml, echo-orchestration/Cargo.toml, echo-state/Cargo.toml, echo-tools/Cargo.toml, echo-sdk-protocol/Cargo.toml, echo-sdk-host/Cargo.toml, echo-agent-learning/Cargo.toml]
     rule_refs: [rule.framework-layer-ownership]
     evidence_refs: [evidence.workspace-structure]
+    finding_refs: [finding.public-feature-table-drift]
+    unknown: Manifest feature权威已映射，但双语README公开不存在的tasks feature
+    next_step: 修复双语feature表并增加manifest-derived contract check
   public-and-background-entrypoints:
-    status: mapped
+    status: needs_review
     source_refs: [src/lib.rs, echo-sdk-host/src/main.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/tasks/background_task.rs]
     behavior_refs: [behavior.workspace-composition]
     evidence_refs: [evidence.workspace-structure]
+    finding_refs: [finding.readme-example-target-drift]
+    unknown: README把test contract写成不存在的Cargo example target
+    next_step: 修正命令并让root README target进入documentation contract
   dynamic-registration-inventory:
     status: needs_review
     source_refs: [echo-macros/src/lib.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/workflow/loader.rs]

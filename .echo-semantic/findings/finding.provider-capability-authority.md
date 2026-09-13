@@ -11,7 +11,7 @@ boundary_ref: boundary.llm-provider-runtime
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
 evidence_refs: [evidence.provider-protocol-quality]
-audit_refs: []
+audit_refs: [audit.llm-provider-runtime.contract-evidence, audit.llm-provider-runtime.time-lifecycle]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []

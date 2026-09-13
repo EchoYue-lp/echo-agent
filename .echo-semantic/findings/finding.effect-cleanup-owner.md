@@ -11,7 +11,7 @@ boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
 evidence_refs: [evidence.effects-extensions]
-audit_refs: []
+audit_refs: [audit.tool-permission-sandbox.result-side-effect]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
@@ -23,7 +23,7 @@ discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f
 
 ## 问题
 
-Artifact scope cleanup 由宿主负责但 React 路径未调用；SandboxManager cleanup 无生产调用点；worktree 创建后 marker 写失败缺少补偿删除。
+Artifact scope cleanup 由宿主负责但 React 路径未调用；SandboxManager cleanup 无生产调用点；worktree 创建后 marker 写失败缺少补偿删除。K8s Pod cleanup 的独立 owner/settlement 缺口由专项 Finding 跟踪。
 
 ## 触发条件与影响
 

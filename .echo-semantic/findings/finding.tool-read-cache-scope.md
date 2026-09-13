@@ -11,7 +11,7 @@ boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: []
 evidence_refs: [evidence.effects-extensions]
-audit_refs: []
+audit_refs: [audit.tool-permission-sandbox.failure-concurrency]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []
