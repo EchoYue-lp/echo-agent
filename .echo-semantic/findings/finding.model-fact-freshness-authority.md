@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # 内置动态 Model facts 缺 freshness authority
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/68
+
 ## 问题
 
 Core 硬编码 context window、max output tokens 与 thinking family 并用精确测试锁定，但没有来源版本、更新时间、失效策略或 provider/application override 的统一 owner。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Tokenizer calibration 生产反馈不收敛到真实比例
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/100
+
 ## 问题
 
 生产路径把已经乘过当前 factor 的 estimate 传给 calibrate，calibrate 又把 actual/adjusted 当新的绝对 factor 做 EMA；真实比例 2 会趋向 sqrt(2)。

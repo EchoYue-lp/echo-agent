@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # MCP 协议版本文档漂移
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/67
+
 ## 问题
 
 正式 MCP 文档声明 `2025-03-26`，源码协议常量已经是 `2025-11-25`。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Plugin wiring 缺 active generation authority
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/72
+
 ## 问题
 
 PreparedPluginSet 有 generation/identity，但 PluginWiringResult 不携带 generation，Integrator 不记录 active generation；旧 Prepared Arc 可在新代后发布，旧 receipt 也可撤销当前资源。

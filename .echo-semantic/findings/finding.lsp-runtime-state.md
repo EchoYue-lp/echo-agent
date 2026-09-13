@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # LSP runtime status 与 restart 字段未闭合
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/64
+
 ## 问题
 
 Public max_restarts/restart_count/last_error 没有更新路径；reader EOF 只清 pending，不重置 running/initialized；load_config 与重复 start 也不撤销旧状态。

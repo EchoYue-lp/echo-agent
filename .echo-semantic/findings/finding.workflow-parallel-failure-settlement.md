@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Workflow 并行 sibling 遮蔽失败并可脱离继续执行
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/113
+
 ## 问题
 
 Graph `join_all` 等待全部 branch 后才传播首个错误，无 timeout 时挂起 sibling 可永久遮蔽失败；DagWorkflow spawned handles 按序等待且 caller cancel 时 JoinHandle drop 不停止节点。

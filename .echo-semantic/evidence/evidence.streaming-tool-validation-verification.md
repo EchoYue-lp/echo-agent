@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.streaming-tool-validation-verification
 kind: evidence
-observed_at: source:aaf0d4c101710a5879fe6066820ffc3145ab93b4295ab8aa22878d54e7a050b5
+observed_at: 50890faac10ab91c90dc45769854c4b6e35f8376
 source_refs:
   - echo-execution/src/tools.rs
 supports: [behavior.effect-permission-execution, rule.permission-effect-order]

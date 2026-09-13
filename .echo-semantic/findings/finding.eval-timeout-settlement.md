@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Eval timeout 取消后未等待 Turn settlement
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/48
+
 ## 问题
 
 Eval timeout 只触发 cancellation token 后立即评分，Agent stream producer 是独立 task，未见等待 receipt/terminal 的边界。

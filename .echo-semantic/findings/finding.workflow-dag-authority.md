@@ -23,6 +23,10 @@ decision: defer
 
 # Task DAG 与 Workflow DAG 平行实现候选
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/111
+
 ## 问题
 
 Revisioned Task graph、Workflow Graph 与 DagWorkflow 各自拥有节点、边、校验和执行算法，但当前 ADR 没有定义它们长期保持独立的完整语义边界。

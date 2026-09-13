@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # K8s Sandbox Pod 清理没有可靠 owner settlement
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/62
+
 ## 问题
 
 Caller drop 只借助 kill_on_drop 终止本地 kubectl，不删除已被 API server 接纳的 Pod；delete_pod 还丢弃 spawn/exit/确认错误，无 detached owner、RAII receipt 或 cleanup debt。

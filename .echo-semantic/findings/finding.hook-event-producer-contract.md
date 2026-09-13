@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # HookEvent catalog 与自动 producer 不一致
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/58
+
 ## 问题
 
 HookEvent::ALL 和文档描述完整自动生命周期，但 PermissionDenied 无 dedicated producer，多种 Notification/Config/Skill/Rule lifecycle 只发现通用手动 dispatch/context 分支。

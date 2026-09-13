@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Turn terminal commit 与 projection 顺序可形成冲突终态
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/108
+
 ## 问题
 
 ReactAgent 在 FinalAnswer 交给 TurnDriver sink 前已保存 checkpoint/transcript 并把 trace 标为 Completed；TurnDriver 或 ACP projector/observer 随后失败可返回 Failed，而先前事实/投影仍保留成功终态。

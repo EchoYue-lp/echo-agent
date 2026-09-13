@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Checkpoint 未绑定来源 Journal identity
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/43
+
 ## 问题
 
 CheckpointFrame 与文件摘要只包含 sequence/state，recover 只检查序号范围；来自 Journal B 的同序号合法 checkpoint 可被 Journal A 接受。

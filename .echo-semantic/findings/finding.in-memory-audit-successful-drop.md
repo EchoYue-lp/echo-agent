@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # InMemoryAuditLogger 丢写仍返回成功
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/61
+
 ## 问题
 
 InMemoryAuditLogger 在写锁 poisoned 时不保存事件却返回 `Ok(())`，调用方无法区分接纳成功和静默丢弃。

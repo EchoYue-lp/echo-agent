@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # MCP SSE 与 SDK LSP cleanup 未等待结算
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/55
+
 ## 问题
 
 SSE endpoint/POST/timeout 失败可遗留 pending sender，close 只 cancel 不 drain/await；SDK Host LSP close 清 Arc map 而未调用 manager shutdown_all。

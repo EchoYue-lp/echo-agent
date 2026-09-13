@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # AgentComponent stream 终态与事件形状混淆
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/87
+
 ## 问题
 
 第四轮审查发现Sandbox与Workflow组件流曾共用任意WireValue，内层终态可出现在outer chunk，且Workflow extension与graph stream投影不同。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # A2A streaming cancel 与 cleanup 未闭合
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/33
+
 ## 问题
 
 Streaming 路径使用 execute_stream 并只在下一个 event 到达后检查 cancel；setup/event error 未始终移除 cancel token，消费者提前 drop 也无 RAII settlement。

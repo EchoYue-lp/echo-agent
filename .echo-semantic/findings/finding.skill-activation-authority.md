@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Skill activation 存在两个状态权威
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/93
+
 ## 问题
 
 ReactAgent 同时维护主 SkillRegistry 与 progressive registry；API activation、resource/script tools 和 checkpoint restore 读取或写入不同集合。

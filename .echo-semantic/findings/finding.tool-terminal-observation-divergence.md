@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Tool caller、trace 与 audit 可记录不同终态
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/102
+
 ## 问题
 
 PostToolUse block 在 effect 后短路 OutputGuard/artifact/Trace/CallbackEnd；失败 ToolResult 仍调用 on_tool_end，on_tool_error 无生产调用，AuditCallback 可把失败记录成成功。

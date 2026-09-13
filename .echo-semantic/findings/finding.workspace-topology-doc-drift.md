@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # 双语README workspace拓扑遗漏SDK crates
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/114
+
 ## 问题
 
 Cargo定义root加10 members共11 package；双语README拓扑遗漏echo-sdk-protocol与echo-sdk-host，并声称8 production crates+1 teaching crate。

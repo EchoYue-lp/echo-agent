@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Subagent lazy factory 取消后无法恢复 publication
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/29
+
 ## 问题
 
 基准实现的`SubagentRegistry::get_agent`在等待factory create前把名称加入`instantiating`，清理只发生在await正常返回后；确定性red确认future被abort时名称永久残留。

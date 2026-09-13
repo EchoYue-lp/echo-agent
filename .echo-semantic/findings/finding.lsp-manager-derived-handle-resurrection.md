@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # 派生 LSP client handle 可在 manager 关闭后复活进程
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/63
+
 ## 问题
 
 SDK get_client 注册独立 client handle 且无 parent/generation link；关闭 manager 只关闭 manager ID并保留不同 ID 的 client handle，后者仍可 initialize 新进程。

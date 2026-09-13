@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # BackgroundTask wait 与多观察者生命周期缺口
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/39
+
 ## 问题
 
 Result 检查与 Notify waiter 注册之间存在 lost-wakeup 窗口；首个 waiter take 结果后，后续 waiter 没有实现注释承诺的 status-based reporting，真实 panic 也可能不结算状态。

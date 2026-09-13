@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # A2A宣告的file/push capability未绑定实现
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/32
+
 ## 问题
 
 AgentCard可宣告任意input modes与push_notifications，A2AMessage支持File；Server实际只压缩text并实现send/subscribe/get/cancel，无push delivery。

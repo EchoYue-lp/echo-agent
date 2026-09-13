@@ -3,23 +3,27 @@ schema_version: 1
 id: finding.tool-read-cache-scope
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: state_authority
 focus: [failure_concurrency, data_durability, contract_evidence]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
-rule_refs: []
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.tool-permission-sandbox.failure-concurrency]
+rule_refs: [rule.permission-effect-order]
+evidence_refs: [evidence.effects-extensions, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification]
+audit_refs: [audit.tool-permission-sandbox.failure-concurrency, audit.tool-read-cache-authority-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.tool-read-cache-authority-repair]
+verification_evidence_refs: [evidence.tool-read-cache-authority-verification]
+rereview_audit_refs: [audit.tool-read-cache-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
 # ToolManager read cache 缺少 workspace identity
+
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/30
 
 ## 问题
 
@@ -35,4 +39,4 @@ Read cache key 只有 tool name 与 parameters，`ToolContext.working_dir`、con
 
 ## 处理记录
 
-Discovery 记录；后续 audit 决定 cache key scope、per-invocation namespace 或禁用条件。
+Issue #30追踪。当前key覆盖effective workspace、invocation lineage与完整artifact policy；无稳定cwd时不缓存，Tool registry变化失效同一cache。确定性red/green、Accepted ADR与三轮独立复审已闭合本Finding。

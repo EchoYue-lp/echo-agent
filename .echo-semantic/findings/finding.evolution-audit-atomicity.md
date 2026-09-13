@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Evolution mutation 与 change audit 非原子
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/51
+
 ## 问题
 
 Memory write/promote/demote 先改变 Store，再写 change audit；audit 失败时 mutation 已可见，与“所有 mutation recorded”承诺冲突。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Skill Curator promotion 缺可验证批准与 audit authority
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/54
+
 ## 问题
 
 Curator promotion/touch可直接Active且无approval/ChangeLog/security；SkillMerger可合入allowed_tools，SkillPatcher可直接写SKILL.md，security check未接生产；这与全mutation可审计、高风险变更需review的合同冲突。

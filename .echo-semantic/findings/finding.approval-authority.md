@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # PermissionService 与 Shell CommandPolicy 双重 approval
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/37
+
 ## 问题
 
 外层 PermissionService 可批准 ShellTool 的 Execute 权限，Shell 内层 CommandPolicy 仍可返回 RequiresApproval，且不会消费已有批准。

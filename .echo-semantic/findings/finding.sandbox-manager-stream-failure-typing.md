@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # SandboxManager 建流失败丢失 typed Failed 终态
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/82
+
 ## 问题
 
 Backend 建流失败被 SandboxManager 包装成 `Complete(exit_code=-1)`，而核心 stream contract 已定义 `Failed` 终态。

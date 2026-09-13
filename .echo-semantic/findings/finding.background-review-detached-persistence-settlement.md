@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Background Review丢handle后持久化无人结算
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/38
+
 ## 问题
 
 BackgroundReviewer返回JoinHandle且文档允许discard；任务可auto-persist memory，失败只写ReviewOutcome，丢handle后success/panic/write failure均无人观察，max_iterations也未消费。

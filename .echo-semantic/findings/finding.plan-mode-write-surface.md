@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Plan mode 未形成可靠只读 surface
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/70
+
 ## 问题
 
 PlanModeStage 以有限工具名列表拦截写文件/shell/delete，但 git commit/branch/worktree 等 mutation 可穿过；readonly_tools 又是独立的注册时机制，默认 PermissionService 可不存在。

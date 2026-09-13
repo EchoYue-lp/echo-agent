@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # SkillLoadPolicy 被误归为process-local
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/92
+
 ## 问题
 
 第四轮审查发现SkillLoadPolicy会影响真实Session Agent的discovery、plugin registration与reconcile，却仍被manifest归为语言本地实现。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # A2A server 自行拥有第二套执行终态
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/35
+
 ## 问题
 
 A2AServer 维护 TaskState/task map/cancel map，直接消费 Agent stream 并自行判定 completed/failed/canceled；stream completion 还可覆盖已写入 Canceled，未复用 AgentTurnDriver/TurnReceipt。

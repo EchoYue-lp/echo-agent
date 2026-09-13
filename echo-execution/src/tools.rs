@@ -123,11 +123,65 @@ fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32)
         .min(30_000)
 }
 
-fn result_cache_key(tool_name: &str, parameters: &ToolParameters) -> (String, String) {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ToolResultCacheKey {
+    tool_name: String,
+    parameters_json: String,
+    working_dir: std::path::PathBuf,
+    conversation_id: Option<String>,
+    run_id: Option<String>,
+    turn_id: Option<String>,
+    message_id: Option<String>,
+    execution_id: Option<String>,
+    output_artifacts: Option<ToolOutputArtifactCacheScope>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ToolOutputArtifactCacheScope {
+    root_dir: std::path::PathBuf,
+    retention: String,
+    threshold_bytes: usize,
+    max_age_secs: Option<u64>,
+}
+
+fn result_cache_key(
+    tool_name: &str,
+    parameters: &ToolParameters,
+    ctx: &ToolContext,
+) -> Option<ToolResultCacheKey> {
     let params_json = echo_core::utils::canonical_json::canonical_json_bytes(parameters)
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
-    (tool_name.to_string(), params_json)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+    let process_working_dir = std::env::current_dir().ok()?;
+    let working_dir = match ctx.working_dir.as_ref() {
+        Some(path) if path.is_absolute() => path.clone(),
+        Some(path) => process_working_dir.join(path),
+        None => process_working_dir.clone(),
+    };
+    let output_artifacts = ctx.output_artifacts.as_ref().map(|config| {
+        let root_dir = if config.root_dir.is_absolute() {
+            config.root_dir.clone()
+        } else {
+            process_working_dir.join(&config.root_dir)
+        };
+        ToolOutputArtifactCacheScope {
+            root_dir,
+            retention: config.retention.clone(),
+            threshold_bytes: config.threshold_bytes,
+            max_age_secs: config.max_age_secs,
+        }
+    });
+    Some(ToolResultCacheKey {
+        tool_name: tool_name.to_string(),
+        parameters_json: params_json,
+        working_dir,
+        conversation_id: ctx.conversation_id.clone(),
+        run_id: ctx.run_id.clone(),
+        turn_id: ctx.turn_id.clone(),
+        message_id: ctx.message_id.clone(),
+        execution_id: ctx.execution_id.clone(),
+        output_artifacts,
+    })
 }
 
 fn validate_schema(tool: &dyn Tool) -> Result<()> {
@@ -191,10 +245,22 @@ pub struct ToolManager {
     /// Monotonically increasing version counter. On register/unregister the
     /// version is bumped so that the next read rebuilds from the live tool set.
     definitions_version: AtomicU64,
-    /// Tool result cache: (tool_name, params_json) -> ToolResult.
-    /// Only caches read-only tool results. Cleared on write operations.
-    result_cache: RwLock<HashMap<(String, String), (ToolResult, std::time::Instant)>>,
+    /// Context-scoped cache for successful read-only tool results.
+    result_cache: RwLock<HashMap<ToolResultCacheKey, (ToolResult, std::time::Instant)>>,
+    /// Every non-read call invalidates at entry and exit. A read may publish
+    /// its result only if this epoch is unchanged since its cache lookup.
+    result_cache_epoch: AtomicU64,
     budget_metrics: ToolBudgetMetrics,
+}
+
+struct ResultCacheInvalidationGuard<'a> {
+    manager: &'a ToolManager,
+}
+
+impl Drop for ResultCacheInvalidationGuard<'_> {
+    fn drop(&mut self) {
+        self.manager.invalidate_result_cache();
+    }
 }
 
 /// Deterministic size accounting for the tool definitions sent to an LLM.
@@ -598,6 +664,7 @@ impl ToolManager {
 
     fn invalidate_cache(&self) {
         self.definitions_version.fetch_add(1, Ordering::Release);
+        self.invalidate_result_cache();
         // No need to clear cached_definitions — version mismatch will trigger
         // a lazy rebuild on the next access.
     }
@@ -628,6 +695,7 @@ impl ToolManager {
             cached_definitions: RwLock::new(None),
             definitions_version: AtomicU64::new(0),
             result_cache: RwLock::new(HashMap::new()),
+            result_cache_epoch: AtomicU64::new(0),
             budget_metrics: ToolBudgetMetrics::default(),
         }
     }
@@ -648,6 +716,7 @@ impl ToolManager {
             cached_definitions: RwLock::new(None),
             definitions_version: AtomicU64::new(0),
             result_cache: RwLock::new(HashMap::new()),
+            result_cache_epoch: AtomicU64::new(0),
             budget_metrics: ToolBudgetMetrics::default(),
         }
     }
@@ -870,6 +939,9 @@ impl ToolManager {
         ctx: &ToolContext,
         drain_started: bool,
     ) -> Result<ToolResult> {
+        // Observe before obtaining the tool guard so a future registry storage
+        // change cannot let an old implementation publish into a new generation.
+        let observed_result_cache_epoch = self.result_cache_epoch.load(Ordering::Acquire);
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
@@ -881,11 +953,14 @@ impl ToolManager {
 
         // A write can invalidate every cached read, even when the write later
         // fails: tools may have partially applied an external side effect.
-        let cache_key = if is_read {
-            Some(result_cache_key(tool_name, &parameters))
+        let (cache_key, read_cache_epoch, _write_cache_guard) = if is_read {
+            (
+                result_cache_key(tool_name, &parameters, ctx),
+                Some(observed_result_cache_epoch),
+                None,
+            )
         } else {
-            self.result_cache.write().clear();
-            None
+            (None, None, Some(self.begin_result_cache_invalidation()))
         };
         if let Some(cache_key) = cache_key.as_ref()
             && let Some(result) = self.cached_result(cache_key)
@@ -948,8 +1023,10 @@ impl ToolManager {
 
             match result {
                 Ok(result) if result.success => {
-                    if let Some(cache_key) = cache_key.as_ref() {
-                        self.store_cached_result(cache_key.clone(), result.clone());
+                    if let (Some(cache_key), Some(expected_epoch)) =
+                        (cache_key.as_ref(), read_cache_epoch)
+                    {
+                        self.store_cached_result(cache_key.clone(), result.clone(), expected_epoch);
                     }
                     return Ok(result);
                 }
@@ -1042,6 +1119,9 @@ impl ToolManager {
         event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
         drain_started: bool,
     ) -> Result<ToolResult> {
+        // Keep the registry generation and result-cache generation ordered:
+        // an old tool implementation must never publish into a replacement's cache.
+        let observed_result_cache_epoch = self.result_cache_epoch.load(Ordering::Acquire);
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
@@ -1050,11 +1130,14 @@ impl ToolManager {
 
         let is_read = tool.risk_level() == ToolRiskLevel::ReadOnly;
 
-        let cache_key = if is_read {
-            Some(result_cache_key(tool_name, &parameters))
+        let (cache_key, read_cache_epoch, _write_cache_guard) = if is_read {
+            (
+                result_cache_key(tool_name, &parameters, ctx),
+                Some(observed_result_cache_epoch),
+                None,
+            )
         } else {
-            self.result_cache.write().clear();
-            None
+            (None, None, Some(self.begin_result_cache_invalidation()))
         };
         if let Some(cache_key) = cache_key.as_ref()
             && let Some(result) = self.cached_result(cache_key)
@@ -1156,8 +1239,10 @@ impl ToolManager {
 
             match result {
                 Ok(result) if result.success => {
-                    if let Some(cache_key) = cache_key.as_ref() {
-                        self.store_cached_result(cache_key.clone(), result.clone());
+                    if let (Some(cache_key), Some(expected_epoch)) =
+                        (cache_key.as_ref(), read_cache_epoch)
+                    {
+                        self.store_cached_result(cache_key.clone(), result.clone(), expected_epoch);
                     }
                     return Ok(result);
                 }
@@ -1196,14 +1281,33 @@ impl ToolManager {
         }))
     }
 
-    fn cached_result(&self, key: &(String, String)) -> Option<ToolResult> {
+    fn begin_result_cache_invalidation(&self) -> ResultCacheInvalidationGuard<'_> {
+        self.invalidate_result_cache();
+        ResultCacheInvalidationGuard { manager: self }
+    }
+
+    fn invalidate_result_cache(&self) {
+        let mut cache = self.result_cache.write();
+        self.result_cache_epoch.fetch_add(1, Ordering::AcqRel);
+        cache.clear();
+    }
+
+    fn cached_result(&self, key: &ToolResultCacheKey) -> Option<ToolResult> {
         let mut cache = self.result_cache.write();
         cache.retain(|_, (_, created)| created.elapsed() < TOOL_RESULT_CACHE_TTL);
         cache.get(key).map(|(result, _)| result.clone())
     }
 
-    fn store_cached_result(&self, key: (String, String), result: ToolResult) {
+    fn store_cached_result(
+        &self,
+        key: ToolResultCacheKey,
+        result: ToolResult,
+        expected_epoch: u64,
+    ) {
         let mut cache = self.result_cache.write();
+        if self.result_cache_epoch.load(Ordering::Acquire) != expected_epoch {
+            return;
+        }
         cache.retain(|_, (_, created)| created.elapsed() < TOOL_RESULT_CACHE_TTL);
         if cache.len() >= TOOL_RESULT_CACHE_CAPACITY
             && let Some(oldest) = cache
@@ -1248,6 +1352,21 @@ mod execute_with_context_tests {
     struct ReadCountingTool {
         calls: Arc<AtomicUsize>,
         output: &'static str,
+    }
+
+    struct CoordinatedReadTool {
+        value: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+        started: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    struct UpdatingWriteTool {
+        value: Arc<AtomicUsize>,
+    }
+
+    struct ArtifactScopeReadTool {
+        calls: Arc<AtomicUsize>,
     }
 
     struct ImageInputTool;
@@ -1719,6 +1838,104 @@ mod execute_with_context_tests {
         }
     }
 
+    impl Tool for CoordinatedReadTool {
+        fn name(&self) -> &str {
+            "coordinated_read"
+        }
+
+        fn description(&self) -> &str {
+            "captures a value before a coordinated write"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn risk_level(&self) -> ToolRiskLevel {
+            ToolRiskLevel::ReadOnly
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                let captured = self.value.load(AtomicOrdering::SeqCst);
+                let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                if call == 0 {
+                    if let Some(started) = self.started.lock().await.take() {
+                        let _ = started.send(());
+                    }
+                    if let Some(release) = self.release.lock().await.take() {
+                        release.await.map_err(|_| ToolError::ExecutionFailed {
+                            tool: self.name().to_string(),
+                            message: "coordinated read release channel closed".to_string(),
+                        })?;
+                    }
+                }
+                Ok(ToolResult::success(captured.to_string()))
+            })
+        }
+    }
+
+    impl Tool for UpdatingWriteTool {
+        fn name(&self) -> &str {
+            "update_value"
+        }
+
+        fn description(&self) -> &str {
+            "updates the value read by the coordinated tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.value.store(1, AtomicOrdering::SeqCst);
+                Ok(ToolResult::success("updated"))
+            })
+        }
+    }
+
+    impl Tool for ArtifactScopeReadTool {
+        fn name(&self) -> &str {
+            "artifact_scope_read"
+        }
+
+        fn description(&self) -> &str {
+            "returns the configured artifact root"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn risk_level(&self) -> ToolRiskLevel {
+            ToolRiskLevel::ReadOnly
+        }
+
+        fn execute_with_context<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+            ctx: &'a ToolContext,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let output = ctx
+                    .output_artifacts
+                    .as_ref()
+                    .map(|config| config.root_dir.display().to_string())
+                    .unwrap_or_else(|| "none".to_string());
+                Ok(ToolResult::success(output))
+            })
+        }
+    }
+
     impl Tool for ImageInputTool {
         fn name(&self) -> &str {
             "image_input"
@@ -2159,6 +2376,326 @@ mod execute_with_context_tests {
 
         manager.execute_tool("write", ToolParameters::new()).await?;
         manager.execute_tool("read_counting", params).await?;
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_cache_is_scoped_by_workspace() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new();
+        manager.register(Box::new(ReadCountingTool {
+            calls: Arc::clone(&calls),
+            output: "scoped",
+        }));
+        let context_a = ToolContext {
+            working_dir: Some(PathBuf::from("/workspace/a")),
+            conversation_id: Some("conversation".to_string()),
+            run_id: Some("run-a".to_string()),
+            ..ToolContext::default()
+        };
+        let context_b = ToolContext {
+            working_dir: Some(PathBuf::from("/workspace/b")),
+            conversation_id: Some("conversation".to_string()),
+            run_id: Some("run-a".to_string()),
+            ..ToolContext::default()
+        };
+
+        manager
+            .execute_tool_with_context("read_counting", ToolParameters::new(), &context_a)
+            .await?;
+        manager
+            .execute_tool_with_context("read_counting", ToolParameters::new(), &context_b)
+            .await?;
+        manager
+            .execute_tool_with_context("read_counting", ToolParameters::new(), &context_a)
+            .await?;
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_cache_is_scoped_by_run_execution_and_message() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new();
+        manager.register(Box::new(ReadCountingTool {
+            calls: Arc::clone(&calls),
+            output: "scoped",
+        }));
+        let base = ToolContext {
+            working_dir: Some(PathBuf::from("/workspace/shared")),
+            conversation_id: Some("conversation".to_string()),
+            run_id: Some("run-a".to_string()),
+            turn_id: Some("turn".to_string()),
+            message_id: Some("message-a".to_string()),
+            execution_id: Some("execution-a".to_string()),
+            ..ToolContext::default()
+        };
+        let mut different_run = base.clone();
+        different_run.run_id = Some("run-b".to_string());
+        let mut different_execution = different_run.clone();
+        different_execution.execution_id = Some("execution-b".to_string());
+        let mut different_message = different_execution.clone();
+        different_message.message_id = Some("message-b".to_string());
+
+        for context in [
+            &base,
+            &different_run,
+            &different_execution,
+            &different_message,
+        ] {
+            manager
+                .execute_tool_with_context("read_counting", ToolParameters::new(), context)
+                .await?;
+        }
+        manager
+            .execute_tool_with_context("read_counting", ToolParameters::new(), &base)
+            .await?;
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_cache_is_scoped_by_artifact_configuration() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new();
+        manager.register(Box::new(ArtifactScopeReadTool {
+            calls: Arc::clone(&calls),
+        }));
+        let process_working_dir =
+            std::env::current_dir().map_err(|error| ToolError::ExecutionFailed {
+                tool: "artifact_scope_read".to_string(),
+                message: format!("failed to resolve test working directory: {error}"),
+            })?;
+        let logical_working_dir = process_working_dir.join("cache-test-workspace");
+        let base = ToolContext {
+            working_dir: Some(logical_working_dir.clone()),
+            conversation_id: Some("conversation".to_string()),
+            run_id: Some("run".to_string()),
+            output_artifacts: Some(
+                echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                    "artifacts-a",
+                    "temporary",
+                )
+                .threshold_bytes(16)
+                .max_age_secs(Some(60)),
+            ),
+            ..ToolContext::default()
+        };
+        let mut different_root = base.clone();
+        different_root.output_artifacts = Some(
+            echo_core::tools::artifact::ToolOutputArtifactConfig::new("artifacts-b", "temporary")
+                .threshold_bytes(16)
+                .max_age_secs(Some(60)),
+        );
+        let mut different_threshold = base.clone();
+        different_threshold.output_artifacts = Some(
+            echo_core::tools::artifact::ToolOutputArtifactConfig::new("artifacts-a", "temporary")
+                .threshold_bytes(32)
+                .max_age_secs(Some(60)),
+        );
+        let mut working_dir_absolute_root = base.clone();
+        let absolute_root = logical_working_dir.join("artifacts-a");
+        working_dir_absolute_root.output_artifacts = Some(
+            echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                absolute_root.clone(),
+                "temporary",
+            )
+            .threshold_bytes(16)
+            .max_age_secs(Some(60)),
+        );
+
+        let first = manager
+            .execute_tool_with_context("artifact_scope_read", ToolParameters::new(), &base)
+            .await?;
+        let second = manager
+            .execute_tool_with_context(
+                "artifact_scope_read",
+                ToolParameters::new(),
+                &different_root,
+            )
+            .await?;
+        manager
+            .execute_tool_with_context(
+                "artifact_scope_read",
+                ToolParameters::new(),
+                &different_threshold,
+            )
+            .await?;
+        let absolute = manager
+            .execute_tool_with_context(
+                "artifact_scope_read",
+                ToolParameters::new(),
+                &working_dir_absolute_root,
+            )
+            .await?;
+        manager
+            .execute_tool_with_context("artifact_scope_read", ToolParameters::new(), &base)
+            .await?;
+
+        assert_eq!(first.output, "artifacts-a");
+        assert_eq!(second.output, "artifacts-b");
+        assert_eq!(absolute.output, absolute_root.display().to_string());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacing_a_read_tool_invalidates_its_cached_generation()
+    -> echo_core::error::Result<()> {
+        let old_calls = Arc::new(AtomicUsize::new(0));
+        let new_calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new();
+        manager.register(Box::new(ReadCountingTool {
+            calls: Arc::clone(&old_calls),
+            output: "old",
+        }));
+        let old = manager
+            .execute_tool("read_counting", ToolParameters::new())
+            .await?;
+        let replaced = manager.replace(Box::new(ReadCountingTool {
+            calls: Arc::clone(&new_calls),
+            output: "new",
+        }));
+        assert!(replaced.is_some());
+
+        let new = manager
+            .execute_tool("read_counting", ToolParameters::new())
+            .await?;
+
+        assert_eq!(old.output, "old");
+        assert_eq!(new.output, "new");
+        assert_eq!(old_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(new_calls.load(AtomicOrdering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacing_a_read_tool_fences_its_inflight_generation() -> echo_core::error::Result<()>
+    {
+        let old_value = Arc::new(AtomicUsize::new(0));
+        let old_calls = Arc::new(AtomicUsize::new(0));
+        let new_value = Arc::new(AtomicUsize::new(1));
+        let new_calls = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let manager = Arc::new(ToolManager::new());
+        manager.register(Box::new(CoordinatedReadTool {
+            value: old_value,
+            calls: Arc::clone(&old_calls),
+            started: tokio::sync::Mutex::new(Some(started_tx)),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+        }));
+
+        let read_manager = Arc::clone(&manager);
+        let old_read = tokio::spawn(async move {
+            read_manager
+                .execute_tool("coordinated_read", ToolParameters::new())
+                .await
+        });
+        started_rx.await.map_err(|_| ToolError::ExecutionFailed {
+            tool: "coordinated_read".to_string(),
+            message: "old read did not start".to_string(),
+        })?;
+        let replace_manager = Arc::clone(&manager);
+        let replacement_calls = Arc::clone(&new_calls);
+        let (replace_started_tx, replace_started_rx) = tokio::sync::oneshot::channel();
+        let replacement = tokio::task::spawn_blocking(move || {
+            let _ = replace_started_tx.send(());
+            replace_manager.replace(Box::new(CoordinatedReadTool {
+                value: new_value,
+                calls: replacement_calls,
+                started: tokio::sync::Mutex::new(None),
+                release: tokio::sync::Mutex::new(None),
+            }))
+        });
+        replace_started_rx
+            .await
+            .map_err(|_| ToolError::ExecutionFailed {
+                tool: "coordinated_read".to_string(),
+                message: "replacement did not start".to_string(),
+            })?;
+        release_tx
+            .send(())
+            .map_err(|_| ToolError::ExecutionFailed {
+                tool: "coordinated_read".to_string(),
+                message: "old read release receiver closed".to_string(),
+            })?;
+        let stale = old_read
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: "coordinated_read".to_string(),
+                message: format!("old read task failed: {error}"),
+            })??;
+        assert_eq!(stale.output, "0");
+        let replaced = replacement
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: "coordinated_read".to_string(),
+                message: format!("replacement task failed: {error}"),
+            })?;
+        assert!(replaced.is_some());
+
+        let current = manager
+            .execute_tool("coordinated_read", ToolParameters::new())
+            .await?;
+        assert_eq!(current.output, "1");
+        assert_eq!(old_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(new_calls.load(AtomicOrdering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_prevents_inflight_read_from_republishing_stale_cache()
+    -> echo_core::error::Result<()> {
+        let value = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let manager = Arc::new(ToolManager::new());
+        manager.register(Box::new(CoordinatedReadTool {
+            value: Arc::clone(&value),
+            calls: Arc::clone(&calls),
+            started: tokio::sync::Mutex::new(Some(started_tx)),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+        }));
+        manager.register(Box::new(UpdatingWriteTool {
+            value: Arc::clone(&value),
+        }));
+
+        let read_manager = Arc::clone(&manager);
+        let first_read = tokio::spawn(async move {
+            read_manager
+                .execute_tool("coordinated_read", ToolParameters::new())
+                .await
+        });
+        started_rx.await.map_err(|_| ToolError::ExecutionFailed {
+            tool: "coordinated_read".to_string(),
+            message: "coordinated read did not start".to_string(),
+        })?;
+        manager
+            .execute_tool("update_value", ToolParameters::new())
+            .await?;
+        release_tx
+            .send(())
+            .map_err(|_| ToolError::ExecutionFailed {
+                tool: "coordinated_read".to_string(),
+                message: "coordinated read release receiver closed".to_string(),
+            })?;
+        let stale = first_read
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: "coordinated_read".to_string(),
+                message: format!("coordinated read task failed: {error}"),
+            })??;
+        assert_eq!(stale.output, "0");
+
+        let refreshed = manager
+            .execute_tool("coordinated_read", ToolParameters::new())
+            .await?;
+        assert_eq!(refreshed.output, "1");
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
         Ok(())
     }

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Plugin MCP server 名缺少 owner 隔离
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/75
+
 ## 问题
 
 Plugin parser 与 McpManager 都用裸 server name；多个 Plugin 同名 reconcile 后，各自 receipt 仍记录相同名称，旧 owner unwire 可关闭新 owner 连接。

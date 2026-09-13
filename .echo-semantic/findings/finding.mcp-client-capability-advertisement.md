@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # MCP client 广告未实现 capability
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/65
+
 ## 问题
 
 Initialize 广告 roots/list-changed、sampling 和 elicitation，但未发现 server-to-client request handler；stdio 对无 id 消息直接忽略。

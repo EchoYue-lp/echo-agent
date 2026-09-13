@@ -8,11 +8,11 @@ risk: high
 primary_focus: permission_external
 focus: [result_side_effect, failure_concurrency, time_lifecycle, state_authority]
 boundary: boundary.tool-permission-sandbox
-observed_at: source:aaf0d4c101710a5879fe6066820ffc3145ab93b4295ab8aa22878d54e7a050b5
+observed_at: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
 code_refs: [echo-core/src/tools/mod.rs, echo-core/src/tools/permission.rs, echo-core/src/tools/cell.rs, echo-execution/src/tools.rs, echo-orchestration/src/human_loop/service.rs, echo-orchestration/src/tasks/command_cell.rs, echo-execution/src/sandbox/local.rs, echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification]
-finding_refs: [finding.tool-read-cache-scope, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.tool-pipeline-example-drift]
+evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification]
+finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.tool-pipeline-example-drift]
 ---
 
 # Tool、Permission 与 Sandbox Effect
@@ -23,7 +23,7 @@ ReactAgent 自动工具调用的 schema/validation、可见性、permission、re
 
 ## 当前行为
 
-ToolManager管注册、统一schema/custom validation、cache与执行并发，stream/non-stream在effect前复用同一输入kernel；ReactAgent的PermissionPolicy/PermissionService、Hook/Guard与tool pipeline影响自动工具调用；trusted Hook command/http可在PermissionStage前执行；Sandbox和具体工具产生文件、进程、网络、数据库或Git effect。
+ToolManager管注册、统一validation、context-scoped read cache/epoch与执行并发；stream/non-stream共用输入及cache freshness机制。ReactAgent的PermissionPolicy/PermissionService、Hook/Guard与tool pipeline影响自动工具调用；trusted Hook command/http可在PermissionStage前执行；Sandbox和具体工具产生文件、进程、网络、数据库或Git effect。
 
 ## 期望行为
 

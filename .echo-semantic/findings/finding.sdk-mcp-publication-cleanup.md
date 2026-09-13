@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # MCP 初始化后发布失败未关闭transport
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/89
+
 ## 问题
 
 第四轮审查发现McpClient::from_transport成功初始化后，facade resource注册失败路径曾直接丢弃client而不关闭语言transport。

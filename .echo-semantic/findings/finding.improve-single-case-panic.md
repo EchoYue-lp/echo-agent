@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Improve 单 case criteria 分组可触发 panic
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/24
+
 ## 问题
 
 基准ImprovementLoop对每个criteria分组执行`split_idx.clamp(1, group.len().saturating_sub(1))`；真实单case测试确认下界1、上界0触发panic。

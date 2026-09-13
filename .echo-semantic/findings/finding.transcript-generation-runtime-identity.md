@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Runtime state 与 transcript generation identity 可写出不可恢复 checkpoint
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/105
+
 ## 问题
 
 Invocation context 允许 `runtime_state_id` 与 `transcript_generation_id` 独立设置且不校验；保存分别使用两者，恢复却要求 checkpoint 的 runtime scope 与 cursor generation 相等。

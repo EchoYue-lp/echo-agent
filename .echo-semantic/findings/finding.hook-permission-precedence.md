@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Hook source order 可绕过 deny-first 归约
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/59
+
 ## 问题
 
 Hook reducer 声称 deny > ask > allow，但每个 declarative permission action 都 stop propagation；较早 UserConfig allow 可阻止后续 Plugin/Skill deny 被看到。

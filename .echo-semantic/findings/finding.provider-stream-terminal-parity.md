@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Provider stream semantic terminal 不对等
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/78
+
 ## 问题
 
 Responses 要求 response.completed；OpenAI EOF 不要求 DONE/finish，Anthropic 把 message_stop 当 Other，并在较早 message_delta 暴露 finish_reason/usage。

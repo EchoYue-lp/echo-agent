@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # TaskClaim 与 SubagentAttempt identity 未闭合
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/99
+
 ## 问题
 
 Team 与 SDK runtime controller 接收 TaskClaim 后调用普通 Subagent dispatch，实际 Subagent execution 使用随机 ID，task/attempt/plan revision lineage 为空。

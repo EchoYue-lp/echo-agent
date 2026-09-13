@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Non-stream LLM cancellation 不对等
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/69
+
 ## 问题
 
 ChatRequest cancel_token 声称中止 in-flight request；OpenAI Chat 与 Responses non-stream 完全未监听，Anthropic 只在响应头前监听、body JSON 读取不可取消。

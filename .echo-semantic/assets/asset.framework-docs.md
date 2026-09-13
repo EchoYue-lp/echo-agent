@@ -6,9 +6,9 @@ title: Framework 正式文档与 ADR
 asset_type: document
 status: needs_review
 risk: medium
-observed_at: 6d66479fd520da9cbbb66723faa35ce69a8963a8
+observed_at: source:efcb720425a2b1b4bbe38d080d40b6b323ffcc116f6499582c6561b703d9e14e
 boundary_refs: [boundary.workspace-architecture]
-code_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/adr/0014-framework-capability-placement.md, docs/adr/0033-subagent-factory-singleflight-publication.md]
+code_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/adr/0014-framework-capability-placement.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0034-context-scoped-tool-result-cache.md]
 consumer_refs: [echo-agent-learning/tests/documentation_contract.rs]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]

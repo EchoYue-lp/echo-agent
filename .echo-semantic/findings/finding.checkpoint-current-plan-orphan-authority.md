@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # AgentCheckpoint current_plan 是孤立恢复权威
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/42
+
 ## 问题
 
 `current_plan` 被注释和文档描述为可恢复运行态，但生产代码只有 reset、restore、checkpoint 读取与重写，未发现 canonical Task artifact writer。

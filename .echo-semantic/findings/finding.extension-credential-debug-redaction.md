@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Extension credential 配置缺统一 Debug/redaction 合同
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/56
+
 ## 问题
 
 MCP env/Authorization、QQ client_secret、Feishu app_secret/verification_token/signing_key 等公开 config 派生原始 Debug；HTTP transport 还记录 session ID，仅部分 backend 手工脱敏。

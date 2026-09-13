@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Workflow 多入口主循环已发生事件漂移
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/112
+
 ## 问题
 
 Graph 的 run、run-until-interrupt、resume 和 stream 分别实现循环；`WorkflowEvent::NodeError` 与 `Token` 被公开定义，但未发现内建生产点，stream 对 node error 直接返回 Err。

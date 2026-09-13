@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Provider capabilities 与 ModelProfile authority 未闭合
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/77
+
 ## 问题
 
 LlmClient capabilities 默认 OpenAI-compatible，concrete providers 未 override；LlmConfig 构造 client 也不自动建立 ModelProfile，多个策略源可产生冲突。

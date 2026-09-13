@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Eval 使用 product run ID 查询 trace
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/49
+
 ## 问题
 
 EvalRunner 从 agent.current_run_id 获取 trace link，但 ReactAgent 该值是外部 product run；真实 trace ID 是 invocation 内局部 trace_run_id。

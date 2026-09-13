@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # readonly_tools 不约束 custom Write/Execute Tool
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/81
+
 ## 问题
 
 Builder 的 readonly_tools 只让 StandardToolPack 安装只读集合，随后 custom tools 仍无条件 add；自定义 Write/Execute 工具进入所谓 read-only Agent。

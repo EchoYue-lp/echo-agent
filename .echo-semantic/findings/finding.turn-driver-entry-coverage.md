@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Channel adapter 绕过 driven Turn authority
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/107
+
 ## 问题
 
 Headless、ACP 与经 ACP 的 SDK 使用 `AgentTurnDriver`/`TurnReceipt`，但 Channel handler 作为外部 adapter 只调用 `ReactAgent::chat`，没有投影 driven Turn identity/receipt。Raw execute/chat 是合理低层 public API，本身不构成缺陷。

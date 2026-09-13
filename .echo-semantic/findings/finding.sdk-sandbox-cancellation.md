@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Sandbox bridge 取消分类丢失
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/91
+
 ## 问题
 
 第四轮审查发现cancel-aware Sandbox回调曾把extension取消映射为ReactError::Other。

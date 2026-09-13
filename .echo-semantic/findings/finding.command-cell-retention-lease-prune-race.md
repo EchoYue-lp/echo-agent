@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # CommandCell retention prune 可删除并发新 lease
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/45
+
 ## 问题
 
 Prune 先扫描 lease 计数并收集 key，随后排序并无条件 remove；删除前不复核 lease，watcher/waiter 可在 scan 与 remove 之间成功取得 lease。

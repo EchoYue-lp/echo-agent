@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Plugin component isolation 与 atomic generation 冲突
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/71
+
 ## 问题
 
 正式文档称坏 Skill/组件按最小边界隔离，SkillLoader error 却使完整 PreparedPluginSet generation 不可应用；ADR 0012 支持后者。

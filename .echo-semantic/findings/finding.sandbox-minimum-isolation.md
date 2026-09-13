@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Sandbox minimum isolation 可被 fallback 降级
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/83
+
 ## 问题
 
 SandboxCommand 将 minimum_isolation 描述为调用方最低要求，SandboxManager 在 allow_fallback=true 时仍可选择更低隔离并执行。

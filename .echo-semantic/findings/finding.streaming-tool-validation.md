@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Streaming Tool 路径跳过统一参数校验
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/26
+
 ## 问题
 
 基准ToolManager非流式路径执行schema与`Tool::validate_parameters`，流式路径取得Tool后直接执行；真实stream tests确认非法输入到达Tool。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # demo64 Tool pipeline 合同与生产顺序漂移
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/101
+
 ## 问题
 
 Executable contract 仍声明 13 stages、包含已不存在的 ParseValidateStage，并把 Trace 放在 PostHook 前；生产 pipeline 当前是 16 stages 且顺序不同。

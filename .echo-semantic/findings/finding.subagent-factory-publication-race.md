@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Subagent lazy factory publication 存在双创建窗口
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/25
+
 ## 问题
 
 基准实现中factory完成后先从`instantiating`删除名称，再取得state lock发布agent；test-only publication boundary确定性确认第二调用可在空窗中启动同revision第二次factory。

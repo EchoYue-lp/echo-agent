@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # CommandCell 普通 cancel 可卡在 artifact finalization
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/44
+
 ## 问题
 
 Stop/owner cancel 令 command 返回 Cancelled 后，artifact finalization 只监听 manager shutdown 与原始命令 deadline，不监听 cell/owner cancellation；terminal 在 finalizer 返回后才发布。

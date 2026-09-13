@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Workflow checkpoint claim 缺少失败恢复
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/109
+
 ## 问题
 
 File checkpoint store 通过 rename 领取后读取并删除 `.claim`；读取/解析/删除失败或进程崩溃会留下普通 list/load 不再发现的 claim，resume 又在执行下一节点前消费 checkpoint。

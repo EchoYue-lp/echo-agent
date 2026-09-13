@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # EvalDrivenImprovement 忽略 max_iterations
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/31
+
 ## 问题
 
 基准public max_iterations setter更新字段，run却直接构造默认ImprovementLoop；真实pipeline测试配置2仍执行5轮。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # A2A 重复 task ID 缺 admission generation authority
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/34
+
 ## 问题
 
 Sync/stream入口接受 client task ID并无条件覆盖 tasks/cancel_tokens；旧执行仍按同 key更新新task、追加旧输出并删除新 cancel token。

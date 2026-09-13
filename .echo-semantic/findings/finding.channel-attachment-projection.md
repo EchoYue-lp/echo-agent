@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Channel attachment 在 Agent adapter 中丢失
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/40
+
 ## 问题
 
 InboundMessage 保存 attachments，AgentChannelHandler 只调用 `agent.chat(&msg.text)`，没有传递多模态内容；当前内建 QQ/飞书声明不支持 media，custom/future media channel 才会即时触发。

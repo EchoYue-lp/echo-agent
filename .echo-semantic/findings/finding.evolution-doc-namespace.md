@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Evolution 文档 namespace 与代码漂移
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/53
+
 ## 问题
 
 代码使用 `agent/memories` warm namespace 并默认折叠 cold 层，双语文档仍描述 `typed_memories` 和旧三层模型。

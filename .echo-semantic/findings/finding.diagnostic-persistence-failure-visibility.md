@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Trace 与 Audit 持久化失败缺少统一可见结果
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/46
+
 ## 问题
 
 RunStore 默认 append 对缺失 run 返回成功，trace 初始 save 失败仍返回 run ID，多条 trace/audit callback 丢弃 backend error，FileAuditLogger 仅 flush 无 durability barrier/torn-tail recovery。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Agent adapter close 与资源结算 owner 未闭合
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/36
+
 ## 问题
 
 ACP 已正确停止接纳、取消/等待 Run 并 await Agent close；Headless 返回结果不 close，A2A 无 close API，Channel manager 只停止 transport 且 MessageHandler 无 close 合同；ReactAgent Drop 的 MCP cleanup 也是未等待任务。

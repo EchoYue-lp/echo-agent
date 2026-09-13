@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # SSE EOF 接受缺事件边界的剩余 JSON
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/95
+
 ## 问题
 
 SseDecoder::finish 把没有空行分隔符的剩余 buffer 当事件返回，只要 data JSON 完整就 yield，而不是 truncated-event error。

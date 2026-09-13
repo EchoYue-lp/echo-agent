@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Transcript projection 写入失败没有结算合同
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/106
+
 ## 问题
 
 `save_transcript_projection` 在 ConversationStore ensure/save 失败时只记录 warning 并返回，未记录 retry、delivery debt 或最终缺失状态。

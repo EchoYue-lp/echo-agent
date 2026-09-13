@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # README feature表列出不存在的tasks feature
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/79
+
 ## 问题
 
 Root Cargo.toml没有tasks feature且明确Task API属于core；双语README feature表仍把tasks列为可启用feature，后文又给出相反说明。

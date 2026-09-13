@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Scheduler store、cache 与 callback delivery 未闭合
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/84
+
 ## 问题
 
 Fire 后只更新 CronTaskStore 而不刷新 runner cache，list 可返回旧 last-run；callback effect 与 store update 没有持久 claim，legacy migration 还可能覆盖已有目标 backend。

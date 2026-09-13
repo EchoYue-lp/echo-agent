@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # MCP server annotation 被当作自动 Tool 权限与副作用事实
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/66
+
 ## 问题
 
 McpToolAdapter 信任 server annotation 设置 ReadOnly/Dangerous，但未覆写 Tool::permissions；ReactAgent 读取空权限无需确认，Plan mode 也漏 mcp tool，readOnlyHint 还影响 partial-side-effect 分类。

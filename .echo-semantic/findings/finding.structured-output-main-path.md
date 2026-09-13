@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Agent structured output 配置未进入主 ReAct request
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/96
+
 ## 问题
 
 Builder/AgentConfig 保存 response_format，主 think request 固定为 None；execute_typed 只在普通 execute 后反序列化，不会让 provider 按 schema 生成。

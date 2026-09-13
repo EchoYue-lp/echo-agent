@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Trace Permission/File/Test 事件缺少生产点
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/104
+
 ## 问题
 
 RunEvent 定义并在文档承诺 PermissionDecision、FileEdit、TestRun、Error、SubagentRun，但全仓未发现对应构造点；文档称 11 类而源码有 14 类，permission audit 另以 fire-and-forget 写入。

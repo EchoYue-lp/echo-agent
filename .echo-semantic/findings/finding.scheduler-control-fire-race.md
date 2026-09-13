@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Scheduler disable/remove 与已捕获 callback 不线性一致
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/85
+
 ## 问题
 
 Tick 在锁内克隆待执行任务后释放锁；随后成功 disable/remove 不会撤销已经捕获但尚未调用的 callback。

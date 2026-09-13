@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # 三语言SDK gap generation校验不对等
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/88
+
 ## 问题
 
 TypeScript用完整handle校验gap generation；Python/Java主要按stream ID路由并可能使用外来watermark，未一致验证WireHandle generation。

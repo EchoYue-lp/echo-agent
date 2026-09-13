@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Evolution ChangeLog不提供later rollback authority
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/52
+
 ## 问题
 
 ChangeLog只有record/query/latest/len，没有rollback apply API；模块和文档却宣称rollback-capable，draft/merge/patch仅在同调用内best-effort补偿。

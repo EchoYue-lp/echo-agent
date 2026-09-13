@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # README把demo34 test contract写成Cargo example target
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/80
+
 ## 问题
 
 双语README要求`cargo run -p echo-agent-learning --example demo34_workflow_stream`，但该源码是tests/example_contracts模块，Cargo metadata没有同名example target。

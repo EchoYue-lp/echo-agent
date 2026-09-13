@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Skill candidate reinforcement不写audit
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/94
+
 ## 问题
 
 新candidate写ChangeLog，但已有candidate的sample/confidence reinforcement在Store更新后直接返回，不记录audit。

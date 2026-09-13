@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Channel reset后旧generation回复无法fencing
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/41
+
 ## 问题
 
 Reset立即发布新handler generation但旧stream继续；cleanup只延后callback不取消旧输出，OutboundMessage不携带incarnation。

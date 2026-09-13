@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Pre-compaction memory丢失混合来源trust provenance
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/76
+
 ## 问题
 
 Pre-compaction flush从user/assistant/tool混合transcript经LLM生成内容，无exact-evidence/origin验证，统一标L3Promotion+Active写入warm memory；Recall只排除Superseded。

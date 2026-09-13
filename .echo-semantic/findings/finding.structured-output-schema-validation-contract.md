@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # strict structured output 没有 framework schema validation
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/97
+
 ## 问题
 
 JsonSchemaSpec strict 与文档承诺严格 schema，但 extract_json 只检查 JSON 语法，extract/execute_typed 只做 serde 反序列化，没有本地 JSON Schema validation。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Plugin lifecycle reconcile 可形成两代资源重叠
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/74
+
 ## 问题
 
 旧 Plugin deactivate 失败后，LifecycleManager 仍继续 activate 新集合；失败旧项保持 active/cleanup_required。

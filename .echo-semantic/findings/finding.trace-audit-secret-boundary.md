@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Trace 与 audit 没有统一 secret retention 合同
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/103
+
 ## 问题
 
 ReactAgent trace 保存 guard 转换后的 effective input，AuditStage 提交完整 tool input；in-memory RunStore/AuditLogger 不做清洗或统一容量限制，只有 JSONL/File 等部分持久 backend 有 retention sanitization。

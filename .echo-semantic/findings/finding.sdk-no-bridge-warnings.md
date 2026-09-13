@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # facade/bridge/improve feature组合未闭合
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/90
+
 ## 问题
 
 第五轮复审发现open_ephemeral及Eval/Improve helper未按真实feature使用点编译，no-bridge组合产生dead_code告警；后续组合暴露improve未声明eval依赖、bridge-only缺失tokenizer facade authority及factory helper多余编译。

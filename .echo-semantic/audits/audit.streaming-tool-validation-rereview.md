@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: trigger_input
 freshness: examined
-revision: source:aaf0d4c101710a5879fe6066820ffc3145ab93b4295ab8aa22878d54e7a050b5
+revision: 50890faac10ab91c90dc45769854c4b6e35f8376
 finding_refs: [finding.streaming-tool-validation]
 challenges:
   stream-validation-parity:
-    revision: source:aaf0d4c101710a5879fe6066820ffc3145ab93b4295ab8aa22878d54e7a050b5
+    revision: 50890faac10ab91c90dc45769854c4b6e35f8376
     source_refs: [echo-execution/src/tools.rs, echo-core/src/tools/mod.rs]
     evidence_refs: [evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification]
   pre-effect-ordering:
-    revision: source:aaf0d4c101710a5879fe6066820ffc3145ab93b4295ab8aa22878d54e7a050b5
+    revision: 50890faac10ab91c90dc45769854c4b6e35f8376
     source_refs: [echo-execution/src/tools.rs]
     evidence_refs: [evidence.streaming-tool-validation-verification]
 ---

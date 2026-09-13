@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Definition-only Subagent catalog 合同冲突
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/98
+
 ## 问题
 
 SubagentRegistry 文档声称 definition-only 项进入 available/catalog，生产实现与测试却过滤没有 instance/factory 的定义。

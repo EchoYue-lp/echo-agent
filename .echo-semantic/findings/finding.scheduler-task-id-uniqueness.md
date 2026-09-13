@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Scheduler 不保证 CronTask ID 唯一
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/86
+
 ## 问题
 
 CronTask ID 可公开赋值且 add 不校验唯一；重复 ID 被 last_fired 合并，update/set-status 只更新首项，remove 删除全部同 ID 定义。

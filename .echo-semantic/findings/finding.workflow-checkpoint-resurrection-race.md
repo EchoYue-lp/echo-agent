@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Workflow tag 可复活已领取 checkpoint
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/110
+
 ## 问题
 
 `tag_checkpoint` 以 load-modify-save 实现，能与 resume claim 交错：tag 先读、resume 消费、tag 后保存会重新发布同一 checkpoint。

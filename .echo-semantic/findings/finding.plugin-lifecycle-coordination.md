@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Plugin Registry、wiring 与 callback lifecycle 未统一编排
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/73
+
 ## 问题
 
 Registry disable/uninstall、Integrator unwire 与 LifecycleManager deactivate/shutdown 是三段状态，未发现一个生产入口确保顺序和 cleanup debt 闭合；PluginLoaded/Disabled 也未发现 emitter。

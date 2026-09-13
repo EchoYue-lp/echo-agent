@@ -3,23 +3,27 @@ schema_version: 1
 id: finding.tool-read-cache-inflight-invalidation-race
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: failure_concurrency
 focus: [state_authority, data_durability]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
-rule_refs: []
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.tool-permission-sandbox.failure-concurrency]
+rule_refs: [rule.permission-effect-order]
+evidence_refs: [evidence.effects-extensions, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification]
+audit_refs: [audit.tool-permission-sandbox.failure-concurrency, audit.tool-read-cache-authority-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.tool-read-cache-authority-repair]
+verification_evidence_refs: [evidence.tool-read-cache-authority-verification]
+rereview_audit_refs: [audit.tool-read-cache-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
 # In-flight Read 可在 Write 后复活陈旧 cache
+
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/28
 
 ## 问题
 
@@ -35,4 +39,4 @@ Read cache miss 后执行期间，Write 可先 clear cache 并完成；旧 Read 
 
 ## 处理记录
 
-Failure-concurrency Audit 确认；后续 repair 需 per-scope epoch/CAS 或协调 invalidation，并补确定性交错测试。
+Issue #28追踪。所有非Read effect在进入和Drop时推进epoch并清cache，Read只在同一cache write临界区确认epoch未变后发布；确定性Read/Write交错、Accepted ADR与三轮独立复审已闭合本Finding。

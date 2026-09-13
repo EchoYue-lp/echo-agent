@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Task relation patch 可能覆盖 live claim
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/27
+
 ## 问题
 
 Relation patch 只以 graph revision 做 CAS；runtime claim 不递增该 revision，且 SetStatus/Skip 对 execution drift 有豁免，旧 patch snapshot 可能覆盖并发创建的 live claim。

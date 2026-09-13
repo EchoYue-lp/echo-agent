@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Hook Allow 可绕过 protected-path decision
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/60
+
 ## 问题
 
 PreToolUse/PermissionRequest Hook 返回 Allow 时 PermissionStage 立即返回，不再调用 PermissionService，因而绕过其文档化最高优先级 protected path 检查。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Guard ToolInput/ToolOutput 与生产可达性错位
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/57
+
 ## 问题
 
 GuardDirection 定义 ToolInput/ToolOutput，但未发现生产调用；工具输出使用通用 Output，单 Guard error 又被降级为 Warn，使上层 fail-closed 分支难以到达。

@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Artifact、Sandbox 与 Worktree cleanup owner 未闭合
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/47
+
 ## 问题
 
 Artifact scope cleanup 由宿主负责但 React 路径未调用；SandboxManager cleanup 无生产调用点；worktree 创建后 marker 写失败缺少补偿删除。K8s Pod cleanup 的独立 owner/settlement 缺口由专项 Finding 跟踪。

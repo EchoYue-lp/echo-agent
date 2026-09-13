@@ -21,6 +21,10 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 # Eval/Improve workspace缺generation隔离
 
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/50
+
 ## 问题
 
 Eval fixture目录固定为workspace_root/case.id且存在即递归删除；ImprovementLoop固定使用系统tmp/improve_i，early-stop在cleanup前break。
