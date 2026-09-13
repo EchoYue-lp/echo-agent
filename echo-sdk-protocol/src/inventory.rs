@@ -2822,9 +2822,9 @@ fn language_status_for(
         )
     } else if MEMORY_SCOPE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "memory_scope_values")
-    } else if MEMORY_TYPE_IDENTITIES.contains(&identity) {
-        (LanguageImplementationStatus::Done, "memory_policy_values")
-    } else if MEMORY_SOURCE_IDENTITIES.contains(&identity) {
+    } else if MEMORY_TYPE_IDENTITIES.contains(&identity)
+        || MEMORY_SOURCE_IDENTITIES.contains(&identity)
+    {
         (LanguageImplementationStatus::Done, "memory_policy_values")
     } else {
         match identity {
