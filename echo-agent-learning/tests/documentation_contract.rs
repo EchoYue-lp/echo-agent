@@ -1,8 +1,22 @@
 //! Contracts for the learning package's docs, examples, and public facade.
 
 use regex::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[derive(serde::Deserialize)]
+struct WorkspaceMetadata {
+    packages: Vec<WorkspacePackage>,
+    workspace_members: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspacePackage {
+    id: String,
+    name: String,
+    manifest_path: PathBuf,
+}
 
 fn collect_markdown_files(directory: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(directory)? {
@@ -62,6 +76,164 @@ fn demo_sources() -> Result<BTreeMap<String, PathBuf>, Box<dyn std::error::Error
         }
     }
     Ok(sources)
+}
+
+fn workspace_packages() -> Result<(PathBuf, Vec<WorkspacePackage>), Box<dyn std::error::Error>> {
+    let learning_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = learning_root.parent().ok_or_else(|| {
+        std::io::Error::other("learning package has no workspace parent directory")
+    })?;
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+        .current_dir(workspace_root)
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let metadata: WorkspaceMetadata = serde_json::from_slice(&output.stdout)?;
+    let member_ids = metadata
+        .workspace_members
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let packages = metadata
+        .packages
+        .into_iter()
+        .filter(|package| member_ids.contains(&package.id))
+        .collect::<Vec<_>>();
+    if packages.len() != member_ids.len() {
+        return Err(std::io::Error::other(format!(
+            "cargo metadata returned {} workspace members but {} matching packages",
+            member_ids.len(),
+            packages.len()
+        ))
+        .into());
+    }
+    Ok((workspace_root.to_path_buf(), packages))
+}
+
+fn markdown_section(content: &str, heading: &str) -> Result<String, std::io::Error> {
+    let mut found = false;
+    let mut section = String::new();
+    for line in content.lines() {
+        if !found {
+            found = line.trim() == heading;
+            continue;
+        }
+        if line.starts_with("## ") {
+            break;
+        }
+        section.push_str(line);
+        section.push('\n');
+    }
+    if found {
+        Ok(section)
+    } else {
+        Err(std::io::Error::other(format!(
+            "missing Markdown section: {heading}"
+        )))
+    }
+}
+
+#[test]
+fn root_readmes_match_workspace_package_topology() -> Result<(), Box<dyn std::error::Error>> {
+    let (workspace_root, packages) = workspace_packages()?;
+    if packages.len() != 11 {
+        return Err(std::io::Error::other(format!(
+            "expected the root package plus ten workspace members, found {} packages",
+            packages.len()
+        ))
+        .into());
+    }
+
+    let framework_count = packages
+        .iter()
+        .filter(|package| {
+            package.name != "echo-agent-learning" && !package.name.starts_with("echo-sdk-")
+        })
+        .count();
+    let sdk_count = packages
+        .iter()
+        .filter(|package| package.name.starts_with("echo-sdk-"))
+        .count();
+    let learning_count = packages
+        .iter()
+        .filter(|package| package.name == "echo-agent-learning")
+        .count();
+    if (framework_count, sdk_count, learning_count) != (8, 2, 1) {
+        return Err(std::io::Error::other(format!(
+            "unexpected package groups: framework/runtime={framework_count}, sdk={sdk_count}, learning={learning_count}"
+        ))
+        .into());
+    }
+
+    let mut package_directories = BTreeSet::new();
+    for package in &packages {
+        let manifest_parent = package.manifest_path.parent().ok_or_else(|| {
+            std::io::Error::other(format!(
+                "workspace package {} has no manifest parent",
+                package.name
+            ))
+        })?;
+        let relative = manifest_parent.strip_prefix(&workspace_root).map_err(|_| {
+            std::io::Error::other(format!(
+                "workspace package {} is outside {}",
+                package.name,
+                workspace_root.display()
+            ))
+        })?;
+        if !relative.as_os_str().is_empty() {
+            package_directories.insert(relative.display().to_string());
+        }
+    }
+    let readmes = [
+        (
+            "README.md",
+            "## Workspace Structure",
+            format!(
+                "**{framework_count} framework/runtime packages + {sdk_count} SDK packages + {learning_count} learning package**"
+            ),
+        ),
+        (
+            "README.zh.md",
+            "## Workspace 结构",
+            format!(
+                "**{framework_count} 个框架/运行时 package + {sdk_count} 个 SDK package + {learning_count} 个学习 package**"
+            ),
+        ),
+    ];
+    let mut violations = Vec::new();
+    for (path, heading, package_summary) in readmes {
+        let content = std::fs::read_to_string(workspace_root.join(path))?;
+        let topology = markdown_section(&content, heading)?;
+        for directory in &package_directories {
+            let marker = format!("{directory}/");
+            if topology.matches(&marker).count() != 1 {
+                violations.push(format!(
+                    "{path} workspace topology must list {marker} exactly once"
+                ));
+            }
+        }
+        if !content.contains(&package_summary) {
+            violations.push(format!(
+                "{path} must report the Cargo-derived package groups as {package_summary}"
+            ));
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "workspace documentation topology drift:\n{}",
+            violations.join("\n")
+        ))
+        .into())
+    }
 }
 
 #[test]

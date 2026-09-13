@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.workspace-structure
 kind: evidence
-observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
+observed_at: source:1edd0f8dd43db91c544af47174e3f57154b9598d3bd78d9a3e7859a422f24a91
 source_refs:
   - Cargo.toml
   - README.md
@@ -45,7 +45,7 @@ limitations:
 
 ## 来源与范围
 
-来源包括全部 11 个 package manifests、各 crate 根模块、root facade、公共 facade smoke、learning 文档合同以及本地/CI 门禁入口。
+来源包括全部 11 个 package manifests、各 crate 根模块、root facade、公共 facade smoke、双语README、Cargo-derived learning 文档合同以及本地/CI 门禁入口。
 
 ## 已知缺口
 

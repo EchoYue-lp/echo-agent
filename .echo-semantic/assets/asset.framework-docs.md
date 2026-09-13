@@ -6,14 +6,14 @@ title: Framework 正式文档与 ADR
 asset_type: document
 status: needs_review
 risk: medium
-observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
+observed_at: source:1edd0f8dd43db91c544af47174e3f57154b9598d3bd78d9a3e7859a422f24a91
 boundary_refs: [boundary.workspace-architecture]
 code_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/en/24-eval-system.md, docs/zh/24-eval-system.md, docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, docs/adr/0014-framework-capability-placement.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0034-context-scoped-tool-result-cache.md, docs/adr/0035-owned-tool-registry-handles.md, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0039-background-task-terminal-authority.md]
 consumer_refs: [echo-agent-learning/tests/documentation_contract.rs]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-verification, evidence.background-task-terminal-authority-verification]
-finding_refs: []
+evidence_refs: [evidence.workspace-structure, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-verification, evidence.background-task-terminal-authority-verification, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification]
+finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift, finding.mcp-version-doc-drift, finding.evolution-doc-namespace, finding.tool-pipeline-example-drift]
 candidate_refs: []
 ---
 

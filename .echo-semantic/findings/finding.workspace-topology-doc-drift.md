@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.workspace-topology-doc-drift
 kind: finding
 type: evidence_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: contract_evidence
 focus: [state_authority]
 boundary_ref: boundary.workspace-architecture
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure]
-audit_refs: [audit.workspace-architecture.contract-evidence]
+evidence_refs: [evidence.workspace-structure, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification]
+audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.workspace-topology-doc-repair]
+verification_evidence_refs: [evidence.workspace-topology-doc-verification]
+rereview_audit_refs: [audit.workspace-topology-doc-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,4 @@ Root Cargo.toml与README.md/README.zh.md的成员图和计数形成直接反例�
 
 ## 处理记录
 
-Workspace Contract Audit确认；属于双语文档修复，不需要runtime/API改动。
+Workspace Contract Audit确认。双语README已补齐SDK protocol/Host并更正为Cargo-derived 8+2+1分组；新documentation contract在旧README上red、修复后green。Repair、verification与独立复审已闭合本Finding。GitHub Issue保持open，等待远程main交付。

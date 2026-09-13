@@ -6,7 +6,7 @@ title: Process-local BackgroundTask
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
+observed_at: 9d1f3f2b5fdc204c08ecdec32ed22e8df95870e9
 boundary_refs: [boundary.task-subagent-workflow]
 code_refs: [echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/background_state.rs, docs/adr/0039-background-task-terminal-authority.md]
 consumer_refs: [docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh]

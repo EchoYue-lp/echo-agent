@@ -265,6 +265,8 @@ echo-agent/
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
 ├── echo-tools/          Domain tools: chart, data, database, git, media, web, rag
+├── echo-sdk-protocol/   Deterministic facade inventory, contracts, and code generation
+├── echo-sdk-host/       Runtime Host exposing echo_agent through ACP and namespaced operations
 ├── echo-agent-learning/ Non-published lessons, demos, composite examples, and facade contracts
 ├── src/                 Agent engine, re-exports, and facade layer
 └── docs/                Framework consumer documentation (en + zh)
@@ -285,7 +287,7 @@ The framework accepts typed `FrameworkConfig`, `AgentConfig`, `LlmConfig`, `Perm
 - **67 registered tools** — ReAct loop, data analysis, research papers, web, media, RAG, database, and more
 - **Runnable examples and a teaching crate** — framework acceptance and Rust lessons are maintained separately
 - **Comprehensive unit tests** — full coverage across all modules
-- **8 production crates + 1 teaching crate** — production dependencies stay one-way and lessons never enter the runtime
+- **8 framework/runtime packages + 2 SDK packages + 1 learning package** — runtime, SDK, and executable consumer boundaries stay explicit
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
 - **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box
 - **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required

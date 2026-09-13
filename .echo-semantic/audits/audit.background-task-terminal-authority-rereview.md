@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: failure_concurrency
 freshness: examined
-revision: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
+revision: 9d1f3f2b5fdc204c08ecdec32ed22e8df95870e9
 finding_refs: [finding.background-task-wait]
 challenges:
   atomic-terminal-and-multi-waiter:
-    revision: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
+    revision: 9d1f3f2b5fdc204c08ecdec32ed22e8df95870e9
     source_refs: [echo-orchestration/src/tasks/background_task.rs]
     evidence_refs: [evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
   admission-execution-cancel-deadline:
-    revision: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
+    revision: 9d1f3f2b5fdc204c08ecdec32ed22e8df95870e9
     source_refs: [echo-orchestration/src/tasks/background_task.rs, docs/adr/0039-background-task-terminal-authority.md]
     evidence_refs: [evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
   panic-type-erasure-and-sdk-contract:
-    revision: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
+    revision: 9d1f3f2b5fdc204c08ecdec32ed22e8df95870e9
     source_refs: [echo-orchestration/src/tasks/background_task.rs, contracts/sdk/parity-manifest.json, echo-sdk-protocol/tests/facade_inventory.rs]
     evidence_refs: [evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
 ---

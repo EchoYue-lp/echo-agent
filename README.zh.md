@@ -261,6 +261,8 @@ echo-agent/
 ├── echo-orchestration/  工作流、人工审批和 DAG 任务
 ├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
 ├── echo-tools/          领域工具：chart、data、database、git、media、web、rag
+├── echo-sdk-protocol/   确定性 facade inventory、契约与代码生成
+├── echo-sdk-host/       通过 ACP 和命名空间操作暴露 echo_agent 的运行时 Host
 ├── echo-agent-learning/ 不发布的学习课程、Demo、综合示例和 facade 合同
 ├── src/                 Agent 引擎、重导出和门面层
 └── docs/                框架消费者文档（en + zh）
@@ -281,7 +283,7 @@ echo-agent/
 - **67 个注册工具** — ReAct 循环、数据分析、论文检索、Web、媒体、RAG、数据库等
 - **可运行示例与教学 crate** — 框架验收示例和 Rust 基础课程分别维护
 - **全模块单元测试** — 覆盖核心路径的测试
-- **8 个生产 crate + 1 个教学 crate** — 生产依赖保持单向，教学代码不进入框架运行时
+- **8 个框架/运行时 package + 2 个 SDK package + 1 个学习 package** — 运行时、SDK 与可执行消费者边界保持明确
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
 - **IM 集成** — QQ Bot（WebSocket）& 飞书（Webhook）开箱即用
 - **声明式工作流** — 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
