@@ -6,13 +6,13 @@ title: Trace、Eval、Improve 与 Evolution
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:a2317ccf488e81ce737d93a5c7b13369d67228da5e54baf56c14210a47794342
 boundary_refs: [boundary.eval-evolution]
 code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, echo-state/src/skill_telemetry.rs]
 consumer_refs: [echo-agent-learning/tests/example_contracts/demo50_eval.rs, echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.evolution-audit-atomicity, finding.evolution-skill-promotion-audit, finding.evolution-doc-namespace]
 candidate_refs: []
 ---
@@ -37,4 +37,4 @@ Quality observation 不替代业务 commit；Evolution 持久 mutation 需要独
 
 ## 未知与限制
 
-Trace identity、timeout settlement、iteration/config panic、memory audit atomicity、Skill promotion audit 与文档 namespace 已形成 Findings。
+Trace identity、timeout settlement、iteration config、workspace generation、memory audit atomicity、Skill promotion audit与文档namespace仍有Finding；singleton split panic已闭合。

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.subagent-factory-singleflight-verification
 kind: evidence
-observed_at: source:252362472c35fc62836123fbf064477b407af7bce21a21f16d231d594eebb136
+observed_at: 6d66479fd520da9cbbb66723faa35ce69a8963a8
 source_refs:
   - src/agent/subagent/registry.rs
   - docs/adr/0033-subagent-factory-singleflight-publication.md

@@ -4,13 +4,13 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:a2317ccf488e81ce737d93a5c7b13369d67228da5e54baf56c14210a47794342
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
-audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external]
+audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
 scenarios:
   trace-record-and-analysis:
@@ -27,9 +27,10 @@ scenarios:
     status: needs_review
     source_refs: [src/improve/loop.rs, src/improve/eval_improvement.rs, src/improve/trajectory.rs]
     finding_refs: [finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation]
-    evidence_refs: [evidence.provider-protocol-quality]
-    unknown: max_iterations 未进入执行，单 case criteria 分组可 panic，共享临时路径与 cleanup 仍需复核
-    next_step: audit iteration/config/split/temporary workspace lifecycle 并补边界测试
+    evidence_refs: [evidence.provider-protocol-quality, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification]
+    audit_refs: [audit.improve-singleton-split-rereview]
+    unknown: single case panic已关闭；max_iterations未进入执行，共享临时路径与cleanup仍需复核
+    next_step: 分别修复iteration config与workspace generation lifecycle
   evolution-background-review-and-dreaming:
     status: needs_review
     source_refs: [src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/runtime_integration.rs, src/evolution/review.rs]
@@ -100,7 +101,7 @@ Report/dashboard/suggestions 是质量投影，不等同产品成功或允许自
 
 ## 场景处置清单
 
-Trace/Eval/Improve、Background Review/Dreaming、Memory mutation、Skill lifecycle 与 Rule promotion 已分别路由；十二个 Finding 和 runtime/human coordination 保持 needs_review。
+Trace/Eval/Improve、Background Review/Dreaming、Memory mutation、Skill lifecycle与Rule promotion已分别路由；singleton panic已关闭，其余十一个Finding和runtime/human coordination保持needs_review。
 
 ## 未展开项
 

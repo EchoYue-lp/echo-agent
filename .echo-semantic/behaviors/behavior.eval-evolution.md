@@ -8,10 +8,10 @@ risk: medium
 primary_focus: contract_evidence
 focus: [result_side_effect, data_durability, permission_external, failure_concurrency]
 boundary: boundary.eval-evolution
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:a2317ccf488e81ce737d93a5c7b13369d67228da5e54baf56c14210a47794342
 code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/eval/replay.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, echo-state/src/skill_telemetry.rs]
 rule_refs: [rule.quality-observation-boundary]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.evolution-audit-atomicity, finding.evolution-skill-promotion-audit, finding.evolution-doc-namespace]
 ---
 
@@ -23,7 +23,7 @@ Quality pipeline 消费 trace、test 和人工裁决证据；它可以提出或�
 
 ## 当前行为
 
-EvalRunner 执行 cases 并评分，Replay/Analyzer 读取 RunStore，Improve 生成离线建议/轨迹；Evolution 分为 Background Review/Dreaming、memory mutation、Skill candidate/draft/review/promote/merge/patch 与仅有安全检查的 rule-promotion surface。
+EvalRunner执行cases并评分，Replay/Analyzer读取RunStore，Improve生成离线建议/轨迹；criteria单例采用train-only disposition以避免holdout复制。Evolution分为Background Review/Dreaming、memory mutation、Skill candidate/draft/review/promote/merge/patch与仅有安全检查的rule-promotion surface。
 
 ## 期望行为
 

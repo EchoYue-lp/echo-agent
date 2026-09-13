@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: failure_concurrency
 freshness: examined
-revision: source:252362472c35fc62836123fbf064477b407af7bce21a21f16d231d594eebb136
+revision: 6d66479fd520da9cbbb66723faa35ce69a8963a8
 finding_refs: [finding.subagent-factory-cancellation, finding.subagent-factory-publication-race]
 challenges:
   cancellation-and-failure-ownership:
-    revision: source:252362472c35fc62836123fbf064477b407af7bce21a21f16d231d594eebb136
+    revision: 6d66479fd520da9cbbb66723faa35ce69a8963a8
     source_refs: [src/agent/subagent/registry.rs, docs/adr/0033-subagent-factory-singleflight-publication.md]
     evidence_refs: [evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
   same-revision-publication:
-    revision: source:252362472c35fc62836123fbf064477b407af7bce21a21f16d231d594eebb136
+    revision: 6d66479fd520da9cbbb66723faa35ce69a8963a8
     source_refs: [src/agent/subagent/registry.rs]
     evidence_refs: [evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
   registration-generation-fence:
-    revision: source:252362472c35fc62836123fbf064477b407af7bce21a21f16d231d594eebb136
+    revision: 6d66479fd520da9cbbb66723faa35ce69a8963a8
     source_refs: [src/agent/subagent/registry.rs]
     evidence_refs: [evidence.subagent-factory-singleflight-verification]
 ---
