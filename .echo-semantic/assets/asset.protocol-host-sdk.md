@@ -6,7 +6,7 @@ title: ACP、A2A、Channels、Headless 与 SDK Host
 asset_type: protocol
 status: needs_review
 risk: high
-observed_at: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
+observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
 boundary_refs: [boundary.protocol-surfaces, boundary.sdk-facade-parity]
 code_refs: [src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, src/channels.rs, src/headless.rs, echo-sdk-protocol/src/lib.rs, echo-sdk-host/src/lib.rs]
 consumer_refs: [tests/acp_agent_adapter.rs, echo-sdk-host/tests/core_profile_e2e.rs, sdks/typescript/src/client.ts, sdks/python/src/echo_agent_sdk/client.py]

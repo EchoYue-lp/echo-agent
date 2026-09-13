@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [time_lifecycle, failure_concurrency, contract_evidence]
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
 behavior_refs: [behavior.task-subagent-execution]
 code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, src/agent/subagent/executor.rs, docs/adr/0008-canonical-runtime-task-authority.md]
 evidence_refs: [evidence.task-subagent-workflow]

@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.task-patch-claim-race
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: failure_concurrency
 focus: [state_authority, data_durability, time_lifecycle]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: [audit.task-subagent-workflow.state-authority]
+evidence_refs: [evidence.task-subagent-workflow, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification]
+audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-patch-claim-cas-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.task-patch-claim-cas-repair]
+verification_evidence_refs: [evidence.task-patch-claim-cas-verification]
+rereview_audit_refs: [audit.task-patch-claim-cas-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -31,8 +31,8 @@ Patch 先读取 Pending revision，runtime 随后 claim，同一 patch 再提交
 
 ## 证据
 
-`echo-orchestration/src/tasks/revisioned.rs` 的 compare/commit 与 patch effects 提供静态反例；现有测试未覆盖 load -> claim -> commit 精确交错。
+基准实现的 compare/commit 与 patch effects 提供静态反例，确定性 red 测试确认 `load -> claim -> stale commit` 可覆盖 live claim。当前 canonical producer、exact execution CAS 和 interleaving regression test 共同覆盖该路径。
 
 ## 处理记录
 
-Discovery 记录为高风险 authority conflict；下一阶段用确定性交错测试审计后再决定 revision 或 CAS 修复。
+`TaskRevisionService` 现携带读取时完整 execution snapshot；Store 对 claim、retry、settlement 与 patch 做 typed conflict。SDK 合同同步并通过独立复审，本 Finding 已关闭；第三方 Store 原子性保留为复用方验证责任。

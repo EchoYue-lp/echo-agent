@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [contract_evidence, permission_external]
-observed_at: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
+observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
 behavior_refs: [behavior.workspace-composition]
 code_refs: [Cargo.toml, src/lib.rs, docs/adr/0014-framework-capability-placement.md, docs/en/39-framework-application-boundary.md]
 evidence_refs: [evidence.workspace-structure]

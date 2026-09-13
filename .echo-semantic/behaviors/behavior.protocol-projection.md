@@ -8,7 +8,7 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, permission_external, failure_concurrency]
 boundary: boundary.protocol-surfaces
-observed_at: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
+observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
 code_refs: [src/acp/adapter.rs, src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, src/channels.rs, src/headless.rs, echo-sdk-protocol/src/lib.rs, echo-sdk-host/src/lib.rs]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
 evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts]

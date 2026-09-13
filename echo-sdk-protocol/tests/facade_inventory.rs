@@ -127,7 +127,7 @@ fn sdk_scope_is_complete_deterministic_and_alias_safe() -> TestResult {
     }
 
     let expected = BTreeMap::from([
-        (SdkScope::ExternalContract, 5_606usize),
+        (SdkScope::ExternalContract, 5_607usize),
         (SdkScope::HostOrRustOnly, 1_765usize),
         (SdkScope::LanguageIntrinsic, 780usize),
         (SdkScope::InternalHelper, 90usize),

@@ -91,7 +91,7 @@ test("every external SDK contract has a completed TypeScript mapping", () => {
   }
   assert.deepEqual(Object.fromEntries(counts), {
     deferred: 1441,
-    external_contract: 5606,
+    external_contract: 5607,
     host_or_rust_only: 1765,
     internal_helper: 90,
     language_intrinsic: 780,

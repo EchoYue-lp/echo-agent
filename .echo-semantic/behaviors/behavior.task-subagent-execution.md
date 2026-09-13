@@ -8,7 +8,7 @@ risk: high
 primary_focus: state_authority
 focus: [time_lifecycle, failure_concurrency, result_side_effect, contract_evidence]
 boundary: boundary.task-subagent-workflow
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
 code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/dag.rs, echo-orchestration/src/workflow/mod.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/command_cell.rs]
 rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]

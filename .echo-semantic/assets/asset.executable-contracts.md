@@ -6,7 +6,7 @@ title: Tests、Examples 与 CI 消费者
 asset_type: test_consumer
 status: active
 risk: high
-observed_at: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
+observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
 boundary_refs: [boundary.workspace-architecture, boundary.agent-session-turn, boundary.context-memory, boundary.task-subagent-workflow, boundary.observation-persistence-delivery, boundary.tool-permission-sandbox, boundary.extension-lifecycle, boundary.llm-provider-runtime, boundary.protocol-surfaces, boundary.eval-evolution]
 code_refs: [tests/facade_smoke.rs, echo-agent-learning/tests/documentation_contract.rs, echo-agent-learning/tests/example_contracts.rs, echo-agent-learning/examples/README.md, .github/workflows/rust-ci.yml, scripts/verify.sh]
 consumer_refs: [Cargo.toml, echo-agent-learning/Cargo.toml]

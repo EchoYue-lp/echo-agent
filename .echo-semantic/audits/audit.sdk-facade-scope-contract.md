@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.sdk-facade-parity
 lens: contract_evidence
 freshness: examined
-revision: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
+revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
 finding_refs: []
 challenges:
   identity-scope-versus-route:
-    revision: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
+    revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
     source_refs: [echo-sdk-protocol/src/inventory.rs, contracts/sdk/parity-manifest.schema.json, contracts/sdk/parity-manifest.json, docs/adr/0032-sdk-contract-scope-classification.md]
     evidence_refs: [evidence.sdk-contracts]
   cross-language-scope-gates:
-    revision: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
+    revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
     source_refs: [echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh, sdks/typescript/test/catalog.test.js, sdks/python/tests/test_catalog.py, sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java]
     evidence_refs: [evidence.sdk-contracts]
   operation-catalog-stability:
-    revision: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
+    revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
     source_refs: [contracts/sdk/facade-operation-catalog.json, contracts/sdk/source-contract.json, sdks/shared/contract-digests.json]
     evidence_refs: [evidence.sdk-contracts]
 ---
@@ -34,7 +34,7 @@ challenges:
 
 ## 实际实现路径与证据
 
-SdkScope是ManifestEntry属性并与status分离；非intrinsic route和具名intrinsic capability group独立决定external acceptance，其余按testing source与既有intrinsic reason分类。Language status随后验证external完整性，不能反向降级scope。Alias显式复制canonical scope。当前canonical计数为5606/1765/780/90/1441，551个intrinsic external保持不变；manifest schema升2，extension protocol保持1，operation catalog哈希保持不变。
+SdkScope是ManifestEntry属性并与status分离；非intrinsic route和具名intrinsic capability group独立决定external acceptance，其余按testing source与既有intrinsic reason分类。Language status随后验证external完整性，不能反向降级scope。Alias显式复制canonical scope。TaskGraphCommit新增的execution precondition沿既有value:task路由进入external contract；当前canonical计数为5607/1765/780/90/1441，总量9683，551个intrinsic external保持不变；manifest schema为2，extension protocol保持1。
 
 ## 问题记录
 

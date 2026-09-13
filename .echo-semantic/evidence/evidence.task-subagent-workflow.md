@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.task-subagent-workflow
 kind: evidence
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
 source_refs:
   - echo-orchestration/src/tasks/revisioned.rs
   - echo-orchestration/src/tasks/runtime.rs

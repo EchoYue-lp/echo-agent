@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.provider-protocol-quality
 kind: evidence
-observed_at: source:5a12b544f08f549cccd424c6c0a22acf3f1cba0e15bcacc1febc283b76536f6b
+observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
 source_refs:
   - echo-core/src/llm/mod.rs
   - echo-core/src/llm/capabilities.rs

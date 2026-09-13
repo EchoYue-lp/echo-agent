@@ -49,7 +49,7 @@ scope_counts=$(jq -r '
     ]
   | @tsv
 ' "$repo_root/contracts/sdk/parity-manifest.json")
-[[ "$scope_counts" == $'5606\t1765\t780\t90\t1441' ]] || {
+[[ "$scope_counts" == $'5607\t1765\t780\t90\t1441' ]] || {
   echo "error: SDK scope counts drifted: $scope_counts" >&2
   exit 1
 }

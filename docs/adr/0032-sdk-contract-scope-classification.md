@@ -86,13 +86,15 @@ The current canonical distribution is:
 
 | Scope | Count |
 | --- | ---: |
-| `external_contract` | 5,606 |
+| `external_contract` | 5,607 |
 | `host_or_rust_only` | 1,765 |
 | `language_intrinsic` | 780 |
 | `internal_helper` | 90 |
 | `deferred` | 1,441 |
 
-The 551 identities that use an intrinsic route but already have three
+The additional external identity is
+`TaskGraphCommit::expected_executions`, a typed precondition on the existing
+`value:task` route. The 551 identities that use an intrinsic route but already have three
 language implementations remain `external_contract`. Route mechanics do not
 downgrade delivered behavior.
 
