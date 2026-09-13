@@ -7,10 +7,10 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [data_durability, contract_evidence, failure_concurrency]
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
 behavior_refs: [behavior.observation-persistence]
-code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, src/trace/mod.rs, docs/en/41-persistence-concepts.md]
-evidence_refs: [evidence.persistence-observation]
+code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, docs/en/41-persistence-concepts.md, docs/adr/0038-eval-trace-correlation-identity.md]
+evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
 finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary]
 ---
 
@@ -26,11 +26,11 @@ finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity
 
 ## 当前实现
 
-EventEnvelope 提供 versioned identity/sequence，CheckpointedReducer 从 Journal 恢复，DeliveryLedger 使用 Journal+reducer，RunStore 独立保存 trace。
+EventEnvelope提供versioned identity/sequence，CheckpointedReducer从Journal恢复，DeliveryLedger使用Journal+reducer，RunStore独立保存producer-owned trace。Eval correlation只关联Run，不能替代真实trace ID；多个精确候选不形成“任选其一”的投影权威。
 
 ## 期望行为
 
-丢失投影可重建；trace 写失败时业务路径可继续则 trace 不能决定提交；gap/retention floor 必须显式可观察。
+丢失投影可重建；trace写失败时业务路径可继续则trace不能决定提交；需要trace的质量投影遇到歧义或存储不一致必须失败可见；gap/retention floor必须显式可观察。
 
 ## 证据
 

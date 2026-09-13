@@ -125,6 +125,15 @@ managed stream releases its terminal only after the owned producer task has
 settled; other Agent implementations must honor the same terminal-is-last
 stream contract.
 
+Each Eval invocation also carries one unique run/turn/execution correlation in
+its value-scoped runtime context. A trace producer keeps ownership of the real
+trace ID and records that correlation as parent, turn, and execution metadata.
+After Turn settlement, Eval resolves exactly one matching Run through the
+configured RunStore. `EvalResult.run_id` is set only to that loadable trace ID;
+it is never the Eval correlation or an Agent's product/business run ID. No
+matching trace remains optional, while ambiguous matches or RunStore
+inconsistency fail the Eval instead of selecting by list order.
+
 ---
 
 ## LlmGrader — LLM-as-Judge

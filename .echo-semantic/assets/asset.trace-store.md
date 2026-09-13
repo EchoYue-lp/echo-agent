@@ -6,13 +6,13 @@ title: Trace Run 与 RunStore
 asset_type: state_authority
 status: active
 risk: medium
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
 boundary_refs: [boundary.observation-persistence-delivery, boundary.eval-evolution]
-code_refs: [src/trace/mod.rs, src/trace/analyzer.rs]
+code_refs: [src/trace/mod.rs, src/trace/analyzer.rs, src/eval/runner.rs, src/agent/react/mod.rs, docs/adr/0038-eval-trace-correlation-identity.md]
 consumer_refs: [src/eval/runner.rs, src/improve/mod.rs, docs/en/27-tracing.md]
 behavior_refs: [behavior.observation-persistence, behavior.eval-evolution]
 rule_refs: [rule.fact-projection-separation, rule.quality-observation-boundary]
-evidence_refs: [evidence.persistence-observation, evidence.provider-protocol-quality]
+evidence_refs: [evidence.persistence-observation, evidence.provider-protocol-quality, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
 finding_refs: [finding.eval-trace-identity, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary]
 candidate_refs: []
 ---
@@ -29,12 +29,12 @@ ReactAgent 可选记录，Analyzer/Eval/Improve 消费。
 
 ## 生命周期
 
-Start trace、append events、finalize status、query/replay/analyze。
+Start trace、append events、finalize status、correlate/query/replay/analyze。
 
 ## 候选关系
 
-Trace Run ID 与 product run/Turn/TaskRun 是不同身份。
+Trace Run ID与product run/Turn/TaskRun是不同身份；parent/turn/execution只用于correlation，不替代RunStore primary key。
 
 ## 未知与限制
 
-Eval trace identity、缺失 event producers 与原始输入 retention 已形成 Findings。
+Eval trace correlation已由repair、verification和独立rereview闭合；缺失event producers与原始输入retention继续由Findings追踪。

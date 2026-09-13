@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.persistence-observation
 kind: evidence
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
 source_refs:
   - echo-core/src/agent/event_envelope.rs
   - echo-core/src/memory/store.rs
@@ -27,6 +27,7 @@ source_refs:
   - src/agent/react/run/phases/finalize.rs
   - src/trace/mod.rs
   - src/agent/react/mod.rs
+  - src/eval/runner.rs
   - src/agent/react/run/pipeline.rs
   - echo-state/src/audit/memory.rs
   - echo-state/src/audit/mod.rs
@@ -40,6 +41,7 @@ source_refs:
   - docs/adr/0007-atomic-journal-batch-commits.md
   - docs/adr/0019-typed-delivery-ledger-api.md
   - docs/adr/0030-versioned-subagent-event-envelope.md
+  - docs/adr/0038-eval-trace-correlation-identity.md
 supports: [behavior.observation-persistence, rule.fact-projection-separation]
 limitations:
   - 所有事件 family 的完整 durable/live/lossy/diagnostic 分类仍需下一阶段 audit 逐项反证
@@ -49,11 +51,11 @@ limitations:
 
 ## 支持的结论
 
-`EventJournal` 保存有序事实，checkpoint 加速恢复，`RuntimeStateStore` 保存 ReAct runtime state，`ConversationStore` 是 transcript 投影，`Store` 保存长期知识，`RunStore` 保存诊断 trace，`DeliveryLedger` 通过 journal 与 reducer 拥有交付生命周期。
+`EventJournal`保存有序事实，checkpoint加速恢复，`RuntimeStateStore`保存ReAct runtime state，`ConversationStore`是transcript投影，`Store`保存长期知识，`RunStore`以producer-owned Run ID保存诊断trace并保留parent/turn/execution correlation，`DeliveryLedger`通过journal与reducer拥有交付生命周期。Eval只把唯一精确匹配且可load的真实trace ID投影到结果。
 
 ## 来源与范围
 
-来源覆盖事件信封、Conversation/long-term/runtime Store traits 与内建 File/SQLite/Embedding/typed backends、snapshot producers、Journal/checkpoint、Delivery Ledger、Trace、Task/Subagent/Workflow 事件和持久化 ADR。
+来源覆盖事件信封、Conversation/long-term/runtime Store traits与内建File/SQLite/Embedding/typed backends、snapshot producers、Journal/checkpoint、Delivery Ledger、Trace producer/Eval consumer correlation、Task/Subagent/Workflow事件和持久化ADR。
 
 ## 已知缺口
 

@@ -6,14 +6,14 @@ title: Raw Agent Execution Contract
 asset_type: protocol
 status: active
 risk: high
-observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
 boundary_refs: [boundary.agent-session-turn]
-code_refs: [echo-core/src/agent/mod.rs, src/agent/react/mod.rs, src/agent/handle.rs]
+code_refs: [echo-core/src/agent/mod.rs, echo-core/src/tools/mod.rs, src/agent/react/mod.rs, src/agent/handle.rs, src/eval/runner.rs, docs/adr/0038-eval-trace-correlation-identity.md]
 consumer_refs: [src/channels.rs, src/a2a/server.rs, echo-orchestration/src/runtime/turn_driver.rs]
 behavior_refs: [behavior.agent-turn-lifecycle]
 rule_refs: []
-evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
-finding_refs: [finding.turn-driver-entry-coverage, finding.a2a-terminal-authority]
+evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
+finding_refs: [finding.turn-driver-entry-coverage, finding.a2a-terminal-authority, finding.eval-trace-identity]
 candidate_refs: [asset.driven-turn-authority]
 ---
 
@@ -29,7 +29,7 @@ Channel、A2A与直接Rust callers可调用raw execution；Eval已迁移为Agent
 
 ## 生命周期
 
-Construct/configure Agent、execute/chat/stream、cancel、close；ReactAgent managed stream terminal不领先于其自有producer settlement，具体Invocation resource和effect由相关运行边界结算。
+Construct/configure Agent、value-scoped runtime identity、execute/chat/stream、cancel、close；ReactAgent managed stream terminal不领先于其自有producer settlement，product correlation不替代producer-owned trace ID，具体Invocation resource和effect由相关运行边界结算。
 
 ## 候选关系
 

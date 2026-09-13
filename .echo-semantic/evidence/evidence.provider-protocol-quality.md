@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.provider-protocol-quality
 kind: evidence
-observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
 source_refs:
   - echo-core/src/llm/mod.rs
   - echo-core/src/llm/capabilities.rs
@@ -72,6 +72,7 @@ source_refs:
   - docs/adr/0028-source-first-multilanguage-sdk-runtime.md
   - docs/adr/0031-sdk-identity-governance-scope.md
   - docs/adr/0037-eval-timeout-turn-settlement.md
+  - docs/adr/0038-eval-trace-correlation-identity.md
 supports: [behavior.llm-provider-execution, behavior.protocol-projection, behavior.eval-evolution, rule.provider-protocol-boundary, rule.protocol-role-separation, rule.quality-observation-boundary]
 limitations:
   - Provider 模型事实会随外部服务变化；SDK intrinsic backlog 与产品 UI/backend 行为不是本 Evidence 的闭合目标
@@ -81,7 +82,7 @@ limitations:
 
 ## 支持的结论
 
-LLM provider adapter、模型能力/预算/超时构成typed framework边界；ACP、A2A、Channels、Headless和SDK Host是不同入口投影；Trace/Eval/Improve的per-run workspace generation、AgentTurnDriver settlement、未settled timeout retain与分层Evolution能力的已知行为和反例均可从本Evidence复核。
+LLM provider adapter、模型能力/预算/超时构成typed framework边界；ACP、A2A、Channels、Headless和SDK Host是不同入口投影；Trace/Eval/Improve的per-run workspace generation、AgentTurnDriver settlement、product/correlation/trace identity分离、未settled timeout retain与分层Evolution能力的已知行为和反例均可从本Evidence复核。
 
 ## 来源与范围
 

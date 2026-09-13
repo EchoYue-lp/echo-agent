@@ -4,12 +4,12 @@ id: map.agent-session-turn
 kind: capability_map
 title: Agent、Session、Invocation 与 Turn
 risk: high
-observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
 boundary_refs: [boundary.agent-session-turn]
 behavior_refs: [behavior.agent-turn-lifecycle]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.high-risk-audit-frontier, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
-finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.eval-timeout-settlement]
+evidence_refs: [evidence.agent-context-execution, evidence.high-risk-audit-frontier, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
+finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.eval-timeout-settlement, finding.eval-trace-identity]
 audit_refs: [audit.agent-session-turn.state-authority]
 related_map_refs: [map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.protocol-surfaces]
 scenarios:
@@ -25,11 +25,11 @@ scenarios:
     evidence_refs: [evidence.agent-context-execution]
   driven-turn-admission-and-terminal:
     status: mapped
-    source_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, docs/adr/0037-eval-timeout-turn-settlement.md]
+    source_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, echo-core/src/tools/mod.rs, src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md]
     behavior_refs: [behavior.agent-turn-lifecycle]
     rule_refs: [rule.turn-terminal-authority]
-    finding_refs: [finding.eval-timeout-settlement]
-    evidence_refs: [evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
+    finding_refs: [finding.eval-timeout-settlement, finding.eval-trace-identity]
+    evidence_refs: [evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
   direct-and-channel-execution:
     status: needs_review
     source_refs: [src/agent/react/mod.rs, src/channels.rs]
@@ -64,7 +64,7 @@ Agent 实现原始执行，Session 管入口作用域，Context 保存模型状�
 
 ## 状态与数据流
 
-Session ID、conversation ID、runtime state ID、run ID 与 trace ID 均为限定 identity；TurnReceipt 不替代持久 Task 或 transcript。
+Session ID、conversation ID、runtime state ID、product run ID、invocation correlation与trace ID均为限定identity；TurnReceipt不替代持久Task、trace Run或transcript。
 
 ## 策略来源与优先级
 
@@ -84,7 +84,7 @@ ACP/Headless/SDK/Eval可投影不同结果并共享driven Turn terminal；Channe
 
 ## 场景处置清单
 
-Agent/Session与driven Turn已映射，Eval timeout repair等待复审；Channel/direct route、AgentRevision与factory同名保持needs_review。
+Agent/Session与driven Turn已映射，Eval timeout与trace correlation已闭合；Channel/direct route、AgentRevision与factory同名保持needs_review。
 
 ## 未展开项
 

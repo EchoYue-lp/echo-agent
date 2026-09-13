@@ -8,11 +8,11 @@ risk: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, result_side_effect, contract_evidence]
 boundary: boundary.agent-session-turn
-observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
-code_refs: [echo-core/src/agent/mod.rs, src/agent/react/mod.rs, src/agent/react/run/stream_channel.rs, src/agent/handle.rs, echo-orchestration/src/runtime/turn_driver.rs, src/acp/session.rs, src/acp/runtime.rs, src/headless.rs, src/eval/runner.rs, src/channels.rs, echo-integration/src/channels/session.rs, docs/adr/0037-eval-timeout-turn-settlement.md]
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
+code_refs: [echo-core/src/agent/mod.rs, echo-core/src/agent/event_envelope.rs, echo-core/src/tools/mod.rs, src/agent/react/mod.rs, src/agent/react/run/stream_channel.rs, src/agent/handle.rs, echo-orchestration/src/runtime/turn_driver.rs, src/acp/session.rs, src/acp/runtime.rs, src/headless.rs, src/eval/runner.rs, src/channels.rs, echo-integration/src/channels/session.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
-finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settlement]
+evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
+finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settlement, finding.eval-trace-identity]
 ---
 
 # Agent、Session 与 Turn 生命周期
@@ -23,7 +23,7 @@ finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settleme
 
 ## 当前行为
 
-`ReactAgent`实现原始Agent调用，并在managed stream中等待自有producer settled后才释放terminal；`AgentTurnDriver`接纳输入、提交envelope、归约usage/final output并生成Completed/Cancelled/Failed receipt。ACP、Headless、经ACP的SDK与Eval使用driver；Eval deadline后在同一个drive future上等待共享bounded grace。Channel和直接Rust execute/chat当前绕过driver。
+`ReactAgent`实现原始Agent调用、生成真实trace Run，并在managed stream中等待自有producer settled后才释放terminal；`AgentTurnDriver`接纳输入、提交envelope、归约usage/final output并生成Completed/Cancelled/Failed receipt。ACP、Headless、经ACP的SDK与Eval使用driver；Eval使用value-scoped run/turn/execution correlation，不读取Agent共享product run来猜trace，并在deadline后对同一个drive future等待共享bounded grace。Channel和直接Rust execute/chat当前绕过driver。
 
 ## 期望行为
 
@@ -39,7 +39,7 @@ ACP prompt、Headless prompt、Eval case和经ACP的SDK call触发driven Turn；
 
 ## 证据
 
-Agent/ReactAgent、Turn driver、EvalRunner、Session registries、tracked receipt/timeout ADR与integration tests覆盖driven路径；Channel/direct差异由Finding保留。
+Agent/ReactAgent、Turn driver、EvalRunner、Session registries、tracked receipt/timeout/trace correlation ADR与integration tests覆盖driven路径；Channel/direct差异由Finding保留。
 
 ## 裁决记录
 

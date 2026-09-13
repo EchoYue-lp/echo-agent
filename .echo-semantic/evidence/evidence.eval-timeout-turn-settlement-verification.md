@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.eval-timeout-turn-settlement-verification
 kind: evidence
-observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+observed_at: 8332345abfefb1aa23b31f32697e97f0cc7a43d3
 source_refs:
   - src/eval/runner.rs
   - src/agent/react/run/stream_channel.rs

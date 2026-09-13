@@ -121,6 +121,13 @@ println!("通过: {}/{}", report.passed, report.total);
 producer task结算后释放terminal；其它Agent实现也必须遵守terminal是stream最后一项的
 合同。调用方取消同样保留目录并记录warning。
 
+每次Eval invocation还会在value-scoped runtime context中携带唯一run/turn/execution
+correlation。trace producer继续拥有真实trace ID，并把该correlation记录为parent、turn和
+execution metadata。Turn结算后，Eval通过配置的RunStore解析唯一精确匹配的Run；
+`EvalResult.run_id`只保存可load的真实trace ID，绝不保存Eval correlation或Agent的
+product/business run ID。没有匹配trace时保持可选；多个精确候选或RunStore不一致会使
+Eval失败，不按列表顺序猜测。
+
 ---
 
 ## LlmGrader — LLM 评判

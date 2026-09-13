@@ -137,13 +137,8 @@ impl EvalRunner {
         let mut final_output = None;
 
         let cancel = CancellationToken::new();
-        let invocation = AgentInvocationContext {
-            working_dir: Some(cwd.clone()),
-            cancel: Some(cancel.clone()),
-            ..AgentInvocationContext::default()
-        };
         let identity_value = format!("eval-{}", uuid::Uuid::new_v4());
-        let identity = match EventIdentity::new(&identity_value, &identity_value) {
+        let identity = match EventIdentity::for_run(identity_value.clone()) {
             Ok(identity) => identity,
             Err(error) => {
                 result.success = false;
@@ -154,6 +149,17 @@ impl EvalRunner {
                 result.recompute_score();
                 return result;
             }
+        };
+        let invocation = AgentInvocationContext {
+            runtime: Some(crate::tools::ExternalRunContext {
+                run_id: Some(identity_value.clone()),
+                turn_id: Some(identity_value.clone()),
+                execution_id: Some(identity_value.clone()),
+                ..crate::tools::ExternalRunContext::default()
+            }),
+            working_dir: Some(cwd.clone()),
+            cancel: Some(cancel.clone()),
+            ..AgentInvocationContext::default()
         };
         let request = TurnRequest::new(identity, case.task.clone())
             .mode(TurnMode::Execute)
@@ -178,8 +184,6 @@ impl EvalRunner {
         drop(drive);
         let turn_settled = receipt.is_some();
 
-        // Capture run_id only after the bounded settlement attempt.
-        result.run_id = agent.current_run_id();
         result.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         if timed_out {
@@ -219,14 +223,22 @@ impl EvalRunner {
             }
         }
 
-        // Load the trace once. Criteria such as ToolUsed/ToolNotUsed require it,
-        // and observability metrics should come from the same authoritative run.
-        let run = if turn_settled
-            && let Some(ref store) = self.run_store
-            && let Some(ref run_id) = result.run_id
-            && let Ok(Some(run)) = store.load(run_id).await
-        {
-            Some(run)
+        // Resolve the producer-owned trace through this invocation's correlation.
+        // EvalResult and all trace-based scoring then consume the same verified Run.
+        let run = if turn_settled && let Some(ref store) = self.run_store {
+            match Self::load_correlated_trace(store.as_ref(), &identity_value).await {
+                Ok(run) => {
+                    result.run_id = run.as_ref().map(|run| run.run_id.clone());
+                    run
+                }
+                Err(error) => {
+                    result.success = false;
+                    result
+                        .violations
+                        .push(format!("Trace lookup failed: {error}"));
+                    None
+                }
+            }
         } else {
             None
         };
@@ -298,6 +310,45 @@ impl EvalRunner {
         }
         result.recompute_score();
         result
+    }
+
+    async fn load_correlated_trace(
+        store: &dyn crate::trace::RunStore,
+        correlation_id: &str,
+    ) -> std::result::Result<Option<Run>, String> {
+        let summaries = store
+            .list_by_parent_run(correlation_id)
+            .await
+            .map_err(|error| format!("could not list correlation {correlation_id}: {error}"))?;
+        let mut exact = summaries.into_iter().filter(|summary| {
+            summary.parent_run_id.as_deref() == Some(correlation_id)
+                && summary.turn_id.as_deref() == Some(correlation_id)
+                && summary.execution_id.as_deref() == Some(correlation_id)
+        });
+        let Some(summary) = exact.next() else {
+            return Ok(None);
+        };
+        if exact.next().is_some() {
+            return Err(format!(
+                "multiple traces matched correlation {correlation_id}"
+            ));
+        }
+        let trace_run_id = summary.run_id;
+        let run = store
+            .load(&trace_run_id)
+            .await
+            .map_err(|error| format!("could not load trace {trace_run_id}: {error}"))?
+            .ok_or_else(|| format!("trace summary {trace_run_id} has no loadable Run"))?;
+        if run.run_id != trace_run_id
+            || run.parent_run_id.as_deref() != Some(correlation_id)
+            || run.turn_id.as_deref() != Some(correlation_id)
+            || run.execution_id.as_deref() != Some(correlation_id)
+        {
+            return Err(format!(
+                "loaded trace {trace_run_id} does not match correlation {correlation_id}"
+            ));
+        }
+        Ok(Some(run))
     }
 
     /// Run all cases against agents created by the factory.
@@ -948,7 +999,21 @@ mod tests {
     }
 
     struct CountingRunStore {
+        lists: AtomicUsize,
         loads: AtomicUsize,
+    }
+
+    #[derive(Clone, Copy)]
+    enum TraceLookupFailure {
+        List,
+        Load,
+        Dangling,
+        MismatchedRun,
+    }
+
+    struct FaultingTraceRunStore {
+        summary: RunSummary,
+        mode: TraceLookupFailure,
     }
 
     impl WorkspaceRecordingAgent {
@@ -1141,7 +1206,85 @@ mod tests {
         }
 
         async fn list_all(&self, _limit: usize) -> crate::error::Result<Vec<RunSummary>> {
+            self.lists.fetch_add(1, Ordering::AcqRel);
             Ok(Vec::new())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::trace::RunStore for FaultingTraceRunStore {
+        async fn save(&self, _run: Run) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, _run_id: &str) -> crate::error::Result<Option<Run>> {
+            match self.mode {
+                TraceLookupFailure::Load => Err(crate::error::ReactError::Other(
+                    "forced trace load failure".to_string(),
+                )),
+                TraceLookupFailure::Dangling => Ok(None),
+                TraceLookupFailure::MismatchedRun => {
+                    Ok(Some(correlated_run("trace-mismatch", "other-correlation")))
+                }
+                TraceLookupFailure::List => Ok(None),
+            }
+        }
+
+        async fn list_by_session(
+            &self,
+            _session_id: &str,
+        ) -> crate::error::Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self, _limit: usize) -> crate::error::Result<Vec<RunSummary>> {
+            if matches!(self.mode, TraceLookupFailure::List) {
+                return Err(crate::error::ReactError::Other(
+                    "forced trace list failure".to_string(),
+                ));
+            }
+            Ok(vec![self.summary.clone()])
+        }
+    }
+
+    fn correlated_run(run_id: &str, correlation_id: &str) -> Run {
+        Run {
+            run_id: run_id.to_string(),
+            parent_run_id: Some(correlation_id.to_string()),
+            agent_name: "trace-agent".to_string(),
+            model: "test".to_string(),
+            provider: None,
+            turn_id: Some(correlation_id.to_string()),
+            execution_id: Some(correlation_id.to_string()),
+            session_id: String::new(),
+            status: RunStatus::Completed,
+            input: "trace lookup".to_string(),
+            events: Vec::new(),
+            final_output: Some("done".to_string()),
+            error: None,
+            token_usage: TokenUsage::default(),
+            timings: RunTimings::default(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+        }
+    }
+
+    fn correlated_summary(run_id: &str, correlation_id: &str) -> RunSummary {
+        RunSummary {
+            run_id: run_id.to_string(),
+            parent_run_id: Some(correlation_id.to_string()),
+            session_id: String::new(),
+            agent_name: "trace-agent".to_string(),
+            model: "test".to_string(),
+            provider: None,
+            turn_id: Some(correlation_id.to_string()),
+            execution_id: Some(correlation_id.to_string()),
+            status: RunStatus::Completed,
+            input_preview: "trace lookup".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            token_usage: TokenUsage::default(),
+            total_duration_ms: 0,
         }
     }
 
@@ -1158,6 +1301,230 @@ mod tests {
             },
             constraints: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn eval_result_uses_the_real_trace_id_not_the_legacy_product_run() -> Result<(), String> {
+        use crate::agent::ReactAgentBuilder;
+        use crate::testing::MockLlmClient;
+        use crate::trace::{InMemoryRunStore, RunStore};
+
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let store = Arc::new(InMemoryRunStore::new());
+        let usage = crate::llm::types::Usage {
+            prompt_tokens: Some(37),
+            completion_tokens: Some(5),
+            total_tokens: Some(42),
+            ..Default::default()
+        };
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new().with_response_usage("done", usage),
+            ))
+            .system_prompt("Return the answer.")
+            .build()
+            .map_err(|error| error.to_string())?;
+        agent.set_run_store(store.clone());
+        agent.set_external_context(&crate::tools::ExternalRunContext {
+            run_id: Some("product-run".to_string()),
+            ..crate::tools::ExternalRunContext::default()
+        });
+        let runner = EvalRunner::new(parent.path().join("runs")).with_run_store(store.clone());
+        let case = workspace_case("trace-correlation", None);
+
+        let result = runner.run(&case, &agent).await;
+        let trace_run_id = result
+            .run_id
+            .as_deref()
+            .ok_or_else(|| "EvalResult did not return a trace run ID".to_string())?;
+        if trace_run_id == "product-run" {
+            return Err("EvalResult exposed the product run as a trace run".to_string());
+        }
+        let trace = store
+            .load(trace_run_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "EvalResult trace run ID was not loadable".to_string())?;
+        let correlation_id = trace
+            .parent_run_id
+            .as_deref()
+            .ok_or_else(|| "real trace did not retain the Eval correlation".to_string())?;
+        if trace.run_id != trace_run_id
+            || correlation_id == "product-run"
+            || !correlation_id.starts_with("eval-")
+            || trace.turn_id.as_deref() != Some(correlation_id)
+            || trace.execution_id.as_deref() != Some(correlation_id)
+            || result.tokens_in != 37
+            || result.tokens_out != 5
+        {
+            return Err(
+                "EvalResult and trace metrics did not use the real invocation trace".into(),
+            );
+        }
+        if agent.current_run_id().as_deref() != Some("product-run") {
+            return Err("Eval mutated the Agent product run identity".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn trace_lookup_requires_one_exact_loadable_correlation() -> Result<(), String> {
+        use crate::trace::{InMemoryRunStore, RunStore};
+
+        let correlation_id = "eval-correlation";
+        let store = InMemoryRunStore::new();
+        store
+            .save(correlated_run("trace-exact", correlation_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut other_child = correlated_run("trace-other-child", correlation_id);
+        other_child.execution_id = Some("different-execution".to_string());
+        store
+            .save(other_child)
+            .await
+            .map_err(|error| error.to_string())?;
+        let exact = EvalRunner::load_correlated_trace(&store, correlation_id)
+            .await?
+            .ok_or_else(|| "exact trace correlation was not found".to_string())?;
+        if exact.run_id != "trace-exact" {
+            return Err("trace lookup selected another child execution".to_string());
+        }
+
+        let empty = InMemoryRunStore::new();
+        if EvalRunner::load_correlated_trace(&empty, correlation_id)
+            .await?
+            .is_some()
+        {
+            return Err("empty trace store produced a correlation".to_string());
+        }
+
+        let ambiguous = InMemoryRunStore::new();
+        ambiguous
+            .save(correlated_run("trace-first", correlation_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        ambiguous
+            .save(correlated_run("trace-second", correlation_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        let ambiguity = EvalRunner::load_correlated_trace(&ambiguous, correlation_id)
+            .await
+            .err()
+            .ok_or_else(|| "duplicate exact traces were accepted".to_string())?;
+        if !ambiguity.contains("multiple traces matched") {
+            return Err(format!("unexpected ambiguity result: {ambiguity}"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn trace_lookup_reports_store_and_loaded_identity_failures() -> Result<(), String> {
+        let correlation_id = "eval-failure-correlation";
+        let summary = correlated_summary("trace-summary", correlation_id);
+        for (mode, expected) in [
+            (TraceLookupFailure::List, "could not list correlation"),
+            (TraceLookupFailure::Load, "could not load trace"),
+            (TraceLookupFailure::Dangling, "has no loadable Run"),
+            (
+                TraceLookupFailure::MismatchedRun,
+                "does not match correlation",
+            ),
+        ] {
+            let store = FaultingTraceRunStore {
+                summary: summary.clone(),
+                mode,
+            };
+            let failure = EvalRunner::load_correlated_trace(&store, correlation_id)
+                .await
+                .err()
+                .ok_or_else(|| format!("trace lookup mode did not fail: {expected}"))?;
+            if !failure.contains(expected) {
+                return Err(format!(
+                    "trace lookup failure '{failure}' did not contain '{expected}'"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_trace_is_optional_but_store_failure_is_not() -> Result<(), String> {
+        use crate::trace::InMemoryRunStore;
+
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let case = workspace_case("trace-lookup-projection", None);
+        let empty_store = Arc::new(InMemoryRunStore::new());
+        let empty_runner = EvalRunner::new(parent.path().join("empty")).with_run_store(empty_store);
+        let (empty_tx, _empty_rx) = tokio::sync::mpsc::unbounded_channel();
+        let empty_result = empty_runner
+            .run(&case, &WorkspaceRecordingAgent::new(empty_tx, None))
+            .await;
+        if !empty_result.success || empty_result.run_id.is_some() {
+            return Err(
+                "Agent without trace did not preserve optional trace semantics".to_string(),
+            );
+        }
+
+        let failing_store = Arc::new(FaultingTraceRunStore {
+            summary: correlated_summary("unused", "unused"),
+            mode: TraceLookupFailure::List,
+        });
+        let failing_runner =
+            EvalRunner::new(parent.path().join("failing")).with_run_store(failing_store);
+        let (failing_tx, _failing_rx) = tokio::sync::mpsc::unbounded_channel();
+        let failed_result = failing_runner
+            .run(&case, &WorkspaceRecordingAgent::new(failing_tx, None))
+            .await;
+        if failed_result.success
+            || !failed_result
+                .violations
+                .iter()
+                .any(|violation| violation.contains("Trace lookup failed: could not list"))
+        {
+            return Err("RunStore correlation failure was not projected".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settled_agent_failure_retains_its_correlated_diagnostic_trace() -> Result<(), String> {
+        use crate::agent::ReactAgentBuilder;
+        use crate::testing::MockLlmClient;
+        use crate::trace::{InMemoryRunStore, RunStore};
+
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let store = Arc::new(InMemoryRunStore::new());
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(MockLlmClient::new().with_error(
+                crate::error::ReactError::Other("forced provider failure".to_string()),
+            )))
+            .system_prompt("Return the answer.")
+            .build()
+            .map_err(|error| error.to_string())?;
+        agent.set_run_store(store.clone());
+        let runner = EvalRunner::new(parent.path().join("runs")).with_run_store(store.clone());
+        let result = runner
+            .run(&workspace_case("failed-trace-correlation", None), &agent)
+            .await;
+        let trace_run_id = result
+            .run_id
+            .as_deref()
+            .ok_or_else(|| "failed turn did not return its diagnostic trace ID".to_string())?;
+        let trace = store
+            .load(trace_run_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "failed turn diagnostic trace was not loadable".to_string())?;
+        if result.success
+            || trace.status != RunStatus::Failed
+            || !result
+                .violations
+                .iter()
+                .any(|violation| violation.contains("forced provider failure"))
+        {
+            return Err("failed turn trace changed or hid the Agent outcome".to_string());
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -1255,6 +1622,7 @@ mod tests {
     async fn timeout_retains_the_unsettled_workspace_generation() -> Result<(), String> {
         let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
         let run_store = Arc::new(CountingRunStore {
+            lists: AtomicUsize::new(0),
             loads: AtomicUsize::new(0),
         });
         let mut runner =
@@ -1298,7 +1666,9 @@ mod tests {
         if retained != observed_cwd || !retained.is_dir() {
             return Err("reported timeout generation was not retained".to_string());
         }
-        if run_store.loads.load(Ordering::Acquire) != 0 {
+        if run_store.lists.load(Ordering::Acquire) != 0
+            || run_store.loads.load(Ordering::Acquire) != 0
+        {
             return Err("unsettled timeout read non-terminal trace state".to_string());
         }
         std::fs::remove_dir_all(&retained).map_err(|error| error.to_string())?;

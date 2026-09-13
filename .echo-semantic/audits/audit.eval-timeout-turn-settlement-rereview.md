@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: time_lifecycle
 freshness: examined
-revision: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+revision: 8332345abfefb1aa23b31f32697e97f0cc7a43d3
 finding_refs: [finding.eval-timeout-settlement]
 challenges:
   single-drive-cancel-settlement:
-    revision: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+    revision: 8332345abfefb1aa23b31f32697e97f0cc7a43d3
     source_refs: [src/eval/runner.rs, echo-orchestration/src/runtime/turn_driver.rs]
     evidence_refs: [evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
   react-producer-terminal-release:
-    revision: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+    revision: 8332345abfefb1aa23b31f32697e97f0cc7a43d3
     source_refs: [src/agent/react/run/stream_channel.rs, src/agent/mod.rs]
     evidence_refs: [evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
   timeout-trace-criteria-workspace-order:
-    revision: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+    revision: 8332345abfefb1aa23b31f32697e97f0cc7a43d3
     source_refs: [src/eval/runner.rs, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md]
     evidence_refs: [evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
 ---

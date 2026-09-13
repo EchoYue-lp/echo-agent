@@ -4,27 +4,29 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
-audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview]
+audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
 scenarios:
   trace-record-and-analysis:
     status: mapped
-    source_refs: [src/trace/mod.rs, src/trace/analyzer.rs]
+    source_refs: [src/trace/mod.rs, src/trace/analyzer.rs, src/eval/runner.rs, docs/adr/0038-eval-trace-correlation-identity.md]
     finding_refs: [finding.eval-trace-identity]
     rule_refs: [rule.fact-projection-separation]
+    evidence_refs: [evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
+    audit_refs: [audit.eval-trace-correlation-rereview]
   eval-run-grade-report:
     status: mapped
-    source_refs: [src/eval/runner.rs, src/eval/comparator.rs, src/eval/mod.rs, src/eval/replay.rs, echo-orchestration/src/runtime/turn_driver.rs, src/agent/react/run/stream_channel.rs, docs/adr/0037-eval-timeout-turn-settlement.md]
+    source_refs: [src/eval/runner.rs, src/eval/comparator.rs, src/eval/mod.rs, src/eval/replay.rs, echo-orchestration/src/runtime/turn_driver.rs, src/agent/react/run/stream_channel.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md]
     finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.eval-workspace-generation-isolation]
     behavior_refs: [behavior.eval-evolution]
-    evidence_refs: [evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
-    audit_refs: [audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview]
+    evidence_refs: [evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
+    audit_refs: [audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview]
   improve-loop-and-trajectory:
     status: mapped
     source_refs: [src/improve/loop.rs, src/improve/eval_improvement.rs, src/improve/trajectory.rs]
@@ -81,7 +83,7 @@ Trace 是 observation，Eval/Improve 消费但不驱动业务 commit；Evolution
 
 ## 状态与数据流
 
-RunStore 保存 trace；AgentTurnDriver/TurnReceipt 是Eval invocation终态权威；EvalWorkspaceGeneration持有每次run的临时目录与cleanup disposition；EvalResult/Report 保存评分；ImprovementLoop 保存迭代结果；MemoryLayer/Curator/ChangeLog 保存演化状态。
+RunStore保存producer-owned trace；EvalRunner拥有每次invocation唯一run/turn/execution correlation并只把已load的真实trace ID写入EvalResult；AgentTurnDriver/TurnReceipt是Eval invocation终态权威；EvalWorkspaceGeneration持有每次run的临时目录与cleanup disposition；EvalResult/Report保存评分；ImprovementLoop保存迭代结果；MemoryLayer/Curator/ChangeLog保存演化状态。
 
 ## 策略来源与优先级
 
@@ -89,7 +91,7 @@ Eval cases/constraints、grader、explicit config、memory source/risk/status �
 
 ## 生命周期与失败路径
 
-Trace start/finalize；Eval run/deadline/cancel/bounded settlement/grade/report，未settled timeout跳过terminal trace评分并保留generation；Improve iterate/stop/export；Evolution detect/review/apply/audit/rollback。
+Trace start/finalize；Eval run/deadline/cancel/bounded settlement/correlate trace/grade/report，未settled timeout跳过RunStore与评分并保留generation；trace缺失保持可选，歧义或存储不一致失败；Improve iterate/stop/export；Evolution detect/review/apply/audit/rollback。
 
 ## 权限与敏感信息
 
@@ -101,7 +103,7 @@ Report/dashboard/suggestions 是质量投影，不等同产品成功或允许自
 
 ## 场景处置清单
 
-Trace/Eval/Improve、Background Review/Dreaming、Memory mutation、Skill lifecycle与Rule promotion已分别路由；singleton panic、iteration config、workspace generation与timeout settlement已关闭，其它Finding保持open。
+Trace/Eval/Improve、Background Review/Dreaming、Memory mutation、Skill lifecycle与Rule promotion已分别路由；trace correlation、singleton panic、iteration config、workspace generation与timeout settlement已关闭，其它Finding保持open。
 
 ## 未展开项
 

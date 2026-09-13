@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.agent-context-execution
 kind: evidence
-observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
 source_refs:
   - echo-core/src/agent/mod.rs
   - echo-core/src/agent/factory.rs
@@ -35,6 +35,7 @@ source_refs:
   - docs/adr/0009-tracked-input-receipts.md
   - docs/adr/0010-canonical-turn-receipt-accounting.md
   - docs/adr/0037-eval-timeout-turn-settlement.md
+  - docs/adr/0038-eval-trace-correlation-identity.md
   - docs/en/24-eval-system.md
   - docs/zh/24-eval-system.md
   - tests/agent_handle_turn_driver.rs
@@ -48,11 +49,11 @@ limitations:
 
 ## 支持的结论
 
-`ReactAgent`是默认Agent实现；`AgentTurnDriver`与`TurnReceipt`拥有一次driven invocation的序列、终态与计量；Eval复用该driver，在deadline后继续等待同一future的bounded settlement。Channel/direct Rust调用当前仍走raw Agent execution。`ContextManager`拥有默认ReAct活跃上下文；runtime checkpoint、transcript和长期memory是不同持久化边界。
+`ReactAgent`是默认Agent实现并拥有真实trace Run创建；`AgentTurnDriver`与`TurnReceipt`拥有一次driven invocation的序列、终态与计量；Eval复用该driver和value-scoped runtime correlation，在deadline后继续等待同一future的bounded settlement，并从RunStore解析真实trace而非读取product run getter。Channel/direct Rust调用当前仍走raw Agent execution。`ContextManager`拥有默认ReAct活跃上下文；runtime checkpoint、transcript、trace和长期memory是不同持久化边界。
 
 ## 来源与范围
 
-来源覆盖Agent trait/实现/handle、ReAct主循环、Turn driver、ACP/Headless/Eval/Channel入口、snapshot producer、safe-point callers、ContextManager、RuntimeStateStore、相关ADR和集成测试。
+来源覆盖Agent trait/实现/handle、ReAct主循环、Turn driver、ACP/Headless/Eval/Channel入口、value-scoped identity、snapshot/trace producer、safe-point callers、ContextManager、RuntimeStateStore、相关ADR和集成测试。
 
 ## 已知缺口
 

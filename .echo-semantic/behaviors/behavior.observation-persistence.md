@@ -8,10 +8,10 @@ risk: high
 primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency, contract_evidence]
 boundary: boundary.observation-persistence-delivery
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
-code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs]
+observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
+code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, src/agent/react/mod.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs, docs/adr/0038-eval-trace-correlation-identity.md]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation]
+evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
 finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary]
 ---
 
@@ -23,7 +23,7 @@ Durable fact、checkpoint、live stream、bounded replay、projection 和 diagno
 
 ## 当前行为
 
-`EventEnvelope` 提供 identity/sequence/hash/parent；Journal 保存有序事实；Delivery Ledger 归约投递生命周期；RuntimeStateStore、ConversationStore、Store 与 RunStore 保存不同数据域。
+`EventEnvelope`提供identity/sequence/hash/parent；Journal保存有序事实；Delivery Ledger归约投递生命周期；RuntimeStateStore、ConversationStore、Store与RunStore保存不同数据域。Trace producer分配真实Run ID，调用方identity只作为parent/turn/execution correlation；Eval只投影已从RunStore验证的真实trace ID。
 
 ## 期望行为
 
@@ -35,7 +35,7 @@ Agent/Task/Subagent/Workflow/Hook/Delivery 事件进入不同 stream 或 store�
 
 ## 失败、重试与恢复
 
-Gap、lag、torn tail、unknown batch outcome、checkpoint mismatch、retention floor 与 generation drift 必须显式处理。
+Gap、lag、torn tail、unknown batch outcome、checkpoint mismatch、retention floor、generation drift与trace correlation歧义/存储不一致必须显式处理。
 
 ## 证据
 
