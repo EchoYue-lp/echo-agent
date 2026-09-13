@@ -6,13 +6,13 @@ title: Framework 正式文档与 ADR
 asset_type: document
 status: needs_review
 risk: medium
-observed_at: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
+observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
 boundary_refs: [boundary.workspace-architecture]
-code_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/en/24-eval-system.md, docs/zh/24-eval-system.md, docs/adr/0014-framework-capability-placement.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0034-context-scoped-tool-result-cache.md, docs/adr/0035-owned-tool-registry-handles.md, docs/adr/0036-eval-workspace-generation-lifecycle.md]
+code_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/en/24-eval-system.md, docs/zh/24-eval-system.md, docs/adr/0014-framework-capability-placement.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0034-context-scoped-tool-result-cache.md, docs/adr/0035-owned-tool-registry-handles.md, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md]
 consumer_refs: [echo-agent-learning/tests/documentation_contract.rs]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure]
+evidence_refs: [evidence.workspace-structure, evidence.eval-timeout-turn-settlement-verification]
 finding_refs: []
 candidate_refs: []
 ---

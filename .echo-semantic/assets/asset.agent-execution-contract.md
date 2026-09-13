@@ -6,13 +6,13 @@ title: Raw Agent Execution Contract
 asset_type: protocol
 status: active
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
 boundary_refs: [boundary.agent-session-turn]
 code_refs: [echo-core/src/agent/mod.rs, src/agent/react/mod.rs, src/agent/handle.rs]
-consumer_refs: [src/channels.rs, src/a2a/server.rs, src/eval/runner.rs]
+consumer_refs: [src/channels.rs, src/a2a/server.rs, echo-orchestration/src/runtime/turn_driver.rs]
 behavior_refs: [behavior.agent-turn-lifecycle]
 rule_refs: []
-evidence_refs: [evidence.agent-context-execution]
+evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
 finding_refs: [finding.turn-driver-entry-coverage, finding.a2a-terminal-authority]
 candidate_refs: [asset.driven-turn-authority]
 ---
@@ -25,11 +25,11 @@ Agent trait、ReactAgent 与 AgentHandle 提供 execute/chat/stream/cancel/close
 
 ## 来源与消费者
 
-Channel、A2A、Eval 与直接 Rust callers 可调用 raw execution；各 adapter 必须自行声明是否需要 driven Turn terminal。
+Channel、A2A与直接Rust callers可调用raw execution；Eval已迁移为AgentTurnDriver consumer，各adapter必须自行声明是否需要driven Turn terminal。
 
 ## 生命周期
 
-Construct/configure Agent、execute/chat/stream、cancel、close；具体 Invocation resource 和 effect 由相关运行边界结算。
+Construct/configure Agent、execute/chat/stream、cancel、close；ReactAgent managed stream terminal不领先于其自有producer settlement，具体Invocation resource和effect由相关运行边界结算。
 
 ## 候选关系
 

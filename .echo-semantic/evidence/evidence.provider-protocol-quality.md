@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.provider-protocol-quality
 kind: evidence
-observed_at: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
+observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
 source_refs:
   - echo-core/src/llm/mod.rs
   - echo-core/src/llm/capabilities.rs
@@ -44,6 +44,8 @@ source_refs:
   - sdks/java/src/main/java/com/echoagent/sdk/EchoAgentClient.java
   - sdks/java/src/main/java/com/echoagent/sdk/BoundedPublisher.java
   - src/eval/runner.rs
+  - echo-orchestration/src/runtime/turn_driver.rs
+  - src/agent/react/run/stream_channel.rs
   - src/eval/replay.rs
   - src/improve/mod.rs
   - src/improve/loop.rs
@@ -69,6 +71,7 @@ source_refs:
   - docs/adr/0022-typed-llm-timeouts.md
   - docs/adr/0028-source-first-multilanguage-sdk-runtime.md
   - docs/adr/0031-sdk-identity-governance-scope.md
+  - docs/adr/0037-eval-timeout-turn-settlement.md
 supports: [behavior.llm-provider-execution, behavior.protocol-projection, behavior.eval-evolution, rule.provider-protocol-boundary, rule.protocol-role-separation, rule.quality-observation-boundary]
 limitations:
   - Provider 模型事实会随外部服务变化；SDK intrinsic backlog 与产品 UI/backend 行为不是本 Evidence 的闭合目标
@@ -78,7 +81,7 @@ limitations:
 
 ## 支持的结论
 
-LLM provider adapter、模型能力/预算/超时构成 typed framework 边界；ACP、A2A、Channels、Headless 和 SDK Host 是不同入口投影；Trace/Eval/Improve的per-run workspace generation、timeout retain与分层 Evolution 能力的已知行为和反例均可从本 Evidence 复核。
+LLM provider adapter、模型能力/预算/超时构成typed framework边界；ACP、A2A、Channels、Headless和SDK Host是不同入口投影；Trace/Eval/Improve的per-run workspace generation、AgentTurnDriver settlement、未settled timeout retain与分层Evolution能力的已知行为和反例均可从本Evidence复核。
 
 ## 来源与范围
 

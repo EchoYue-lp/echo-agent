@@ -114,9 +114,12 @@ println!("通过: {}/{}", report.passed, report.total);
 - 显式删除已结算 generation，并把 cleanup 失败写入 `EvalResult`
 
 `workspace_root`不会直接成为 Agent 工作目录，只是随机`eval-` generation
-的父目录。Timeout会取消调用，但当前尚不能证明stream producer已结算，因此runner
-会保留该generation并把路径加入`violations`；调用方取消同样保留目录并记录warning。
-这样后续case仍然隔离，而Turn settlement继续由独立生命周期负责。
+的父目录。Eval以framework `AgentTurnDriver`作为唯一终态权威：case deadline到达
+后请求取消，再对同一个drive future等待共享的6秒settlement grace。取得receipt时结果
+仍是Timeout，但可以读取终态trace并清理workspace；grace再次超时则跳过非终态trace
+评分，保留generation并把路径加入`violations`。ReactAgent managed stream只在其自有
+producer task结算后释放terminal；其它Agent实现也必须遵守terminal是stream最后一项的
+合同。调用方取消同样保留目录并记录warning。
 
 ---
 

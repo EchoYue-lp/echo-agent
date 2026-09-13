@@ -114,11 +114,16 @@ The runner automatically:
 - Explicitly removes settled generations and reports cleanup failures in `EvalResult`
 
 `workspace_root` is never the Agent working directory; it is only the parent
-for random `eval-` generations. A timeout cancels the invocation but does not
-yet prove that the stream producer has settled, so the runner retains that
-generation and adds its path to `violations`. Caller cancellation likewise
-retains the directory and logs a warning. This keeps later cases isolated while
-Turn settlement remains an explicit lifecycle responsibility.
+for random `eval-` generations. Eval uses the framework `AgentTurnDriver` as
+its terminal authority. At the case deadline it requests cancellation, then
+continues waiting for the same drive future for the shared six-second settlement
+grace. A receipt keeps the result timed out but permits terminal trace metrics
+and workspace cleanup. If the grace also expires, Eval skips non-terminal trace
+scoring, retains the generation, and reports its path in `violations`. Caller
+cancellation likewise retains the directory and logs a warning. ReactAgent's
+managed stream releases its terminal only after the owned producer task has
+settled; other Agent implementations must honor the same terminal-is-last
+stream contract.
 
 ---
 

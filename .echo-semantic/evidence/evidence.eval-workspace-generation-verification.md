@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.eval-workspace-generation-verification
 kind: evidence
-observed_at: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
+observed_at: 29a00f66843263f27503f83247ee8a770b89e913
 source_refs:
   - src/eval/runner.rs
   - src/eval/comparator.rs

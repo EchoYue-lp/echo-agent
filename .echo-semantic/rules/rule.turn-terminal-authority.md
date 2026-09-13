@@ -7,11 +7,11 @@ expectation: human_confirmed
 risk: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, contract_evidence]
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
 behavior_refs: [behavior.agent-turn-lifecycle]
-code_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs, src/channels.rs, src/agent/react/mod.rs, docs/adr/0009-tracked-input-receipts.md, docs/adr/0010-canonical-turn-receipt-accounting.md]
-evidence_refs: [evidence.agent-context-execution]
-finding_refs: [finding.turn-driver-entry-coverage]
+code_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, src/channels.rs, src/agent/react/mod.rs, docs/adr/0009-tracked-input-receipts.md, docs/adr/0010-canonical-turn-receipt-accounting.md, docs/adr/0037-eval-timeout-turn-settlement.md]
+evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
+finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settlement]
 ---
 
 # Turn 终态权威
@@ -22,15 +22,15 @@ finding_refs: [finding.turn-driver-entry-coverage]
 
 ## 适用行为
 
-适用于 Headless、ACP、经 ACP 的 SDK 和其它显式通过 driver 执行的 Turn，以及 tracked steer input；不自动覆盖 raw ReactAgent 或 Channel 调用。
+适用于Headless、ACP、Eval、经ACP的SDK和其它显式通过driver执行的Turn，以及tracked steer input；不自动覆盖raw ReactAgent或Channel调用。
 
 ## 当前实现
 
-Driver 在 sink 前记录事实，区分 Completed/Cancelled/Failed，并保存 final answer、usage、compaction、last sequence 和 elapsed time。
+Driver在sink前记录事实，区分Completed/Cancelled/Failed，并保存final answer、usage、compaction、last sequence和elapsed time。ReactAgent managed stream在producer task settled后才释放terminal；提前drop才走bounded reaper。Eval deadline只发出cancel request，必须继续等待同一driver future取得receipt，或在共享bounded grace后显式标记未settled。
 
 ## 期望行为
 
-EOF、renderer、trace 或产品 observer 不得自行推断成功；失败投递不能保留成功 receipt 字段。
+EOF、renderer、trace、cancel request或产品observer不得自行推断成功；失败投递不能保留成功receipt字段。
 
 ## 证据
 

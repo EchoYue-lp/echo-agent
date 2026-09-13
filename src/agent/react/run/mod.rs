@@ -12,7 +12,6 @@
 use std::time::Duration;
 
 pub(super) const TOOL_CANCELLATION_GRACE_PERIOD: Duration = Duration::from_secs(5);
-const STREAM_CANCELLATION_SETTLE_PERIOD: Duration = Duration::from_secs(6);
 
 pub(crate) mod context;
 pub(crate) mod direct;

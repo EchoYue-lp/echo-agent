@@ -67,9 +67,10 @@ Choose option 4.
 - Success, typed Agent failure, and completed grading/trace evaluation are
   settled paths. They explicitly call `TempDir::close()`; deletion errors are
   added to the same `EvalResult` and make it unsuccessful.
-- Timeout triggers the existing cancellation token but calls `keep()` instead
-  of cleanup. The retained path is included in a violation so a caller can
-  inspect or remove it after external settlement.
+- Timeout follows ADR 0037: it requests cancellation and waits for the shared
+  six-second Turn settlement grace. A received receipt permits explicit
+  cleanup; a grace timeout calls `keep()` and includes the retained path in a
+  violation.
 - If fixture setup fails before Agent start, cleanup is safe and explicit.
 - `ImprovementLoop` and `AbComparator` use the system temp directory only as
   the EvalRunner parent. They no longer name or remove child workspaces.
@@ -86,10 +87,9 @@ enter this implementation.
 - Same-ID and fixture-free runs cannot share or delete one another's working
   directory.
 - Early-stop and ordinary errors use the same settled cleanup path as success.
-- Timeout and caller-drop directories can remain on disk. This is deliberate
+- Timeout directories remain only when the Turn does not settle inside the
+  bounded grace; caller-drop directories can also remain. This is deliberate
   containment of an unsettled producer, not a claim of cleanup completion.
-  Issue #48 remains responsible for bounded Turn settlement and later
-  reclamation.
 - Cleanup failure becomes visible in EvalResult instead of being ignored.
 - Callers that treated `workspace_root` itself or
   `workspace_root/case.id` as a durable result path must stop doing so.
@@ -110,7 +110,8 @@ fixed case or iteration paths is not an acceptable partial rollback.
 Deterministic tests run the same fixture case and fixture-free cases
 concurrently, recording the Agent invocation cwd and verifying distinct paths.
 Settled paths must disappear; an injected cleanup error must make EvalResult
-fail. Timeout and caller-drop paths must remain and be removed by the test.
+fail. A cancellation-responsive timeout must settle and clean up, while an
+unresponsive timeout and caller-drop retain paths that the tests remove.
 
 Improvement tests cover early-stop and concurrent loops without fixed
 `improve_i` directories. Source checks confirm Comparator no longer creates

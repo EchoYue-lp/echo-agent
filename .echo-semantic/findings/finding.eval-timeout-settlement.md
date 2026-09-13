@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.eval-timeout-settlement
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: time_lifecycle
 focus: [failure_concurrency, result_side_effect]
 boundary_ref: boundary.eval-evolution
 behavior_refs: [behavior.eval-evolution, behavior.agent-turn-lifecycle]
 rule_refs: [rule.quality-observation-boundary, rule.turn-terminal-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.agent-context-execution, evidence.eval-workspace-generation-verification]
-audit_refs: [audit.eval-evolution.failure-concurrency]
+evidence_refs: [evidence.provider-protocol-quality, evidence.agent-context-execution, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
+audit_refs: [audit.eval-evolution.failure-concurrency, audit.eval-timeout-turn-settlement-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.eval-timeout-turn-settlement-repair]
+verification_evidence_refs: [evidence.eval-timeout-turn-settlement-verification]
+rereview_audit_refs: [audit.eval-timeout-turn-settlement-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,4 @@ Timeout 后 tool/file effect 可能继续运行并污染 fixture，评分与 cle
 
 ## 处理记录
 
-Discovery 记录；workspace generation修复在timeout后保留隔离目录而不抢先清理。本Finding仍需让Eval消费bounded Turn settlement后再评分并决定回收。
+Issue #48追踪。Eval已复用AgentTurnDriver并在deadline后对同一drive future等待共享bounded grace；React terminal不领先于自有producer settlement；收到receipt才读取terminal trace和close workspace，未settled则跳过评分并retain。Repair、verification与三轮独立复审已闭合本Finding。GitHub Issue保持open，等待远端main交付。

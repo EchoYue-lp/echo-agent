@@ -1,14 +1,25 @@
 //! Eval runner — executes eval cases against an agent.
 
-use crate::agent::{Agent, AgentEvent, AgentInvocationContext};
+use crate::agent::{
+    AGENT_CANCELLATION_SETTLE_PERIOD, Agent, AgentInvocationContext, EventEnvelope, EventIdentity,
+};
 use crate::eval::{EvalCase, EvalConstraints, EvalReport, EvalResult, SuccessCriteria};
 use crate::eval::{LlmGrader, TrajectoryReplay};
+use crate::runtime::{AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnOutcome, TurnRequest};
 use crate::trace::Run;
-use futures::StreamExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+struct EvalEventSink;
+
+#[async_trait::async_trait]
+impl EventSink for EvalEventSink {
+    async fn on_event(&self, _envelope: EventEnvelope) -> crate::error::Result<SinkControl> {
+        Ok(SinkControl::Continue)
+    }
+}
 
 struct EvalWorkspaceGeneration {
     directory: Option<tempfile::TempDir>,
@@ -131,41 +142,87 @@ impl EvalRunner {
             cancel: Some(cancel.clone()),
             ..AgentInvocationContext::default()
         };
-        let agent_result = tokio::time::timeout(
+        let identity_value = format!("eval-{}", uuid::Uuid::new_v4());
+        let identity = match EventIdentity::new(&identity_value, &identity_value) {
+            Ok(identity) => identity,
+            Err(error) => {
+                result.success = false;
+                result
+                    .violations
+                    .push(format!("Eval turn identity failed: {error}"));
+                Self::record_workspace_cleanup(&mut result, generation.close());
+                result.recompute_score();
+                return result;
+            }
+        };
+        let request = TurnRequest::new(identity, case.task.clone())
+            .mode(TurnMode::Execute)
+            .cancel(cancel.clone())
+            .invocation(invocation);
+        let mut drive = Box::pin(AgentTurnDriver.drive(agent, request, &EvalEventSink));
+        let deadline_result = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
-            execute_for_final_answer(agent, &case.task, cancel.clone(), invocation),
+            &mut drive,
         )
         .await;
-        let mut timed_out = false;
-
-        // Capture run_id from agent for trace linkage (all branches)
-        result.run_id = agent.current_run_id();
-
-        match agent_result {
-            Ok(Ok(output)) => {
-                result.duration_ms =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                final_output = Some(output);
-            }
-            Ok(Err(e)) => {
-                result.duration_ms =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                result.success = false;
-                result.violations.push(format!("Agent error: {e}"));
-            }
+        let (receipt, timed_out) = match deadline_result {
+            Ok(receipt) => (Some(receipt), false),
             Err(_) => {
                 cancel.cancel();
-                timed_out = true;
-                result.duration_ms =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                result.success = false;
-                result.violations.push("Timeout".to_string());
+                match tokio::time::timeout(AGENT_CANCELLATION_SETTLE_PERIOD, &mut drive).await {
+                    Ok(receipt) => (Some(receipt), true),
+                    Err(_) => (None, true),
+                }
+            }
+        };
+        drop(drive);
+        let turn_settled = receipt.is_some();
+
+        // Capture run_id only after the bounded settlement attempt.
+        result.run_id = agent.current_run_id();
+        result.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        if timed_out {
+            result.success = false;
+            result.violations.push("Timeout".to_string());
+            match receipt.as_ref() {
+                Some(receipt) => result
+                    .violations
+                    .push(format!("Turn settled after timeout: {}", receipt.status())),
+                None => result.violations.push(format!(
+                    "Turn did not settle within {} ms cancellation grace",
+                    AGENT_CANCELLATION_SETTLE_PERIOD.as_millis()
+                )),
+            }
+        } else if let Some(receipt) = receipt.as_ref() {
+            match &receipt.outcome {
+                TurnOutcome::Completed => match receipt.final_answer.as_ref() {
+                    Some(output) => final_output = Some(output.clone()),
+                    None => {
+                        result.success = false;
+                        result
+                            .violations
+                            .push("Completed turn did not include a final answer".to_string());
+                    }
+                },
+                TurnOutcome::Cancelled => {
+                    result.success = false;
+                    result.violations.push("Agent cancelled".to_string());
+                }
+                TurnOutcome::Failed(failure) => {
+                    result.success = false;
+                    result.violations.push(format!(
+                        "Agent error ({}): {}",
+                        failure.code, failure.message
+                    ));
+                }
             }
         }
 
         // Load the trace once. Criteria such as ToolUsed/ToolNotUsed require it,
         // and observability metrics should come from the same authoritative run.
-        let run = if let Some(ref store) = self.run_store
+        let run = if turn_settled
+            && let Some(ref store) = self.run_store
             && let Some(ref run_id) = result.run_id
             && let Ok(Some(run)) = store.load(run_id).await
         {
@@ -229,15 +286,15 @@ impl EvalRunner {
             result.file_changes = replay.written_files().len();
         }
 
-        if timed_out {
+        if turn_settled {
+            Self::record_workspace_cleanup(&mut result, generation.close());
+        } else {
             if let Some(path) = generation.retain() {
                 result.violations.push(format!(
                     "Workspace retained after timeout: {}",
                     path.display()
                 ));
             }
-        } else {
-            Self::record_workspace_cleanup(&mut result, generation.close());
         }
         result.recompute_score();
         result
@@ -851,38 +908,6 @@ fn extract_number_near_key(text: &str, key: &str) -> Option<f64> {
     None
 }
 
-async fn execute_for_final_answer(
-    agent: &dyn Agent,
-    task: &str,
-    cancel: CancellationToken,
-    invocation: AgentInvocationContext,
-) -> crate::error::Result<String> {
-    let mut stream = agent
-        .execute_stream_with_invocation_context(task, cancel, invocation)
-        .await?;
-    while let Some(event) = stream.next().await {
-        match event? {
-            AgentEvent::FinalAnswer(answer) => return Ok(answer),
-            AgentEvent::Cancelled => {
-                return Err(crate::error::ReactError::Agent(Box::new(
-                    crate::error::AgentError::Cancelled("eval invocation".to_string()),
-                )));
-            }
-            AgentEvent::Error {
-                source, message, ..
-            } => {
-                return Err(crate::error::ReactError::Other(format!(
-                    "{source}: {message}"
-                )));
-            }
-            _ => {}
-        }
-    }
-    Err(crate::error::ReactError::Other(
-        "agent event stream closed without a terminal event".to_string(),
-    ))
-}
-
 /// Simple recursive directory copy.
 fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
@@ -902,13 +927,28 @@ fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentEvent;
     use crate::eval::EvalCase;
-    use crate::trace::{RunEvent, RunStatus, RunTimings, TokenUsage};
+    use crate::trace::{RunEvent, RunStatus, RunSummary, RunTimings, TokenUsage};
     use chrono::Utc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     struct WorkspaceRecordingAgent {
         cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
         release: Option<Arc<tokio::sync::Notify>>,
         fail_after_recording: bool,
+        run_id: Option<String>,
+    }
+
+    struct CancellationSettlingAgent {
+        cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
+        settled_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        terminal_answer: Option<String>,
+        stream_invocations: Arc<AtomicUsize>,
+    }
+
+    struct CountingRunStore {
+        loads: AtomicUsize,
     }
 
     impl WorkspaceRecordingAgent {
@@ -920,6 +960,7 @@ mod tests {
                 cwd_tx,
                 release,
                 fail_after_recording: false,
+                run_id: None,
             }
         }
 
@@ -928,7 +969,13 @@ mod tests {
                 cwd_tx,
                 release: None,
                 fail_after_recording: true,
+                run_id: None,
             }
+        }
+
+        fn with_run_id(mut self, run_id: &str) -> Self {
+            self.run_id = Some(run_id.to_string());
+            self
         }
 
         fn final_stream<'a>() -> futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>> {
@@ -949,6 +996,10 @@ mod tests {
 
         fn system_prompt(&self) -> &str {
             "record workspace"
+        }
+
+        fn current_run_id(&self) -> Option<String> {
+            self.run_id.clone()
         }
 
         fn execute<'a>(
@@ -998,6 +1049,99 @@ mod tests {
                 }
                 Ok(Self::final_stream())
             })
+        }
+    }
+
+    impl Agent for CancellationSettlingAgent {
+        fn name(&self) -> &str {
+            "cancellation-settler"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "settle after cancellation"
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async { Ok(WorkspaceRecordingAgent::final_stream()) })
+        }
+
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                self.stream_invocations.fetch_add(1, Ordering::AcqRel);
+                let cwd = invocation.working_dir.ok_or_else(|| {
+                    crate::error::ReactError::Other(
+                        "eval invocation did not contain a working directory".to_string(),
+                    )
+                })?;
+                self.cwd_tx.send(cwd.clone()).map_err(|_| {
+                    crate::error::ReactError::Other(
+                        "workspace observation receiver closed".to_string(),
+                    )
+                })?;
+                let stream = async_stream::try_stream! {
+                    cancel.cancelled().await;
+                    std::fs::write(cwd.join("cancel-settled.marker"), "settled")
+                        .map_err(crate::error::ReactError::from)?;
+                    if let Some(settled) = self.settled_tx.lock().await.take() {
+                        let _ = settled.send(());
+                    }
+                    match self.terminal_answer.as_ref() {
+                        Some(answer) => yield AgentEvent::FinalAnswer(answer.clone()),
+                        None => yield AgentEvent::Cancelled,
+                    }
+                };
+                let stream: futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>> =
+                    Box::pin(stream);
+                Ok(stream)
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::trace::RunStore for CountingRunStore {
+        async fn save(&self, _run: Run) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, _run_id: &str) -> crate::error::Result<Option<Run>> {
+            self.loads.fetch_add(1, Ordering::AcqRel);
+            Ok(None)
+        }
+
+        async fn list_by_session(
+            &self,
+            _session_id: &str,
+        ) -> crate::error::Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self, _limit: usize) -> crate::error::Result<Vec<RunSummary>> {
+            Ok(Vec::new())
         }
     }
 
@@ -1110,12 +1254,17 @@ mod tests {
     #[tokio::test]
     async fn timeout_retains_the_unsettled_workspace_generation() -> Result<(), String> {
         let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let mut runner = EvalRunner::new(parent.path().join("runs"));
+        let run_store = Arc::new(CountingRunStore {
+            loads: AtomicUsize::new(0),
+        });
+        let mut runner =
+            EvalRunner::new(parent.path().join("runs")).with_run_store(run_store.clone());
         runner.timeout_secs = 1;
         let case = workspace_case("timeout", None);
         let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
         let release = Arc::new(tokio::sync::Notify::new());
-        let agent = WorkspaceRecordingAgent::new(cwd_tx, Some(release));
+        let agent =
+            WorkspaceRecordingAgent::new(cwd_tx, Some(release)).with_run_id("unsettled-run");
 
         let result = runner.run(&case, &agent).await;
         let observed_cwd = cwd_rx
@@ -1132,13 +1281,117 @@ mod tests {
             })
             .ok_or_else(|| "timeout result did not report a retained workspace".to_string())?;
 
-        if result.success || !result.violations.iter().any(|value| value == "Timeout") {
+        if result.success
+            || !result.violations.iter().any(|value| value == "Timeout")
+            || !result
+                .violations
+                .iter()
+                .any(|value| value.contains("Turn did not settle within"))
+        {
             return Err("timed out eval did not retain its failure outcome".to_string());
+        }
+        if result.duration_ms
+            < u64::try_from(AGENT_CANCELLATION_SETTLE_PERIOD.as_millis()).unwrap_or(u64::MAX)
+        {
+            return Err("unsettled Eval returned before the cancellation grace".to_string());
         }
         if retained != observed_cwd || !retained.is_dir() {
             return Err("reported timeout generation was not retained".to_string());
         }
+        if run_store.loads.load(Ordering::Acquire) != 0 {
+            return Err("unsettled timeout read non-terminal trace state".to_string());
+        }
         std::fs::remove_dir_all(&retained).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timeout_waits_for_a_cancellation_responsive_turn_to_settle() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut runner = EvalRunner::new(parent.path().join("runs"));
+        runner.timeout_secs = 1;
+        let case = workspace_case("responsive-timeout", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        let stream_invocations = Arc::new(AtomicUsize::new(0));
+        let agent = CancellationSettlingAgent {
+            cwd_tx,
+            settled_tx: tokio::sync::Mutex::new(Some(settled_tx)),
+            terminal_answer: None,
+            stream_invocations: Arc::clone(&stream_invocations),
+        };
+
+        let result = runner.run(&case, &agent).await;
+        let workspace = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "responsive timeout did not report its workspace".to_string())?;
+        tokio::time::timeout(std::time::Duration::from_millis(200), settled_rx)
+            .await
+            .map_err(|_| "Eval returned before cancellation settlement".to_string())?
+            .map_err(|_| "cancellation settlement sender closed".to_string())?;
+
+        if result.success
+            || !result.violations.iter().any(|value| value == "Timeout")
+            || !result
+                .violations
+                .iter()
+                .any(|value| value == "Turn settled after timeout: cancelled")
+        {
+            return Err("responsive timeout did not preserve the deadline failure".to_string());
+        }
+        if workspace.exists() {
+            return Err("settled timeout workspace was not removed".to_string());
+        }
+        if stream_invocations.load(Ordering::Acquire) != 1 {
+            return Err("responsive timeout restarted its Agent stream".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn late_completed_turn_remains_timeout_without_running_criteria() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut runner = EvalRunner::new(parent.path().join("runs"));
+        runner.timeout_secs = 1;
+        let case = workspace_case("late-completed-timeout", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        let stream_invocations = Arc::new(AtomicUsize::new(0));
+        let agent = CancellationSettlingAgent {
+            cwd_tx,
+            settled_tx: tokio::sync::Mutex::new(Some(settled_tx)),
+            terminal_answer: Some("done".to_string()),
+            stream_invocations: Arc::clone(&stream_invocations),
+        };
+
+        let result = runner.run(&case, &agent).await;
+        let workspace = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "late completed timeout did not report its workspace".to_string())?;
+        settled_rx
+            .await
+            .map_err(|_| "late completed settlement sender closed".to_string())?;
+        if result.success
+            || result.score != 0.0
+            || !result.metrics.is_empty()
+            || !result.violations.iter().any(|value| value == "Timeout")
+            || !result
+                .violations
+                .iter()
+                .any(|value| value == "Turn settled after timeout: completed")
+        {
+            return Err(
+                "late Completed turn changed the timeout result or ran criteria".to_string(),
+            );
+        }
+        if stream_invocations.load(Ordering::Acquire) != 1 {
+            return Err("late completed timeout restarted its Agent stream".to_string());
+        }
+        if workspace.exists() {
+            return Err("late completed timeout workspace was not removed".to_string());
+        }
         Ok(())
     }
 

@@ -4,12 +4,12 @@ id: map.agent-session-turn
 kind: capability_map
 title: Agent、Session、Invocation 与 Turn
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:0ff44ba1010dfd579acdd80c3f9d369c3d87f1dcbe05ba8840f5de7c96be4e61
 boundary_refs: [boundary.agent-session-turn]
 behavior_refs: [behavior.agent-turn-lifecycle]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.high-risk-audit-frontier]
-finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement]
+evidence_refs: [evidence.agent-context-execution, evidence.high-risk-audit-frontier, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
+finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.eval-timeout-settlement]
 audit_refs: [audit.agent-session-turn.state-authority]
 related_map_refs: [map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.protocol-surfaces]
 scenarios:
@@ -25,9 +25,11 @@ scenarios:
     evidence_refs: [evidence.agent-context-execution]
   driven-turn-admission-and-terminal:
     status: mapped
-    source_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs]
+    source_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, docs/adr/0037-eval-timeout-turn-settlement.md]
     behavior_refs: [behavior.agent-turn-lifecycle]
     rule_refs: [rule.turn-terminal-authority]
+    finding_refs: [finding.eval-timeout-settlement]
+    evidence_refs: [evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification]
   direct-and-channel-execution:
     status: needs_review
     source_refs: [src/agent/react/mod.rs, src/channels.rs]
@@ -54,11 +56,11 @@ scenarios:
 
 ## 入口与输出
 
-Execute/chat/stream、Headless、ACP prompt、Channel message 和 SDK call 进入 Agent；输出 event stream、TurnReceipt 与外部 effect。
+Execute/chat/stream、Headless、ACP prompt、Eval case、Channel message 和 SDK call 进入 Agent；输出 event stream、TurnReceipt、EvalResult 与外部 effect。
 
 ## 行为关系
 
-Agent 实现原始执行，Session 管入口作用域，Context 保存模型状态；仅 driven invocation 由 Turn driver 统一终态。
+Agent 实现原始执行，Session 管入口作用域，Context 保存模型状态；Headless、ACP、经ACP的SDK与Eval等driven invocation由Turn driver统一终态。
 
 ## 状态与数据流
 
@@ -70,7 +72,7 @@ AgentConfig/InvocationContext、Session adapter、ADR 0001/0005/0006/0009/0010 �
 
 ## 生命周期与失败路径
 
-Create/resolve Agent、admit/accept/drain Turn、cancel/fail/complete、close Session/Agent；EOF 不构成成功。
+Create/resolve Agent、admit/accept/drain Turn、cancel/fail/complete、bounded timeout settlement、close Session/Agent；cancel request与EOF都不构成成功。
 
 ## 权限与敏感信息
 
@@ -78,11 +80,11 @@ Agent 自动 effect 交给 permission map；Session scope 与 secret-bearing con
 
 ## 用户侧投影
 
-ACP/Headless/SDK 可投影不同 UI/wire 并共享 driven Turn terminal；Channel 与直接 Rust 调用的覆盖缺口已进入 Finding。
+ACP/Headless/SDK/Eval可投影不同结果并共享driven Turn terminal；Channel与直接Rust调用的覆盖缺口已进入Finding。
 
 ## 场景处置清单
 
-Agent/Session 与 driven Turn 已映射；Channel/direct route、AgentRevision 与 factory 同名保持 needs_review。
+Agent/Session与driven Turn已映射，Eval timeout repair等待复审；Channel/direct route、AgentRevision与factory同名保持needs_review。
 
 ## 未展开项
 

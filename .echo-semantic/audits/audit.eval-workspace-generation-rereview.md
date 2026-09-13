@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: failure_concurrency
 freshness: examined
-revision: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
+revision: 29a00f66843263f27503f83247ee8a770b89e913
 finding_refs: [finding.eval-workspace-generation-isolation]
 challenges:
   per-run-generation-isolation:
-    revision: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
+    revision: 29a00f66843263f27503f83247ee8a770b89e913
     source_refs: [src/eval/runner.rs]
     evidence_refs: [evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification]
   settled-and-unsettled-cleanup:
-    revision: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
+    revision: 29a00f66843263f27503f83247ee8a770b89e913
     source_refs: [src/eval/runner.rs]
     evidence_refs: [evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification]
   improve-consumer-convergence:
-    revision: source:c205eb521ef63e2d37d921693a1a0703b253144b575642baa3ec94c3ba2d75b3
+    revision: 29a00f66843263f27503f83247ee8a770b89e913
     source_refs: [src/improve/loop.rs, src/eval/comparator.rs, docs/adr/0036-eval-workspace-generation-lifecycle.md]
     evidence_refs: [evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification]
 ---
