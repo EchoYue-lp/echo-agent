@@ -383,6 +383,9 @@ text-only and historical all-supported ordering without moving model transport
 out of Rust.
 The ResponseFormat slice adds six structured-output value identities, preserving
 strict JSON Schema tags without moving response validation out of Rust.
+The PromptCacheLayout slice adds three read-only layout identities, preserving
+system/canonical/history/runtime segmentation and half-open indexes without
+moving cache state or provider placement out of Rust.
 The SDKs preserve calculation priority while LLM execution remains in Rust/Host.
 
 The HookAction slice adds 31 tagged variant/field/validation identities. The

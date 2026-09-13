@@ -243,6 +243,9 @@ Model input modality values preserve text-only and historical all-supported
 ordering without owning model transport.
 Response format values preserve text, JSON object, and strict JSON Schema tags
 without validating or executing provider responses.
+Prompt cache layout values preserve the Rust system/canonical/history/runtime
+segment projection and half-open indexes without owning cache state or provider
+placement.
 Page metadata values preserve truncation, continuation metadata, and output
 projection without owning collection state.
 Subagent context snapshots preserve empty/content semantics without owning

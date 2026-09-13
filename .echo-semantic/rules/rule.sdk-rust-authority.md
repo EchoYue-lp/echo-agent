@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [contract_evidence, failure_concurrency, time_lifecycle]
-observed_at: source:d7ba0cfc0af9a51108f22065b5d198eb70e172a9cd361923fe2077290796269f
+observed_at: source:385c413d4058aa4224078a94c93eeb3b1b0d3e3e92e0ceb31b63a20ee17a4a47
 behavior_refs: [behavior.sdk-facade-routing]
 code_refs:
   - docs/supreme/specs/2026-09-04-source-first-multilanguage-sdk-runtime/design.md
