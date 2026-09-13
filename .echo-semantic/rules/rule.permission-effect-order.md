@@ -7,10 +7,10 @@ expectation: human_confirmed
 risk: high
 primary_focus: permission_external
 focus: [result_side_effect, state_authority, failure_concurrency, time_lifecycle]
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:aaf0d4c101710a5879fe6066820ffc3145ab93b4295ab8aa22878d54e7a050b5
 behavior_refs: [behavior.effect-permission-execution]
 code_refs: [echo-core/src/tools/permission.rs, echo-orchestration/src/human_loop/service.rs, echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs, echo-execution/src/tools.rs]
-evidence_refs: [evidence.effects-extensions]
+evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification]
 finding_refs: [finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.tool-pipeline-example-drift]
 ---
 
@@ -26,7 +26,7 @@ ReactAgent 的 LLM 驱动自动 Tool effect 必须先完成该入口定义的可
 
 ## 当前实现
 
-PermissionPolicy/Service、Hook/Guard 与 ToolExecutionPipeline 分层影响 ReactAgent 自动调用；ToolManager 负责最终注册和执行 primitive，Sandbox/具体 Tool 持有资源。
+PermissionPolicy/Service、Hook/Guard与ToolExecutionPipeline分层影响ReactAgent自动调用；ToolManager用一个kernel在stream/non-stream的cache、permit和execute前完成schema/custom validation，Sandbox/具体Tool持有资源。
 
 ## 期望行为
 
@@ -38,4 +38,4 @@ Tool/permission contracts、PermissionService、Hook reducer、pipeline 和 sand
 
 ## 裁决记录
 
-Hook source order、deny-first、stream validation、approval 与 cleanup 冲突仍需审计，且本 Rule 不扩展为 direct-user 或 trusted-extension 权限门控。
+Stream validation已闭合；Hook source order、deny-first、approval与cleanup冲突仍需审计，且本Rule不扩展为direct-user或trusted-extension权限门控。

@@ -162,6 +162,11 @@ fn validate_parameters_against_schema(tool: &dyn Tool, parameters: &ToolParamete
     Ok(())
 }
 
+async fn validate_tool_input(tool: &dyn Tool, parameters: &ToolParameters) -> Result<()> {
+    validate_parameters_against_schema(tool, parameters)?;
+    tool.validate_parameters(parameters).await
+}
+
 impl ToolRegistrar for ToolManager {
     fn register(&mut self, tool: Box<dyn Tool>) {
         ToolManager::register(self, tool);
@@ -868,8 +873,7 @@ impl ToolManager {
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
-        validate_parameters_against_schema(tool.as_ref(), &parameters)?;
-        tool.validate_parameters(&parameters).await?;
+        validate_tool_input(tool.as_ref(), &parameters).await?;
         reject_cancelled(ctx, tool_name)?;
 
         // 并发控制：获取信号量许可（读/写分离）
@@ -988,8 +992,7 @@ impl ToolManager {
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
-        validate_parameters_against_schema(tool.as_ref(), parameters)?;
-        tool.validate_parameters(parameters).await
+        validate_tool_input(tool.as_ref(), parameters).await
     }
 
     /// Whether the named tool supports streaming execution via [`Tool::execute_stream`].
@@ -1042,6 +1045,7 @@ impl ToolManager {
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        validate_tool_input(tool.as_ref(), &parameters).await?;
         reject_cancelled(ctx, tool_name)?;
 
         let is_read = tool.risk_level() == ToolRiskLevel::ReadOnly;
@@ -1422,6 +1426,49 @@ mod execute_with_context_tests {
             _params: ToolParameters,
         ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
             Box::pin(async { Ok(ToolResult::success("unreachable")) })
+        }
+    }
+
+    struct CustomValidationTool {
+        validations: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for CustomValidationTool {
+        fn name(&self) -> &str {
+            "custom_validation"
+        }
+
+        fn description(&self) -> &str {
+            "custom parameter validation fixture"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(ToolResult::success("executed"))
+            })
+        }
+
+        fn validate_parameters<'a>(
+            &'a self,
+            _params: &'a ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<()>> {
+            Box::pin(async move {
+                self.validations.fetch_add(1, AtomicOrdering::SeqCst);
+                Err(ToolError::InvalidParameter {
+                    name: self.name().to_string(),
+                    message: "custom validation rejected parameters".to_string(),
+                }
+                .into())
+            })
         }
     }
 
@@ -2201,6 +2248,71 @@ mod execute_with_context_tests {
         let valid = ToolParameters::from([("count".to_string(), serde_json::json!(2))]);
         assert!(manager.execute_tool("schema_tool", valid).await?.success);
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_schema_validation_prevents_execution() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new();
+        manager.try_register(Box::new(SchemaTool {
+            calls: Arc::clone(&calls),
+        }))?;
+
+        let error = manager
+            .execute_tool_stream_with_context(
+                "schema_tool",
+                ToolParameters::new(),
+                &ToolContext::default(),
+                None,
+            )
+            .await
+            .err()
+            .ok_or_else(|| ToolError::InvalidParameter {
+                name: "schema_tool".to_string(),
+                message: "invalid streaming parameters reached execution".to_string(),
+            })?;
+
+        assert!(matches!(
+            &error,
+            ReactError::Tool(error)
+                if matches!(error.as_ref(), ToolError::InvalidParameter { .. })
+        ));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_custom_validation_prevents_execution() -> echo_core::error::Result<()> {
+        let validations = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new();
+        manager.try_register(Box::new(CustomValidationTool {
+            validations: Arc::clone(&validations),
+            calls: Arc::clone(&calls),
+        }))?;
+
+        let error = manager
+            .execute_tool_stream_with_context(
+                "custom_validation",
+                ToolParameters::new(),
+                &ToolContext::default(),
+                None,
+            )
+            .await
+            .err()
+            .ok_or_else(|| ToolError::InvalidParameter {
+                name: "custom_validation".to_string(),
+                message: "custom streaming validation was skipped".to_string(),
+            })?;
+
+        assert!(matches!(
+            &error,
+            ReactError::Tool(error)
+                if matches!(error.as_ref(), ToolError::InvalidParameter { .. })
+        ));
+        assert_eq!(validations.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
         Ok(())
     }
 

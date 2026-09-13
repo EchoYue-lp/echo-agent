@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.improve-iteration-config-verification
 kind: evidence
-observed_at: source:e5661d8044dbe3eba9bc3ce5fd34a408b5fc89558472af0a66cbc6566a39c0ce
+observed_at: 57066461ddbe8a32ce63f1b75dd40603530e786e
 source_refs:
   - src/improve/eval_improvement.rs
 supports: [behavior.eval-evolution, rule.quality-observation-boundary]

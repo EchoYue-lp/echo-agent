@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: trigger_input
 freshness: examined
-revision: source:e5661d8044dbe3eba9bc3ce5fd34a408b5fc89558472af0a66cbc6566a39c0ce
+revision: 57066461ddbe8a32ce63f1b75dd40603530e786e
 finding_refs: [finding.improve-iteration-config]
 challenges:
   configured-iteration-consumption:
-    revision: source:e5661d8044dbe3eba9bc3ce5fd34a408b5fc89558472af0a66cbc6566a39c0ce
+    revision: 57066461ddbe8a32ce63f1b75dd40603530e786e
     source_refs: [src/improve/eval_improvement.rs, src/improve/loop.rs]
     evidence_refs: [evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification]
   zero-and-short-circuit-semantics:
-    revision: source:e5661d8044dbe3eba9bc3ce5fd34a408b5fc89558472af0a66cbc6566a39c0ce
+    revision: 57066461ddbe8a32ce63f1b75dd40603530e786e
     source_refs: [src/improve/eval_improvement.rs]
     evidence_refs: [evidence.improve-iteration-config-verification]
 ---
