@@ -4,7 +4,7 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 多语言 SDK facade 对等边界
 risk: high
-observed_at: source:bda87d008aa2dd10179af02d1467124a8a3d65bf275d1efc2b6434e029dac7e7
+observed_at: source:448caeb7a6cc1bb147c8d86412b0b9a8d0c14b653b8326724432b49faebab62c
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.sdk-facade-routing]
 rule_refs: [rule.sdk-rust-authority]

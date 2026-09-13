@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:bda87d008aa2dd10179af02d1467124a8a3d65bf275d1efc2b6434e029dac7e7
+observed_at: source:448caeb7a6cc1bb147c8d86412b0b9a8d0c14b653b8326724432b49faebab62c
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -40,6 +40,7 @@ source_refs:
   - echo-sdk-protocol/src/scalar.rs
   - echo-sdk-host/tests/extension_bridge_e2e.rs
   - echo-sdk-host/tests/facade_feature_adapters_e2e.rs
+  - src/agent/react/run/phases/think.rs
   - echo-sdk-host/src/factory.rs
   - echo-sdk-host/src/lib.rs
   - echo-sdk-host/tests/core_profile_e2e.rs
