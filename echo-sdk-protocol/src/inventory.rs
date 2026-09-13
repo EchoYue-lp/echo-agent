@@ -2610,6 +2610,20 @@ fn language_status_for(
         "echo_core::llm::cache::layout::PromptCacheLayout::from_messages",
         "echo_core::llm::cache::layout::PromptCacheLayout::segment_ranges",
     ];
+    const MEMORY_SCOPE_IDENTITIES: &[&str] = &[
+        "echo_core::memory::scope::MemoryScope",
+        "echo_core::memory::scope::MemoryScope::Project",
+        "echo_core::memory::scope::MemoryScope::Repo",
+        "echo_core::memory::scope::MemoryScope::Run",
+        "echo_core::memory::scope::MemoryScope::Session",
+        "echo_core::memory::scope::MemoryScope::Task",
+        "echo_core::memory::scope::MemoryScope::User",
+        "echo_core::memory::scope::MemoryScope::all",
+        "echo_core::memory::scope::MemoryScope::impl<FromStr>",
+        "echo_core::memory::scope::MemoryScope::is_persistent",
+        "echo_core::memory::scope::MemoryScope::name",
+        "echo_core::memory::scope::MemoryScope::priority",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2779,6 +2793,8 @@ fn language_status_for(
             LanguageImplementationStatus::Done,
             "prompt_cache_layout_values",
         )
+    } else if MEMORY_SCOPE_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "memory_scope_values")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

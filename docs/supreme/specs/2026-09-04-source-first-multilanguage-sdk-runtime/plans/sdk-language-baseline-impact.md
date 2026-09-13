@@ -386,6 +386,9 @@ strict JSON Schema tags without moving response validation out of Rust.
 The PromptCacheLayout slice adds three read-only layout identities, preserving
 system/canonical/history/runtime segmentation and half-open indexes without
 moving cache state or provider placement out of Rust.
+The MemoryScope slice adds twelve lifetime-policy identities, preserving scope
+ordering, persistence classification, wire names and parser aliases without
+moving memory storage or cleanup out of Rust.
 The SDKs preserve calculation priority while LLM execution remains in Rust/Host.
 
 The HookAction slice adds 31 tagged variant/field/validation identities. The
