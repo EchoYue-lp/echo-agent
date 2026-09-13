@@ -17,7 +17,10 @@ dependency relationships, claims, retries, and terminal settlement belong to a
 
 `BackgroundTask<T>` is a cloneable handle for one spawned future. It supports
 non-blocking status reads, cancellation, and retryable waits with an optional
-timeout.
+timeout. Clones share one lifecycle and cancellation scope; they do not clone
+`T`. The first terminal waiter consumes the result. A later waiter returns
+immediately with the persistent Completed, Failed, or Cancelled disposition
+instead of waiting for another notification.
 
 ```rust,ignore
 use echo_agent::tasks::{TaskSpawner, TaskSpawnerConfig};
@@ -43,6 +46,19 @@ Pending -> Running -> Completed
 The spawner bounds concurrency with a semaphore and can list or cancel handles
 that still exist in the current process. It does not serialize future closures
 or claim they can resume after restart.
+
+`default_timeout_secs` is one absolute budget from spawn acceptance through
+capacity admission and execution. Cancellation and the deadline are observed
+while queued as well as while running. A queued task that is cancelled never
+starts; `max_concurrent = 0` produces a Failed handle rather than a permanently
+Pending task. During execution, cancellation or timeout aborts and joins the
+child task before terminal status is published. A child-task panic is converted
+to Failed and is observable through `is_panicked()`.
+
+Each individual `wait(timeout)` also uses one absolute timeout for that call;
+notifications do not restart its budget, and a wait timeout never consumes the
+eventual task result. Status, result delivery, list, and retention all read the
+same process-local terminal state.
 
 ## Durable DAG Execution
 

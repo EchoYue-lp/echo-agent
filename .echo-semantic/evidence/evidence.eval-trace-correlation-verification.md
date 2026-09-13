@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.eval-trace-correlation-verification
 kind: evidence
-observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
+observed_at: 81e2756cee9127fa23a9bb1023bd56aa8f954964
 source_refs:
   - src/eval/runner.rs
   - src/agent/react/mod.rs

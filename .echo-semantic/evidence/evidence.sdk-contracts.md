@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
+observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -22,6 +22,7 @@ source_refs:
   - echo-integration/src/mcp/client.rs
   - echo-orchestration/src/tasks/revisioned.rs
   - echo-orchestration/src/tasks/runtime_executor.rs
+  - echo-orchestration/src/tasks/background_task.rs
   - echo-orchestration/src/workflow/mod.rs
   - echo-state/src/compression/compressor/hybrid.rs
   - echo-state/src/compression/compressor/sliding_window.rs
@@ -35,6 +36,7 @@ source_refs:
   - scripts/check-language-sdks.sh
   - docs/adr/0031-sdk-identity-governance-scope.md
   - docs/adr/0032-sdk-contract-scope-classification.md
+  - docs/adr/0039-background-task-terminal-authority.md
   - docs/sdk/README.md
   - echo-sdk-protocol/tests/extension_contract.rs
   - echo-sdk-host/src/core_profile/facade/mod.rs
@@ -456,7 +458,9 @@ limitations:
 
 当前合同可确定列出root facade、route、signature、feature和语言状态；真实Host测试已覆盖ACP、core、family、extension、全部canonical source adapter、typed compressor/AgentComponent consumer trait及Workflow/A2A facade stream的显式关闭、Session关闭和connection EOF。
 
-Manifest schema v2新增identity级`sdk_scope`。非intrinsic route或具名intrinsic capability group独立决定external acceptance，language status随后提供实现证据并可让gate失败，不能反向降级scope。当前9,683个canonical identity分为5,607个external contract、1,765个Host/Rust-only、780个language intrinsic、90个internal helper和1,441个deferred；551个intrinsic route仍属于external contract。Alias显式继承canonical scope，四套catalog gate均要求external contract三语言done。
+Manifest schema v2新增identity级`sdk_scope`。非intrinsic route或具名intrinsic capability group独立决定external acceptance，language status随后提供实现证据并可让gate失败，不能反向降级scope。当前9,684个canonical identity分为5,607个external contract、1,765个Host/Rust-only、781个language intrinsic、90个internal helper和1,441个deferred；551个intrinsic route仍属于external contract。Alias显式继承canonical scope，四套catalog gate均要求external contract三语言done。
+
+本轮`Clone for BackgroundTask<T>`新增1个canonical和3个re-export alias，全部分类为`language_intrinsic`的Rust trait implementation。Public inventory、manifest、source contract、catalog总量、shared digest与四套scope-count consumer已同步；external/Host/helper/deferred数量、route集合和三语言facade实现保持不变。
 
 本轮ToolManager/ReactAgent动态registry的12个Rust public路径（5个canonical与7个re-export alias）只把借用Ref或Box返回改为owned Arc signature，canonical数量与scope不变且全部属于Host/Rust-only。Public API、parity manifest、source contract与shared source digest由唯一generator更新；operation catalog、extension schema、fixtures和三语言facade保持不变。
 
@@ -472,4 +476,4 @@ Manifest schema v2新增identity级`sdk_scope`。非intrinsic route或具名intr
 
 ## 已知缺口
 
-机械闭合、90个合同artifact byte-stability、Rust scope测试和三语言source/Host gate均已通过；TypeScript 156、Python 168测试与Java真实Host连接成功，operation catalog保持字节不变。当前证据支持已声明external contract完整，不支持“所有Rust public identity均在三语言可用”的总体声明。1,441个deferred identity仍需按capability判断；组件流终态、Sandbox取消、MCP发布失败清理、SkillLoadPolicy live路径和SDK gap generation等现有Finding均未因scope重分类关闭。
+机械闭合、90个合同artifact byte-stability、Rust scope测试和三语言source/Host gate覆盖当前生成物；TypeScript 156、Python 168测试与Java真实Host连接成功。Operation route集合保持不变，catalog总量随Rust intrinsic增加。当前证据支持已声明external contract完整，不支持“所有Rust public identity均在三语言可用”的总体声明。1,441个deferred identity仍需按capability判断；组件流终态、Sandbox取消、MCP发布失败清理、SkillLoadPolicy live路径和SDK gap generation等现有Finding均未因本轮intrinsic更新关闭。

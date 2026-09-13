@@ -4,11 +4,11 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 多语言 SDK facade 对等边界
 risk: high
-observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
+observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.sdk-facade-routing]
 rule_refs: [rule.sdk-rust-authority]
-evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
+evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification, evidence.background-task-terminal-authority-verification]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
 audit_refs: [audit.sdk-facade-plan08-final, audit.sdk-facade-scope-contract]
 related_map_refs: [map.protocol-surfaces]
@@ -37,10 +37,10 @@ scenarios:
     evidence_refs: [evidence.sdk-contracts]
   sdk-contract-scope:
     status: mapped
-    source_refs: [echo-sdk-protocol/src/inventory.rs, contracts/sdk/parity-manifest.schema.json, contracts/sdk/parity-manifest.json, echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh, docs/adr/0032-sdk-contract-scope-classification.md]
+    source_refs: [echo-sdk-protocol/src/inventory.rs, contracts/sdk/parity-manifest.schema.json, contracts/sdk/parity-manifest.json, echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh, docs/adr/0032-sdk-contract-scope-classification.md, docs/adr/0039-background-task-terminal-authority.md]
     behavior_refs: [behavior.sdk-facade-routing]
     rule_refs: [rule.sdk-rust-authority]
-    evidence_refs: [evidence.sdk-contracts]
+    evidence_refs: [evidence.sdk-contracts, evidence.background-task-terminal-authority-verification]
 ---
 
 # 多语言 SDK facade 对等边界
@@ -79,7 +79,7 @@ permission operation复用Session Agent的`PermissionService`。Host不得引入
 
 ## 场景处置清单
 
-ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5607个当前external contract、1765个Host/Rust-only、780个language intrinsic、90个internal helper与1441个deferred，总量9683；551个已完成intrinsic仍属于external contract。
+ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5607个当前external contract、1765个Host/Rust-only、781个language intrinsic、90个internal helper与1441个deferred，总量9684；新增项仅为BackgroundTask Clone的Rust trait impl，551个已完成intrinsic仍属于external contract。
 
 ## 未展开项
 

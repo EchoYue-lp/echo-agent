@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [contract_evidence, failure_concurrency, time_lifecycle]
-observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
+observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
 behavior_refs: [behavior.sdk-facade-routing]
 code_refs:
   - docs/supreme/specs/2026-09-04-source-first-multilanguage-sdk-runtime/design.md
@@ -19,7 +19,9 @@ code_refs:
   - echo-sdk-host/src/core_profile/handles.rs
   - echo-sdk-host/src/core_profile/facade/source_operations.rs
   - echo-sdk-host/src/core_profile/facade/stream.rs
-evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
+  - echo-orchestration/src/tasks/background_task.rs
+  - docs/adr/0039-background-task-terminal-authority.md
+evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification, evidence.background-task-terminal-authority-verification]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
 ---
 
@@ -35,7 +37,7 @@ Rust `echo-agent`继续唯一拥有Agent、Run、Task、Subagent、事件、重�
 
 ## 当前实现
 
-Host adapter只做typed值转换、handle寻址、generation fencing和调用现有服务；事件使用`EventEnvelope`，Run使用`AgentTurnDriver`及既有存储。文件资源只保留Rust lease/guard，stream业务map只保留receiver/background，HandleRegistry仍是唯一identity与生命周期权威。
+Host adapter只做typed值转换、handle寻址、generation fencing和调用现有服务；事件使用`EventEnvelope`，Run使用`AgentTurnDriver`及既有存储。文件资源只保留Rust lease/guard，stream业务map只保留receiver/background，HandleRegistry仍是唯一identity与生命周期权威。Process-local BackgroundTask Clone只属于Rust language intrinsic，不授权Host或语言层复制task/result状态机。
 
 ## 期望行为
 

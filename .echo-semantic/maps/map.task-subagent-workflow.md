@@ -4,13 +4,13 @@ id: map.task-subagent-workflow
 kind: capability_map
 title: Task、Subagent、Workflow 与 Scheduler
 risk: high
-observed_at: 6d66479fd520da9cbbb66723faa35ce69a8963a8
+observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
 boundary_refs: [boundary.task-subagent-workflow]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
+evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
 finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement, finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race, finding.background-task-wait, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.subagent-definition-catalog]
-audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview, audit.subagent-factory-singleflight-rereview]
+audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview, audit.subagent-factory-singleflight-rereview, audit.background-task-terminal-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.tool-permission-sandbox]
 scenarios:
   revisioned-task-graph:
@@ -47,11 +47,13 @@ scenarios:
     unknown: store/cache 可见状态、migration overwrite 与 callback delivery guarantee 未闭合
     next_step: audit cache refresh、持久 claim/ledger 与 migration target collision
   process-local-background-task:
-    status: needs_review
-    source_refs: [echo-orchestration/src/tasks/background_task.rs]
+    status: mapped
+    source_refs: [echo-orchestration/src/tasks/background_task.rs, docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, docs/adr/0039-background-task-terminal-authority.md]
     finding_refs: [finding.background-task-wait]
-    unknown: wait lost-wakeup、多观察者结果与 panic settlement 未闭合
-    next_step: 用确定性调度测试审计 process-local terminal authority
+    behavior_refs: [behavior.task-subagent-execution]
+    rule_refs: [rule.task-subagent-authority]
+    evidence_refs: [evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
+    audit_refs: [audit.background-task-terminal-authority-rereview]
   command-cell-runtime:
     status: needs_review
     source_refs: [echo-core/src/tools/cell.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0025-deterministic-command-cell-watcher.md]
@@ -78,7 +80,7 @@ Task graph 和 Subagent 是主任务执行关系；Workflow/Scheduler/Background
 
 ## 状态与数据流
 
-Task spec/execution/claim、Subagent identity/control/envelope、Workflow state/checkpoint、Scheduler store/cache 各有明确 owner，但存在记录的冲突。
+Task spec/execution/claim、Subagent identity/control/envelope、Workflow state/checkpoint、Scheduler store/cache各有明确owner。Process-local BackgroundTaskHandleState原子保存status与单消费者result；公开BackgroundTaskState checkpoint类型仍是独立历史合同。
 
 ## 策略来源与优先级
 
@@ -86,7 +88,7 @@ Task policy/controller、Subagent prompt/isolation/admission、Workflow graph de
 
 ## 生命周期与失败路径
 
-Revision/claim/wave/settle/retry/pause/cancel、dispatch/message/interrupt/terminal、checkpoint/resume、tick/shutdown、spawn/wait。
+Revision/claim/wave/settle/retry/pause/cancel、dispatch/message/interrupt/terminal、checkpoint/resume、tick/shutdown、spawn/admit/execute/cancel/deadline/wait/terminal。
 
 ## 权限与敏感信息
 
@@ -98,7 +100,7 @@ TaskEvent/progress、Subagent envelopes、Workflow events 和 command snapshots 
 
 ## 场景处置清单
 
-所有主要入口已映射；Task relation patch与Subagent factory的两个竞态已关闭，其余十三个当前缺口继续进入Finding/needs_review。Workflow、Scheduler、BackgroundTask与CommandCell不合成一个authority。
+所有主要入口已映射；Task relation patch、Subagent factory竞态与BackgroundTask terminal authority已关闭。其它当前缺口继续进入Finding/needs_review；Workflow、Scheduler、BackgroundTask与CommandCell不合成一个authority。
 
 ## 未展开项
 

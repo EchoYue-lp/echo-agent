@@ -6,7 +6,7 @@ title: Driven Turn Terminal Authority
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
+observed_at: 81e2756cee9127fa23a9bb1023bd56aa8f954964
 boundary_refs: [boundary.agent-session-turn]
 code_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/eval/runner.rs, docs/adr/0038-eval-trace-correlation-identity.md]
 consumer_refs: [src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, tests/agent_handle_turn_driver.rs]

@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: state_authority
 freshness: examined
-revision: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
+revision: 81e2756cee9127fa23a9bb1023bd56aa8f954964
 finding_refs: [finding.eval-trace-identity]
 challenges:
   product-correlation-trace-ownership:
-    revision: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
+    revision: 81e2756cee9127fa23a9bb1023bd56aa8f954964
     source_refs: [src/eval/runner.rs, src/agent/react/mod.rs, echo-core/src/agent/event_envelope.rs, echo-core/src/tools/mod.rs]
     evidence_refs: [evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
   exact-summary-and-run-identity:
-    revision: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
+    revision: 81e2756cee9127fa23a9bb1023bd56aa8f954964
     source_refs: [src/eval/runner.rs, src/trace/mod.rs]
     evidence_refs: [evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
   terminal-and-optional-trace-boundary:
-    revision: source:8d6ff0470d17f79ed8a03d9a7582f36e94d1a96bb02cbafa853d97ba05cee64e
+    revision: 81e2756cee9127fa23a9bb1023bd56aa8f954964
     source_refs: [src/eval/runner.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md]
     evidence_refs: [evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
 ---

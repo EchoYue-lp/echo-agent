@@ -55,7 +55,7 @@ def test_every_external_sdk_contract_has_a_completed_python_mapping() -> None:
     assert counts == {
         "external_contract": 5607,
         "host_or_rust_only": 1765,
-        "language_intrinsic": 780,
+        "language_intrinsic": 781,
         "internal_helper": 90,
         "deferred": 1441,
     }

@@ -8,7 +8,7 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, failure_concurrency]
 boundary: boundary.sdk-facade-parity
-observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
+observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
 code_refs:
   - echo-sdk-protocol/src/inventory.rs
   - echo-sdk-protocol/src/facade.rs
@@ -16,7 +16,7 @@ code_refs:
   - echo-sdk-host/src/core_profile/facade/stream.rs
   - echo-sdk-host/src/core_profile/extension_bridge.rs
 rule_refs: [rule.sdk-rust-authority]
-evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
+evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification, evidence.background-task-terminal-authority-verification]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
 ---
 
@@ -28,7 +28,7 @@ finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancel
 
 ## 当前行为
 
-每条canonical source operation均到达具体Host adapter；存在live Agent消费点的consumer trait进入typed compressor或AgentComponent bridge，无Host消费点的trait保留具体process-local依据；AgentComponent覆盖可覆写default方法、IntentClassifier、异步SkillLoadPolicy、Sandbox/Workflow typed stream和cancel-aware执行，且只对Workflow mutation使用排他admission；Agent、extension、Workflow和A2A stream均有真实生产者与统一生命周期。
+每条canonical source operation均到达具体Host adapter；存在live Agent消费点的consumer trait进入typed compressor或AgentComponent bridge，无Host消费点的trait保留具体process-local依据。BackgroundTask Clone作为Rust trait implementation进入language-intrinsic scope，不生成语言facade。AgentComponent覆盖可覆写default方法、IntentClassifier、异步SkillLoadPolicy、Sandbox/Workflow typed stream和cancel-aware执行，且只对Workflow mutation使用排他admission；Agent、extension、Workflow和A2A stream均有真实生产者与统一生命周期。
 
 ## 期望行为
 

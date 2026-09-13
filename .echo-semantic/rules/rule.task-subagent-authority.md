@@ -7,11 +7,11 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [time_lifecycle, failure_concurrency, contract_evidence]
-observed_at: 6d66479fd520da9cbbb66723faa35ce69a8963a8
+observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
 behavior_refs: [behavior.task-subagent-execution]
-code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, docs/adr/0008-canonical-runtime-task-authority.md, docs/adr/0033-subagent-factory-singleflight-publication.md]
-evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
-finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.subagent-definition-catalog]
+code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/background_state.rs, src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, docs/adr/0008-canonical-runtime-task-authority.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0039-background-task-terminal-authority.md]
+evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
+finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.background-task-wait, finding.subagent-definition-catalog]
 ---
 
 # Task 与 Subagent 单一权威
@@ -22,19 +22,19 @@ finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link
 
 ## 适用行为
 
-适用于单 Task、Todo projection、Plan artifact、依赖 DAG、Team intent、direct/Fork/Teammate/Team dispatch 和恢复。
+适用于单Task、Todo projection、Plan artifact、依赖DAG、Team intent、direct/Fork/Teammate/Team dispatch和恢复；process-local BackgroundTask是相邻能力，必须保持自身唯一handle terminal且不得冒充durable graph。
 
 ## 当前实现
 
-Task claim 绑定 revision/attempt/spec hash/claim ID；Subagent control/event/outcome 绑定 exact Subagent attempt，但两类 identity 的生产关联尚未闭合。Registry entry 的 revision 与 OnceCell 共同约束 lazy factory generation，同代只发布一个cached实例；Team 编译到同一 graph。
+Task claim绑定revision/attempt/spec hash/claim ID；Subagent control/event/outcome绑定exact Subagent attempt，但两类identity的生产关联尚未闭合。Registry entry的revision与OnceCell共同约束lazy factory generation，同代只发布一个cached实例。Process-local BackgroundTaskHandleState唯一提交status/result，type-erased list读取同一state；它不替代公开checkpoint BackgroundTaskState或durable graph。Team编译到同一graph。
 
 ## 期望行为
 
-不得恢复旧 TaskManager/TaskStore/TaskExecutor、plan CRUD、Todo store、Team 私有 DAG loop 或 Worker 术语。
+不得恢复旧TaskManager/TaskStore/TaskExecutor、plan CRUD、Todo store、Team私有DAG loop或禁用旧术语；也不得把process-local future handle扩成第二Task关系权威。
 
 ## 证据
 
-ADR 0008/0033、task runtime tests、Subagent registry/executor tests 与 multi-agent 文档提供证据。
+ADR0008/0033/0039、task runtime tests、Subagent registry/executor tests、BackgroundTask并发测试与multi-agent文档提供证据。
 
 ## 裁决记录
 

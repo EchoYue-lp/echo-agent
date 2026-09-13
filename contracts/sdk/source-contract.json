@@ -8,19 +8,19 @@
     },
     {
       "path": "contracts/sdk/public-api.txt",
-      "bytes": 16677873,
-      "sha256": "sha256:0d3fa0cd556436713d590db97b5ae5c1de0b7dbac5c459ebbd66bb7649a89268"
+      "bytes": 16682365,
+      "sha256": "sha256:48fec44c15d0365c76e03d1d34f8493c8de34f93c77b912e93bc61686a7c1d60"
     },
     {
       "path": "contracts/sdk/parity-manifest.json",
-      "bytes": 32774878,
-      "sha256": "sha256:06923ab742a7cf919b0777573820ee1c9c1f797bdb96683ad78e60883db908e4"
+      "bytes": 32780753,
+      "sha256": "sha256:a1bbe217c02cab3dad2957d0babdfe54ab82b5d611f41502c87dc515a9b78a3a"
     },
     {
       "path": "contracts/sdk/facade-operation-catalog.json",
       "bytes": 593526,
-      "sha256": "sha256:6710a9d5b3f61f20364230bfdf4cd2a814463c7f6aec8e5d3956d51153e395d3"
+      "sha256": "sha256:b6cf0fd77271b3b5f42d4e7b9e289574a304f47f2e58e847fca7f3976b83a25b"
     }
   ],
-  "aggregate_digest": "sha256:231d652c6dca3bf8d4527926bae26a45a8538e8b8a8146be87937fdbe321b2c1"
+  "aggregate_digest": "sha256:a7c759a3f44f0542ff6da2f0de5497c49ded14b9eaf4ff2e100bbde6d527850e"
 }

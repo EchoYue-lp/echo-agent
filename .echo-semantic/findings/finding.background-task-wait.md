@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.background-task-wait
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: failure_concurrency
 focus: [time_lifecycle, state_authority]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: [audit.task-subagent-workflow.time-lifecycle]
+evidence_refs: [evidence.task-subagent-workflow, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
+audit_refs: [audit.task-subagent-workflow.time-lifecycle, audit.background-task-terminal-authority-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.background-task-terminal-authority-repair]
+verification_evidence_refs: [evidence.background-task-terminal-authority-verification]
+rereview_audit_refs: [audit.background-task-terminal-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,4 @@ Result 检查与 Notify waiter 注册之间存在 lost-wakeup 窗口；首个 wa
 
 ## 处理记录
 
-Time-lifecycle Audit 确认；TaskSpawner admission 不监听 cancel/deadline且允许零并发也纳入本 Finding repair 范围，后续用确定性调度测试修复单一 terminal authority。
+Issue #39追踪。BackgroundTask已用单一共享state原子发布status/result/typed panic provenance，Clone handle的多waiter不会挂起；TaskSpawner admission/execution共享cancel与absolute deadline，child execution task由JoinHandle监督，zero config与panic均归约terminal。Repair、verification与独立复审已闭合本Finding。GitHub Issue保持open，等待远程main交付。

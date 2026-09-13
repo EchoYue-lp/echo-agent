@@ -94,6 +94,6 @@ test("every external SDK contract has a completed TypeScript mapping", () => {
     external_contract: 5607,
     host_or_rust_only: 1765,
     internal_helper: 90,
-    language_intrinsic: 780,
+    language_intrinsic: 781,
   });
 });

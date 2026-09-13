@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.task-subagent-workflow
 kind: evidence
-observed_at: 6d66479fd520da9cbbb66723faa35ce69a8963a8
+observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
 source_refs:
   - echo-orchestration/src/tasks/revisioned.rs
   - echo-orchestration/src/tasks/runtime.rs
@@ -29,6 +29,9 @@ source_refs:
   - docs/adr/0030-versioned-subagent-event-envelope.md
   - docs/adr/0033-subagent-factory-singleflight-publication.md
   - docs/adr/0025-deterministic-command-cell-watcher.md
+  - docs/adr/0039-background-task-terminal-authority.md
+  - docs/en/29-long-running-tasks.md
+  - docs/zh/29-long-running-tasks.md
   - tests/facade_smoke.rs
 supports: [behavior.task-subagent-execution, rule.task-subagent-authority]
 limitations:
@@ -39,11 +42,11 @@ limitations:
 
 ## 支持的结论
 
-`TaskRevisionService` 唯一负责 revisioned graph CRUD/关系/校验，`RuntimeTaskService` 唯一负责 dependency execution；所有 Subagent 模式经过 `SubagentRegistry` 与 `SubagentExecutor`。Registry entry revision与OnceCell共同拥有lazy factory的single-flight publication；Workflow、Scheduler、BackgroundTask和CommandCell是相邻但不同的运行边界。
+`TaskRevisionService`唯一负责revisioned graph CRUD/关系/校验，`RuntimeTaskService`唯一负责dependency execution；所有Subagent模式经过`SubagentRegistry`与`SubagentExecutor`。Registry entry revision与OnceCell共同拥有lazy factory的single-flight publication。TaskSpawner的BackgroundTaskHandleState原子保存process-local status/result，Clone handle、多waiter、admission/deadline与child-task JoinHandle已形成修复证据；公开BackgroundTaskState checkpoint、Workflow、Scheduler和CommandCell是相邻但不同的运行边界。
 
 ## 来源与范围
 
-来源覆盖 task spec/execution/claim、runtime controller、Team/SDK TaskClaim adapter、Subagent registry/executor/control/events、Workflow graph/event/checkpoint、Scheduler store/runner、BackgroundTask、CommandCell 与相关 ADR/测试。
+来源覆盖task spec/execution/claim、runtime controller、Team/SDK TaskClaim adapter、Subagent registry/executor/control/events、Workflow graph/event/checkpoint、Scheduler store/runner、BackgroundTask handle/checkpoint、CommandCell与相关ADR/测试。
 
 ## 已知缺口
 

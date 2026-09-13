@@ -43,7 +43,7 @@ class FacadeParityTest {
         assertEquals(Map.of(
                 "external_contract", 5607,
                 "host_or_rust_only", 1765,
-                "language_intrinsic", 780,
+                "language_intrinsic", 781,
                 "internal_helper", 90,
                 "deferred", 1441), counts);
     }

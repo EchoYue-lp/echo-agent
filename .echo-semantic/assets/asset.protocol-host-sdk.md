@@ -6,13 +6,13 @@ title: ACP、A2A、Channels、Headless 与 SDK Host
 asset_type: protocol
 status: needs_review
 risk: high
-observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
+observed_at: source:d61c2341a008920576462b3051374115cf1b4da682c341852b052224f022d027
 boundary_refs: [boundary.protocol-surfaces, boundary.sdk-facade-parity]
 code_refs: [src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, src/channels.rs, src/headless.rs, echo-sdk-protocol/src/lib.rs, echo-sdk-host/src/lib.rs, contracts/sdk/parity-manifest.json]
 consumer_refs: [tests/acp_agent_adapter.rs, echo-sdk-host/tests/core_profile_e2e.rs, sdks/typescript/src/client.ts, sdks/python/src/echo_agent_sdk/client.py]
 behavior_refs: [behavior.protocol-projection, behavior.sdk-facade-routing]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification, evidence.background-task-terminal-authority-verification]
 finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.channel-attachment-projection, finding.turn-driver-entry-coverage]
 candidate_refs: []
 ---
