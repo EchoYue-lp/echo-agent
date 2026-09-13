@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: failure_concurrency
 freshness: examined
-revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+revision: 78b9f06b4320531fd8f41260887cd69c1343e995
 finding_refs: [finding.task-patch-claim-race]
 challenges:
   canonical-producer-precondition:
-    revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+    revision: 78b9f06b4320531fd8f41260887cd69c1343e995
     source_refs: [echo-orchestration/src/tasks/revisioned.rs, docs/adr/0008-canonical-runtime-task-authority.md]
     evidence_refs: [evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification]
   interleaved-runtime-mutation:
-    revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+    revision: 78b9f06b4320531fd8f41260887cd69c1343e995
     source_refs: [echo-orchestration/src/tasks/revisioned.rs]
     evidence_refs: [evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification]
   public-sdk-contract:
-    revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+    revision: 78b9f06b4320531fd8f41260887cd69c1343e995
     source_refs: [contracts/sdk/parity-manifest.json, contracts/sdk/facade-operation-catalog.json, echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh]
     evidence_refs: [evidence.task-patch-claim-cas-verification]
 ---

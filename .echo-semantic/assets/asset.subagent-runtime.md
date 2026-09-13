@@ -6,14 +6,14 @@ title: Subagent Registry、Executor 与 Control
 asset_type: state_authority
 status: active
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:252362472c35fc62836123fbf064477b407af7bce21a21f16d231d594eebb136
 boundary_refs: [boundary.task-subagent-workflow]
-code_refs: [src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, src/agent/subagent/control.rs, src/agent/subagent/events.rs]
+code_refs: [src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, src/agent/subagent/control.rs, src/agent/subagent/events.rs, docs/adr/0033-subagent-factory-singleflight-publication.md]
 consumer_refs: [src/tools/builtin/agent_dispatch.rs, src/agent/subagent/team/mod.rs]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow]
-finding_refs: [finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-definition-catalog]
+evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
+finding_refs: [finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.subagent-definition-catalog]
 candidate_refs: []
 ---
 
@@ -29,7 +29,7 @@ Agent tool、Team runtime、Hook actions 和 programmatic callers 消费。
 
 ## 生命周期
 
-Register/resolve、compile prompt/isolate、dispatch、message/interrupt/join、typed settle/replay。
+Register/revision-scoped factory resolve、compile prompt/isolate、dispatch、message/interrupt/join、typed settle/replay。
 
 ## 候选关系
 
@@ -37,4 +37,4 @@ Register/resolve、compile prompt/isolate、dispatch、message/interrupt/join、
 
 ## 未知与限制
 
-Team/SDK dispatch 丢失 TaskClaim 到 SubagentAttempt identity、lazy factory cancellation 和 definition catalog 漂移已形成 Findings。
+Team/SDK dispatch丢失TaskClaim到SubagentAttempt identity和definition catalog漂移仍为开放Finding；factory cancellation/publication已具备闭合证据。

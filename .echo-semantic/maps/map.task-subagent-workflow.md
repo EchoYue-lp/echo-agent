@@ -4,13 +4,13 @@ id: map.task-subagent-workflow
 kind: capability_map
 title: Task、Subagent、Workflow 与 Scheduler
 risk: high
-observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+observed_at: source:252362472c35fc62836123fbf064477b407af7bce21a21f16d231d594eebb136
 boundary_refs: [boundary.task-subagent-workflow]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification]
+evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
 finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement, finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race, finding.background-task-wait, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.subagent-definition-catalog]
-audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview]
+audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview, audit.subagent-factory-singleflight-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.tool-permission-sandbox]
 scenarios:
   revisioned-task-graph:
@@ -28,8 +28,10 @@ scenarios:
     source_refs: [src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, src/agent/subagent/control.rs, src/agent/subagent/events.rs]
     finding_refs: [finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.subagent-definition-catalog]
     rule_refs: [rule.task-subagent-authority]
-    unknown: lazy factory 取消可遗留 instantiating，publication gap 可双创建，TaskClaim 与 SubagentAttempt identity 也未闭合
-    next_step: 分别 repair factory publication guard 与 Task/Subagent attempt route，再确认 terminal/control contract
+    evidence_refs: [evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
+    audit_refs: [audit.subagent-factory-singleflight-rereview]
+    unknown: TaskClaim与SubagentAttempt identity及definition catalog仍未闭合；factory cancellation/publication已关闭
+    next_step: 分别处理Task/Subagent attempt route与definition catalog裁决
   workflow-graph-and-events:
     status: needs_review
     source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/checkpoint_store.rs, echo-orchestration/src/workflow/dag.rs]
@@ -96,7 +98,7 @@ TaskEvent/progress、Subagent envelopes、Workflow events 和 command snapshots 
 
 ## 场景处置清单
 
-所有主要入口已映射；Task relation patch 覆盖 claim 的竞态已关闭，其余十五个当前缺口继续进入 Finding/needs_review。Workflow、Scheduler、BackgroundTask 与 CommandCell 不合成一个 authority。
+所有主要入口已映射；Task relation patch与Subagent factory的两个竞态已关闭，其余十三个当前缺口继续进入Finding/needs_review。Workflow、Scheduler、BackgroundTask与CommandCell不合成一个authority。
 
 ## 未展开项
 

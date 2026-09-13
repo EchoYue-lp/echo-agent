@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [contract_evidence, permission_external, time_lifecycle]
-observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
 behavior_refs: [behavior.protocol-projection]
 code_refs: [src/acp/adapter.rs, src/a2a/server.rs, echo-integration/src/mcp/mod.rs, echo-integration/src/channels/manager.rs, src/channels.rs, src/headless.rs, echo-sdk-protocol/src/lib.rs, docs/adr/0028-source-first-multilanguage-sdk-runtime.md]
 evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts]

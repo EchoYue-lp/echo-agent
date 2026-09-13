@@ -8,11 +8,11 @@ risk: high
 primary_focus: state_authority
 focus: [time_lifecycle, failure_concurrency, result_side_effect, contract_evidence]
 boundary: boundary.task-subagent-workflow
-observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+observed_at: source:252362472c35fc62836123fbf064477b407af7bce21a21f16d231d594eebb136
 code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/dag.rs, echo-orchestration/src/workflow/mod.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/command_cell.rs]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow]
-finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.scheduler-cache-delivery, finding.background-task-wait, finding.subagent-definition-catalog]
+evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
+finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.scheduler-cache-delivery, finding.background-task-wait, finding.subagent-definition-catalog]
 ---
 
 # Task、Subagent 与 Workflow 执行
@@ -23,7 +23,7 @@ finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link
 
 ## 当前行为
 
-`TaskRevisionService` 提交完整 revision，`RuntimeTaskService` 计算 ready frontier、claim、retry/pause/cancel/settle；Subagent attempt 使用 typed identity、control、events 和 outcome，但 TaskClaim 关联与 lazy factory cancellation 仍有 Finding；Team intent 编译到同一 graph。
+`TaskRevisionService` 提交完整 revision，`RuntimeTaskService` 计算 ready frontier、claim、retry/pause/cancel/settle；Subagent attempt 使用 typed identity、control、events 和 outcome。Registry lazy factory以registration revision scoped OnceCell统一构造与发布，取消、错误与旧代结果已有闭合证据；TaskClaim到SubagentAttempt的关联仍有Finding。Team intent编译到同一graph。
 
 ## 期望行为
 
@@ -35,11 +35,11 @@ Task tools、Team/agent dispatch、programmatic runtime、Workflow 和 Scheduler
 
 ## 失败、重试与恢复
 
-循环依赖、无 ready frontier、timeout、cancel、pause、skip、retry exhaustion、superseded claim 和 restart 必须保留 typed 状态与 safe point。
+循环依赖、无 ready frontier、timeout、cancel、pause、skip、retry exhaustion、superseded claim 和 restart 必须保留 typed 状态与一致性提交点。
 
 ## 证据
 
-Task service/executor tests、Subagent control/event tests、ADR 0008/0024/0027/0030 和 public facade smoke 提供证据。
+Task service/executor tests、Subagent registry/control/event tests、ADR 0008/0024/0027/0030/0033 和 public facade smoke 提供证据。
 
 ## 裁决记录
 

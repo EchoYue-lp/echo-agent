@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.subagent-factory-cancellation
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: failure_concurrency
 focus: [time_lifecycle, state_authority, contract_evidence]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: [audit.task-subagent-workflow.state-authority]
+evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
+audit_refs: [audit.task-subagent-workflow.state-authority, audit.subagent-factory-singleflight-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.subagent-factory-singleflight-repair]
+verification_evidence_refs: [evidence.subagent-factory-singleflight-verification]
+rereview_audit_refs: [audit.subagent-factory-singleflight-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -23,7 +23,7 @@ discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 
 ## 问题
 
-`SubagentRegistry::get_agent` 在等待 factory create 前把名称加入 `instantiating`，清理只发生在 await 正常返回后；dispatch future 被取消或 abort 时名称可永久残留。
+基准实现的`SubagentRegistry::get_agent`在等待factory create前把名称加入`instantiating`，清理只发生在await正常返回后；确定性red确认future被abort时名称永久残留。
 
 ## 触发条件与影响
 
@@ -31,8 +31,8 @@ Factory create 期间发生 caller cancel、runtime grace timeout 或 task abort
 
 ## 证据
 
-`src/agent/subagent/registry.rs` 展示 instantiating publication；`echo-orchestration/src/tasks/runtime_executor.rs` 展示超时 abort 路径。
+当前entry以Tokio OnceCell持有初始化ownership；取消、错误或panic不初始化cell，后续resolve可重试。Registry与executor定向测试及ADR 0033提供验证。
 
 ## 处理记录
 
-Discovery 记录；后续 lifecycle audit 应验证取消安全的 publication guard、waiter 唤醒和 stale generation 防护。
+revision/cell双重fence、确定性red/green与独立复审已闭合本Finding；factory自身的外部副作用清理仍由实现方负责。

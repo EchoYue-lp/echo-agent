@@ -6,7 +6,7 @@ title: Workspace 与 Feature 编译权威
 asset_type: state_authority
 status: active
 risk: high
-observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
 boundary_refs: [boundary.workspace-architecture]
 code_refs: [Cargo.toml, echo-core/Cargo.toml, echo-execution/Cargo.toml, echo-integration/Cargo.toml, echo-macros/Cargo.toml, echo-orchestration/Cargo.toml, echo-state/Cargo.toml, echo-tools/Cargo.toml, echo-sdk-protocol/Cargo.toml, echo-sdk-host/Cargo.toml, echo-agent-learning/Cargo.toml]
 consumer_refs: [.github/workflows/rust-ci.yml, scripts/verify.sh]

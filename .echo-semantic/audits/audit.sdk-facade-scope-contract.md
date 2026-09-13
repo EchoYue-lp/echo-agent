@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.sdk-facade-parity
 lens: contract_evidence
 freshness: examined
-revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+revision: 78b9f06b4320531fd8f41260887cd69c1343e995
 finding_refs: []
 challenges:
   identity-scope-versus-route:
-    revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+    revision: 78b9f06b4320531fd8f41260887cd69c1343e995
     source_refs: [echo-sdk-protocol/src/inventory.rs, contracts/sdk/parity-manifest.schema.json, contracts/sdk/parity-manifest.json, docs/adr/0032-sdk-contract-scope-classification.md]
     evidence_refs: [evidence.sdk-contracts]
   cross-language-scope-gates:
-    revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+    revision: 78b9f06b4320531fd8f41260887cd69c1343e995
     source_refs: [echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh, sdks/typescript/test/catalog.test.js, sdks/python/tests/test_catalog.py, sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java]
     evidence_refs: [evidence.sdk-contracts]
   operation-catalog-stability:
-    revision: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+    revision: 78b9f06b4320531fd8f41260887cd69c1343e995
     source_refs: [contracts/sdk/facade-operation-catalog.json, contracts/sdk/source-contract.json, sdks/shared/contract-digests.json]
     evidence_refs: [evidence.sdk-contracts]
 ---

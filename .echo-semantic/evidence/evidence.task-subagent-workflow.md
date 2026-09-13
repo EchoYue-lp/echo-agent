@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.task-subagent-workflow
 kind: evidence
-observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+observed_at: source:252362472c35fc62836123fbf064477b407af7bce21a21f16d231d594eebb136
 source_refs:
   - echo-orchestration/src/tasks/revisioned.rs
   - echo-orchestration/src/tasks/runtime.rs
@@ -27,6 +27,7 @@ source_refs:
   - docs/adr/0024-unified-subagent-prompt-compilation.md
   - docs/adr/0027-subagent-communication-primitives.md
   - docs/adr/0030-versioned-subagent-event-envelope.md
+  - docs/adr/0033-subagent-factory-singleflight-publication.md
   - docs/adr/0025-deterministic-command-cell-watcher.md
   - tests/facade_smoke.rs
 supports: [behavior.task-subagent-execution, rule.task-subagent-authority]
@@ -38,7 +39,7 @@ limitations:
 
 ## 支持的结论
 
-`TaskRevisionService` 唯一负责 revisioned graph CRUD/关系/校验，`RuntimeTaskService` 唯一负责 dependency execution；所有 Subagent 模式经过 `SubagentRegistry` 与 `SubagentExecutor`；Workflow、Scheduler、BackgroundTask 和 CommandCell 是相邻但不同的运行边界。
+`TaskRevisionService` 唯一负责 revisioned graph CRUD/关系/校验，`RuntimeTaskService` 唯一负责 dependency execution；所有 Subagent 模式经过 `SubagentRegistry` 与 `SubagentExecutor`。Registry entry revision与OnceCell共同拥有lazy factory的single-flight publication；Workflow、Scheduler、BackgroundTask和CommandCell是相邻但不同的运行边界。
 
 ## 来源与范围
 

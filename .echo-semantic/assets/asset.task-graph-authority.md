@@ -6,7 +6,7 @@ title: Revisioned Task Graph Authority
 asset_type: state_authority
 status: active
 risk: high
-observed_at: source:64131952ceb6f498fe94fc34482afe3ecf1e1e77f5a1d31a6ff3ce81b7e0eb01
+observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
 boundary_refs: [boundary.task-subagent-workflow]
 code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs]
 consumer_refs: [src/tasks.rs, src/agent/subagent/team/mod.rs, tests/facade_smoke.rs]
