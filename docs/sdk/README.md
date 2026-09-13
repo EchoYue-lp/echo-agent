@@ -241,6 +241,8 @@ LLM API protocol values preserve endpoint path selection, strict complete-path
 detection, and Anthropic fallback semantics without opening HTTP connections.
 Model input modality values preserve text-only and historical all-supported
 ordering without owning model transport.
+Response format values preserve text, JSON object, and strict JSON Schema tags
+without validating or executing provider responses.
 Page metadata values preserve truncation, continuation metadata, and output
 projection without owning collection state.
 Subagent context snapshots preserve empty/content semantics without owning

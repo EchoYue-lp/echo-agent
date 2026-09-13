@@ -2597,6 +2597,14 @@ fn language_status_for(
         "echo_core::llm::ModelInputModality::all_supported",
         "echo_core::llm::ModelInputModality::text_only",
     ];
+    const RESPONSE_FORMAT_IDENTITIES: &[&str] = &[
+        "echo_core::llm::types::ResponseFormat",
+        "echo_core::llm::types::ResponseFormat::JsonObject",
+        "echo_core::llm::types::ResponseFormat::JsonSchema",
+        "echo_core::llm::types::ResponseFormat::Text",
+        "echo_core::llm::types::ResponseFormat::is_json",
+        "echo_core::llm::types::ResponseFormat::json_schema",
+    ];
     let (status, suffix) = if LOCAL_TOOL_VALUE_IDENTITIES.contains(&identity) {
         (LanguageImplementationStatus::Done, "local_tool_values")
     } else if A2A_TASK_STATE_IDENTITIES.contains(&identity) {
@@ -2759,6 +2767,8 @@ fn language_status_for(
             LanguageImplementationStatus::Done,
             "model_input_modality_values",
         )
+    } else if RESPONSE_FORMAT_IDENTITIES.contains(&identity) {
+        (LanguageImplementationStatus::Done, "response_format_values")
     } else {
         match identity {
             "echo_orchestration::runtime::turn_driver::TurnOutcome::classify" => {

@@ -8,7 +8,7 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, failure_concurrency]
 boundary: boundary.sdk-facade-parity
-observed_at: source:98de3633aed56a0e9bd67a3eee18dfb0ec005ce6d04472aa872d16c1deb3d4ae
+observed_at: source:d7ba0cfc0af9a51108f22065b5d198eb70e172a9cd361923fe2077290796269f
 code_refs:
   - echo-sdk-protocol/src/facade.rs
   - echo-sdk-host/src/core_profile/facade/source_operations.rs

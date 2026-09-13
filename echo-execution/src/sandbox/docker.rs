@@ -1459,10 +1459,14 @@ esac
 exit 64
 "#
             );
-            std::fs::write(&program, script)?;
-            let mut permissions = std::fs::metadata(&program)?.permissions();
+            // Publish the executable only after the complete script is written. Linux runners can
+            // otherwise report ETXTBSY when execve races with the final write on the temp volume.
+            let script_path = directory.join("docker.script");
+            std::fs::write(&script_path, script)?;
+            let mut permissions = std::fs::metadata(&script_path)?.permissions();
             permissions.set_mode(0o700);
-            std::fs::set_permissions(&program, permissions)?;
+            std::fs::set_permissions(&script_path, permissions)?;
+            std::fs::rename(&script_path, &program)?;
             Ok(Self {
                 directory,
                 program,
