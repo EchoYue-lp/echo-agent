@@ -99,6 +99,12 @@
 | [0023 - 当前 Skill Frontmatter](../adr/0023-current-skill-frontmatter.md) | Markdown 正文与目录资源取代旧 frontmatter 内容字段 |
 | [0024 - Subagent 提示词统一编译](../adr/0024-unified-subagent-prompt-compilation.md) | 一个注入式 compiler 统一拥有注册与派发 prompt framing |
 | [0025 - 确定性 CommandCell watcher](../adr/0025-deterministic-command-cell-watcher.md) | retained typed watcher 取代模型驱动的命令轮询 |
+| [0026 - 仅使用官方 Skill Frontmatter](../adr/0026-official-skill-frontmatter-only.md) | 文件 Skill 使用官方字段，Hook 配置保持独立 |
+| [0027 - Subagent 通信原语](../adr/0027-subagent-communication-primitives.md) | attempt-scoped 消息与 lineage 复用同一 Subagent 控制面 |
+| [0028 - 源码优先的多语言 SDK Runtime](../adr/0028-source-first-multilanguage-sdk-runtime.md) | ACP 与 namespaced extension 向源码 SDK 暴露同一个 Rust runtime |
+| [0029 - 共享 Subagent 执行准入](../adr/0029-shared-subagent-execution-admission.md) | Proposed 的共享准入组合 Task 与直接 Subagent 执行 |
+| [0030 - 版本化 Subagent 事件信封](../adr/0030-versioned-subagent-event-envelope.md) | 一个版本化信封拥有 Subagent 事件 identity、顺序与 replay |
+| [0031 - SDK Identity 治理范围](../adr/0031-sdk-identity-governance-scope.md) | SDK identity inventory 监控漂移，不衡量项目语义完成度 |
 
 ---
 

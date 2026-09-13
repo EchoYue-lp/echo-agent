@@ -120,6 +120,22 @@ previous ones.
 | **Parity complete** | TypeScript, Python and Java all pass the full facade/all-features parity suite | ❌ intrinsic mappings and behavior matrix pending |
 | **Published** | Registry/binary publication — **explicitly out of scope**; this design ships source only | never (by design) |
 
+### Identity inventory scope
+
+At `echo-agent/main@b21aba01`, the parity manifest contains 9,682 canonical
+identities. TypeScript, Python, and Java all mark 5,606 of them `done`; the
+remaining 4,076 identities are all classified under the `intrinsic` route
+surface. Standard ACP, core extension, family, bridge, invoke, and value route
+surfaces have no remaining not-done canonical identities.
+
+These counts are SDK inventory telemetry, not repository-wide semantic progress
+and not an instruction to open one pull request per identity. The complete
+inventory remains the drift authority. Further language work is grouped by an
+externally useful SDK capability or a confirmed Finding, while whole-workspace
+governance is measured through Capability, Behavior, Rule, state authority,
+lifecycle, Finding, and Evidence coverage. See
+[ADR 0031](../adr/0031-sdk-identity-governance-scope.md).
+
 Only *Parity complete* justifies claiming "all public Rust capabilities are
 available from the SDK". Executable routes currently use the canonical
 resolver and serializable values use the lossless WireValue algebra; the

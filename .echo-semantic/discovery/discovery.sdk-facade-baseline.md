@@ -4,7 +4,7 @@ id: discovery.sdk-facade-baseline
 kind: discovery
 source_snapshot:
   base_revision: 4af71b1d40558436350efd16a6f320c0f2193745
-  content_digest: 448caeb7a6cc1bb147c8d86412b0b9a8d0c14b653b8326724432b49faebab62c
+  content_digest: 8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
 scope: root echo_agent facade到ACP与多语言SDK Host适配边界
 inspected_paths:
   - contracts/sdk
