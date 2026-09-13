@@ -163,6 +163,7 @@ from .permission_rule_matcher import RuleMatcher, RuleMatcherKind, ToolPermissio
 from .permission_rule_values import RuleSource
 from .prompt_diagnostics_values import PromptDiagnostics, PromptSectionDiagnostic
 from .provider_capabilities_values import ProviderCapabilities
+from .response_format_values import JsonSchemaSpec, ResponseFormat
 from .retry_policy_values import RetryPolicy
 from .sandbox_resource_values import ResourceLimits
 from .segment_range_values import SegmentRange
@@ -315,6 +316,7 @@ __all__ = [
     "InterventionResult",
     "JsonRpcNotification",
     "JsonRpcRequest",
+    "JsonSchemaSpec",
     "JwtClaims",
     "JwtConfig",
     "LlmApiProtocol",
@@ -344,6 +346,7 @@ __all__ = [
     "ProviderCapabilities",
     "ResolvedOperation",
     "ResourceLimits",
+    "ResponseFormat",
     "RetryPolicy",
     "RevisionedTaskCompareAndCommitRequest",
     "RevisionedTaskLoadRequest",

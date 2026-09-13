@@ -381,6 +381,8 @@ out of Rust.
 The ModelInputModality slice adds seven model-input value identities, preserving
 text-only and historical all-supported ordering without moving model transport
 out of Rust.
+The ResponseFormat slice adds six structured-output value identities, preserving
+strict JSON Schema tags without moving response validation out of Rust.
 The SDKs preserve calculation priority while LLM execution remains in Rust/Host.
 
 The HookAction slice adds 31 tagged variant/field/validation identities. The

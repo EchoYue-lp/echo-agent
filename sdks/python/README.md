@@ -158,6 +158,8 @@ then exact override precedence without owning provider transport.
 detection without opening HTTP connections.
 `ModelInputModality` preserves text-only and historical all-supported ordering
 without owning model transport.
+`ResponseFormat` preserves text, JSON object, and strict JSON Schema tagged
+values without validating or executing provider responses.
 `PageInfo` preserves truncation, continuation metadata, and output projection
 without owning collection state.
 `SubagentContext` preserves empty/content semantics without owning context or
