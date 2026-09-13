@@ -1,0 +1,40 @@
+---
+schema_version: 1
+id: asset.framework-docs
+kind: asset
+title: Framework 正式文档与 ADR
+asset_type: document
+status: needs_review
+risk: medium
+observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+boundary_refs: [boundary.workspace-architecture]
+code_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/adr/0014-framework-capability-placement.md]
+consumer_refs: [echo-agent-learning/tests/documentation_contract.rs]
+behavior_refs: [behavior.workspace-composition]
+rule_refs: [rule.framework-layer-ownership]
+evidence_refs: [evidence.workspace-structure]
+finding_refs: []
+candidate_refs: []
+---
+
+# Framework 正式文档与 ADR
+
+## 资产身份
+
+公共概念、API、架构决策、examples 路由与长期维护说明。
+
+## 来源与消费者
+
+Framework 用户、SDK consumers、website 同步和 documentation contracts 消费。
+
+## 生命周期
+
+架构/API 变化时与代码、examples 和 tests 同步更新。
+
+## 候选关系
+
+顶层跨仓计划和历史审计不是本资产的长期行为 authority。
+
+## 未知与限制
+
+Workspace 图、Task feature、example path、MCP version 和 Evolution namespace 已形成文档 Finding。

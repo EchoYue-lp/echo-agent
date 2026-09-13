@@ -11,7 +11,7 @@ rule_refs: [rule.sdk-rust-authority]
 evidence_refs: [evidence.sdk-contracts]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
 audit_refs: [audit.sdk-facade-plan08-final]
-related_map_refs: []
+related_map_refs: [map.protocol-surfaces]
 scenarios:
   standard-acp:
     status: mapped
@@ -77,5 +77,5 @@ ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source 
 
 ## 未展开项
 
-intrinsic 语言行为、逐项领域/失败语义与最终 Parity complete 属于后续独立交付结果；
-全仓 inventory/behavior model 和 clean-checkout 发布证据也仍保持开放。
+intrinsic 语言行为、逐项领域/失败语义与最终 Parity complete 属于后续独立 SDK 交付结果；
+全仓 inventory/behavior model 由父级能力图闭合，不以本 map 的 identity 数量衡量。

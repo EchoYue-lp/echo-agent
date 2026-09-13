@@ -1,0 +1,106 @@
+---
+schema_version: 1
+id: map.eval-evolution
+kind: capability_map
+title: Trace、Eval、Improve 与 Evolution
+risk: high
+observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+boundary_refs: [boundary.eval-evolution]
+behavior_refs: [behavior.eval-evolution]
+rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation]
+finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.evolution-audit-atomicity, finding.evolution-skill-promotion-audit, finding.evolution-doc-namespace]
+audit_refs: []
+related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
+scenarios:
+  trace-record-and-analysis:
+    status: mapped
+    source_refs: [src/trace/mod.rs, src/trace/analyzer.rs]
+    finding_refs: [finding.eval-trace-identity]
+    rule_refs: [rule.fact-projection-separation]
+  eval-run-grade-report:
+    status: mapped
+    source_refs: [src/eval/runner.rs, src/eval/mod.rs, src/eval/replay.rs]
+    finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement]
+    behavior_refs: [behavior.eval-evolution]
+  improve-loop-and-trajectory:
+    status: needs_review
+    source_refs: [src/improve/loop.rs, src/improve/eval_improvement.rs, src/improve/trajectory.rs]
+    finding_refs: [finding.improve-iteration-config, finding.improve-single-case-panic]
+    evidence_refs: [evidence.provider-protocol-quality]
+    unknown: max_iterations 未进入执行，单 case criteria 分组可 panic，共享临时路径与 cleanup 仍需复核
+    next_step: audit iteration/config/split/temporary workspace lifecycle 并补边界测试
+  evolution-background-review-and-dreaming:
+    status: needs_review
+    source_refs: [src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/runtime_integration.rs, src/evolution/review.rs]
+    rule_refs: [rule.quality-observation-boundary]
+    unknown: proposal-only review、可选 auto-persistence、deterministic dreaming 与 application scheduling 的协调 owner 未闭合
+    next_step: 区分 observation/proposal 与 mutation，并审计 join/取消/失败结算
+  evolution-memory-mutation:
+    status: needs_review
+    source_refs: [src/evolution/layer.rs, src/evolution/audit.rs, src/evolution/security.rs]
+    finding_refs: [finding.evolution-audit-atomicity, finding.evolution-doc-namespace]
+    rule_refs: [rule.quality-observation-boundary]
+    unknown: memory mutation 与 audit 非原子，正式 namespace 文档漂移
+    next_step: audit commit/audit/rollback 顺序与当前 namespace contract
+  evolution-skill-lifecycle:
+    status: needs_review
+    source_refs: [src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]
+    finding_refs: [finding.evolution-skill-promotion-audit]
+    rule_refs: [rule.quality-observation-boundary]
+    unknown: Curator public promotion 可直接持久化 active 状态，未携带可验证 human approval 或 ChangeLog；其它 draft/merge/patch 各自有审计合同
+    next_step: audit skill candidate/draft/review/promote/merge/patch 的唯一 lifecycle 与授权证据
+  evolution-rule-promotion-surface:
+    status: needs_review
+    source_refs: [src/evolution/security.rs, src/evolution/mod.rs]
+    unknown: 仅发现 rule-promotion 安全检查，未发现 framework 内规则 mutation/持久 authority，不能声明 rule evolution 已 mapped
+    next_step: 在 application boundary audit 中确认 consumer；若无实现则收窄公开文档与 capability 名称
+    rule_refs: [rule.quality-observation-boundary]
+  runtime-trigger-and-human-review:
+    status: needs_review
+    source_refs: [src/agent/react/run/context.rs, src/evolution/runtime_integration.rs, src/evolution/review.rs]
+    unknown: 自动维护、应用调度与人工 review 的完整 production coordination 未在 framework 内形成一个 owner
+    next_step: audit 区分 deterministic maintenance、proposal、human-approved mutation 与 application scheduling
+---
+
+# Trace、Eval、Improve 与 Evolution
+
+## 能力范围
+
+覆盖执行 trace、case/constraint/grader eval、离线 improvement、trajectory export、typed memory/skill/rule evolution 与 change audit。
+
+## 入口与输出
+
+ReactAgent 可选记录 trace；显式 Eval/Improve API 和 runtime/app trigger 消费；输出 Run/report/suggestion/trajectory/candidate/mutation audit。
+
+## 行为关系
+
+Trace 是 observation，Eval/Improve 消费但不驱动业务 commit；Evolution 可写持久状态，需独立 authorization/audit/rollback。
+
+## 状态与数据流
+
+RunStore 保存 trace，EvalResult/Report 保存评分，ImprovementLoop 保存迭代结果，MemoryLayer/Curator/ChangeLog 保存演化状态。
+
+## 策略来源与优先级
+
+Eval cases/constraints、grader、explicit config、memory source/risk/status 和 human decision 决定行为。
+
+## 生命周期与失败路径
+
+Trace start/finalize，Eval run/timeout/grade/report，Improve iterate/stop/export，Evolution detect/review/apply/audit/rollback。
+
+## 权限与敏感信息
+
+Tool command、fixture、memory/skill/rule 写入是外部 effect；untrusted source 不能自动提升，secret/injection 检查必须保留。
+
+## 用户侧投影
+
+Report/dashboard/suggestions 是质量投影，不等同产品成功或允许自动改变权限。
+
+## 场景处置清单
+
+Trace/Eval/Improve、Background Review/Dreaming、Memory mutation、Skill lifecycle 与 Rule promotion 已分别路由；七个 Finding 和 runtime/human coordination 保持 needs_review。
+
+## 未展开项
+
+Application review dashboard、schedule 和 UI 不进入 framework baseline。

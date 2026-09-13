@@ -1,0 +1,89 @@
+---
+schema_version: 1
+id: map.agent-session-turn
+kind: capability_map
+title: Agent、Session、Invocation 与 Turn
+risk: high
+observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+boundary_refs: [boundary.agent-session-turn]
+behavior_refs: [behavior.agent-turn-lifecycle]
+rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
+evidence_refs: [evidence.agent-context-execution]
+finding_refs: [finding.turn-driver-entry-coverage]
+audit_refs: []
+related_map_refs: [map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.protocol-surfaces]
+scenarios:
+  agent-definition-and-instance:
+    status: mapped
+    source_refs: [echo-core/src/agent/mod.rs, src/agent/react/mod.rs, src/agent/handle.rs]
+    behavior_refs: [behavior.agent-turn-lifecycle]
+    evidence_refs: [evidence.agent-context-execution]
+  session-and-conversation-identities:
+    status: mapped
+    source_refs: [src/acp/session.rs, echo-integration/src/channels/session.rs, src/state/mod.rs]
+    rule_refs: [rule.context-persistence-separation]
+    evidence_refs: [evidence.agent-context-execution]
+  driven-turn-admission-and-terminal:
+    status: mapped
+    source_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs]
+    behavior_refs: [behavior.agent-turn-lifecycle]
+    rule_refs: [rule.turn-terminal-authority]
+  direct-and-channel-execution:
+    status: needs_review
+    source_refs: [src/agent/react/mod.rs, src/channels.rs]
+    finding_refs: [finding.turn-driver-entry-coverage]
+    unknown: ReactAgent direct execute/chat 与 Channel handler 绕过 AgentTurnDriver，不生成 TurnReceipt；这些入口是否必须采用 driven Turn 尚无统一合同
+    next_step: 在 turn authority audit 中建立逐入口 route matrix，并裁决 direct framework API 与 Channel adapter 的 terminal contract
+  agent-revision:
+    status: needs_review
+    source_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/workflow/graph.rs, echo-core/src/plugin/registry.rs, echo-sdk-host/src/core_profile/state.rs]
+    unknown: 仓库不存在通用 AgentRevision；Task/Workflow/Plugin/schema/generation revisions 是否需要共同 glossary 而非新 aggregate
+    next_step: 在 architecture audit 中确认限定术语并禁止新增裸 Revision authority
+  agent-factory-naming:
+    status: needs_review
+    source_refs: [echo-core/src/agent/factory.rs, src/agent/subagent/registry.rs]
+    unknown: 两个同名 AgentFactory 服务不同生命周期，是否需要限定命名以减少 API 歧义
+    next_step: 审查调用方和兼容影响，默认保留两个合理 public capability
+---
+
+# Agent、Session、Invocation 与 Turn
+
+## 能力范围
+
+覆盖 Agent 构造/实例、ACP/Channel Session、Conversation/runtime incarnation、Invocation/Turn 与 terminal receipt。
+
+## 入口与输出
+
+Execute/chat/stream、Headless、ACP prompt、Channel message 和 SDK call 进入 Agent；输出 event stream、TurnReceipt 与外部 effect。
+
+## 行为关系
+
+Agent 实现原始执行，Session 管入口作用域，Context 保存模型状态；仅 driven invocation 由 Turn driver 统一终态。
+
+## 状态与数据流
+
+Session ID、conversation ID、runtime state ID、run ID 与 trace ID 均为限定 identity；TurnReceipt 不替代持久 Task 或 transcript。
+
+## 策略来源与优先级
+
+AgentConfig/InvocationContext、Session adapter、ADR 0001/0005/0006/0009/0010 共同决定 scope 与生命周期。
+
+## 生命周期与失败路径
+
+Create/resolve Agent、admit/accept/drain Turn、cancel/fail/complete、close Session/Agent；EOF 不构成成功。
+
+## 权限与敏感信息
+
+Agent 自动 effect 交给 permission map；Session scope 与 secret-bearing config 不进入 event/trace 明文。
+
+## 用户侧投影
+
+ACP/Headless/SDK 可投影不同 UI/wire 并共享 driven Turn terminal；Channel 与直接 Rust 调用的覆盖缺口已进入 Finding。
+
+## 场景处置清单
+
+Agent/Session 与 driven Turn 已映射；Channel/direct route、AgentRevision 与 factory 同名保持 needs_review。
+
+## 未展开项
+
+Context persistence、Task/Subagent 与 protocol adapter 由 related maps 展开。

@@ -1,0 +1,38 @@
+---
+schema_version: 1
+id: finding.lsp-runtime-state
+kind: finding
+type: implementation_bug
+status: open
+severity: high
+primary_focus: time_lifecycle
+focus: [state_authority, failure_concurrency, contract_evidence]
+boundary_ref: boundary.extension-lifecycle
+behavior_refs: [behavior.extension-publication]
+rule_refs: [rule.extension-generation-authority]
+evidence_refs: [evidence.effects-extensions]
+audit_refs: []
+decision_refs: []
+repair_evidence_refs: []
+verification_evidence_refs: []
+rereview_audit_refs: []
+discovered_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+---
+
+# LSP runtime status 与 restart 字段未闭合
+
+## 问题
+
+Public max_restarts/restart_count/last_error 没有更新路径；reader EOF 只清 pending，不重置 running/initialized；load_config 与重复 start 也不撤销旧状态。
+
+## 触发条件与影响
+
+Language server 异常退出、配置 reload 或重复启动时，查询状态与真实 child process 可能不一致，pending caller 和资源清理也可能漂移。
+
+## 证据
+
+`echo-core/src/lsp/types.rs`、`echo-integration/src/lsp/client.rs` 与 `lsp/manager.rs` 提供源码反例。
+
+## 处理记录
+
+Discovery 记录；下一阶段补 EOF/restart/reload/shutdown 合同测试。

@@ -1,0 +1,100 @@
+---
+schema_version: 1
+id: map.task-subagent-workflow
+kind: capability_map
+title: Task、Subagent、Workflow 与 Scheduler
+risk: high
+observed_at: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+boundary_refs: [boundary.task-subagent-workflow]
+behavior_refs: [behavior.task-subagent-execution]
+rule_refs: [rule.task-subagent-authority]
+evidence_refs: [evidence.task-subagent-workflow]
+finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.scheduler-cache-delivery, finding.background-task-wait, finding.subagent-definition-catalog]
+audit_refs: []
+related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.tool-permission-sandbox]
+scenarios:
+  revisioned-task-graph:
+    status: mapped
+    source_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime.rs]
+    behavior_refs: [behavior.task-subagent-execution]
+    rule_refs: [rule.task-subagent-authority]
+  runtime-claim-settlement:
+    status: mapped
+    source_refs: [echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs]
+    finding_refs: [finding.task-patch-claim-race]
+    evidence_refs: [evidence.task-subagent-workflow]
+  subagent-attempt-control:
+    status: needs_review
+    source_refs: [src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, src/agent/subagent/control.rs, src/agent/subagent/events.rs]
+    finding_refs: [finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-definition-catalog]
+    rule_refs: [rule.task-subagent-authority]
+    unknown: lazy factory dispatch 取消可遗留 instantiating 名称，TaskClaim 与 SubagentAttempt identity 也未闭合
+    next_step: audit factory publication guard 与 Task/Subagent attempt route 后再确认 terminal/control contract
+  workflow-graph-and-events:
+    status: needs_review
+    source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/checkpoint_store.rs, echo-orchestration/src/workflow/dag.rs]
+    finding_refs: [finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery]
+    evidence_refs: [evidence.task-subagent-workflow]
+    unknown: Graph/DagWorkflow authority、四执行入口事件对等与 checkpoint claim recovery 尚未闭合
+    next_step: 分别执行 consolidation、entry parity 与 crash-cut audit
+  cron-scheduler:
+    status: needs_review
+    source_refs: [echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs]
+    finding_refs: [finding.scheduler-cache-delivery]
+    evidence_refs: [evidence.task-subagent-workflow]
+    unknown: store/cache 可见状态、migration overwrite 与 callback delivery guarantee 未闭合
+    next_step: audit cache refresh、持久 claim/ledger 与 migration target collision
+  process-local-background-task:
+    status: needs_review
+    source_refs: [echo-orchestration/src/tasks/background_task.rs]
+    finding_refs: [finding.background-task-wait]
+    unknown: wait lost-wakeup、多观察者结果与 panic settlement 未闭合
+    next_step: 用确定性调度测试审计 process-local terminal authority
+  command-cell-runtime:
+    status: mapped
+    source_refs: [echo-core/src/tools/cell.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0025-deterministic-command-cell-watcher.md]
+    evidence_refs: [evidence.task-subagent-workflow, evidence.effects-extensions]
+    behavior_refs: [behavior.task-subagent-execution, behavior.effect-permission-execution]
+---
+
+# Task、Subagent、Workflow 与 Scheduler
+
+## 能力范围
+
+覆盖 revisioned Task graph、runtime execution、Subagent attempt、Team、Workflow、Scheduler、BackgroundTask 和 CommandCell。
+
+## 入口与输出
+
+Task tools、programmatic runtime、Agent dispatch、Workflow Rust/JSON/YAML、cron tick 与 command tools 触发；输出 claim/receipt/event/checkpoint/effect。
+
+## 行为关系
+
+Task graph 和 Subagent 是主任务执行关系；Workflow/Scheduler/Background 是相邻通用能力，不凭采用量判死或自动归并。
+
+## 状态与数据流
+
+Task spec/execution/claim、Subagent identity/control/envelope、Workflow state/checkpoint、Scheduler store/cache 各有明确 owner，但存在记录的冲突。
+
+## 策略来源与优先级
+
+Task policy/controller、Subagent prompt/isolation/admission、Workflow graph definition、cron store 与 CommandCell config 决定行为。
+
+## 生命周期与失败路径
+
+Revision/claim/wave/settle/retry/pause/cancel、dispatch/message/interrupt/terminal、checkpoint/resume、tick/shutdown、spawn/wait。
+
+## 权限与敏感信息
+
+Subagent 复用 Agent tool policy；Workflow node/cron callback 本身不替代外层 permission；CommandCell 可要求 sandbox。
+
+## 用户侧投影
+
+TaskEvent/progress、Subagent envelopes、Workflow events 和 command snapshots 是消费者视图，不取代各自 authority。
+
+## 场景处置清单
+
+所有主要入口已映射；九个当前缺口分别进入 Finding/needs_review，Workflow、Scheduler、BackgroundTask 与 CommandCell 不再合成一个 authority。
+
+## 未展开项
+
+具体 Finding 修复由后续独立 delivery outcome 处理。

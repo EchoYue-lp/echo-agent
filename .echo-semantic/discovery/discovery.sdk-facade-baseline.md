@@ -13,11 +13,10 @@ inspected_paths:
   - echo-sdk-host/tests
   - sdks
   - src/acp
-candidate_refs: [map.sdk-facade-parity]
+candidate_refs: [map.sdk-facade-parity, map.protocol-surfaces]
 unresolved:
   - intrinsic 语言行为与逐项领域/失败语义证据
   - 三语言整体 Parity complete 状态与最终发布检出证据
-  - 全仓 inventory 与 behavior model closure
 ---
 
 # SDK facade 首次基线发现
@@ -32,8 +31,8 @@ unresolved:
 
 ## 归并结果
 
-建立一张高风险能力图、一条路由行为、一条Rust唯一权威规则和一份合同证据；全仓其它能力暂不建模。
+SDK 子边界保留一张高风险能力图、一条路由行为、一条 Rust 唯一权威规则和合同证据；全仓其它能力由 `discovery.workspace-baseline` 与父级 maps 建模。
 
 ## 未决项
 
-Plan 8机械闭合、focused运行证据、完整门禁和三语言可执行 route baseline 已完成；intrinsic 语言行为、可执行示例和全仓 inventory/behavior model 仍保持开放。
+Plan 8 机械闭合、focused 运行证据、完整门禁和三语言可执行 route baseline 已完成；intrinsic 语言行为、可执行示例与整体 Parity complete 仍是独立 SDK backlog，不阻塞全仓 baseline。
