@@ -16,7 +16,7 @@ decision_refs: []
 repair_evidence_refs: [evidence.sdk-contracts]
 verification_evidence_refs: [evidence.sdk-contracts]
 rereview_audit_refs: [audit.sdk-facade-plan08-final]
-discovered_at: source:9e943fdc8ad7c5d9fe6e1486cecf6bd30c77b5e6452cab50ae295f6027ad8de9
+discovered_at: source:13192164b42c8866c7eefcb6085ce026369709d5eec4500ab6c94bb285436519
 ---
 
 # MCP 初始化后发布失败未关闭transport

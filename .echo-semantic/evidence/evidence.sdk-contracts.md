@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:9e943fdc8ad7c5d9fe6e1486cecf6bd30c77b5e6452cab50ae295f6027ad8de9
+observed_at: source:13192164b42c8866c7eefcb6085ce026369709d5eec4500ab6c94bb285436519
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
@@ -431,6 +431,13 @@ source_refs:
   - sdks/python/tests/test_memory_scope_values.py
   - sdks/java/src/main/java/com/echoagent/sdk/MemoryScope.java
   - sdks/java/src/test/java/com/echoagent/sdk/MemoryScopeTest.java
+  - sdks/typescript/src/memory_policy_values.ts
+  - sdks/typescript/test/memory-policy-values.test.js
+  - sdks/python/src/echo_agent_sdk/memory_policy_values.py
+  - sdks/python/tests/test_memory_policy_values.py
+  - sdks/java/src/main/java/com/echoagent/sdk/MemoryType.java
+  - sdks/java/src/main/java/com/echoagent/sdk/MemorySource.java
+  - sdks/java/src/test/java/com/echoagent/sdk/MemoryPolicyValuesTest.java
 supports: [behavior.sdk-facade-routing, rule.sdk-rust-authority]
 limitations:
   - Evidence 证明合同、路由和语言 mapping 门禁，不替代各业务 operation 的领域验收
@@ -445,6 +452,8 @@ limitations:
 本轮新增的 `PromptCacheLayout`/`SegmentRanges` 仅复现 Rust 的只读分段投影和半开区间，缓存状态与 provider placement 仍由 Rust/Host 持有；TypeScript、Python、Java 行为测试分别覆盖典型分段、无 canonical 标记和范围计算。前一轮 Linux fake-Docker 测试夹具改为临时文件写入后原子重命名，避免执行文件写入竞争触发 `ETXTBSY`，生产 Docker 执行路径未改变。
 
 本轮新增的 `MemoryScope` 仅复现 Rust 的 scope 顺序、持久化分类、wire 名称和 `proj`/`sess` 解析别名；Memory storage、清理和生命周期仍由 Rust/Host 持有。三语言测试覆盖顺序、持久化边界、别名和未知输入。
+
+本轮新增的 `MemoryType`/`MemorySource` 仅复现 Rust 的稳定性、skill/rule 晋升资格、默认置信度和召回权重；MemoryMeta 持久化与进化流程仍由 Rust/Host 持有。三语言测试覆盖所有策略分支和边界值。
 
 ## 来源与范围
 

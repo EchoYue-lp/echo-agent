@@ -248,6 +248,8 @@ segment projection and half-open indexes without owning cache state or provider
 placement.
 Memory scope values preserve Rust lifetime ordering, persistence classification,
 wire names and parser aliases without owning memory storage or cleanup.
+Memory type/source values preserve stability, promotion eligibility, confidence
+and recall-weight defaults without owning memory persistence or evolution.
 Page metadata values preserve truncation, continuation metadata, and output
 projection without owning collection state.
 Subagent context snapshots preserve empty/content semantics without owning
