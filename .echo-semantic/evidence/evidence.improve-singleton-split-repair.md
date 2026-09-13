@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.improve-singleton-split-repair
 kind: evidence
-observed_at: source:a2317ccf488e81ce737d93a5c7b13369d67228da5e54baf56c14210a47794342
+observed_at: 2bac05803adf25192fc494824918169f9bf0ca1f
 source_refs:
   - src/improve/loop.rs
 supports: [behavior.eval-evolution, rule.quality-observation-boundary]

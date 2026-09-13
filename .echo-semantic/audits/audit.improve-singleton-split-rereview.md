@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: trigger_input
 freshness: examined
-revision: source:a2317ccf488e81ce737d93a5c7b13369d67228da5e54baf56c14210a47794342
+revision: 2bac05803adf25192fc494824918169f9bf0ca1f
 finding_refs: [finding.improve-single-case-panic]
 challenges:
   singleton-disposition:
-    revision: source:a2317ccf488e81ce737d93a5c7b13369d67228da5e54baf56c14210a47794342
+    revision: 2bac05803adf25192fc494824918169f9bf0ca1f
     source_refs: [src/improve/loop.rs]
     evidence_refs: [evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification]
   ratio-and-group-boundaries:
-    revision: source:a2317ccf488e81ce737d93a5c7b13369d67228da5e54baf56c14210a47794342
+    revision: 2bac05803adf25192fc494824918169f9bf0ca1f
     source_refs: [src/improve/loop.rs, src/eval/mod.rs]
     evidence_refs: [evidence.improve-singleton-split-verification]
 ---

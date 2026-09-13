@@ -7,10 +7,10 @@ expectation: inferred
 risk: medium
 primary_focus: result_side_effect
 focus: [contract_evidence, data_durability, permission_external]
-observed_at: source:a2317ccf488e81ce737d93a5c7b13369d67228da5e54baf56c14210a47794342
+observed_at: source:e5661d8044dbe3eba9bc3ce5fd34a408b5fc89558472af0a66cbc6566a39c0ce
 behavior_refs: [behavior.eval-evolution]
 code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.evolution-audit-atomicity, finding.evolution-skill-promotion-audit, finding.evolution-doc-namespace]
 ---
 
@@ -26,7 +26,7 @@ Trace/Eval/Improve 观察和评价执行；Evolution 的持久 mutation 仍需�
 
 ## 当前实现
 
-Eval/Improve显式消费Agent/trace；ImprovementLoop按criteria分组并保持训练case与独立holdout不重复。Evolution runtime integration可生成或写入memory/skill artifacts，并记录change log。
+Eval/Improve显式消费Agent/trace；ImprovementLoop按criteria分组并保持训练case与独立holdout不重复，EvalDrivenImprovement只把既有配置传给这一loop。Evolution runtime integration可生成或写入memory/skill artifacts，并记录change log。
 
 ## 期望行为
 
