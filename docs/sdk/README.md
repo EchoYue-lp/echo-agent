@@ -246,6 +246,8 @@ without validating or executing provider responses.
 Prompt cache layout values preserve the Rust system/canonical/history/runtime
 segment projection and half-open indexes without owning cache state or provider
 placement.
+Memory scope values preserve Rust lifetime ordering, persistence classification,
+wire names and parser aliases without owning memory storage or cleanup.
 Page metadata values preserve truncation, continuation metadata, and output
 projection without owning collection state.
 Subagent context snapshots preserve empty/content semantics without owning

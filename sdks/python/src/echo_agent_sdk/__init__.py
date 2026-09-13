@@ -148,6 +148,14 @@ from .intrinsics import ParamValue, ToolCallParams, ToolResult
 from .jsonrpc_values import JsonRpcNotification, JsonRpcRequest
 from .jwt_values import JwtClaims, JwtConfig
 from .llm_api_protocol_values import LlmApiProtocol
+from .memory_scope_values import (
+    MemoryScope,
+    memory_scope_all,
+    memory_scope_is_persistent,
+    memory_scope_name,
+    memory_scope_priority,
+    parse_memory_scope,
+)
 from .model_input_modality_values import ModelInputModality
 from .model_profile_values import (
     ModelProfile,
@@ -331,6 +339,7 @@ __all__ = [
     "McpTransportResult",
     "MemoryPromoterPromoteRequest",
     "MemoryPromoterResult",
+    "MemoryScope",
     "MemoryTriggerRequest",
     "MemoryTriggerResult",
     "ModelInputModality",
@@ -440,11 +449,16 @@ __all__ = [
     "infer_context_window",
     "local_rfc3339_deserialize",
     "local_rfc3339_serialize",
+    "memory_scope_all",
+    "memory_scope_is_persistent",
+    "memory_scope_name",
+    "memory_scope_priority",
     "now_local",
     "now_millis",
     "now_secs",
     "option_local_rfc3339_deserialize",
     "option_local_rfc3339_serialize",
+    "parse_memory_scope",
     "resolve_thinking_profile",
     "split_utf8_chunks",
     "to_local",

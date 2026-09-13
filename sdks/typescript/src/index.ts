@@ -48,6 +48,7 @@ export * from "./llm_api_protocol_values.js";
 export * from "./model_input_modality_values.js";
 export * from "./response_format_values.js";
 export * from "./prompt_cache_layout_values.js";
+export * from "./memory_scope_values.js";
 export * from "./page_info_values.js";
 export * from "./catalog.js";
 export * from "./client.js";
