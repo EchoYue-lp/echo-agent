@@ -6,13 +6,13 @@ title: Framework 正式文档与 ADR
 asset_type: document
 status: needs_review
 risk: medium
-observed_at: source:e5875d2d355e903b53de984f1f399ba10a08d50a8d5d42a03418a2264c09f3b9
+observed_at: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
 boundary_refs: [boundary.workspace-architecture]
-code_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/en/24-eval-system.md, docs/zh/24-eval-system.md, docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, docs/adr/0014-framework-capability-placement.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0034-context-scoped-tool-result-cache.md, docs/adr/0035-owned-tool-registry-handles.md, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0039-background-task-terminal-authority.md]
+code_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/en/architecture.md, docs/zh/architecture.md, docs/en/concepts.md, docs/zh/concepts.md, docs/en/lifecycles.md, docs/zh/lifecycles.md, docs/en/24-eval-system.md, docs/zh/24-eval-system.md, docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, docs/adr/0014-framework-capability-placement.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0034-context-scoped-tool-result-cache.md, docs/adr/0035-owned-tool-registry-handles.md, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0039-background-task-terminal-authority.md, docs/adr/0040-framework-concept-documentation-authority.md]
 consumer_refs: [echo-agent-learning/tests/documentation_contract.rs]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-verification, evidence.background-task-terminal-authority-verification, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification]
+evidence_refs: [evidence.workspace-structure, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-verification, evidence.background-task-terminal-authority-verification, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift, finding.mcp-version-doc-drift, finding.evolution-doc-namespace, finding.tool-pipeline-example-drift]
 candidate_refs: []
 ---

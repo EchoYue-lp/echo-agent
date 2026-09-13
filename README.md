@@ -161,35 +161,20 @@ Task APIs are part of the framework core and do not have a separate feature flag
 ## Architecture
 
 ```text
-                              ┌─────────────┐
-                              │   Your App   │
-                              └──────┬───────┘
-                                     │
-                    ┌────────────────▼────────────────┐
-                    │          ReactAgent              │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  Context  │  │    Tools      │  │
-                    │  │ Manager   │  │   Manager     │  │
-                    │  │(compress) │  │(retry/limit)  │  │
-                    │  └──────────┘  └──────────────┘  │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  Memory   │  │    Human      │  │
-                    │  │Store+Cp   │  │ Approval      │  │
-                    │  └──────────┘  └──────────────┘  │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  Skills   │  │   Subagent    │  │
-                    │  │ Registry  │  │   Registry    │  │
-                    │  └──────────┘  └──────────────┘  │
-                    └────────────────┬────────────────┘
-                                     │
-              ┌──────────────────────▼──────────────────────┐
-              │              LLM Providers                    │
-              │  OpenAI · Anthropic · DeepSeek · Qwen · Ollama │
-              └─────────────────────────────────────────────┘
+Application / protocol surface
+             |
+             v
+    echo_agent public facade
+             |
+  core contracts + execution + state + orchestration + integrations + tools
+             |
+  SDK protocol / Host and executable learning consumers
 ```
+
+Start with [Framework Architecture](docs/en/architecture.md),
+[Core Concepts](docs/en/concepts.md), and
+[Framework Lifecycles](docs/en/lifecycles.md). Product Workspace, frontend,
+desktop, and device policy stay in the embedding application.
 
 ---
 

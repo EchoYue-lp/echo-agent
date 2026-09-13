@@ -62,6 +62,104 @@ fn local_link_target(raw: &str) -> Option<&str> {
     (!target.is_empty() && !Path::new(target).is_absolute()).then_some(target)
 }
 
+fn unresolved_local_links(
+    root: &Path,
+    files: &[PathBuf],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let link_pattern = Regex::new(r#"!?\[[^\]]*\]\(([^)]+)\)"#)?;
+    let reference_pattern = Regex::new(r#"^\s*\[[^\]]+\]:\s*(\S+)"#)?;
+    let mut broken = Vec::new();
+    for source in files {
+        let content = std::fs::read_to_string(source)?;
+        let Some(parent) = source.parent() else {
+            continue;
+        };
+        let relative = source.strip_prefix(root).unwrap_or(source).display();
+        for (line_index, line) in content.lines().enumerate() {
+            let inline_targets = link_pattern
+                .captures_iter(line)
+                .filter_map(|captures| captures.get(1).map(|value| value.as_str()));
+            let reference_targets = reference_pattern
+                .captures(line)
+                .and_then(|captures| captures.get(1).map(|value| value.as_str()))
+                .into_iter();
+            for raw in inline_targets.chain(reference_targets) {
+                let Some(target) = local_link_target(raw) else {
+                    continue;
+                };
+                if !parent.join(target).exists() {
+                    broken.push(format!("{relative}:{} -> {target}", line_index + 1));
+                }
+            }
+        }
+    }
+    Ok(broken)
+}
+
+fn markdown_heading_profile(content: &str) -> Vec<usize> {
+    let mut in_fence = false;
+    let mut profile = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let level = trimmed
+            .chars()
+            .take_while(|character| *character == '#')
+            .count();
+        if level > 0 && trimmed.chars().nth(level) == Some(' ') {
+            profile.push(level);
+        }
+    }
+    profile
+}
+
+fn markdown_structure(content: &str) -> (usize, usize) {
+    let mut table_rows = 0_usize;
+    let mut fences = 0_usize;
+    let mut in_fence = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            fences = fences.saturating_add(1);
+            in_fence = !in_fence;
+        } else if !in_fence && trimmed.starts_with('|') && trimmed.ends_with('|') {
+            table_rows = table_rows.saturating_add(1);
+        }
+    }
+    (table_rows, fences)
+}
+
+fn has_expected_markdown_structure(
+    content: &str,
+    heading_profile: &[usize],
+    structure: (usize, usize),
+) -> bool {
+    markdown_heading_profile(content) == heading_profile && markdown_structure(content) == structure
+}
+
+fn contains_targets_once_in_order(content: &str, targets: &[&str]) -> bool {
+    let mut previous = None;
+    for target in targets {
+        if content.matches(target).count() != 1 {
+            return false;
+        }
+        let Some(position) = content.find(target) else {
+            return false;
+        };
+        if previous.is_some_and(|previous| previous >= position) {
+            return false;
+        }
+        previous = Some(position);
+    }
+    true
+}
+
 fn demo_sources() -> Result<BTreeMap<String, PathBuf>, Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = BTreeMap::new();
@@ -450,41 +548,205 @@ fn root_readme_learning_commands_reference_cargo_targets() -> Result<(), Box<dyn
 }
 
 #[test]
-fn learning_markdown_has_resolvable_local_links() -> Result<(), Box<dyn std::error::Error>> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let link_pattern = Regex::new(r#"!?\[[^\]]*\]\(([^)]+)\)"#)?;
-    let reference_pattern = Regex::new(r#"^\s*\[[^\]]+\]:\s*(\S+)"#)?;
-    let mut files = Vec::new();
-    collect_markdown_files(root, &mut files)?;
-    let mut broken = Vec::new();
-
-    for source in files {
-        let content = std::fs::read_to_string(&source)?;
-        let Some(parent) = source.parent() else {
+fn foundational_framework_docs_are_routed_and_structurally_paired()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (workspace_root, _) = workspace_packages()?;
+    let pairs = [
+        (
+            "docs/en/architecture.md",
+            "docs/zh/architecture.md",
+            [
+                "echo_agent",
+                "echo-core",
+                "echo-sdk-protocol",
+                "echo-sdk-host",
+                "echo-agent-learning",
+            ]
+            .as_slice(),
+            [1, 2, 2, 2, 2, 2, 2, 2, 2].as_slice(),
+            (33, 2),
+        ),
+        (
+            "docs/en/concepts.md",
+            "docs/zh/concepts.md",
+            [
+                "Agent",
+                "Session",
+                "Conversation",
+                "Invocation",
+                "Turn",
+                "Task",
+                "Plan",
+                "Subagent",
+                "Context",
+                "Checkpoint",
+                "Journal",
+                "Projection",
+                "Trace",
+                "Delivery",
+                "Revision",
+            ]
+            .as_slice(),
+            [1, 2, 2, 2, 2, 2, 2, 2, 2, 2].as_slice(),
+            (43, 2),
+        ),
+        (
+            "docs/en/lifecycles.md",
+            "docs/zh/lifecycles.md",
+            [
+                "Agent Turn",
+                "Context",
+                "Task",
+                "Subagent",
+                "Tool",
+                "Permission",
+                "Observation",
+                "Delivery",
+                "Extension",
+                "SDK",
+            ]
+            .as_slice(),
+            [1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2].as_slice(),
+            (79, 14),
+        ),
+    ];
+    let mut violations = Vec::new();
+    let mut link_sources = Vec::new();
+    for (english_path, chinese_path, required_terms, heading_profile, structure) in pairs {
+        let english_path = workspace_root.join(english_path);
+        let chinese_path = workspace_root.join(chinese_path);
+        if !english_path.is_file() {
+            violations.push(format!(
+                "missing foundational document {}",
+                english_path.display()
+            ));
+        }
+        if !chinese_path.is_file() {
+            violations.push(format!(
+                "missing foundational document {}",
+                chinese_path.display()
+            ));
+        }
+        if !english_path.is_file() || !chinese_path.is_file() {
             continue;
-        };
-        let relative = source
-            .strip_prefix(root)
-            .unwrap_or(source.as_path())
-            .display();
-        for (line_index, line) in content.lines().enumerate() {
-            let inline_targets = link_pattern
-                .captures_iter(line)
-                .filter_map(|captures| captures.get(1).map(|value| value.as_str()));
-            let reference_targets = reference_pattern
-                .captures(line)
-                .and_then(|captures| captures.get(1).map(|value| value.as_str()))
-                .into_iter();
-            for raw in inline_targets.chain(reference_targets) {
-                let Some(target) = local_link_target(raw) else {
-                    continue;
-                };
-                if !parent.join(target).exists() {
-                    broken.push(format!("{relative}:{} -> {target}", line_index + 1));
-                }
+        }
+        let english = std::fs::read_to_string(&english_path)?;
+        let chinese = std::fs::read_to_string(&chinese_path)?;
+        if !has_expected_markdown_structure(&english, heading_profile, structure)
+            || !has_expected_markdown_structure(&chinese, heading_profile, structure)
+        {
+            violations.push(format!(
+                "foundational structure does not match the reviewed contract: {}={:?}/{:?}, {}={:?}/{:?}, expected={heading_profile:?}/{structure:?}",
+                english_path.display(),
+                markdown_heading_profile(&english),
+                markdown_structure(&english),
+                chinese_path.display(),
+                markdown_heading_profile(&chinese),
+                markdown_structure(&chinese)
+            ));
+        }
+        for term in required_terms {
+            if !english.contains(term) || !chinese.contains(term) {
+                violations.push(format!(
+                    "foundational pair {} / {} is missing stable term {term}",
+                    english_path.display(),
+                    chinese_path.display()
+                ));
             }
         }
+        link_sources.push(english_path);
+        link_sources.push(chinese_path);
     }
+
+    let navigation = [
+        (
+            "README.md",
+            "## Architecture",
+            [
+                "docs/en/architecture.md",
+                "docs/en/concepts.md",
+                "docs/en/lifecycles.md",
+            ],
+        ),
+        (
+            "README.zh.md",
+            "## 架构",
+            [
+                "docs/zh/architecture.md",
+                "docs/zh/concepts.md",
+                "docs/zh/lifecycles.md",
+            ],
+        ),
+        (
+            "docs/en/README.md",
+            "## Start Here",
+            ["./architecture.md", "./concepts.md", "./lifecycles.md"],
+        ),
+        (
+            "docs/zh/README.md",
+            "## 从这里开始",
+            ["./architecture.md", "./concepts.md", "./lifecycles.md"],
+        ),
+    ];
+    for (path, heading, targets) in navigation {
+        let path = workspace_root.join(path);
+        let content = std::fs::read_to_string(&path)?;
+        let section = markdown_section(&content, heading)?;
+        let link_targets = targets
+            .iter()
+            .map(|target| format!("]({target})"))
+            .collect::<Vec<_>>();
+        let link_target_refs = link_targets.iter().map(String::as_str).collect::<Vec<_>>();
+        if !contains_targets_once_in_order(&section, &link_target_refs) {
+            violations.push(format!(
+                "{} does not contain the foundational links exactly once in order {targets:?}",
+                path.display()
+            ));
+        }
+        link_sources.push(path);
+    }
+    violations.extend(unresolved_local_links(&workspace_root, &link_sources)?);
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "foundational framework documentation contract failed:\n{}",
+            violations.join("\n")
+        ))
+        .into())
+    }
+}
+
+#[test]
+fn foundational_structure_contract_rejects_symmetric_deletion_and_navigation_reorder()
+-> Result<(), std::io::Error> {
+    let complete = "# Title\n\n## Section\n\n| A | B |\n| --- | --- |\n```text\nflow\n```\n";
+    if !has_expected_markdown_structure(complete, &[1, 2], (2, 2)) {
+        return Err(std::io::Error::other(
+            "synthetic complete document did not satisfy the structure contract",
+        ));
+    }
+    if has_expected_markdown_structure("# Title\n", &[1, 2], (2, 2)) {
+        return Err(std::io::Error::other(
+            "symmetric section/table/diagram deletion passed the structure contract",
+        ));
+    }
+    let reordered = "[Lifecycles](lifecycles) [Concepts](concepts) [Architecture](architecture)";
+    if contains_targets_once_in_order(reordered, &["architecture", "concepts", "lifecycles"]) {
+        return Err(std::io::Error::other(
+            "reordered foundational navigation passed the order contract",
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn learning_markdown_has_resolvable_local_links() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    collect_markdown_files(root, &mut files)?;
+    let broken = unresolved_local_links(root, &files)?;
 
     if broken.is_empty() {
         Ok(())

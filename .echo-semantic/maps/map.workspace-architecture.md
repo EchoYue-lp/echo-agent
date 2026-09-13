@@ -4,15 +4,22 @@ id: map.workspace-architecture
 kind: capability_map
 title: Workspace 架构与公共组合
 risk: high
-observed_at: source:e5875d2d355e903b53de984f1f399ba10a08d50a8d5d42a03418a2264c09f3b9
+observed_at: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
 boundary_refs: [boundary.workspace-architecture]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification]
+evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift]
-audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview, audit.feature-table-doc-rereview, audit.readme-example-target-rereview]
+audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview, audit.feature-table-doc-rereview, audit.readme-example-target-rereview, audit.framework-concept-navigation-rereview]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.tool-permission-sandbox, map.extension-lifecycle, map.llm-provider-runtime, map.protocol-surfaces, map.eval-evolution]
 scenarios:
+  framework-concept-navigation:
+    status: mapped
+    source_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/en/architecture.md, docs/zh/architecture.md, docs/en/concepts.md, docs/zh/concepts.md, docs/en/lifecycles.md, docs/zh/lifecycles.md, docs/adr/0040-framework-concept-documentation-authority.md, echo-agent-learning/tests/documentation_contract.rs]
+    behavior_refs: [behavior.workspace-composition]
+    rule_refs: [rule.framework-layer-ownership]
+    evidence_refs: [evidence.framework-concept-navigation]
+    audit_refs: [audit.framework-concept-navigation-rereview]
   crate-dag-and-layering:
     status: mapped
     source_refs: [Cargo.toml, src/lib.rs, echo-core/src/lib.rs]

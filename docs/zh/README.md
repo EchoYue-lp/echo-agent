@@ -4,6 +4,16 @@
 
 ---
 
+## 从这里开始
+
+| 指南 | 作用 |
+| --- | --- |
+| [Framework 架构](./architecture.md) | Package DAG、分层、public facade、SDK consumer 和 application 边界 |
+| [核心概念](./concepts.md) | 限定 identity、状态权威、持久 scope 和非责任 |
+| [Framework 生命周期](./lifecycles.md) | 跨领域的接纳、取消、终态、恢复、清理和 projection |
+| [Framework 与应用边界](./39-framework-application-boundary.md) | 产品无关机制与 embedding application 策略 |
+| [快速入门](./getting-started.md) | 构建并运行第一个 Agent |
+
 ## 文档索引
 
 ### Framework 边界

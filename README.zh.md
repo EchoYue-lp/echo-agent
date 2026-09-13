@@ -114,36 +114,20 @@ cargo run -p echo-agent-learning --example demo38_im_channels --features channel
 
 ## 架构
 
+```text
+Application / protocol surface
+             |
+             v
+    echo_agent public facade
+             |
+  core contracts + execution + state + orchestration + integrations + tools
+             |
+  SDK protocol / Host and executable learning consumers
 ```
-                              ┌─────────────┐
-                              │   你的应用    │
-                              └──────┬───────┘
-                                     │
-                    ┌────────────────▼────────────────┐
-                    │          ReactAgent              │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  上下文    │  │    工具       │  │
-                    │  │  管理器    │  │   管理器      │  │
-                    │  │(压缩)     │  │(重试/限流)    │  │
-                    │  └──────────┘  └──────────────┘  │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  记忆     │  │   人工        │  │
-                    │  │Store+Cp  │  │   审批        │  │
-                    │  └──────────┘  └──────────────┘  │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  技能     │  │   子代理      │  │
-                    │  │  注册表   │  │   注册表      │  │
-                    │  └──────────┘  └──────────────┘  │
-                    └────────────────┬────────────────┘
-                                     │
-              ┌──────────────────────▼──────────────────────┐
-              │              LLM 提供方                       │
-              │  OpenAI · Anthropic · DeepSeek · Qwen · Ollama │
-              └─────────────────────────────────────────────┘
-```
+
+建议从 [Framework 架构](docs/zh/architecture.md)、[核心概念](docs/zh/concepts.md)和
+[Framework 生命周期](docs/zh/lifecycles.md)开始。Product Workspace、前端、桌面端和 device policy
+仍属于 embedding application。
 
 ---
 

@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: examined
-revision: source:e5875d2d355e903b53de984f1f399ba10a08d50a8d5d42a03418a2264c09f3b9
+revision: 7ba1f12279a65296257bda79206ccd9dd0e078a2
 finding_refs: [finding.readme-example-target-drift]
 challenges:
   cargo-target-kind-and-command-parse:
-    revision: source:e5875d2d355e903b53de984f1f399ba10a08d50a8d5d42a03418a2264c09f3b9
+    revision: 7ba1f12279a65296257bda79206ccd9dd0e078a2
     source_refs: [echo-agent-learning/Cargo.toml, echo-agent-learning/tests/documentation_contract.rs, README.md, README.zh.md]
     evidence_refs: [evidence.workspace-structure, evidence.readme-example-target-repair, evidence.readme-example-target-verification]
   contract-filter-and-real-execution:
-    revision: source:e5875d2d355e903b53de984f1f399ba10a08d50a8d5d42a03418a2264c09f3b9
+    revision: 7ba1f12279a65296257bda79206ccd9dd0e078a2
     source_refs: [echo-agent-learning/tests/example_contracts.rs, echo-agent-learning/tests/example_contracts/demo34_workflow_stream.rs]
     evidence_refs: [evidence.readme-example-target-repair, evidence.readme-example-target-verification]
   bilingual-and-adjacent-scope:
-    revision: source:e5875d2d355e903b53de984f1f399ba10a08d50a8d5d42a03418a2264c09f3b9
+    revision: 7ba1f12279a65296257bda79206ccd9dd0e078a2
     source_refs: [README.md, README.zh.md, .echo-semantic/findings/finding.workspace-topology-doc-drift.md, .echo-semantic/findings/finding.public-feature-table-drift.md]
     evidence_refs: [evidence.readme-example-target-verification]
 ---

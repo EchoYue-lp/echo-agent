@@ -6,6 +6,16 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 ---
 
+## Start Here
+
+| Guide | Purpose |
+| --- | --- |
+| [Framework Architecture](./architecture.md) | Package DAG, layers, public facade, SDK consumers, and application boundary |
+| [Core Concepts](./concepts.md) | Qualified identity, state authority, persistence scope, and non-responsibility |
+| [Framework Lifecycles](./lifecycles.md) | Admission, cancellation, terminal, recovery, cleanup, and projection across domains |
+| [Framework and Application Boundary](./39-framework-application-boundary.md) | Product-neutral mechanism versus embedding application policy |
+| [Getting Started](./getting-started.md) | Build and run the first Agent |
+
 ## Documentation Index
 
 ### Framework Boundaries

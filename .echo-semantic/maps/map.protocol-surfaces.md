@@ -4,11 +4,11 @@ id: map.protocol-surfaces
 kind: capability_map
 title: ACP、A2A、Channels、Headless 与 SDK Surfaces
 risk: high
-observed_at: 78b9f06b4320531fd8f41260887cd69c1343e995
+observed_at: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
 boundary_refs: [boundary.protocol-surfaces]
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.high-risk-audit-frontier]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation]
 finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding, finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.sdk-gap-generation-validation-parity]
 audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.time-lifecycle, audit.protocol-surfaces.contract-evidence]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.extension-lifecycle, map.sdk-facade-parity]
