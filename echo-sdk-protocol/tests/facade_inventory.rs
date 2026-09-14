@@ -1,11 +1,12 @@
 //! Artifact-level facade inventory and parity-manifest checks.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use echo_sdk_protocol::facade::{FACADE_FAMILIES, validate_facade_route_table};
 use echo_sdk_protocol::inventory::{
-    AcpRelationship, FeatureSemantics, ItemKind, ManifestEntry, ParityManifest, SemanticClass,
+    AcpRelationship, FeatureSemantics, ItemKind, ManifestEntry, ParityManifest, SdkScope,
+    SemanticClass,
 };
 use sha2::{Digest, Sha256};
 
@@ -82,6 +83,77 @@ fn manifest_schema_compiles_and_validates_document() -> TestResult {
     assert!(
         validator.validate(&document).is_ok(),
         "manifest does not satisfy its schema"
+    );
+    Ok(())
+}
+
+#[test]
+fn sdk_scope_is_complete_deterministic_and_alias_safe() -> TestResult {
+    let manifest = manifest()?;
+    assert_eq!(manifest.schema_version, 2);
+
+    let mut counts = BTreeMap::new();
+    let scope_by_path: BTreeMap<&str, SdkScope> = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.sdk_scope))
+        .collect();
+    for entry in &manifest.entries {
+        if entry.canonical {
+            let count = counts.entry(entry.sdk_scope).or_insert(0usize);
+            *count = count.saturating_add(1);
+        }
+        if let Some(alias_of) = &entry.alias_of {
+            let canonical_scope = scope_by_path
+                .get(alias_of.as_str())
+                .ok_or_else(|| format!("missing canonical scope for alias {}", entry.path))?;
+            assert_eq!(
+                entry.sdk_scope, *canonical_scope,
+                "alias {} and canonical {alias_of} must share one SDK scope",
+                entry.path
+            );
+        }
+        if entry.sdk_scope == SdkScope::ExternalContract {
+            assert!(
+                entry.languages.values().all(|mapping| {
+                    mapping.status
+                        == echo_sdk_protocol::inventory::LanguageImplementationStatus::Done
+                        && !mapping.contract_test.is_empty()
+                }),
+                "external SDK contract is incomplete: {}",
+                entry.path
+            );
+        }
+    }
+
+    let expected = BTreeMap::from([
+        (SdkScope::ExternalContract, 5_607usize),
+        (SdkScope::HostOrRustOnly, 1_765usize),
+        (SdkScope::LanguageIntrinsic, 781usize),
+        (SdkScope::InternalHelper, 90usize),
+        (SdkScope::Deferred, 1_441usize),
+    ]);
+    assert_eq!(counts, expected);
+
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::llm::types::ResponseFormat")?.sdk_scope,
+        SdkScope::ExternalContract
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::testing::MockAgent")?.sdk_scope,
+        SdkScope::InternalHelper
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::Tool")?.sdk_scope,
+        SdkScope::LanguageIntrinsic
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::a2a::A2AServer")?.sdk_scope,
+        SdkScope::HostOrRustOnly
+    );
+    assert_eq!(
+        find_entry(&manifest, "echo_agent::a2a::A2AClient::new")?.sdk_scope,
+        SdkScope::Deferred
     );
     Ok(())
 }
@@ -2176,7 +2248,7 @@ fn facade_route_table_is_mechanically_closed() -> TestResult {
 
 #[test]
 fn intrinsic_routes_are_an_explicit_frozen_snapshot() -> TestResult {
-    const EXPECTED: &str = "32942a67d6f4bd225c7ce6ed0ce55aed284954145ee88e2f84d7fa1e69921501";
+    const EXPECTED: &str = "13b9920a374c7853ef576a1b2c196c6378e93ca807bcfc3b11c943f15dc39fcd";
     let mut routes = manifest()?
         .entries
         .into_iter()

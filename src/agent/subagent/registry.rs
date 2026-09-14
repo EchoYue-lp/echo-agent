@@ -6,10 +6,10 @@
 use crate::error::Result;
 use echo_core::agent::Agent;
 use futures::future::BoxFuture;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{OnceCell, RwLock};
 use tracing::{debug, info, warn};
 
 use super::events::SubagentEventBus;
@@ -17,7 +17,7 @@ use super::types::{RegisteredSubagent, SubagentDefinition};
 
 struct RegistryEntry {
     definition: SubagentDefinition,
-    agent: Option<Arc<dyn Agent>>,
+    agent: Arc<OnceCell<Arc<dyn Agent>>>,
     factory: Option<Arc<dyn AgentFactory>>,
     revision: u64,
 }
@@ -26,6 +26,13 @@ struct RegistryEntry {
 struct RegistryState {
     entries: HashMap<String, RegistryEntry>,
     next_revision: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct FactoryPublicationPause {
+    reached: Arc<tokio::sync::Semaphore>,
+    resume: Arc<tokio::sync::Semaphore>,
 }
 
 impl RegistryState {
@@ -43,6 +50,10 @@ impl RegistryState {
 /// the actual agent construction until it's first dispatched.
 pub trait AgentFactory: Send + Sync {
     /// Create an agent instance asynchronously.
+    ///
+    /// A factory must not recursively resolve its own registration through
+    /// [`SubagentRegistry::get_agent`]; async single initialization cannot
+    /// complete while waiting for itself. Callers own any required deadline.
     ///
     /// # Returns
     /// A boxed future that resolves to a `Result<Box<dyn Agent>>`.
@@ -92,10 +103,8 @@ pub struct SubagentRegistry {
     state: Arc<RwLock<RegistryState>>,
     executable_catalog: Arc<std::sync::RwLock<Vec<SubagentDefinition>>>,
     catalog_revision: Arc<AtomicU64>,
-    /// Names currently being instantiated (prevents double-creation races).
-    instantiating: Arc<RwLock<HashSet<String>>>,
-    /// Notifier for waiters on factory instantiation completion.
-    instantiating_done: Arc<Notify>,
+    #[cfg(test)]
+    factory_publication_pause: Arc<RwLock<Option<FactoryPublicationPause>>>,
     /// Event bus for lifecycle events.
     event_bus: SubagentEventBus,
     /// Shared process-level execution control for dispatched attempts.
@@ -116,8 +125,8 @@ impl SubagentRegistry {
             state: Arc::new(RwLock::new(RegistryState::default())),
             executable_catalog: Arc::new(std::sync::RwLock::new(Vec::new())),
             catalog_revision: Arc::new(AtomicU64::new(0)),
-            instantiating: Arc::new(RwLock::new(HashSet::new())),
-            instantiating_done: Arc::new(Notify::new()),
+            #[cfg(test)]
+            factory_publication_pause: Arc::new(RwLock::new(None)),
             event_bus: SubagentEventBus::new(),
             control: Arc::new(super::control::SubagentControlRegistry::default()),
         }
@@ -129,8 +138,8 @@ impl SubagentRegistry {
             state: Arc::new(RwLock::new(RegistryState::default())),
             executable_catalog: Arc::new(std::sync::RwLock::new(Vec::new())),
             catalog_revision: Arc::new(AtomicU64::new(0)),
-            instantiating: Arc::new(RwLock::new(HashSet::new())),
-            instantiating_done: Arc::new(Notify::new()),
+            #[cfg(test)]
+            factory_publication_pause: Arc::new(RwLock::new(None)),
             event_bus,
             control: Arc::new(super::control::SubagentControlRegistry::default()),
         }
@@ -145,7 +154,7 @@ impl SubagentRegistry {
         let mut definitions = state
             .entries
             .values()
-            .filter(|entry| entry.agent.is_some() || entry.factory.is_some())
+            .filter(|entry| entry.agent.get().is_some() || entry.factory.is_some())
             .map(|entry| entry.definition.clone())
             .collect::<Vec<_>>();
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
@@ -164,6 +173,17 @@ impl SubagentRegistry {
 
     pub(crate) fn catalog_revision_handle(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.catalog_revision)
+    }
+
+    #[cfg(test)]
+    async fn pause_before_factory_publication(&self) {
+        let pause = self.factory_publication_pause.read().await.clone();
+        if let Some(pause) = pause {
+            pause.reached.add_permits(1);
+            if let Ok(permit) = pause.resume.acquire().await {
+                permit.forget();
+            }
+        }
     }
 
     // ── Registration ──────────────────────────────────────────────────────
@@ -186,7 +206,7 @@ impl SubagentRegistry {
             name.clone(),
             RegistryEntry {
                 definition: def,
-                agent: Some(agent),
+                agent: Arc::new(OnceCell::new_with(Some(agent))),
                 factory: None,
                 revision,
             },
@@ -218,7 +238,7 @@ impl SubagentRegistry {
                     name.clone(),
                     RegistryEntry {
                         definition: def,
-                        agent: Some(agent),
+                        agent: Arc::new(OnceCell::new_with(Some(agent))),
                         factory: None,
                         revision,
                     },
@@ -251,7 +271,7 @@ impl SubagentRegistry {
             name,
             RegistryEntry {
                 definition: def,
-                agent: None,
+                agent: Arc::new(OnceCell::new()),
                 factory: Some(factory),
                 revision,
             },
@@ -283,7 +303,7 @@ impl SubagentRegistry {
             name,
             RegistryEntry {
                 definition: def,
-                agent: None,
+                agent: Arc::new(OnceCell::new()),
                 factory: None,
                 revision,
             },
@@ -306,7 +326,7 @@ impl SubagentRegistry {
                     name,
                     RegistryEntry {
                         definition: def,
-                        agent: None,
+                        agent: Arc::new(OnceCell::new()),
                         factory: None,
                         revision,
                     },
@@ -341,7 +361,7 @@ impl SubagentRegistry {
             name,
             RegistryEntry {
                 definition: def,
-                agent: None,
+                agent: Arc::new(OnceCell::new()),
                 factory: Some(factory),
                 revision,
             },
@@ -372,7 +392,7 @@ impl SubagentRegistry {
 
         Some(RegisteredSubagent {
             definition: entry.definition.clone(),
-            has_instance: entry.agent.is_some(),
+            has_instance: entry.agent.get().is_some(),
         })
     }
 
@@ -381,109 +401,49 @@ impl SubagentRegistry {
     /// If the agent was registered via factory and not yet instantiated,
     /// this will create it on demand.
     ///
-    /// Uses a loop with timeout to handle concurrent instantiation attempts
-    /// rather than relying on a single `notified()` call.
+    /// Concurrent callers share one cancellation-safe initialization attempt
+    /// for the current registration revision. Callers own any deadline around
+    /// this operation; the registry does not impose a construction timeout.
     pub async fn get_agent(&self, name: &str) -> Option<Arc<dyn Agent>> {
-        use std::time::Duration;
-
-        // Check if already instantiated
-        {
+        let (agent_cell, factory, factory_revision) = {
             let state = self.state.read().await;
-            if let Some(agent) = state
-                .entries
-                .get(name)
-                .and_then(|entry| entry.agent.clone())
-            {
-                return Some(agent);
+            let entry = state.entries.get(name)?;
+            if let Some(agent) = entry.agent.get() {
+                return Some(Arc::clone(agent));
             }
-        }
-
-        // Try factory
-        let factory_revision = {
-            let state = self.state.read().await;
-            state.entries.get(name).and_then(|entry| {
-                entry
-                    .factory
-                    .clone()
-                    .map(|factory| (factory, entry.revision))
-            })
+            (
+                Arc::clone(&entry.agent),
+                entry.factory.clone()?,
+                entry.revision,
+            )
         };
 
-        if let Some((factory, factory_revision)) = factory_revision {
-            // Prevent concurrent double-instantiation
-            {
-                let mut in_progress = self.instantiating.write().await;
-                if in_progress.contains(name) {
-                    debug!(subagent = %name, "Factory instantiation already in progress, waiting");
-                    drop(in_progress);
-                    // Loop-check with timeout instead of single notified()
-                    let timeout = Duration::from_secs(30);
-                    let start = std::time::Instant::now();
-                    loop {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        // Check if agent has been created
-                        {
-                            let state = self.state.read().await;
-                            if let Some(agent) = state
-                                .entries
-                                .get(name)
-                                .and_then(|entry| entry.agent.clone())
-                            {
-                                return Some(agent);
-                            }
-                        }
-                        // Check if instantiation failed (removed from instantiating but not in agents)
-                        {
-                            let in_progress = self.instantiating.read().await;
-                            if !in_progress.contains(name) {
-                                // Instantiation finished (success or failure), re-check agents
-                                let state = self.state.read().await;
-                                return state
-                                    .entries
-                                    .get(name)
-                                    .and_then(|entry| entry.agent.clone());
-                            }
-                        }
-                        if start.elapsed() > timeout {
-                            warn!(subagent = %name, "Timeout waiting for agent instantiation");
-                            return None;
-                        }
-                    }
+        let result = agent_cell
+            .get_or_try_init(|| async {
+                info!(subagent = %name, "Instantiating agent from factory");
+                factory.create().await.map(Arc::<dyn Agent>::from)
+            })
+            .await;
+
+        #[cfg(test)]
+        self.pause_before_factory_publication().await;
+
+        match result {
+            Ok(agent) => {
+                let agent = Arc::clone(agent);
+                let state = self.state.read().await;
+                let entry = state.entries.get(name)?;
+                if entry.revision != factory_revision || !Arc::ptr_eq(&entry.agent, &agent_cell) {
+                    warn!(subagent = %name, "Discarding stale subagent factory result");
+                    return entry.agent.get().cloned();
                 }
-                in_progress.insert(name.to_string());
+                Some(agent)
             }
-
-            info!(subagent = %name, "Instantiating agent from factory");
-            let result = factory.create().await;
-
-            // Clean up instantiating guard and notify waiters
-            {
-                let mut in_progress = self.instantiating.write().await;
-                in_progress.remove(name);
-            }
-            self.instantiating_done.notify_waiters();
-
-            match result {
-                Ok(agent) => {
-                    let arc_agent = Arc::new(agent);
-                    let mut state = self.state.write().await;
-                    let entry = state.entries.get_mut(name)?;
-                    if entry.revision != factory_revision {
-                        warn!(subagent = %name, "Discarding stale subagent factory result");
-                        return entry.agent.clone();
-                    }
-                    entry.agent = Some(arc_agent.clone());
-                    self.publish_catalog(&state);
-                    return Some(arc_agent);
-                }
-                Err(e) => {
-                    warn!(subagent = %name, error = %e, "Factory instantiation failed");
-                    return None;
-                }
+            Err(error) => {
+                warn!(subagent = %name, error = %error, "Factory instantiation failed");
+                None
             }
         }
-
-        None
     }
 
     /// Create a fresh agent when a factory is registered for `name`.
@@ -518,7 +478,7 @@ impl SubagentRegistry {
         state
             .entries
             .values()
-            .filter(|entry| entry.agent.is_some() || entry.factory.is_some())
+            .filter(|entry| entry.agent.get().is_some() || entry.factory.is_some())
             .map(|entry| entry.definition.clone())
             .collect()
     }
@@ -529,7 +489,7 @@ impl SubagentRegistry {
         state
             .entries
             .values()
-            .filter(|entry| entry.agent.is_some() || entry.factory.is_some())
+            .filter(|entry| entry.agent.get().is_some() || entry.factory.is_some())
             .map(|entry| &entry.definition)
             .filter(|definition| definition.tags.iter().any(|entry_tag| entry_tag == tag))
             .cloned()
@@ -542,7 +502,7 @@ impl SubagentRegistry {
         state
             .entries
             .iter()
-            .filter(|(_, entry)| entry.agent.is_some() || entry.factory.is_some())
+            .filter(|(_, entry)| entry.agent.get().is_some() || entry.factory.is_some())
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -565,8 +525,8 @@ impl Clone for SubagentRegistry {
             state: self.state.clone(),
             executable_catalog: self.executable_catalog.clone(),
             catalog_revision: self.catalog_revision.clone(),
-            instantiating: self.instantiating.clone(),
-            instantiating_done: self.instantiating_done.clone(),
+            #[cfg(test)]
+            factory_publication_pause: self.factory_publication_pause.clone(),
             event_bus: self.event_bus.clone(),
             control: self.control.clone(),
         }
@@ -743,6 +703,292 @@ mod tests {
                 .as_ref()
                 .is_some_and(|state| state.entries.contains_key("sync"))
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_factory_attempt_allows_next_resolution() -> Result<()> {
+        let registry = SubagentRegistry::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let factory_attempts = Arc::clone(&attempts);
+        let factory = Arc::new(FnAgentFactory::new(move || {
+            let attempt = factory_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = started_tx.send(attempt);
+            Box::pin(async move {
+                if attempt == 1 {
+                    std::future::pending::<()>().await;
+                }
+                Ok(Box::new(MockAgent::new("cancel-safe")) as Box<dyn Agent>)
+            })
+        }));
+        registry
+            .register_factory(
+                SubagentDefinition::new("cancel-safe", "Cancellation-safe factory"),
+                factory,
+            )
+            .await;
+
+        let first_registry = registry.clone();
+        let first = tokio::spawn(async move { first_registry.get_agent("cancel-safe").await });
+        let first_attempt =
+            tokio::time::timeout(std::time::Duration::from_secs(1), started_rx.recv())
+                .await
+                .map_err(|_| {
+                    crate::error::ReactError::Other(
+                        "first factory attempt did not start".to_string(),
+                    )
+                })?
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("factory start channel closed".to_string())
+                })?;
+        assert_eq!(first_attempt, 1);
+        first.abort();
+        let join_error = first.await.err().ok_or_else(|| {
+            crate::error::ReactError::Other("cancelled factory task completed".to_string())
+        })?;
+        assert!(join_error.is_cancelled());
+
+        let second = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            registry.get_agent("cancel-safe"),
+        )
+        .await
+        .map_err(|_| {
+            crate::error::ReactError::Other(
+                "cancelled factory attempt retained single-flight ownership".to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            crate::error::ReactError::Other("second factory attempt returned no agent".to_string())
+        })?;
+        assert_eq!(second.name(), "cancel-safe");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn factory_result_is_published_before_another_creation_can_start() -> Result<()> {
+        let registry = SubagentRegistry::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let factory_attempts = Arc::clone(&attempts);
+        let factory = Arc::new(FnAgentFactory::new(move || {
+            let attempt = factory_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = started_tx.send(attempt);
+            Box::pin(async move { Ok(Box::new(MockAgent::new("single-flight")) as Box<dyn Agent>) })
+        }));
+        let publication_reached = Arc::new(tokio::sync::Semaphore::new(0));
+        let publication_resume = Arc::new(tokio::sync::Semaphore::new(0));
+        *registry.factory_publication_pause.write().await = Some(FactoryPublicationPause {
+            reached: Arc::clone(&publication_reached),
+            resume: Arc::clone(&publication_resume),
+        });
+        registry
+            .register_factory(
+                SubagentDefinition::new("single-flight", "Single-flight factory"),
+                factory,
+            )
+            .await;
+
+        let first_registry = registry.clone();
+        let first = tokio::spawn(async move { first_registry.get_agent("single-flight").await });
+        let first_attempt =
+            tokio::time::timeout(std::time::Duration::from_secs(1), started_rx.recv())
+                .await
+                .map_err(|_| {
+                    crate::error::ReactError::Other(
+                        "first factory attempt did not start".to_string(),
+                    )
+                })?
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("factory start channel closed".to_string())
+                })?;
+        assert_eq!(first_attempt, 1);
+
+        let reached_permit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            publication_reached.acquire(),
+        )
+        .await
+        .map_err(|_| {
+            crate::error::ReactError::Other(
+                "first factory did not reach the publication boundary".to_string(),
+            )
+        })?
+        .map_err(|error| {
+            crate::error::ReactError::Other(format!(
+                "publication boundary semaphore closed: {error}"
+            ))
+        })?;
+        reached_permit.forget();
+
+        let second_registry = registry.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let mut second = tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            second_registry.get_agent("single-flight").await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), entered_rx)
+            .await
+            .map_err(|_| {
+                crate::error::ReactError::Other(
+                    "second resolver did not enter the publication interleaving".to_string(),
+                )
+            })?
+            .map_err(|error| {
+                crate::error::ReactError::Other(format!(
+                    "second resolver entry channel closed: {error}"
+                ))
+            })?;
+        let second_agent = tokio::select! {
+            joined = &mut second => {
+                joined
+                    .map_err(|error| {
+                        crate::error::ReactError::Other(format!(
+                            "second resolver failed while first publication was paused: {error}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        crate::error::ReactError::Other(
+                            "second resolver returned no published agent".to_string(),
+                        )
+                    })?
+            }
+            duplicate = started_rx.recv() => {
+                publication_resume.add_permits(2);
+                return match duplicate {
+                    Some(attempt) => Err(crate::error::ReactError::Other(format!(
+                        "factory started duplicate attempt {attempt} before publication"
+                    ))),
+                    None => Err(crate::error::ReactError::Other(
+                        "factory start channel closed before publication".to_string(),
+                    )),
+                };
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                publication_resume.add_permits(2);
+                second.abort();
+                return Err(crate::error::ReactError::Other(
+                    "second resolver produced neither a cached agent nor a duplicate factory attempt"
+                        .to_string(),
+                ));
+            }
+        };
+        publication_resume.add_permits(1);
+
+        let first_agent = first
+            .await
+            .map_err(|error| {
+                crate::error::ReactError::Other(format!("first resolver failed: {error}"))
+            })?
+            .ok_or_else(|| {
+                crate::error::ReactError::Other("first resolver returned no agent".to_string())
+            })?;
+        assert!(Arc::ptr_eq(&first_agent, &second_agent));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_factory_attempt_does_not_poison_registration() -> Result<()> {
+        let registry = SubagentRegistry::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        let factory = Arc::new(FnAgentFactory::new(move || {
+            let attempt = factory_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            Box::pin(async move {
+                if attempt == 1 {
+                    return Err(crate::error::ReactError::Other(
+                        "first factory attempt failed".to_string(),
+                    ));
+                }
+                Ok(Box::new(MockAgent::new("retryable-factory")) as Box<dyn Agent>)
+            })
+        }));
+        registry
+            .register_factory(
+                SubagentDefinition::new("retryable-factory", "Retryable factory"),
+                factory,
+            )
+            .await;
+
+        assert!(registry.get_agent("retryable-factory").await.is_none());
+        let recovered = registry
+            .get_agent("retryable-factory")
+            .await
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "factory registration remained poisoned after an error".to_string(),
+                )
+            })?;
+        assert_eq!(recovered.name(), "retryable-factory");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_factory_result_does_not_replace_new_registration() -> Result<()> {
+        let registry = SubagentRegistry::new();
+        let release_old = Arc::new(tokio::sync::Semaphore::new(0));
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let factory_release = Arc::clone(&release_old);
+        let factory = Arc::new(FnAgentFactory::new(move || {
+            let release = Arc::clone(&factory_release);
+            let _ = started_tx.send(());
+            Box::pin(async move {
+                let permit = release.acquire().await.map_err(|error| {
+                    crate::error::ReactError::Other(format!(
+                        "stale factory release semaphore closed: {error}"
+                    ))
+                })?;
+                permit.forget();
+                Ok(Box::new(MockAgent::new("stale-factory")) as Box<dyn Agent>)
+            })
+        }));
+        registry
+            .register_factory(
+                SubagentDefinition::new("replaceable", "Old factory registration"),
+                factory,
+            )
+            .await;
+
+        let old_registry = registry.clone();
+        let old_resolution =
+            tokio::spawn(async move { old_registry.get_agent("replaceable").await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started_rx.recv())
+            .await
+            .map_err(|_| crate::error::ReactError::Other("old factory did not start".to_string()))?
+            .ok_or_else(|| {
+                crate::error::ReactError::Other("old factory start channel closed".to_string())
+            })?;
+
+        let current: Arc<dyn Agent> = Arc::new(MockAgent::new("current-registration"));
+        registry
+            .register_shared(
+                SubagentDefinition::new("replaceable", "Current registration"),
+                Arc::clone(&current),
+            )
+            .await;
+        release_old.add_permits(1);
+
+        let old_result = old_resolution
+            .await
+            .map_err(|error| {
+                crate::error::ReactError::Other(format!(
+                    "old factory resolver task failed: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "old factory resolver did not return the current registration".to_string(),
+                )
+            })?;
+        assert!(Arc::ptr_eq(&old_result, &current));
+        let resolved = registry.get_agent("replaceable").await.ok_or_else(|| {
+            crate::error::ReactError::Other("current registration disappeared".to_string())
+        })?;
+        assert!(Arc::ptr_eq(&resolved, &current));
+        Ok(())
     }
 
     #[tokio::test]

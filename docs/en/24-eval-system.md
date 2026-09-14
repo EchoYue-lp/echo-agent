@@ -91,6 +91,7 @@ The runner executes cases against an agent and collects results:
 use echo_agent::eval::EvalRunner;
 use std::path::PathBuf;
 
+// This path is a parent; every run receives a unique child workspace.
 let runner = EvalRunner::new(PathBuf::from("/tmp/eval_workspace"))
     .with_run_store(run_store)  // For trace linkage
     .with_grader(grader, grading_agent);  // For LlmGraded criteria
@@ -105,10 +106,33 @@ println!("Passed: {}/{}", report.passed, report.total);
 ```
 
 The runner automatically:
-- Copies `project_fixture` to a temporary workspace before each run
+- Creates a unique workspace generation for every run, including cases without fixtures
+- Copies `project_fixture` into that generation without reusing or deleting a case-ID path
 - Links results to execution traces via `run_id`
 - Populates metrics from traces (tool calls, tokens, file changes)
 - Evaluates constraints against the trace
+- Explicitly removes settled generations and reports cleanup failures in `EvalResult`
+
+`workspace_root` is never the Agent working directory; it is only the parent
+for random `eval-` generations. Eval uses the framework `AgentTurnDriver` as
+its terminal authority. At the case deadline it requests cancellation, then
+continues waiting for the same drive future for the shared six-second settlement
+grace. A receipt keeps the result timed out but permits terminal trace metrics
+and workspace cleanup. If the grace also expires, Eval skips non-terminal trace
+scoring, retains the generation, and reports its path in `violations`. Caller
+cancellation likewise retains the directory and logs a warning. ReactAgent's
+managed stream releases its terminal only after the owned producer task has
+settled; other Agent implementations must honor the same terminal-is-last
+stream contract.
+
+Each Eval invocation also carries one unique run/turn/execution correlation in
+its value-scoped runtime context. A trace producer keeps ownership of the real
+trace ID and records that correlation as parent, turn, and execution metadata.
+After Turn settlement, Eval resolves exactly one matching Run through the
+configured RunStore. `EvalResult.run_id` is set only to that loadable trace ID;
+it is never the Eval correlation or an Agent's product/business run ID. No
+matching trace remains optional, while ambiguous matches or RunStore
+inconsistency fail the Eval instead of selecting by list order.
 
 ---
 
@@ -313,6 +337,7 @@ async fn main() -> Result<()> {
     ];
 
     // 2. Create runner
+    // /tmp/eval is the parent for isolated per-run generations.
     let runner = EvalRunner::new(PathBuf::from("/tmp/eval"));
 
     // 3. Run with factory
@@ -342,6 +367,8 @@ async fn main() -> Result<()> {
 │  │ EvalCase  │  │ Fixture  │  │ SuccessCriteria  │   │
 │  │  (task)   │  │  (copy)  │  │  (judge)         │   │
 │  └──────────┘  └──────────┘  └──────────────────┘   │
+│                     │                                 │
+│  workspace_root ──▶ unique eval-* generation (cwd)   │
 │                                                      │
 │  ┌──────────────────────────────────────────────┐    │
 │  │              Agent.execute(task)               │    │
@@ -406,5 +433,9 @@ Construct the production Agent with `ReactAgentBuilder`, then pass that Agent to
 `EvalRunner::run` or provide a fresh-Agent factory to `run_all`. This keeps eval
 execution explicit and prevents production turns from silently acquiring a
 second lifecycle or persistence owner.
+
+`ImprovementLoop` and `AbComparator` reuse this same per-run generation
+authority. They do not create fixed iteration directories or independently
+delete Eval workspaces.
 
 See also: [25 - Self-Improvement](./25-self-improvement.md) for how eval feeds into the improvement loop.

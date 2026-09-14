@@ -4,14 +4,14 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 多语言 SDK facade 对等边界
 risk: high
-observed_at: source:448caeb7a6cc1bb147c8d86412b0b9a8d0c14b653b8326724432b49faebab62c
+observed_at: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.sdk-facade-routing]
 rule_refs: [rule.sdk-rust-authority]
-evidence_refs: [evidence.sdk-contracts]
+evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification, evidence.background-task-terminal-authority-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
-audit_refs: [audit.sdk-facade-plan08-final]
-related_map_refs: []
+audit_refs: [audit.sdk-facade-plan08-final, audit.sdk-facade-scope-contract]
+related_map_refs: [map.protocol-surfaces]
 scenarios:
   standard-acp:
     status: mapped
@@ -25,7 +25,7 @@ scenarios:
     status: mapped
     source_refs: [echo-sdk-host/src/core_profile/facade/source_operations.rs]
     behavior_refs: [behavior.sdk-facade-routing]
-    evidence_refs: [evidence.sdk-contracts]
+    evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification]
   extension-bridge:
     status: mapped
     source_refs: [echo-sdk-host/src/core_profile/extension_bridge.rs]
@@ -35,6 +35,12 @@ scenarios:
     source_refs: [echo-sdk-host/src/core_profile/facade/stream.rs]
     behavior_refs: [behavior.sdk-facade-routing]
     evidence_refs: [evidence.sdk-contracts]
+  sdk-contract-scope:
+    status: mapped
+    source_refs: [echo-sdk-protocol/src/inventory.rs, contracts/sdk/parity-manifest.schema.json, contracts/sdk/parity-manifest.json, echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh, docs/adr/0032-sdk-contract-scope-classification.md, docs/adr/0039-background-task-terminal-authority.md]
+    behavior_refs: [behavior.sdk-facade-routing]
+    rule_refs: [rule.sdk-rust-authority]
+    evidence_refs: [evidence.sdk-contracts, evidence.background-task-terminal-authority-verification]
 ---
 
 # 多语言 SDK facade 对等边界
@@ -57,7 +63,7 @@ Host只保存寻址、handle owner/generation和有界投递状态；Agent、Run
 
 ## 策略来源与优先级
 
-正式design与ADR 0028定义边界；parity manifest和operation catalog定义机器清单；Rust服务定义运行语义。
+正式design与ADR 0028定义运行边界；ADR 0031/0032定义inventory与consumer scope；parity manifest和operation catalog定义机器清单；Rust服务定义运行语义。
 
 ## 生命周期与失败路径
 
@@ -73,9 +79,8 @@ permission operation复用Session Agent的`PermissionService`。Host不得引入
 
 ## 场景处置清单
 
-ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter，live consumer trait进入typed compressor或AgentComponent bridge，Workflow/A2A stream复用统一HandleRegistry并覆盖Session/connection teardown。
+ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5607个当前external contract、1765个Host/Rust-only、781个language intrinsic、90个internal helper与1441个deferred，总量9684；新增项仅为BackgroundTask Clone的Rust trait impl，551个已完成intrinsic仍属于external contract。
 
 ## 未展开项
 
-intrinsic 语言行为、逐项领域/失败语义与最终 Parity complete 属于后续独立交付结果；
-全仓 inventory/behavior model 和 clean-checkout 发布证据也仍保持开放。
+deferred identity只按externally useful capability进入后续合同决策；Host/Rust-only、language intrinsic和helper不是逐identity语言任务。全仓inventory/behavior model由父级能力图闭合，不以本map的identity数量衡量。

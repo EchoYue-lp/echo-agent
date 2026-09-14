@@ -153,7 +153,7 @@ async fn requires_sequential_execution(snap: &AgentRunSnapshot, tool_name: &str)
         .tools
         .tool_manager
         .get_tool(tool_name)
-        .is_some_and(|tool| !tool.value().allows_parallel_batch_execution());
+        .is_some_and(|tool| !tool.allows_parallel_batch_execution());
     #[cfg(feature = "human-loop")]
     {
         tool_disallows_parallel_execution || snap.tool_needs_approval(tool_name).await
@@ -274,7 +274,7 @@ pub(crate) async fn run_tools(
                     snap.tools
                         .tool_manager
                         .get_tool(name)
-                        .map(|tool| tool.value().exempt_from_batch_timeout())
+                        .map(|tool| tool.exempt_from_batch_timeout())
                         .unwrap_or(false)
                 });
                 let tool_count = conc.len();

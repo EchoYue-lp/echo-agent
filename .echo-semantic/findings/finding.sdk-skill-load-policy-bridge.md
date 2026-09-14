@@ -16,10 +16,14 @@ decision_refs: []
 repair_evidence_refs: [evidence.sdk-contracts]
 verification_evidence_refs: [evidence.sdk-contracts]
 rereview_audit_refs: [audit.sdk-facade-plan08-final]
-discovered_at: source:448caeb7a6cc1bb147c8d86412b0b9a8d0c14b653b8326724432b49faebab62c
+discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
 # SkillLoadPolicy 被误归为process-local
+
+## 外部 Issue
+
+GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/92
 
 ## 问题
 

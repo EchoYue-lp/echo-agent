@@ -40,8 +40,7 @@ impl AbComparator {
         mut baseline_factory: impl FnMut() -> Box<dyn crate::agent::Agent>,
         mut experiment_factory: impl FnMut() -> Box<dyn crate::agent::Agent>,
     ) -> AbComparison {
-        let workspace = std::env::temp_dir().join(format!("ab_compare_{}", uuid::Uuid::new_v4()));
-        let runner = EvalRunner::new(workspace);
+        let runner = EvalRunner::new(std::env::temp_dir());
 
         let baseline = runner.run_all(cases, &mut baseline_factory).await;
         let experiment = runner.run_all(cases, &mut experiment_factory).await;

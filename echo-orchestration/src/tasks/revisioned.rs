@@ -5,7 +5,7 @@
 //! optimistic concurrency. Applications provide persistence and product policy
 //! through narrow adapters.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -198,6 +198,13 @@ pub struct TaskPatchEffects {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskGraphCommit {
     pub expected_revision: Option<u64>,
+    /// Exact runtime execution state observed when a relation patch was
+    /// prepared. Persistence adapters must reject the commit if any entry has
+    /// changed, even when the relation revision is unchanged. `None` is kept
+    /// for create and legacy/direct commits that do not carry this stronger
+    /// precondition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_executions: Option<BTreeMap<TaskId, TaskExecution>>,
     pub next: RevisionedTaskGraph,
     pub reason: String,
     pub effects: TaskPatchEffects,
@@ -682,25 +689,35 @@ impl RevisionedTaskStore for InMemoryRevisionedTaskStore {
             });
         }
         if let Some(current_graph) = graphs.get(scope_id) {
-            let intentionally_progressed = commit
-                .effects
-                .progressed_task_ids
-                .iter()
-                .chain(&commit.effects.skipped_task_ids)
-                .chain(&commit.effects.reset_task_ids)
-                .collect::<HashSet<_>>();
-            let execution_drifted = current_graph.snapshot.tasks.iter().any(|current_task| {
-                if intentionally_progressed.contains(&current_task.spec.id) {
-                    return false;
-                }
-                commit
-                    .next
+            let execution_drifted = if let Some(expected_executions) = &commit.expected_executions {
+                let current_executions: BTreeMap<TaskId, TaskExecution> = current_graph
                     .snapshot
                     .tasks
                     .iter()
-                    .find(|next_task| next_task.spec.id == current_task.spec.id)
-                    .is_some_and(|next_task| next_task.execution != current_task.execution)
-            });
+                    .map(|task| (task.spec.id.clone(), task.execution.clone()))
+                    .collect();
+                &current_executions != expected_executions
+            } else {
+                let intentionally_progressed = commit
+                    .effects
+                    .progressed_task_ids
+                    .iter()
+                    .chain(&commit.effects.skipped_task_ids)
+                    .chain(&commit.effects.reset_task_ids)
+                    .collect::<HashSet<_>>();
+                current_graph.snapshot.tasks.iter().any(|current_task| {
+                    if intentionally_progressed.contains(&current_task.spec.id) {
+                        return false;
+                    }
+                    commit
+                        .next
+                        .snapshot
+                        .tasks
+                        .iter()
+                        .find(|next_task| next_task.spec.id == current_task.spec.id)
+                        .is_some_and(|next_task| next_task.execution != current_task.execution)
+                })
+            };
             if execution_drifted {
                 return Err(RevisionedTaskStoreError::Conflict {
                     expected: commit.expected_revision,
@@ -1178,6 +1195,7 @@ impl TaskRevisionService {
                 scope_id,
                 TaskGraphCommit {
                     expected_revision: None,
+                    expected_executions: None,
                     next: graph,
                     reason,
                     effects: TaskPatchEffects::default(),
@@ -1228,6 +1246,12 @@ impl TaskRevisionService {
             patch.operations,
             self.policy.allow_manual_progress_updates(),
         )?;
+        let expected_executions = current
+            .snapshot
+            .tasks
+            .iter()
+            .map(|task| (task.spec.id.clone(), task.execution.clone()))
+            .collect();
         let tasks = self
             .finalize_and_validate(scope_id, application.tasks)
             .await?;
@@ -1248,6 +1272,7 @@ impl TaskRevisionService {
                 scope_id,
                 TaskGraphCommit {
                     expected_revision: Some(patch.base_revision),
+                    expected_executions: Some(expected_executions),
                     next,
                     reason: patch.reason,
                     effects: application.effects,
@@ -1314,6 +1339,151 @@ mod tests {
             Arc::new(InMemoryRevisionedTaskStore::new()),
             Arc::new(DefaultTaskToolPolicy::new("test-scope")),
         )
+    }
+
+    struct ClaimBeforePatchCommitStore {
+        inner: Arc<InMemoryRevisionedTaskStore>,
+    }
+
+    #[async_trait]
+    impl RevisionedTaskStore for ClaimBeforePatchCommitStore {
+        async fn load(
+            &self,
+            scope_id: &str,
+        ) -> Result<Option<RevisionedTaskGraph>, RevisionedTaskStoreError> {
+            self.inner.load(scope_id).await
+        }
+
+        async fn compare_and_commit(
+            &self,
+            scope_id: &str,
+            commit: TaskGraphCommit,
+        ) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError> {
+            if commit.expected_revision.is_some() {
+                let current = self.inner.load(scope_id).await?.ok_or_else(|| {
+                    RevisionedTaskStoreError::Backend {
+                        message: "interleaving store could not load the patch graph".to_string(),
+                    }
+                })?;
+                let expected = commit.expected_executions.as_ref().ok_or_else(|| {
+                    RevisionedTaskStoreError::Backend {
+                        message: "canonical patch omitted its execution precondition".to_string(),
+                    }
+                })?;
+                let current_executions: BTreeMap<TaskId, TaskExecution> = current
+                    .snapshot
+                    .tasks
+                    .iter()
+                    .map(|task| (task.spec.id.clone(), task.execution.clone()))
+                    .collect();
+                if expected != &current_executions {
+                    return Err(RevisionedTaskStoreError::Backend {
+                        message: "canonical patch did not preserve its loaded execution snapshot"
+                            .to_string(),
+                    });
+                }
+                let task = current.snapshot.tasks.first().ok_or_else(|| {
+                    RevisionedTaskStoreError::Backend {
+                        message: "interleaving store could not find the patch task".to_string(),
+                    }
+                })?;
+                if matches!(
+                    self.inner
+                        .claim_runtime_task(scope_id, task, current.snapshot.revision)
+                        .await?,
+                    RuntimeTaskClaimOutcome::ReloadSnapshot
+                ) {
+                    return Err(RevisionedTaskStoreError::Backend {
+                        message: "interleaving claim unexpectedly requested a reload".to_string(),
+                    });
+                }
+            }
+            self.inner.compare_and_commit(scope_id, commit).await
+        }
+    }
+
+    fn commit_from_loaded(
+        loaded: &RevisionedTaskGraph,
+        operation: TaskPlanPatchOp,
+    ) -> Result<TaskGraphCommit, String> {
+        let application =
+            TaskPatchEngine::apply_operations(&loaded.snapshot.tasks, vec![operation], true)
+                .map_err(|error| error.to_string())?;
+        let revision = loaded
+            .snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "test graph revision overflow".to_string())?;
+        Ok(TaskGraphCommit {
+            expected_revision: Some(loaded.snapshot.revision),
+            expected_executions: Some(
+                loaded
+                    .snapshot
+                    .tasks
+                    .iter()
+                    .map(|task| (task.spec.id.clone(), task.execution.clone()))
+                    .collect(),
+            ),
+            next: RevisionedTaskGraph {
+                snapshot: RuntimePlanSnapshot {
+                    revision,
+                    tasks: application.tasks,
+                },
+                context: loaded.context.clone(),
+            },
+            reason: "deterministic execution CAS test".to_string(),
+            effects: application.effects,
+        })
+    }
+
+    async fn assert_claim_conflicts_with_patch(
+        scope_id: &str,
+        operation: TaskPlanPatchOp,
+    ) -> Result<(), String> {
+        let store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let service = TaskRevisionService::new(
+            store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new(scope_id)),
+        );
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let loaded = store
+            .load(scope_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "claim conflict graph is missing".to_string())?;
+        let commit = commit_from_loaded(&loaded, operation)?;
+        let task = loaded
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "claim conflict task is missing".to_string())?;
+        let claim = match store
+            .claim_runtime_task(scope_id, task, loaded.snapshot.revision)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+            RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                return Err("claim conflict task unexpectedly requested reload".to_string());
+            }
+        };
+        let error = store
+            .compare_and_commit(scope_id, commit)
+            .await
+            .err()
+            .ok_or_else(|| "relation patch overwrote a concurrent claim".to_string())?;
+        assert!(matches!(error, RevisionedTaskStoreError::Conflict { .. }));
+        assert_eq!(
+            store
+                .settle_runtime_claim(scope_id, "a", &claim, TaskStatus::Completed)
+                .await
+                .map_err(|error| error.to_string())?,
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled
+        );
+        Ok(())
     }
 
     #[test]
@@ -1808,6 +1978,278 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relation_patch_loaded_before_claim_cannot_overwrite_live_claim() -> Result<(), String>
+    {
+        let store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let service = TaskRevisionService::new(
+            store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new("claim-patch-cas")),
+        );
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let loaded = store
+            .load("claim-patch-cas")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "claim patch graph is missing".to_string())?;
+        let application = TaskPatchEngine::apply_operations(
+            &loaded.snapshot.tasks,
+            vec![TaskPlanPatchOp::Skip {
+                task_id: "a".to_string(),
+            }],
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+        let next = RevisionedTaskGraph {
+            snapshot: RuntimePlanSnapshot {
+                revision: loaded.snapshot.revision.saturating_add(1),
+                tasks: application.tasks,
+            },
+            context: loaded.context.clone(),
+        };
+        let task = loaded
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "claim patch task is missing".to_string())?;
+        let claim = match store
+            .claim_runtime_task("claim-patch-cas", task, loaded.snapshot.revision)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+            RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                return Err("claim patch task unexpectedly requested reload".to_string());
+            }
+        };
+
+        let error = store
+            .compare_and_commit(
+                "claim-patch-cas",
+                TaskGraphCommit {
+                    expected_revision: Some(loaded.snapshot.revision),
+                    expected_executions: Some(
+                        loaded
+                            .snapshot
+                            .tasks
+                            .iter()
+                            .map(|task| (task.spec.id.clone(), task.execution.clone()))
+                            .collect(),
+                    ),
+                    next,
+                    reason: "skip stale loaded task".to_string(),
+                    effects: application.effects,
+                },
+            )
+            .await
+            .err()
+            .ok_or_else(|| "stale relation patch overwrote a live claim".to_string())?;
+        assert!(matches!(error, RevisionedTaskStoreError::Conflict { .. }));
+
+        let current = store
+            .load("claim-patch-cas")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "claimed graph disappeared".to_string())?;
+        let current_task = current
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "claimed task disappeared".to_string())?;
+        assert_eq!(current_task.execution.claim.as_ref(), Some(&claim));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_patch_carries_loaded_execution_precondition() -> Result<(), String> {
+        let inner = Arc::new(InMemoryRevisionedTaskStore::new());
+        let service = TaskRevisionService::new(
+            Arc::new(ClaimBeforePatchCommitStore {
+                inner: inner.clone(),
+            }),
+            Arc::new(DefaultTaskToolPolicy::new("canonical-patch-cas")),
+        );
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let error = service
+            .apply_patch(
+                "canonical-patch-cas",
+                TaskPlanPatch {
+                    base_revision: 1,
+                    reason: "exercise canonical execution precondition".to_string(),
+                    operations: vec![TaskPlanPatchOp::Skip {
+                        task_id: "a".to_string(),
+                    }],
+                },
+            )
+            .await
+            .err()
+            .ok_or_else(|| "canonical patch overwrote the interleaved claim".to_string())?;
+        assert!(matches!(error, TaskRevisionError::RevisionConflict { .. }));
+
+        let current = inner
+            .load("canonical-patch-cas")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "canonical patch graph disappeared".to_string())?;
+        let task = current
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "canonical patch task disappeared".to_string())?;
+        assert_eq!(task.execution.status, TaskStatus::Running);
+        assert!(task.execution.claim.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_status_and_spec_update_conflict_with_concurrent_claim() -> Result<(), String> {
+        assert_claim_conflicts_with_patch(
+            "claim-set-status-cas",
+            TaskPlanPatchOp::SetStatus {
+                task_id: "a".to_string(),
+                status: TaskStatus::Running,
+            },
+        )
+        .await?;
+        assert_claim_conflicts_with_patch(
+            "claim-spec-update-cas",
+            TaskPlanPatchOp::Update {
+                task_id: "a".to_string(),
+                patch: TaskSpecPatch {
+                    title: Some("Updated after stale load".to_string()),
+                    ..TaskSpecPatch::default()
+                },
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn relation_patch_conflicts_with_runtime_settlement_and_retry() -> Result<(), String> {
+        let store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let service = TaskRevisionService::new(
+            store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new("settlement-patch-cas")),
+        );
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let pending = store
+            .load("settlement-patch-cas")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "settlement graph is missing".to_string())?;
+        let stale_skip = commit_from_loaded(
+            &pending,
+            TaskPlanPatchOp::Skip {
+                task_id: "a".to_string(),
+            },
+        )?;
+        let pending_task = pending
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "settlement task is missing".to_string())?;
+        let claim = match store
+            .claim_runtime_task(
+                "settlement-patch-cas",
+                pending_task,
+                pending.snapshot.revision,
+            )
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+            RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                return Err("settlement task unexpectedly requested reload".to_string());
+            }
+        };
+        assert_eq!(
+            store
+                .settle_runtime_claim("settlement-patch-cas", "a", &claim, TaskStatus::Completed,)
+                .await
+                .map_err(|error| error.to_string())?,
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled
+        );
+        let settlement_error = store
+            .compare_and_commit("settlement-patch-cas", stale_skip)
+            .await
+            .err()
+            .ok_or_else(|| "relation patch overwrote runtime settlement".to_string())?;
+        assert!(matches!(
+            settlement_error,
+            RevisionedTaskStoreError::Conflict { .. }
+        ));
+
+        let retry_store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let retry_service = TaskRevisionService::new(
+            retry_store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new("retry-patch-cas")),
+        );
+        retry_service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        {
+            let mut graphs = retry_store.graphs.write().await;
+            let graph = graphs
+                .get_mut("retry-patch-cas")
+                .ok_or_else(|| "retry graph is missing".to_string())?;
+            let task = graph
+                .snapshot
+                .tasks
+                .first_mut()
+                .ok_or_else(|| "retry task is missing".to_string())?;
+            task.execution.status = TaskStatus::Blocked("retry".to_string());
+        }
+        let blocked = retry_store
+            .load("retry-patch-cas")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "blocked graph is missing".to_string())?;
+        let stale_update = commit_from_loaded(
+            &blocked,
+            TaskPlanPatchOp::Update {
+                task_id: "a".to_string(),
+                patch: TaskSpecPatch {
+                    title: Some("Updated after retry".to_string()),
+                    ..TaskSpecPatch::default()
+                },
+            },
+        )?;
+        let blocked_task = blocked
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "blocked retry task is missing".to_string())?;
+        assert_eq!(
+            retry_store
+                .retry_runtime_task("retry-patch-cas", blocked_task, blocked.snapshot.revision)
+                .await
+                .map_err(|error| error.to_string())?,
+            crate::tasks::RuntimeTaskRetryOutcome::Retried { retry_count: 1 }
+        );
+        let retry_error = retry_store
+            .compare_and_commit("retry-patch-cas", stale_update)
+            .await
+            .err()
+            .ok_or_else(|| "relation patch overwrote runtime retry".to_string())?;
+        assert!(matches!(
+            retry_error,
+            RevisionedTaskStoreError::Conflict { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn patch_cannot_reduce_retry_budget_below_consumed_retries() -> Result<(), String> {
         let store = Arc::new(InMemoryRevisionedTaskStore::new());
         let service = TaskRevisionService::new(
@@ -1957,6 +2399,7 @@ mod tests {
                 "runtime-scope",
                 TaskGraphCommit {
                     expected_revision: Some(1),
+                    expected_executions: None,
                     next: stale_next,
                     reason: "stale relation edit".to_string(),
                     effects: TaskPatchEffects {

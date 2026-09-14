@@ -4,6 +4,10 @@
 - Date: 2026-08-26
 - Owners: `echo-orchestration/tasks`, `agent/subagent`
 
+## Status
+
+Accepted.
+
 ## Context
 
 The framework historically had overlapping task models and execution loops:
@@ -25,6 +29,8 @@ References:
 - <https://cursor.com/docs/agent/plan-mode>
 - <https://cursor.com/docs/subagents>
 - <https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md>
+- <https://www.rfc-editor.org/rfc/rfc9110.html#name-if-match>
+- <https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions>
 
 ## Options Considered
 
@@ -52,6 +58,14 @@ boundaries over that same authority.
   state. Application fields must round-trip losslessly through the extension.
 - Claims bind revision, attempt, stable spec hash, and unique identity.
   Compare-and-set settlement rejects stale or superseded Subagent results.
+- Relation patches keep graph revision and runtime execution as separate
+  preconditions. `TaskGraphCommit.expected_executions` captures the exact
+  `TaskId -> TaskExecution` map observed before applying a patch. A store first
+  validates the relation revision, then rejects the commit if any claim,
+  retry, settlement, status, error, or task membership changed. Patch operations
+  cannot exempt their target from this check. Create and legacy/direct commits
+  may omit the stronger precondition; the canonical `TaskRevisionService`
+  patch path never does.
 - A controller adapter may atomically persist snapshots, dispatch Subagents,
   and apply product review/resource policy. It must not own another DAG loop,
   validator, ready frontier, retry state machine, or task store.
@@ -68,9 +82,12 @@ remain application concerns. The adapter boundary is intentionally thin.
 
 ## Consequences
 
-Dynamic patches take effect at a reload safe point, and stale attempts cannot
-overwrite a reclaimed task. Retry, pause, skip, cancellation, and dependency
-failure have one semantic source across Team and direct Task APIs.
+Dynamic patches take effect at a reload safe point, and stale attempts or
+stale relation patches cannot overwrite a claimed, retried, or settled task.
+Runtime mutations do not increment the relation revision; exact execution
+preconditions provide the equivalent of an `If-Match` validator without
+merging the two lifecycle authorities. Retry, pause, skip, cancellation, and
+dependency failure have one semantic source across Team and direct Task APIs.
 
 Legacy `TaskManager`, `TaskStore`, `TaskExecutor`, `TaskScheduler`, manager-owned
 ready loops, and Team-specific checkpoint nodes were removed. Applications
@@ -83,6 +100,7 @@ Tests cover create/update revision conflicts, complete graph validation,
 dynamic revision reload, exact claim identity, stale and superseded settlement,
 bounded/conflict-aware waves, retry exhaustion, explicit retry, resumable pause,
 cancellation settlement, skip waivers, transitive dependency blocking, stall
-detection, Team adaptation, extension round trips, and public facade
+detection, deterministic load/claim/commit and load/settle-or-retry/commit
+interleavings, Team adaptation, extension round trips, and public facade
 construction. Documentation and facade smoke tests assert that the canonical
 services are the exported framework entry points.

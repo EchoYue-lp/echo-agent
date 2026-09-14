@@ -1331,6 +1331,36 @@ impl SemanticClass {
     }
 }
 
+/// Consumer-facing disposition of one Rust facade identity.
+///
+/// This is intentionally independent from [`SemanticClass`], the adapter
+/// route, and per-language implementation status. It answers whether an item
+/// belongs to the cross-language SDK contract, not how it is represented or
+/// whether a particular language implementation is complete.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SdkScope {
+    ExternalContract,
+    HostOrRustOnly,
+    LanguageIntrinsic,
+    InternalHelper,
+    Deferred,
+}
+
+impl SdkScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExternalContract => "external_contract",
+            Self::HostOrRustOnly => "host_or_rust_only",
+            Self::LanguageIntrinsic => "language_intrinsic",
+            Self::InternalHelper => "internal_helper",
+            Self::Deferred => "deferred",
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -1443,6 +1473,8 @@ pub struct ManifestEntry {
     pub feature_semantics: FeatureSemantics,
     pub signatures: Vec<ManifestSignature>,
     pub classification: SemanticClass,
+    /// Consumer-facing SDK contract scope for this facade identity.
+    pub sdk_scope: SdkScope,
     pub acp_relationship: AcpRelationship,
     pub semantic_rule: String,
     pub derived_traits: BTreeSet<String>,
@@ -1714,6 +1746,60 @@ fn entry_feature_semantics(entry: &InventoryEntry) -> FeatureSemantics {
     } else {
         FeatureSemantics::AnyOf
     }
+}
+
+fn sdk_scope_for(
+    source_paths: &BTreeSet<String>,
+    route: &RouteObligation,
+    accepted_external_contract: bool,
+) -> SdkScope {
+    if accepted_external_contract {
+        return SdkScope::ExternalContract;
+    }
+
+    if source_paths
+        .iter()
+        .any(|source| source.starts_with("echo_agent::testing::"))
+    {
+        return SdkScope::InternalHelper;
+    }
+
+    let intrinsic_reason = route.route.strip_prefix("intrinsic:").unwrap_or_default();
+    if matches!(
+        intrinsic_reason,
+        "rust-language-surface" | "rust-trait-implementation" | "callback-type-alias"
+    ) {
+        return SdkScope::LanguageIntrinsic;
+    }
+
+    if intrinsic_reason.starts_with("process-local-")
+        || intrinsic_reason.starts_with("host-owned-")
+        || intrinsic_reason == "language-local-opaque-resource-type"
+    {
+        return SdkScope::HostOrRustOnly;
+    }
+
+    SdkScope::Deferred
+}
+
+fn accepted_external_contract(route: &RouteObligation, language_contract_suffix: &str) -> bool {
+    if route.surface != "intrinsic" {
+        return true;
+    }
+
+    // Intrinsic behavior enters the external contract only through a named
+    // capability group. Generic suffixes are inventory dispositions, not
+    // accepted contracts. This decision is independent from implementation
+    // status.
+    !matches!(
+        language_contract_suffix,
+        "wire_value"
+            | "facade_operation"
+            | "facade_handle"
+            | "facade_stream"
+            | "facade_extension"
+            | "language_intrinsic"
+    )
 }
 
 /// Facade namespaces that only re-export items defined elsewhere; when an
@@ -2964,7 +3050,7 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
             canonical_member_of.insert(path.clone(), alias_of);
         }
     }
-    merged
+    let mut entries: Vec<ManifestEntry> = merged
         .iter()
         .filter(|entry| !(entry.kind == ItemKind::TraitImpl && entry.automatically_derived))
         .map(|entry| {
@@ -2998,6 +3084,24 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
                 classification,
                 &route,
             );
+            let accepted_external_contract =
+                accepted_external_contract(&route, language_contract_suffix);
+            let languages: BTreeMap<String, LanguageStatusRecord> = LANGUAGES
+                .iter()
+                .map(|language| {
+                    (
+                        (*language).to_string(),
+                        LanguageStatusRecord {
+                            status: language_status,
+                            target: language_target(classification).to_string(),
+                            contract_test: format!(
+                                "sdk-parity/{language}/{language_contract_suffix}"
+                            ),
+                        },
+                    )
+                })
+                .collect();
+            let sdk_scope = sdk_scope_for(&entry.source_paths, &route, accepted_external_contract);
             ManifestEntry {
                 path: entry.path.clone(),
                 kind: entry.kind,
@@ -3013,6 +3117,7 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
                     })
                     .collect(),
                 classification,
+                sdk_scope,
                 acp_relationship,
                 semantic_rule: semantic_rule.to_string(),
                 derived_traits: derived_traits_by_parent
@@ -3022,24 +3127,24 @@ pub fn manifest_entries(merged: &[InventoryEntry]) -> Vec<ManifestEntry> {
                 route,
                 canonical: alias_of.is_none(),
                 alias_of,
-                languages: LANGUAGES
-                    .iter()
-                    .map(|language| {
-                        (
-                            (*language).to_string(),
-                            LanguageStatusRecord {
-                                status: language_status,
-                                target: language_target(classification).to_string(),
-                                contract_test: format!(
-                                    "sdk-parity/{language}/{language_contract_suffix}"
-                                ),
-                            },
-                        )
-                    })
-                    .collect(),
+                languages,
             }
         })
-        .collect()
+        .collect();
+
+    let canonical_scopes: BTreeMap<String, SdkScope> = entries
+        .iter()
+        .filter(|entry| entry.canonical)
+        .map(|entry| (entry.path.clone(), entry.sdk_scope))
+        .collect();
+    for entry in &mut entries {
+        if let Some(alias_of) = &entry.alias_of
+            && let Some(canonical_scope) = canonical_scopes.get(alias_of)
+        {
+            entry.sdk_scope = *canonical_scope;
+        }
+    }
+    entries
 }
 
 pub fn manifest_document(
@@ -3053,7 +3158,7 @@ pub fn manifest_document(
         .collect();
     let inventory_value = serde_json::to_vec(merged).unwrap_or_default();
     ParityManifest {
-        schema_version: 1,
+        schema_version: 2,
         extension_protocol_version,
         generated: ManifestGenerated {
             rustdoc_format_version: RUSTDOC_FORMAT_VERSION,
@@ -3161,6 +3266,41 @@ mod tests {
             .ok_or_else(|| "expected one merged item".to_string())?;
         assert!(features_of_entry(first).is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn sdk_scope_acceptance_is_independent_from_language_status() {
+        let route = |surface: &str, route: &str| RouteObligation {
+            route: route.to_string(),
+            surface: surface.to_string(),
+            family: None,
+            method: None,
+            operation: None,
+            handler_operation: None,
+            required_feature: None,
+            required_features: Vec::new(),
+            feature_semantics: FeatureSemantics::Default,
+            signatures: Vec::new(),
+            mapping: String::new(),
+            validation: Vec::new(),
+        };
+        let executable = route("invoke", "source:echo_core::agent::Agent::name");
+        let accepted_intrinsic = route("intrinsic", "intrinsic:language-local-value-method");
+        let unaccepted_intrinsic = route("intrinsic", "intrinsic:callable-operation");
+
+        assert!(accepted_external_contract(&executable, "facade_operation"));
+        assert!(accepted_external_contract(
+            &accepted_intrinsic,
+            "response_format_values"
+        ));
+        assert!(!accepted_external_contract(
+            &unaccepted_intrinsic,
+            "facade_operation"
+        ));
+        assert_eq!(
+            sdk_scope_for(&BTreeSet::new(), &accepted_intrinsic, true),
+            SdkScope::ExternalContract
+        );
     }
 
     #[test]

@@ -87,7 +87,10 @@ impl EvalDrivenImprovement {
             return None;
         }
 
-        let runner = ImprovementLoop::new();
+        let runner = ImprovementLoop {
+            max_iterations: self.max_iterations,
+            ..ImprovementLoop::default()
+        };
         let result = runner
             .run(&self.cases, agent_factory, &self.run_store)
             .await;
@@ -112,5 +115,95 @@ impl EvalDrivenImprovement {
             }
         }
         Some(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::{EvalConstraints, SuccessCriteria};
+    use crate::testing::MockAgent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn failing_case() -> EvalCase {
+        EvalCase {
+            id: "iteration-config".to_string(),
+            name: "Iteration config".to_string(),
+            description: String::new(),
+            domain: None,
+            task: "Return the configured marker".to_string(),
+            project_fixture: None,
+            success_criteria: SuccessCriteria::OutputContains {
+                substring: "expected-marker".to_string(),
+            },
+            constraints: EvalConstraints::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_max_iterations_controls_real_run() -> std::result::Result<(), String> {
+        let engine = EvalDrivenImprovement::new()
+            .with_eval_cases(vec![failing_case()])
+            .max_iterations(2)
+            .enable();
+
+        let result = engine
+            .run(|| Box::new(MockAgent::new("iteration-config").with_response("not-matched")))
+            .await
+            .ok_or_else(|| "enabled improvement run returned no result".to_string())?;
+
+        assert_eq!(result.iterations.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_iterations_does_not_construct_an_agent() -> std::result::Result<(), String> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let engine = EvalDrivenImprovement::new()
+            .with_eval_cases(vec![failing_case()])
+            .max_iterations(0)
+            .enable();
+
+        let result = engine
+            .run(move || {
+                factory_calls.fetch_add(1, Ordering::SeqCst);
+                Box::new(MockAgent::new("zero-iterations"))
+            })
+            .await
+            .ok_or_else(|| "zero-iteration run returned no result".to_string())?;
+
+        assert!(result.iterations.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_or_empty_runs_still_skip_agent_construction() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let disabled_calls = Arc::clone(&calls);
+        let disabled = EvalDrivenImprovement::new()
+            .with_eval_cases(vec![failing_case()])
+            .max_iterations(2);
+        let disabled_result = disabled
+            .run(move || {
+                disabled_calls.fetch_add(1, Ordering::SeqCst);
+                Box::new(MockAgent::new("disabled"))
+            })
+            .await;
+
+        let empty_calls = Arc::clone(&calls);
+        let empty_result = EvalDrivenImprovement::new()
+            .max_iterations(2)
+            .enable()
+            .run(move || {
+                empty_calls.fetch_add(1, Ordering::SeqCst);
+                Box::new(MockAgent::new("empty"))
+            })
+            .await;
+
+        assert!(disabled_result.is_none());
+        assert!(empty_result.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

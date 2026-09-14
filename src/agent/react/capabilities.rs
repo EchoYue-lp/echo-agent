@@ -269,7 +269,7 @@ impl ReactAgent {
     ///
     /// Supports dynamic tool management in the ReAct loop — for example,
     /// switching from search tools to execution tools mid-task.
-    pub fn remove_tool(&mut self, name: &str) -> Option<Box<dyn Tool>> {
+    pub fn remove_tool(&mut self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.tool_manager.unregister(name)
     }
 
@@ -277,7 +277,7 @@ impl ReactAgent {
     ///
     /// If a tool with the same name exists, it is removed and the new tool is registered.
     /// Returns the old tool if it was replaced.
-    pub fn replace_tool(&mut self, tool: Box<dyn Tool>) -> Option<Box<dyn Tool>> {
+    pub fn replace_tool(&mut self, tool: Box<dyn Tool>) -> Option<Arc<dyn Tool>> {
         self.tools.tool_manager.replace(tool)
     }
 

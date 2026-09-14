@@ -108,7 +108,7 @@ manager.start_all(handler).await?;
 ```bash
 cargo run -p echo-agent-learning --example demo01_tools          # Custom tools
 cargo run -p echo-agent-learning --example demo25_macros         # Macro system
-cargo run -p echo-agent-learning --example demo34_workflow_stream # Workflow streaming
+cargo test -p echo-agent-learning --test example_contracts --all-features --locked contract_demo34_workflow_stream # Workflow streaming
 cargo run -p echo-agent-learning --example demo36_multimodal     # Multi-modal messages
 cargo run -p echo-agent-learning --example demo38_im_channels --features channels  # IM channels
 ```
@@ -124,6 +124,8 @@ echo-agent = { version = "0.2", features = ["full"] }
 echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 ```
 
+Task APIs are part of the framework core and do not have a separate feature flag.
+
 | Feature | In `full`? | Description |
 |---------|-----------|-------------|
 | `full` | — | Meta-feature: enables every flag listed below |
@@ -135,7 +137,6 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 | `telemetry` | yes | OpenTelemetry tracing and metrics |
 | `human-loop` | yes | Human-in-the-loop approval (Console/Webhook/WebSocket) |
 | `topology` | yes | Multi-agent topology tracking |
-| `tasks` | yes | DAG task scheduling |
 | `subagent` | yes | Subagent orchestration |
 | `web` | yes | Web search and page fetch |
 | `media` | yes | PDF/Excel/Word/image extraction |
@@ -160,35 +161,20 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 ## Architecture
 
 ```text
-                              ┌─────────────┐
-                              │   Your App   │
-                              └──────┬───────┘
-                                     │
-                    ┌────────────────▼────────────────┐
-                    │          ReactAgent              │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  Context  │  │    Tools      │  │
-                    │  │ Manager   │  │   Manager     │  │
-                    │  │(compress) │  │(retry/limit)  │  │
-                    │  └──────────┘  └──────────────┘  │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  Memory   │  │    Human      │  │
-                    │  │Store+Cp   │  │ Approval      │  │
-                    │  └──────────┘  └──────────────┘  │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  Skills   │  │   Subagent    │  │
-                    │  │ Registry  │  │   Registry    │  │
-                    │  └──────────┘  └──────────────┘  │
-                    └────────────────┬────────────────┘
-                                     │
-              ┌──────────────────────▼──────────────────────┐
-              │              LLM Providers                    │
-              │  OpenAI · Anthropic · DeepSeek · Qwen · Ollama │
-              └─────────────────────────────────────────────┘
+Application / protocol surface
+             |
+             v
+    echo_agent public facade
+             |
+  core contracts + execution + state + orchestration + integrations + tools
+             |
+  SDK protocol / Host and executable learning consumers
 ```
+
+Start with [Framework Architecture](docs/en/architecture.md),
+[Core Concepts](docs/en/concepts.md), and
+[Framework Lifecycles](docs/en/lifecycles.md). Product Workspace, frontend,
+desktop, and device policy stay in the embedding application.
 
 ---
 
@@ -265,6 +251,8 @@ echo-agent/
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
 ├── echo-tools/          Domain tools: chart, data, database, git, media, web, rag
+├── echo-sdk-protocol/   Deterministic facade inventory, contracts, and code generation
+├── echo-sdk-host/       Runtime Host exposing echo_agent through ACP and namespaced operations
 ├── echo-agent-learning/ Non-published lessons, demos, composite examples, and facade contracts
 ├── src/                 Agent engine, re-exports, and facade layer
 └── docs/                Framework consumer documentation (en + zh)
@@ -285,7 +273,7 @@ The framework accepts typed `FrameworkConfig`, `AgentConfig`, `LlmConfig`, `Perm
 - **67 registered tools** — ReAct loop, data analysis, research papers, web, media, RAG, database, and more
 - **Runnable examples and a teaching crate** — framework acceptance and Rust lessons are maintained separately
 - **Comprehensive unit tests** — full coverage across all modules
-- **8 production crates + 1 teaching crate** — production dependencies stay one-way and lessons never enter the runtime
+- **8 framework/runtime packages + 2 SDK packages + 1 learning package** — runtime, SDK, and executable consumer boundaries stay explicit
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
 - **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box
 - **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required

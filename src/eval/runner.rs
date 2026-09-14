@@ -1,19 +1,72 @@
 //! Eval runner — executes eval cases against an agent.
 
-use crate::agent::{Agent, AgentEvent, AgentInvocationContext};
+use crate::agent::{
+    AGENT_CANCELLATION_SETTLE_PERIOD, Agent, AgentInvocationContext, EventEnvelope, EventIdentity,
+};
 use crate::eval::{EvalCase, EvalConstraints, EvalReport, EvalResult, SuccessCriteria};
 use crate::eval::{LlmGrader, TrajectoryReplay};
+use crate::runtime::{AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnOutcome, TurnRequest};
 use crate::trace::Run;
-use futures::StreamExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+struct EvalEventSink;
+
+#[async_trait::async_trait]
+impl EventSink for EvalEventSink {
+    async fn on_event(&self, _envelope: EventEnvelope) -> crate::error::Result<SinkControl> {
+        Ok(SinkControl::Continue)
+    }
+}
+
+struct EvalWorkspaceGeneration {
+    directory: Option<tempfile::TempDir>,
+}
+
+impl EvalWorkspaceGeneration {
+    fn create(parent: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(parent)?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("eval-").disable_cleanup(true);
+        let directory = builder.tempdir_in(parent)?;
+        Ok(Self {
+            directory: Some(directory),
+        })
+    }
+
+    fn path(&self) -> Option<&Path> {
+        self.directory.as_ref().map(tempfile::TempDir::path)
+    }
+
+    fn close(mut self) -> std::io::Result<()> {
+        match self.directory.take() {
+            Some(directory) => directory.close(),
+            None => Ok(()),
+        }
+    }
+
+    fn retain(mut self) -> Option<PathBuf> {
+        self.directory.take().map(tempfile::TempDir::keep)
+    }
+}
+
+impl Drop for EvalWorkspaceGeneration {
+    fn drop(&mut self) {
+        if let Some(directory) = self.directory.as_ref() {
+            tracing::warn!(
+                path = %directory.path().display(),
+                "Retaining unsettled eval workspace generation"
+            );
+        }
+    }
+}
+
 /// Runs eval cases against agents.
 #[derive(Clone)]
 pub struct EvalRunner {
-    /// Root directory for temporary workspaces (fixtures copied here).
+    /// Parent directory for unique per-run workspace generations.
     pub workspace_root: PathBuf,
     /// Maximum time per eval case in seconds.
     pub timeout_secs: u64,
@@ -54,67 +107,138 @@ impl EvalRunner {
     /// Run a single eval case against the given agent.
     pub async fn run(&self, case: &EvalCase, agent: &dyn Agent) -> EvalResult {
         let started = Instant::now();
-        let work_dir = match self.setup_fixture(case).await {
-            Ok(work_dir) => work_dir,
+        let generation = match EvalWorkspaceGeneration::create(&self.workspace_root) {
+            Ok(generation) => generation,
             Err(error) => {
                 let mut result = EvalResult::new(&case.id, false);
                 result
                     .violations
-                    .push(format!("Fixture setup failed: {error}"));
+                    .push(format!("Workspace generation failed: {error}"));
                 return result;
             }
         };
+        let Some(cwd) = generation.path().map(Path::to_path_buf) else {
+            let mut result = EvalResult::new(&case.id, false);
+            result
+                .violations
+                .push("Workspace generation has no active directory".to_string());
+            return result;
+        };
+        if let Err(error) = self.setup_fixture(case, &cwd) {
+            let mut result = EvalResult::new(&case.id, false);
+            result
+                .violations
+                .push(format!("Fixture setup failed: {error}"));
+            Self::record_workspace_cleanup(&mut result, generation.close());
+            result.recompute_score();
+            return result;
+        }
         let mut result = EvalResult::new(&case.id, true);
         let mut final_output = None;
 
-        // Execute the task — pass workspace dir explicitly, never change global cwd
-        let cwd = work_dir
-            .clone()
-            .unwrap_or_else(|| self.workspace_root.clone());
-
         let cancel = CancellationToken::new();
+        let identity_value = format!("eval-{}", uuid::Uuid::new_v4());
+        let identity = match EventIdentity::for_run(identity_value.clone()) {
+            Ok(identity) => identity,
+            Err(error) => {
+                result.success = false;
+                result
+                    .violations
+                    .push(format!("Eval turn identity failed: {error}"));
+                Self::record_workspace_cleanup(&mut result, generation.close());
+                result.recompute_score();
+                return result;
+            }
+        };
         let invocation = AgentInvocationContext {
+            runtime: Some(crate::tools::ExternalRunContext {
+                run_id: Some(identity_value.clone()),
+                turn_id: Some(identity_value.clone()),
+                execution_id: Some(identity_value.clone()),
+                ..crate::tools::ExternalRunContext::default()
+            }),
             working_dir: Some(cwd.clone()),
             cancel: Some(cancel.clone()),
             ..AgentInvocationContext::default()
         };
-        let agent_result = tokio::time::timeout(
+        let request = TurnRequest::new(identity, case.task.clone())
+            .mode(TurnMode::Execute)
+            .cancel(cancel.clone())
+            .invocation(invocation);
+        let mut drive = Box::pin(AgentTurnDriver.drive(agent, request, &EvalEventSink));
+        let deadline_result = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
-            execute_for_final_answer(agent, &case.task, cancel.clone(), invocation),
+            &mut drive,
         )
         .await;
-
-        // Capture run_id from agent for trace linkage (all branches)
-        result.run_id = agent.current_run_id();
-
-        match agent_result {
-            Ok(Ok(output)) => {
-                result.duration_ms =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                final_output = Some(output);
-            }
-            Ok(Err(e)) => {
-                result.duration_ms =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                result.success = false;
-                result.violations.push(format!("Agent error: {e}"));
-            }
+        let (receipt, timed_out) = match deadline_result {
+            Ok(receipt) => (Some(receipt), false),
             Err(_) => {
                 cancel.cancel();
-                result.duration_ms =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                result.success = false;
-                result.violations.push("Timeout".to_string());
+                match tokio::time::timeout(AGENT_CANCELLATION_SETTLE_PERIOD, &mut drive).await {
+                    Ok(receipt) => (Some(receipt), true),
+                    Err(_) => (None, true),
+                }
+            }
+        };
+        drop(drive);
+        let turn_settled = receipt.is_some();
+
+        result.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        if timed_out {
+            result.success = false;
+            result.violations.push("Timeout".to_string());
+            match receipt.as_ref() {
+                Some(receipt) => result
+                    .violations
+                    .push(format!("Turn settled after timeout: {}", receipt.status())),
+                None => result.violations.push(format!(
+                    "Turn did not settle within {} ms cancellation grace",
+                    AGENT_CANCELLATION_SETTLE_PERIOD.as_millis()
+                )),
+            }
+        } else if let Some(receipt) = receipt.as_ref() {
+            match &receipt.outcome {
+                TurnOutcome::Completed => match receipt.final_answer.as_ref() {
+                    Some(output) => final_output = Some(output.clone()),
+                    None => {
+                        result.success = false;
+                        result
+                            .violations
+                            .push("Completed turn did not include a final answer".to_string());
+                    }
+                },
+                TurnOutcome::Cancelled => {
+                    result.success = false;
+                    result.violations.push("Agent cancelled".to_string());
+                }
+                TurnOutcome::Failed(failure) => {
+                    result.success = false;
+                    result.violations.push(format!(
+                        "Agent error ({}): {}",
+                        failure.code, failure.message
+                    ));
+                }
             }
         }
 
-        // Load the trace once. Criteria such as ToolUsed/ToolNotUsed require it,
-        // and observability metrics should come from the same authoritative run.
-        let run = if let Some(ref store) = self.run_store
-            && let Some(ref run_id) = result.run_id
-            && let Ok(Some(run)) = store.load(run_id).await
-        {
-            Some(run)
+        // Resolve the producer-owned trace through this invocation's correlation.
+        // EvalResult and all trace-based scoring then consume the same verified Run.
+        let run = if turn_settled && let Some(ref store) = self.run_store {
+            match Self::load_correlated_trace(store.as_ref(), &identity_value).await {
+                Ok(run) => {
+                    result.run_id = run.as_ref().map(|run| run.run_id.clone());
+                    run
+                }
+                Err(error) => {
+                    result.success = false;
+                    result
+                        .violations
+                        .push(format!("Trace lookup failed: {error}"));
+                    None
+                }
+            }
         } else {
             None
         };
@@ -174,8 +298,57 @@ impl EvalRunner {
             result.file_changes = replay.written_files().len();
         }
 
+        if turn_settled {
+            Self::record_workspace_cleanup(&mut result, generation.close());
+        } else {
+            if let Some(path) = generation.retain() {
+                result.violations.push(format!(
+                    "Workspace retained after timeout: {}",
+                    path.display()
+                ));
+            }
+        }
         result.recompute_score();
         result
+    }
+
+    async fn load_correlated_trace(
+        store: &dyn crate::trace::RunStore,
+        correlation_id: &str,
+    ) -> std::result::Result<Option<Run>, String> {
+        let summaries = store
+            .list_by_parent_run(correlation_id)
+            .await
+            .map_err(|error| format!("could not list correlation {correlation_id}: {error}"))?;
+        let mut exact = summaries.into_iter().filter(|summary| {
+            summary.parent_run_id.as_deref() == Some(correlation_id)
+                && summary.turn_id.as_deref() == Some(correlation_id)
+                && summary.execution_id.as_deref() == Some(correlation_id)
+        });
+        let Some(summary) = exact.next() else {
+            return Ok(None);
+        };
+        if exact.next().is_some() {
+            return Err(format!(
+                "multiple traces matched correlation {correlation_id}"
+            ));
+        }
+        let trace_run_id = summary.run_id;
+        let run = store
+            .load(&trace_run_id)
+            .await
+            .map_err(|error| format!("could not load trace {trace_run_id}: {error}"))?
+            .ok_or_else(|| format!("trace summary {trace_run_id} has no loadable Run"))?;
+        if run.run_id != trace_run_id
+            || run.parent_run_id.as_deref() != Some(correlation_id)
+            || run.turn_id.as_deref() != Some(correlation_id)
+            || run.execution_id.as_deref() != Some(correlation_id)
+        {
+            return Err(format!(
+                "loaded trace {trace_run_id} does not match correlation {correlation_id}"
+            ));
+        }
+        Ok(Some(run))
     }
 
     /// Run all cases against agents created by the factory.
@@ -211,24 +384,30 @@ impl EvalRunner {
 
     // ── Private helpers ────────────────────────────────────────────
 
-    async fn setup_fixture(&self, case: &EvalCase) -> std::result::Result<Option<PathBuf>, String> {
+    fn setup_fixture(
+        &self,
+        case: &EvalCase,
+        destination: &Path,
+    ) -> std::result::Result<(), String> {
         let Some(fixture) = case.project_fixture.as_ref() else {
-            return Ok(None);
+            return Ok(());
         };
         if !fixture.exists() {
             return Err(format!("fixture does not exist: {}", fixture.display()));
         }
-        let dest = echo_core::utils::fs::join_path_segment(&self.workspace_root, &case.id)
-            .map_err(|error| format!("unsafe eval case id {:?}: {error}", case.id))?;
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest)
-                .map_err(|error| format!("failed to reset {}: {error}", dest.display()))?;
-        }
-        // Simple recursive copy
-        if let Err(e) = copy_dir(fixture, &dest) {
+        if let Err(e) = copy_dir(fixture, destination) {
             return Err(format!("failed to copy fixture {}: {e}", fixture.display()));
         }
-        Ok(Some(dest))
+        Ok(())
+    }
+
+    fn record_workspace_cleanup(result: &mut EvalResult, cleanup: std::io::Result<()>) {
+        if let Err(error) = cleanup {
+            result.success = false;
+            result
+                .violations
+                .push(format!("Workspace cleanup failed: {error}"));
+        }
     }
 
     async fn check_criteria(
@@ -780,38 +959,6 @@ fn extract_number_near_key(text: &str, key: &str) -> Option<f64> {
     None
 }
 
-async fn execute_for_final_answer(
-    agent: &dyn Agent,
-    task: &str,
-    cancel: CancellationToken,
-    invocation: AgentInvocationContext,
-) -> crate::error::Result<String> {
-    let mut stream = agent
-        .execute_stream_with_invocation_context(task, cancel, invocation)
-        .await?;
-    while let Some(event) = stream.next().await {
-        match event? {
-            AgentEvent::FinalAnswer(answer) => return Ok(answer),
-            AgentEvent::Cancelled => {
-                return Err(crate::error::ReactError::Agent(Box::new(
-                    crate::error::AgentError::Cancelled("eval invocation".to_string()),
-                )));
-            }
-            AgentEvent::Error {
-                source, message, ..
-            } => {
-                return Err(crate::error::ReactError::Other(format!(
-                    "{source}: {message}"
-                )));
-            }
-            _ => {}
-        }
-    }
-    Err(crate::error::ReactError::Other(
-        "agent event stream closed without a terminal event".to_string(),
-    ))
-}
-
 /// Simple recursive directory copy.
 fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
@@ -831,9 +978,906 @@ fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentEvent;
     use crate::eval::EvalCase;
-    use crate::trace::{RunEvent, RunStatus, RunTimings, TokenUsage};
+    use crate::trace::{RunEvent, RunStatus, RunSummary, RunTimings, TokenUsage};
     use chrono::Utc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct WorkspaceRecordingAgent {
+        cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
+        release: Option<Arc<tokio::sync::Notify>>,
+        fail_after_recording: bool,
+        run_id: Option<String>,
+    }
+
+    struct CancellationSettlingAgent {
+        cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
+        settled_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        terminal_answer: Option<String>,
+        stream_invocations: Arc<AtomicUsize>,
+    }
+
+    struct CountingRunStore {
+        lists: AtomicUsize,
+        loads: AtomicUsize,
+    }
+
+    #[derive(Clone, Copy)]
+    enum TraceLookupFailure {
+        List,
+        Load,
+        Dangling,
+        MismatchedRun,
+    }
+
+    struct FaultingTraceRunStore {
+        summary: RunSummary,
+        mode: TraceLookupFailure,
+    }
+
+    impl WorkspaceRecordingAgent {
+        fn new(
+            cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
+            release: Option<Arc<tokio::sync::Notify>>,
+        ) -> Self {
+            Self {
+                cwd_tx,
+                release,
+                fail_after_recording: false,
+                run_id: None,
+            }
+        }
+
+        fn failing(cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>) -> Self {
+            Self {
+                cwd_tx,
+                release: None,
+                fail_after_recording: true,
+                run_id: None,
+            }
+        }
+
+        fn with_run_id(mut self, run_id: &str) -> Self {
+            self.run_id = Some(run_id.to_string());
+            self
+        }
+
+        fn final_stream<'a>() -> futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>> {
+            Box::pin(futures::stream::once(async {
+                Ok(AgentEvent::FinalAnswer("done".to_string()))
+            }))
+        }
+    }
+
+    impl Agent for WorkspaceRecordingAgent {
+        fn name(&self) -> &str {
+            "workspace-recorder"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "record workspace"
+        }
+
+        fn current_run_id(&self) -> Option<String> {
+            self.run_id.clone()
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async { Ok(Self::final_stream()) })
+        }
+
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                let cwd = invocation.working_dir.ok_or_else(|| {
+                    crate::error::ReactError::Other(
+                        "eval invocation did not contain a working directory".to_string(),
+                    )
+                })?;
+                self.cwd_tx.send(cwd).map_err(|_| {
+                    crate::error::ReactError::Other(
+                        "workspace observation receiver closed".to_string(),
+                    )
+                })?;
+                if let Some(release) = self.release.as_ref() {
+                    release.notified().await;
+                }
+                if self.fail_after_recording {
+                    return Err(crate::error::ReactError::Other(
+                        "forced typed Agent error".to_string(),
+                    ));
+                }
+                Ok(Self::final_stream())
+            })
+        }
+    }
+
+    impl Agent for CancellationSettlingAgent {
+        fn name(&self) -> &str {
+            "cancellation-settler"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "settle after cancellation"
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async { Ok(WorkspaceRecordingAgent::final_stream()) })
+        }
+
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                self.stream_invocations.fetch_add(1, Ordering::AcqRel);
+                let cwd = invocation.working_dir.ok_or_else(|| {
+                    crate::error::ReactError::Other(
+                        "eval invocation did not contain a working directory".to_string(),
+                    )
+                })?;
+                self.cwd_tx.send(cwd.clone()).map_err(|_| {
+                    crate::error::ReactError::Other(
+                        "workspace observation receiver closed".to_string(),
+                    )
+                })?;
+                let stream = async_stream::try_stream! {
+                    cancel.cancelled().await;
+                    std::fs::write(cwd.join("cancel-settled.marker"), "settled")
+                        .map_err(crate::error::ReactError::from)?;
+                    if let Some(settled) = self.settled_tx.lock().await.take() {
+                        let _ = settled.send(());
+                    }
+                    match self.terminal_answer.as_ref() {
+                        Some(answer) => yield AgentEvent::FinalAnswer(answer.clone()),
+                        None => yield AgentEvent::Cancelled,
+                    }
+                };
+                let stream: futures::stream::BoxStream<'a, crate::error::Result<AgentEvent>> =
+                    Box::pin(stream);
+                Ok(stream)
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::trace::RunStore for CountingRunStore {
+        async fn save(&self, _run: Run) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, _run_id: &str) -> crate::error::Result<Option<Run>> {
+            self.loads.fetch_add(1, Ordering::AcqRel);
+            Ok(None)
+        }
+
+        async fn list_by_session(
+            &self,
+            _session_id: &str,
+        ) -> crate::error::Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self, _limit: usize) -> crate::error::Result<Vec<RunSummary>> {
+            self.lists.fetch_add(1, Ordering::AcqRel);
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::trace::RunStore for FaultingTraceRunStore {
+        async fn save(&self, _run: Run) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, _run_id: &str) -> crate::error::Result<Option<Run>> {
+            match self.mode {
+                TraceLookupFailure::Load => Err(crate::error::ReactError::Other(
+                    "forced trace load failure".to_string(),
+                )),
+                TraceLookupFailure::Dangling => Ok(None),
+                TraceLookupFailure::MismatchedRun => {
+                    Ok(Some(correlated_run("trace-mismatch", "other-correlation")))
+                }
+                TraceLookupFailure::List => Ok(None),
+            }
+        }
+
+        async fn list_by_session(
+            &self,
+            _session_id: &str,
+        ) -> crate::error::Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self, _limit: usize) -> crate::error::Result<Vec<RunSummary>> {
+            if matches!(self.mode, TraceLookupFailure::List) {
+                return Err(crate::error::ReactError::Other(
+                    "forced trace list failure".to_string(),
+                ));
+            }
+            Ok(vec![self.summary.clone()])
+        }
+    }
+
+    fn correlated_run(run_id: &str, correlation_id: &str) -> Run {
+        Run {
+            run_id: run_id.to_string(),
+            parent_run_id: Some(correlation_id.to_string()),
+            agent_name: "trace-agent".to_string(),
+            model: "test".to_string(),
+            provider: None,
+            turn_id: Some(correlation_id.to_string()),
+            execution_id: Some(correlation_id.to_string()),
+            session_id: String::new(),
+            status: RunStatus::Completed,
+            input: "trace lookup".to_string(),
+            events: Vec::new(),
+            final_output: Some("done".to_string()),
+            error: None,
+            token_usage: TokenUsage::default(),
+            timings: RunTimings::default(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+        }
+    }
+
+    fn correlated_summary(run_id: &str, correlation_id: &str) -> RunSummary {
+        RunSummary {
+            run_id: run_id.to_string(),
+            parent_run_id: Some(correlation_id.to_string()),
+            session_id: String::new(),
+            agent_name: "trace-agent".to_string(),
+            model: "test".to_string(),
+            provider: None,
+            turn_id: Some(correlation_id.to_string()),
+            execution_id: Some(correlation_id.to_string()),
+            status: RunStatus::Completed,
+            input_preview: "trace lookup".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            token_usage: TokenUsage::default(),
+            total_duration_ms: 0,
+        }
+    }
+
+    fn workspace_case(id: &str, fixture: Option<PathBuf>) -> EvalCase {
+        EvalCase {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            domain: None,
+            task: "record the workspace".to_string(),
+            project_fixture: fixture,
+            success_criteria: SuccessCriteria::OutputContains {
+                substring: "done".to_string(),
+            },
+            constraints: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn eval_result_uses_the_real_trace_id_not_the_legacy_product_run() -> Result<(), String> {
+        use crate::agent::ReactAgentBuilder;
+        use crate::testing::MockLlmClient;
+        use crate::trace::{InMemoryRunStore, RunStore};
+
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let store = Arc::new(InMemoryRunStore::new());
+        let usage = crate::llm::types::Usage {
+            prompt_tokens: Some(37),
+            completion_tokens: Some(5),
+            total_tokens: Some(42),
+            ..Default::default()
+        };
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new().with_response_usage("done", usage),
+            ))
+            .system_prompt("Return the answer.")
+            .build()
+            .map_err(|error| error.to_string())?;
+        agent.set_run_store(store.clone());
+        agent.set_external_context(&crate::tools::ExternalRunContext {
+            run_id: Some("product-run".to_string()),
+            ..crate::tools::ExternalRunContext::default()
+        });
+        let runner = EvalRunner::new(parent.path().join("runs")).with_run_store(store.clone());
+        let case = workspace_case("trace-correlation", None);
+
+        let result = runner.run(&case, &agent).await;
+        let trace_run_id = result
+            .run_id
+            .as_deref()
+            .ok_or_else(|| "EvalResult did not return a trace run ID".to_string())?;
+        if trace_run_id == "product-run" {
+            return Err("EvalResult exposed the product run as a trace run".to_string());
+        }
+        let trace = store
+            .load(trace_run_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "EvalResult trace run ID was not loadable".to_string())?;
+        let correlation_id = trace
+            .parent_run_id
+            .as_deref()
+            .ok_or_else(|| "real trace did not retain the Eval correlation".to_string())?;
+        if trace.run_id != trace_run_id
+            || correlation_id == "product-run"
+            || !correlation_id.starts_with("eval-")
+            || trace.turn_id.as_deref() != Some(correlation_id)
+            || trace.execution_id.as_deref() != Some(correlation_id)
+            || result.tokens_in != 37
+            || result.tokens_out != 5
+        {
+            return Err(
+                "EvalResult and trace metrics did not use the real invocation trace".into(),
+            );
+        }
+        if agent.current_run_id().as_deref() != Some("product-run") {
+            return Err("Eval mutated the Agent product run identity".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn trace_lookup_requires_one_exact_loadable_correlation() -> Result<(), String> {
+        use crate::trace::{InMemoryRunStore, RunStore};
+
+        let correlation_id = "eval-correlation";
+        let store = InMemoryRunStore::new();
+        store
+            .save(correlated_run("trace-exact", correlation_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut other_child = correlated_run("trace-other-child", correlation_id);
+        other_child.execution_id = Some("different-execution".to_string());
+        store
+            .save(other_child)
+            .await
+            .map_err(|error| error.to_string())?;
+        let exact = EvalRunner::load_correlated_trace(&store, correlation_id)
+            .await?
+            .ok_or_else(|| "exact trace correlation was not found".to_string())?;
+        if exact.run_id != "trace-exact" {
+            return Err("trace lookup selected another child execution".to_string());
+        }
+
+        let empty = InMemoryRunStore::new();
+        if EvalRunner::load_correlated_trace(&empty, correlation_id)
+            .await?
+            .is_some()
+        {
+            return Err("empty trace store produced a correlation".to_string());
+        }
+
+        let ambiguous = InMemoryRunStore::new();
+        ambiguous
+            .save(correlated_run("trace-first", correlation_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        ambiguous
+            .save(correlated_run("trace-second", correlation_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        let ambiguity = EvalRunner::load_correlated_trace(&ambiguous, correlation_id)
+            .await
+            .err()
+            .ok_or_else(|| "duplicate exact traces were accepted".to_string())?;
+        if !ambiguity.contains("multiple traces matched") {
+            return Err(format!("unexpected ambiguity result: {ambiguity}"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn trace_lookup_reports_store_and_loaded_identity_failures() -> Result<(), String> {
+        let correlation_id = "eval-failure-correlation";
+        let summary = correlated_summary("trace-summary", correlation_id);
+        for (mode, expected) in [
+            (TraceLookupFailure::List, "could not list correlation"),
+            (TraceLookupFailure::Load, "could not load trace"),
+            (TraceLookupFailure::Dangling, "has no loadable Run"),
+            (
+                TraceLookupFailure::MismatchedRun,
+                "does not match correlation",
+            ),
+        ] {
+            let store = FaultingTraceRunStore {
+                summary: summary.clone(),
+                mode,
+            };
+            let failure = EvalRunner::load_correlated_trace(&store, correlation_id)
+                .await
+                .err()
+                .ok_or_else(|| format!("trace lookup mode did not fail: {expected}"))?;
+            if !failure.contains(expected) {
+                return Err(format!(
+                    "trace lookup failure '{failure}' did not contain '{expected}'"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_trace_is_optional_but_store_failure_is_not() -> Result<(), String> {
+        use crate::trace::InMemoryRunStore;
+
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let case = workspace_case("trace-lookup-projection", None);
+        let empty_store = Arc::new(InMemoryRunStore::new());
+        let empty_runner = EvalRunner::new(parent.path().join("empty")).with_run_store(empty_store);
+        let (empty_tx, _empty_rx) = tokio::sync::mpsc::unbounded_channel();
+        let empty_result = empty_runner
+            .run(&case, &WorkspaceRecordingAgent::new(empty_tx, None))
+            .await;
+        if !empty_result.success || empty_result.run_id.is_some() {
+            return Err(
+                "Agent without trace did not preserve optional trace semantics".to_string(),
+            );
+        }
+
+        let failing_store = Arc::new(FaultingTraceRunStore {
+            summary: correlated_summary("unused", "unused"),
+            mode: TraceLookupFailure::List,
+        });
+        let failing_runner =
+            EvalRunner::new(parent.path().join("failing")).with_run_store(failing_store);
+        let (failing_tx, _failing_rx) = tokio::sync::mpsc::unbounded_channel();
+        let failed_result = failing_runner
+            .run(&case, &WorkspaceRecordingAgent::new(failing_tx, None))
+            .await;
+        if failed_result.success
+            || !failed_result
+                .violations
+                .iter()
+                .any(|violation| violation.contains("Trace lookup failed: could not list"))
+        {
+            return Err("RunStore correlation failure was not projected".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settled_agent_failure_retains_its_correlated_diagnostic_trace() -> Result<(), String> {
+        use crate::agent::ReactAgentBuilder;
+        use crate::testing::MockLlmClient;
+        use crate::trace::{InMemoryRunStore, RunStore};
+
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let store = Arc::new(InMemoryRunStore::new());
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(MockLlmClient::new().with_error(
+                crate::error::ReactError::Other("forced provider failure".to_string()),
+            )))
+            .system_prompt("Return the answer.")
+            .build()
+            .map_err(|error| error.to_string())?;
+        agent.set_run_store(store.clone());
+        let runner = EvalRunner::new(parent.path().join("runs")).with_run_store(store.clone());
+        let result = runner
+            .run(&workspace_case("failed-trace-correlation", None), &agent)
+            .await;
+        let trace_run_id = result
+            .run_id
+            .as_deref()
+            .ok_or_else(|| "failed turn did not return its diagnostic trace ID".to_string())?;
+        let trace = store
+            .load(trace_run_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "failed turn diagnostic trace was not loadable".to_string())?;
+        if result.success
+            || trace.status != RunStatus::Failed
+            || !result
+                .violations
+                .iter()
+                .any(|violation| violation.contains("forced provider failure"))
+        {
+            return Err("failed turn trace changed or hid the Agent outcome".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_case_runs_use_distinct_workspace_generations() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let fixture = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(fixture.path().join("marker.txt"), "fixture")
+            .map_err(|error| error.to_string())?;
+        let runner = EvalRunner::new(parent.path().join("runs"));
+        let case = workspace_case("same-case", Some(fixture.path().to_path_buf()));
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agent = Arc::new(WorkspaceRecordingAgent::new(
+            cwd_tx,
+            Some(Arc::clone(&release)),
+        ));
+
+        let first_runner = runner.clone();
+        let first_case = case.clone();
+        let first_agent = Arc::clone(&agent);
+        let first =
+            tokio::spawn(async move { first_runner.run(&first_case, first_agent.as_ref()).await });
+        let first_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "first eval did not report its workspace".to_string())?;
+
+        let second_runner = runner.clone();
+        let second_case = case.clone();
+        let second_agent = Arc::clone(&agent);
+        let second =
+            tokio::spawn(
+                async move { second_runner.run(&second_case, second_agent.as_ref()).await },
+            );
+        let second_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "second eval did not report its workspace".to_string())?;
+
+        if first_cwd == second_cwd {
+            return Err(format!(
+                "concurrent same-ID evals shared workspace {}",
+                first_cwd.display()
+            ));
+        }
+        if !first_cwd.join("marker.txt").is_file() || !second_cwd.join("marker.txt").is_file() {
+            return Err("fixture was not independently copied into both generations".to_string());
+        }
+        release.notify_waiters();
+        let first_result = first.await.map_err(|error| error.to_string())?;
+        let second_result = second.await.map_err(|error| error.to_string())?;
+
+        if !first_result.success || !second_result.success {
+            return Err("concurrent eval generation unexpectedly failed".to_string());
+        }
+        if first_cwd.exists() || second_cwd.exists() {
+            return Err("settled eval generation was not removed".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixture_free_runs_do_not_use_the_shared_workspace_parent() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_root = parent.path().join("runs");
+        let runner = EvalRunner::new(workspace_root.clone());
+        let case = workspace_case("fixture-free", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = WorkspaceRecordingAgent::new(cwd_tx, None);
+
+        let (first_result, second_result) =
+            tokio::join!(runner.run(&case, &agent), runner.run(&case, &agent));
+        let first_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "first fixture-free eval did not report cwd".to_string())?;
+        let second_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "second fixture-free eval did not report cwd".to_string())?;
+
+        if first_cwd == workspace_root || second_cwd == workspace_root || first_cwd == second_cwd {
+            return Err("fixture-free evals did not receive unique child generations".to_string());
+        }
+        if !first_result.success || !second_result.success {
+            return Err("fixture-free eval generation unexpectedly failed".to_string());
+        }
+        if first_cwd.exists() || second_cwd.exists() {
+            return Err("settled fixture-free generation was not removed".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timeout_retains_the_unsettled_workspace_generation() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let run_store = Arc::new(CountingRunStore {
+            lists: AtomicUsize::new(0),
+            loads: AtomicUsize::new(0),
+        });
+        let mut runner =
+            EvalRunner::new(parent.path().join("runs")).with_run_store(run_store.clone());
+        runner.timeout_secs = 1;
+        let case = workspace_case("timeout", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agent =
+            WorkspaceRecordingAgent::new(cwd_tx, Some(release)).with_run_id("unsettled-run");
+
+        let result = runner.run(&case, &agent).await;
+        let observed_cwd = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "timed out eval did not report its workspace".to_string())?;
+        let retained = result
+            .violations
+            .iter()
+            .find_map(|violation| {
+                violation
+                    .strip_prefix("Workspace retained after timeout: ")
+                    .map(PathBuf::from)
+            })
+            .ok_or_else(|| "timeout result did not report a retained workspace".to_string())?;
+
+        if result.success
+            || !result.violations.iter().any(|value| value == "Timeout")
+            || !result
+                .violations
+                .iter()
+                .any(|value| value.contains("Turn did not settle within"))
+        {
+            return Err("timed out eval did not retain its failure outcome".to_string());
+        }
+        if result.duration_ms
+            < u64::try_from(AGENT_CANCELLATION_SETTLE_PERIOD.as_millis()).unwrap_or(u64::MAX)
+        {
+            return Err("unsettled Eval returned before the cancellation grace".to_string());
+        }
+        if retained != observed_cwd || !retained.is_dir() {
+            return Err("reported timeout generation was not retained".to_string());
+        }
+        if run_store.lists.load(Ordering::Acquire) != 0
+            || run_store.loads.load(Ordering::Acquire) != 0
+        {
+            return Err("unsettled timeout read non-terminal trace state".to_string());
+        }
+        std::fs::remove_dir_all(&retained).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timeout_waits_for_a_cancellation_responsive_turn_to_settle() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut runner = EvalRunner::new(parent.path().join("runs"));
+        runner.timeout_secs = 1;
+        let case = workspace_case("responsive-timeout", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        let stream_invocations = Arc::new(AtomicUsize::new(0));
+        let agent = CancellationSettlingAgent {
+            cwd_tx,
+            settled_tx: tokio::sync::Mutex::new(Some(settled_tx)),
+            terminal_answer: None,
+            stream_invocations: Arc::clone(&stream_invocations),
+        };
+
+        let result = runner.run(&case, &agent).await;
+        let workspace = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "responsive timeout did not report its workspace".to_string())?;
+        tokio::time::timeout(std::time::Duration::from_millis(200), settled_rx)
+            .await
+            .map_err(|_| "Eval returned before cancellation settlement".to_string())?
+            .map_err(|_| "cancellation settlement sender closed".to_string())?;
+
+        if result.success
+            || !result.violations.iter().any(|value| value == "Timeout")
+            || !result
+                .violations
+                .iter()
+                .any(|value| value == "Turn settled after timeout: cancelled")
+        {
+            return Err("responsive timeout did not preserve the deadline failure".to_string());
+        }
+        if workspace.exists() {
+            return Err("settled timeout workspace was not removed".to_string());
+        }
+        if stream_invocations.load(Ordering::Acquire) != 1 {
+            return Err("responsive timeout restarted its Agent stream".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn late_completed_turn_remains_timeout_without_running_criteria() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut runner = EvalRunner::new(parent.path().join("runs"));
+        runner.timeout_secs = 1;
+        let case = workspace_case("late-completed-timeout", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        let stream_invocations = Arc::new(AtomicUsize::new(0));
+        let agent = CancellationSettlingAgent {
+            cwd_tx,
+            settled_tx: tokio::sync::Mutex::new(Some(settled_tx)),
+            terminal_answer: Some("done".to_string()),
+            stream_invocations: Arc::clone(&stream_invocations),
+        };
+
+        let result = runner.run(&case, &agent).await;
+        let workspace = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "late completed timeout did not report its workspace".to_string())?;
+        settled_rx
+            .await
+            .map_err(|_| "late completed settlement sender closed".to_string())?;
+        if result.success
+            || result.score != 0.0
+            || !result.metrics.is_empty()
+            || !result.violations.iter().any(|value| value == "Timeout")
+            || !result
+                .violations
+                .iter()
+                .any(|value| value == "Turn settled after timeout: completed")
+        {
+            return Err(
+                "late Completed turn changed the timeout result or ran criteria".to_string(),
+            );
+        }
+        if stream_invocations.load(Ordering::Acquire) != 1 {
+            return Err("late completed timeout restarted its Agent stream".to_string());
+        }
+        if workspace.exists() {
+            return Err("late completed timeout workspace was not removed".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_an_active_run_future_retains_its_real_workspace() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let runner = EvalRunner::new(parent.path().join("runs"));
+        let case = workspace_case("caller-drop", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agent = Arc::new(WorkspaceRecordingAgent::new(cwd_tx, Some(release)));
+        let run_agent = Arc::clone(&agent);
+        let run = tokio::spawn(async move { runner.run(&case, run_agent.as_ref()).await });
+        let path = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "active eval did not report its workspace".to_string())?;
+
+        run.abort();
+        let join_error = run
+            .await
+            .err()
+            .ok_or_else(|| "aborted eval run unexpectedly completed".to_string())?;
+        if !join_error.is_cancelled() {
+            return Err(format!(
+                "aborted eval returned unexpected error: {join_error}"
+            ));
+        }
+        if !path.is_dir() {
+            return Err("active run workspace was deleted on caller drop".to_string());
+        }
+        std::fs::remove_dir_all(path).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn typed_agent_error_closes_the_settled_generation() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let runner = EvalRunner::new(parent.path().join("runs"));
+        let case = workspace_case("agent-error", None);
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = WorkspaceRecordingAgent::failing(cwd_tx);
+
+        let result = runner.run(&case, &agent).await;
+        let path = cwd_rx
+            .recv()
+            .await
+            .ok_or_else(|| "failed eval did not report its workspace".to_string())?;
+
+        if result.success
+            || !result
+                .violations
+                .iter()
+                .any(|value| value.contains("forced typed Agent error"))
+        {
+            return Err("typed Agent error was not projected into EvalResult".to_string());
+        }
+        if path.exists() {
+            return Err("typed Agent error did not close its settled generation".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_failure_is_visible_in_the_eval_result() -> Result<(), String> {
+        let mut result = EvalResult::new("cleanup", true).with_metric("quality", 0.75, "graded");
+
+        EvalRunner::record_workspace_cleanup(
+            &mut result,
+            Err(std::io::Error::other("forced cleanup failure")),
+        );
+        result.recompute_score();
+
+        if result.success
+            || result.score != 0.75
+            || !result
+                .violations
+                .iter()
+                .any(|value| value.contains("forced cleanup failure"))
+        {
+            return Err("cleanup failure was not projected into EvalResult".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixture_setup_failure_closes_its_generation() -> Result<(), String> {
+        let parent = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_root = parent.path().join("runs");
+        let runner = EvalRunner::new(workspace_root.clone());
+        let case = workspace_case(
+            "missing-fixture",
+            Some(parent.path().join("does-not-exist")),
+        );
+        let (cwd_tx, mut cwd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = WorkspaceRecordingAgent::new(cwd_tx, None);
+
+        let result = runner.run(&case, &agent).await;
+
+        if result.success
+            || !result
+                .violations
+                .iter()
+                .any(|value| value.contains("Fixture setup failed"))
+        {
+            return Err("fixture setup failure was not reported".to_string());
+        }
+        if cwd_rx.try_recv().is_ok() {
+            return Err("Agent started after fixture setup failed".to_string());
+        }
+        let mut entries = std::fs::read_dir(workspace_root).map_err(|error| error.to_string())?;
+        if entries.next().is_some() {
+            return Err("failed fixture generation was not cleaned up".to_string());
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_runner_output_contains() {

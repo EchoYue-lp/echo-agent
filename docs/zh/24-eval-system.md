@@ -91,6 +91,7 @@ EvalConstraints {
 use echo_agent::eval::EvalRunner;
 use std::path::PathBuf;
 
+// 该路径只是父目录；每次运行都会获得唯一子工作区。
 let runner = EvalRunner::new(PathBuf::from("/tmp/eval_workspace"))
     .with_run_store(run_store)        // 用于 trace 关联
     .with_grader(grader, grading_agent); // 用于 LlmGraded 标准
@@ -105,10 +106,27 @@ println!("通过: {}/{}", report.passed, report.total);
 ```
 
 运行器自动完成：
-- 运行前将 `project_fixture` 复制到临时工作区
+- 每次运行创建唯一 workspace generation，无 fixture 的用例也不例外
+- 将 `project_fixture` 复制进当前 generation，不复用或删除 case ID 路径
 - 通过 `run_id` 将结果关联到执行轨迹
 - 从轨迹填充指标（工具调用、token 数、文件变更）
 - 根据轨迹评估约束
+- 显式删除已结算 generation，并把 cleanup 失败写入 `EvalResult`
+
+`workspace_root`不会直接成为 Agent 工作目录，只是随机`eval-` generation
+的父目录。Eval以framework `AgentTurnDriver`作为唯一终态权威：case deadline到达
+后请求取消，再对同一个drive future等待共享的6秒settlement grace。取得receipt时结果
+仍是Timeout，但可以读取终态trace并清理workspace；grace再次超时则跳过非终态trace
+评分，保留generation并把路径加入`violations`。ReactAgent managed stream只在其自有
+producer task结算后释放terminal；其它Agent实现也必须遵守terminal是stream最后一项的
+合同。调用方取消同样保留目录并记录warning。
+
+每次Eval invocation还会在value-scoped runtime context中携带唯一run/turn/execution
+correlation。trace producer继续拥有真实trace ID，并把该correlation记录为parent、turn和
+execution metadata。Turn结算后，Eval通过配置的RunStore解析唯一精确匹配的Run；
+`EvalResult.run_id`只保存可load的真实trace ID，绝不保存Eval correlation或Agent的
+product/business run ID。没有匹配trace时保持可选；多个精确候选或RunStore不一致会使
+Eval失败，不按列表顺序猜测。
 
 ---
 
@@ -299,6 +317,7 @@ async fn main() -> Result<()> {
     ];
 
     // 2. 创建运行器
+    // /tmp/eval 是隔离的 per-run generation 父目录。
     let runner = EvalRunner::new(PathBuf::from("/tmp/eval"));
 
     // 3. 使用工厂运行
@@ -328,6 +347,8 @@ async fn main() -> Result<()> {
 │  │ EvalCase  │  │ Fixture  │  │ SuccessCriteria  │   │
 │  │  (任务)   │  │  (复制)  │  │  (评判)          │   │
 │  └──────────┘  └──────────┘  └──────────────────┘   │
+│                     │                                 │
+│  workspace_root ──▶ 唯一 eval-* generation（cwd）    │
 │                                                      │
 │  ┌──────────────────────────────────────────────┐    │
 │  │              Agent.execute(task)               │    │
@@ -390,5 +411,8 @@ echo_agent = { version = "0.2", features = ["eval"] }
 Agent builder 不提供自动 eval recorder。生产 Agent 由 `ReactAgentBuilder` 构造，再显式
 传给 `EvalRunner::run`，或向 `run_all` 提供创建全新 Agent 的 factory。这样 eval 执行保持
 显式，不会让生产 turn 静默获得第二套生命周期或持久化 owner。
+
+`ImprovementLoop`与`AbComparator`复用同一per-run generation权威，不创建固定
+iteration目录，也不独立删除Eval workspace。
 
 另见：[25 - 自进化系统](./25-self-improvement.md) 了解评估如何驱动改进循环。

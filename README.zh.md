@@ -105,7 +105,7 @@ manager.start_all(handler).await?;
 ```bash
 cargo run -p echo-agent-learning --example demo01_tools          # 自定义工具
 cargo run -p echo-agent-learning --example demo25_macros         # 宏系统
-cargo run -p echo-agent-learning --example demo34_workflow_stream # 工作流流式
+cargo test -p echo-agent-learning --test example_contracts --all-features --locked contract_demo34_workflow_stream # 工作流流式
 cargo run -p echo-agent-learning --example demo36_multimodal     # 多模态消息
 cargo run -p echo-agent-learning --example demo38_im_channels --features channels  # IM 通道
 ```
@@ -114,36 +114,20 @@ cargo run -p echo-agent-learning --example demo38_im_channels --features channel
 
 ## 架构
 
+```text
+Application / protocol surface
+             |
+             v
+    echo_agent public facade
+             |
+  core contracts + execution + state + orchestration + integrations + tools
+             |
+  SDK protocol / Host and executable learning consumers
 ```
-                              ┌─────────────┐
-                              │   你的应用    │
-                              └──────┬───────┘
-                                     │
-                    ┌────────────────▼────────────────┐
-                    │          ReactAgent              │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  上下文    │  │    工具       │  │
-                    │  │  管理器    │  │   管理器      │  │
-                    │  │(压缩)     │  │(重试/限流)    │  │
-                    │  └──────────┘  └──────────────┘  │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  记忆     │  │   人工        │  │
-                    │  │Store+Cp  │  │   审批        │  │
-                    │  └──────────┘  └──────────────┘  │
-                    │                                  │
-                    │  ┌──────────┐  ┌──────────────┐  │
-                    │  │  技能     │  │   子代理      │  │
-                    │  │  注册表   │  │   注册表      │  │
-                    │  └──────────┘  └──────────────┘  │
-                    └────────────────┬────────────────┘
-                                     │
-              ┌──────────────────────▼──────────────────────┐
-              │              LLM 提供方                       │
-              │  OpenAI · Anthropic · DeepSeek · Qwen · Ollama │
-              └─────────────────────────────────────────────┘
-```
+
+建议从 [Framework 架构](docs/zh/architecture.md)、[核心概念](docs/zh/concepts.md)和
+[Framework 生命周期](docs/zh/lifecycles.md)开始。Product Workspace、前端、桌面端和 device policy
+仍属于 embedding application。
 
 ---
 
@@ -217,6 +201,8 @@ echo-agent = { version = "0.2.0", features = ["full"] }
 echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "web"] }
 ```
 
+任务 API 属于框架核心，没有需要单独启用的 feature。
+
 | Feature | 启用 | 关键依赖 |
 |---------|------|---------|
 | `full` | 启用下列全部 feature | — |
@@ -228,7 +214,6 @@ echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "
 | `telemetry` | OpenTelemetry 追踪与指标 | `opentelemetry` |
 | `human-loop` | 人工审批 | `tokio-tungstenite` |
 | `topology` | Agent 拓扑 | — |
-| `tasks` | DAG 任务管理 | — |
 | `subagent` | Subagent 编排 | — |
 | `web` | Web 搜索 + 获取工具 | `scraper`, `html2text` |
 | `media` | PDF、Excel、Word、图片工具 | `lopdf`, `calamine`, `docx-rs` |
@@ -261,6 +246,8 @@ echo-agent/
 ├── echo-orchestration/  工作流、人工审批和 DAG 任务
 ├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
 ├── echo-tools/          领域工具：chart、data、database、git、media、web、rag
+├── echo-sdk-protocol/   确定性 facade inventory、契约与代码生成
+├── echo-sdk-host/       通过 ACP 和命名空间操作暴露 echo_agent 的运行时 Host
 ├── echo-agent-learning/ 不发布的学习课程、Demo、综合示例和 facade 合同
 ├── src/                 Agent 引擎、重导出和门面层
 └── docs/                框架消费者文档（en + zh）
@@ -281,7 +268,7 @@ echo-agent/
 - **67 个注册工具** — ReAct 循环、数据分析、论文检索、Web、媒体、RAG、数据库等
 - **可运行示例与教学 crate** — 框架验收示例和 Rust 基础课程分别维护
 - **全模块单元测试** — 覆盖核心路径的测试
-- **8 个生产 crate + 1 个教学 crate** — 生产依赖保持单向，教学代码不进入框架运行时
+- **8 个框架/运行时 package + 2 个 SDK package + 1 个学习 package** — 运行时、SDK 与可执行消费者边界保持明确
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
 - **IM 集成** — QQ Bot（WebSocket）& 飞书（Webhook）开箱即用
 - **声明式工作流** — 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码

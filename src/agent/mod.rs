@@ -43,6 +43,9 @@ pub use echo_core::agent::{
     envelope_event_stream_after, validate_envelope_trajectory, validate_event_trajectory,
 };
 
+pub(crate) const AGENT_CANCELLATION_SETTLE_PERIOD: std::time::Duration =
+    std::time::Duration::from_secs(6);
+
 // ── Core sub-modules ───────────────────────────────────────────────────────
 
 pub mod admission;

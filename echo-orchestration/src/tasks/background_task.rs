@@ -45,9 +45,10 @@ use dashmap::DashMap;
 use echo_core::error::{ReactError, Result};
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -105,6 +106,25 @@ impl BackgroundTaskStatus {
 
 // ── BackgroundTask<T> ─────────────────────────────────────────────
 
+struct BackgroundTaskHandleState<T> {
+    status: BackgroundTaskStatus,
+    result: Option<Result<T>>,
+    panicked: bool,
+}
+
+trait BackgroundTaskStatusSource: Send + Sync {
+    fn snapshot(&self) -> BackgroundTaskStatus;
+}
+
+impl<T: Send + 'static> BackgroundTaskStatusSource for Mutex<BackgroundTaskHandleState<T>> {
+    fn snapshot(&self) -> BackgroundTaskStatus {
+        self.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .status
+            .clone()
+    }
+}
+
 /// A handle to a background task that can be polled, awaited, or cancelled.
 ///
 /// The task runs asynchronously on the tokio runtime. The handle is cheap to
@@ -114,48 +134,52 @@ pub struct BackgroundTask<T: Send + 'static> {
     pub id: String,
     /// Human-readable name/description.
     pub name: String,
-    /// Current lifecycle status (shared, readable without blocking).
-    status: Arc<RwLock<BackgroundTaskStatus>>,
-    /// Result cell: `None` until the task finishes, then `Some(result)`.
-    /// Guarded by a Mutex so `wait()` can `take()` it only once. The paired
-    /// `Notify` wakes waiters when a result arrives.
-    ///
-    /// **Retry-safe (N-P2-5)**: unlike the old oneshot design, a timeout does
-    /// NOT consume the cell. `wait()` only calls `take()` once it observes the
-    /// result is present, so a timed-out `wait()` can be retried and still
-    /// receive the result.
-    result: Arc<Mutex<Option<Result<T>>>>,
-    /// Notifier fired when the result cell is filled.
+    /// Single authority for lifecycle status and the single-consumer result.
+    state: Arc<Mutex<BackgroundTaskHandleState<T>>>,
+    /// Notifier fired after a terminal state is atomically published.
     result_notify: Arc<Notify>,
     /// Token to request cancellation of the running task.
     cancel: CancellationToken,
-    /// Inner join handle (for detecting panics).
-    join_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl<T: Send + 'static> Clone for BackgroundTask<T> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            state: Arc::clone(&self.state),
+            result_notify: Arc::clone(&self.result_notify),
+            cancel: self.cancel.clone(),
+        }
+    }
 }
 
 impl<T: Send + 'static> BackgroundTask<T> {
     /// Non-blocking snapshot of the current status.
     pub async fn status(&self) -> BackgroundTaskStatus {
-        self.status.read().await.clone()
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .status
+            .clone()
     }
 
     /// Convenience: check if the task is still running (non-blocking).
     pub async fn is_running(&self) -> bool {
-        matches!(
-            *self.status.read().await,
-            BackgroundTaskStatus::Running { .. }
-        )
+        matches!(self.status().await, BackgroundTaskStatus::Running { .. })
     }
 
     /// Convenience: check if the task has reached a terminal state.
     pub async fn is_completed(&self) -> bool {
-        self.status.read().await.is_terminal()
+        self.status().await.is_terminal()
     }
 
     /// Request cancellation of the running task.
     ///
     /// This signals the cancellation token but does not guarantee immediate
-    /// termination — the task must check for cancellation cooperatively.
+    /// termination. The supervisor observes it during admission or execution;
+    /// during execution it aborts and awaits the child before publishing the
+    /// terminal state.
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
@@ -167,40 +191,15 @@ impl<T: Send + 'static> BackgroundTask<T> {
 
     /// Check if the task has panicked.
     ///
-    /// Returns `Some(true)` if the task panicked, `Some(false)` if it completed
-    /// normally, or `None` if the task is still running or the handle was
-    /// already consumed.
-    ///
-    /// This is a non-blocking check: it inspects the current status for the
-    /// [`BackgroundTaskStatus::Failed`] variant whose error message indicates a
-    /// panic (i.e., the tokio task panicked and the join handle returned a
-    /// `JoinError`). If the task is still running, `None` is returned.
+    /// Returns `Some(true)` for a caught child execution-task panic,
+    /// `Some(false)` for another terminal, or `None` while nonterminal.
     pub async fn is_panicked(&self) -> Option<bool> {
-        let handle_guard = self.join_handle.lock().await;
-        if let Some(ref handle) = *handle_guard {
-            if !handle.is_finished() {
-                // Still running — cannot determine panic state yet
-                return None;
-            }
-            // The task has finished. We can't `.await` the JoinHandle here
-            // (that would consume it), so we infer panic from the status:
-            // a tokio panic surfaces as a Failed status with "panic" in the
-            // error string. As a simpler heuristic, if the status is Failed
-            // and the task finished, we report `Some(false)` — meaning
-            // "finished, not a panic" — unless the error text hints at one.
-            let status = self.status.read().await.clone();
-            match &status {
-                BackgroundTaskStatus::Failed { error, .. } => {
-                    Some(error.contains("panic") || error.contains("JoinError"))
-                }
-                BackgroundTaskStatus::Cancelled | BackgroundTaskStatus::Completed { .. } => {
-                    Some(false)
-                }
-                // If finished but still shows Running/Pending, something is off
-                _ => Some(false),
-            }
-        } else {
-            None
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match state.status {
+            BackgroundTaskStatus::Pending | BackgroundTaskStatus::Running { .. } => None,
+            BackgroundTaskStatus::Completed { .. }
+            | BackgroundTaskStatus::Failed { .. }
+            | BackgroundTaskStatus::Cancelled => Some(state.panicked),
         }
     }
 
@@ -209,43 +208,68 @@ impl<T: Send + 'static> BackgroundTask<T> {
     /// If `timeout` is `Some`, returns an error if the task doesn't complete
     /// within the given duration. If `None`, waits indefinitely.
     ///
-    /// **Retry-safe**: unlike the old oneshot implementation, a timeout does
-    /// NOT consume the receiver. The caller may call `wait()` again (possibly
-    /// with a longer timeout) and still receive the result once the task
-    /// completes. The result is stored in a `watch` channel that survives
-    /// timeouts (N-P2-5).
+    /// A timeout does not consume the result. The first terminal waiter owns
+    /// `T`; later waiters return immediately from the persistent status.
     pub async fn wait(&self, timeout: Option<Duration>) -> Result<T> {
+        let deadline = match timeout {
+            Some(duration) => Some(
+                tokio::time::Instant::now()
+                    .checked_add(duration)
+                    .ok_or_else(|| {
+                        ReactError::Other(format!(
+                            "Background task '{}' wait deadline overflow",
+                            self.name
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
         loop {
-            // Check if the result is already present (non-blocking).
-            {
-                let mut cell = self.result.lock().await;
-                if let Some(result) = cell.take() {
-                    // Only the first observer gets it; later callers fall
-                    // through to status-based reporting.
+            let notified = self.result_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let status = {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(result) = state.result.take() {
                     return result;
                 }
+                state.status.clone()
+            };
+            match status {
+                BackgroundTaskStatus::Completed { .. } => {
+                    return Err(ReactError::Other(format!(
+                        "Background task '{}' completed, but its result was already consumed by another waiter",
+                        self.name
+                    )));
+                }
+                BackgroundTaskStatus::Failed { error, .. } => {
+                    return Err(ReactError::Other(format!(
+                        "Background task '{}' failed: {error}",
+                        self.name
+                    )));
+                }
+                BackgroundTaskStatus::Cancelled => {
+                    return Err(ReactError::Other(format!(
+                        "Background task '{}' was cancelled",
+                        self.name
+                    )));
+                }
+                BackgroundTaskStatus::Pending | BackgroundTaskStatus::Running { .. } => {}
             }
-
-            // Not ready yet — wait for the Notify (with optional timeout).
-            let notified = self.result_notify.notified();
-            if let Some(dur) = timeout {
-                match tokio::time::timeout(dur, notified).await {
-                    Ok(()) => {
-                        // Notified — loop back and check the cell again.
-                        continue;
-                    }
-                    Err(_) => {
-                        // Timeout: the cell is untouched, so the result is NOT
-                        // lost. The caller may retry wait() (possibly longer).
+            match deadline {
+                Some(deadline) => {
+                    if tokio::time::timeout_at(deadline, &mut notified)
+                        .await
+                        .is_err()
+                    {
+                        let duration = timeout.unwrap_or_default();
                         return Err(ReactError::Other(format!(
                             "Background task '{}' timed out after {:?} (retry-safe: call wait() again)",
-                            self.name, dur
+                            self.name, duration
                         )));
                     }
                 }
-            } else {
-                notified.await;
-                // Loop back and check the cell.
+                None => (&mut notified).await,
             }
         }
     }
@@ -266,9 +290,8 @@ pub trait AnyBackgroundTask: Send + Sync {
     fn status_text(&self) -> &'static str;
     /// Non-blocking snapshot of the current status.
     ///
-    /// Returns the actual [`BackgroundTaskStatus`] variant for fine-grained
-    /// status reporting (Pending, Running, Completed, Failed, Cancelled).
-    /// Falls back to a synthetic status if the lock cannot be acquired.
+    /// Returns the actual [`BackgroundTaskStatus`] variant from the same shared
+    /// state used by the typed handle.
     fn status_snapshot(&self) -> BackgroundTaskStatus;
     /// Request cancellation.
     fn cancel(&self);
@@ -278,15 +301,13 @@ pub trait AnyBackgroundTask: Send + Sync {
     fn sequence(&self) -> u64;
 }
 
-/// A simple wrapper that stores a status snapshot for sync access.
+/// A type-erased live view of the typed handle's shared lifecycle state.
 struct TypeErasedTask {
     id: String,
     name: String,
-    /// Shared status handle for fine-grained status reporting.
-    status: Arc<RwLock<BackgroundTaskStatus>>,
+    /// Type-erased view of the same generic state held by BackgroundTask<T>.
+    state: Arc<dyn BackgroundTaskStatusSource>,
     cancel: CancellationToken,
-    /// Cached terminal status for sync checks (updated by the spawn wrapper).
-    terminal_flag: Arc<std::sync::atomic::AtomicBool>,
     sequence: u64,
 }
 
@@ -298,48 +319,16 @@ impl AnyBackgroundTask for TypeErasedTask {
         &self.name
     }
     fn status_text(&self) -> &'static str {
-        // Try to get the actual status text via non-blocking lock
-        match self.status.try_read() {
-            Ok(guard) => guard.as_str(),
-            Err(_) => {
-                // Lock busy — fall back to terminal flag heuristic
-                if self
-                    .terminal_flag
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    "completed"
-                } else {
-                    "running"
-                }
-            }
-        }
+        self.state.snapshot().as_str()
     }
     fn status_snapshot(&self) -> BackgroundTaskStatus {
-        match self.status.try_read() {
-            Ok(guard) => guard.clone(),
-            Err(_) => {
-                // Lock busy — synthesise from terminal flag
-                if self
-                    .terminal_flag
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    BackgroundTaskStatus::Completed {
-                        finished_at: Instant::now(),
-                    }
-                } else {
-                    BackgroundTaskStatus::Running {
-                        started_at: Instant::now(),
-                    }
-                }
-            }
-        }
+        self.state.snapshot()
     }
     fn cancel(&self) {
         self.cancel.cancel();
     }
     fn is_terminal_sync(&self) -> bool {
-        self.terminal_flag
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.state.snapshot().is_terminal()
     }
     fn sequence(&self) -> u64 {
         self.sequence
@@ -398,6 +387,122 @@ pub struct TaskSpawner {
     next_sequence: AtomicU64,
 }
 
+fn publish_terminal<T: Send + 'static>(
+    state: &Arc<Mutex<BackgroundTaskHandleState<T>>>,
+    notify: &Arc<Notify>,
+    result: Result<T>,
+    status: BackgroundTaskStatus,
+    panicked: bool,
+) {
+    {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.status.is_terminal() {
+            return;
+        }
+        state.result = Some(result);
+        state.status = status;
+        state.panicked = panicked;
+    }
+    notify.notify_waiters();
+}
+
+fn publish_running<T: Send + 'static>(state: &Arc<Mutex<BackgroundTaskHandleState<T>>>) {
+    let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+    if matches!(state.status, BackgroundTaskStatus::Pending) {
+        state.status = BackgroundTaskStatus::Running {
+            started_at: Instant::now(),
+        };
+    }
+}
+
+fn completion_from_join<T: Send + 'static>(
+    joined: std::result::Result<Result<T>, tokio::task::JoinError>,
+) -> (Result<T>, BackgroundTaskStatus, bool) {
+    match joined {
+        Ok(result) => {
+            let status = match result.as_ref() {
+                Ok(_) => BackgroundTaskStatus::Completed {
+                    finished_at: Instant::now(),
+                },
+                Err(error) => BackgroundTaskStatus::Failed {
+                    error: error.to_string(),
+                    at: Instant::now(),
+                },
+            };
+            (result, status, false)
+        }
+        Err(error) => {
+            let panicked = error.is_panic();
+            let message = if panicked {
+                format!("Background execution task panicked: {error}")
+            } else {
+                format!("Background execution task failed to join: {error}")
+            };
+            (
+                Err(ReactError::Other(message.clone())),
+                BackgroundTaskStatus::Failed {
+                    error: message,
+                    at: Instant::now(),
+                },
+                panicked,
+            )
+        }
+    }
+}
+
+async fn abort_execution_task<T: Send + 'static>(task: &mut JoinHandle<Result<T>>) {
+    task.abort();
+    let _ = task.await;
+}
+
+async fn supervise_execution<T: Send + 'static>(
+    mut execution_task: JoinHandle<Result<T>>,
+    cancel: CancellationToken,
+    deadline: Option<tokio::time::Instant>,
+    timeout: Option<Duration>,
+) -> (Result<T>, BackgroundTaskStatus, bool) {
+    if let Some(deadline) = deadline {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                abort_execution_task(&mut execution_task).await;
+                (
+                    Err(ReactError::Other("Task cancelled".to_string())),
+                    BackgroundTaskStatus::Cancelled,
+                    false,
+                )
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                abort_execution_task(&mut execution_task).await;
+                let duration = timeout.unwrap_or_default();
+                let message = format!("Task timed out after {duration:?}");
+                (
+                    Err(ReactError::Other(message.clone())),
+                    BackgroundTaskStatus::Failed {
+                        error: message,
+                        at: Instant::now(),
+                    },
+                    false,
+                )
+            }
+            joined = &mut execution_task => completion_from_join(joined),
+        }
+    } else {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                abort_execution_task(&mut execution_task).await;
+                (
+                    Err(ReactError::Other("Task cancelled".to_string())),
+                    BackgroundTaskStatus::Cancelled,
+                    false,
+                )
+            }
+            joined = &mut execution_task => completion_from_join(joined),
+        }
+    }
+}
+
 impl TaskSpawner {
     /// Create a new task spawner with the given configuration.
     pub fn new(config: TaskSpawnerConfig) -> Self {
@@ -427,141 +532,175 @@ impl TaskSpawner {
         let id = uuid::Uuid::new_v4().to_string();
         let name = name.to_string();
         let cancel = CancellationToken::new();
-        let status = Arc::new(RwLock::new(BackgroundTaskStatus::Pending));
-        // Retry-safe result delivery: a Mutex<Option> cell + a Notify. The cell
-        // is only `take()`n once a waiter observes it's filled, so a timeout
-        // leaves the cell intact for the next wait() call (N-P2-5).
-        let result: Arc<Mutex<Option<Result<T>>>> = Arc::new(Mutex::new(None));
+        let state = Arc::new(Mutex::new(BackgroundTaskHandleState {
+            status: BackgroundTaskStatus::Pending,
+            result: None,
+            panicked: false,
+        }));
         let result_notify = Arc::new(Notify::new());
-        let terminal_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let permit = self.semaphore.clone();
         let cancel_inner = cancel.clone();
-        let status_inner = status.clone();
+        let state_inner = Arc::clone(&state);
         let id_inner = id.clone();
         let name_inner = name.clone();
+        let max_concurrent = self.config.max_concurrent;
         let timeout = if self.config.default_timeout_secs > 0 {
             Some(Duration::from_secs(self.config.default_timeout_secs))
         } else {
             None
         };
+        let accepted_at = tokio::time::Instant::now();
+        let deadline = timeout.and_then(|duration| accepted_at.checked_add(duration));
+        let deadline_overflow = timeout.is_some() && deadline.is_none();
+        let notify = Arc::clone(&result_notify);
 
-        let result_cell = result.clone();
-        let notify = result_notify.clone();
-        let terminal_flag_inner = terminal_flag.clone();
+        let supervisor = tokio::spawn(async move {
+            if max_concurrent == 0 {
+                let message = "TaskSpawner max_concurrent must be greater than zero".to_string();
+                publish_terminal(
+                    &state_inner,
+                    &notify,
+                    Err(ReactError::Other(message.clone())),
+                    BackgroundTaskStatus::Failed {
+                        error: message,
+                        at: Instant::now(),
+                    },
+                    false,
+                );
+                return;
+            }
+            if deadline_overflow {
+                let message = "Background task deadline overflow".to_string();
+                publish_terminal(
+                    &state_inner,
+                    &notify,
+                    Err(ReactError::Other(message.clone())),
+                    BackgroundTaskStatus::Failed {
+                        error: message,
+                        at: Instant::now(),
+                    },
+                    false,
+                );
+                return;
+            }
 
-        /// Fill the result cell and wake any waiters. Used at every early-return
-        /// and normal-completion path in the spawn closure.
-        async fn deliver<T>(
-            cell: &Arc<Mutex<Option<Result<T>>>>,
-            notify: &Arc<Notify>,
-            r: Result<T>,
-        ) {
-            *cell.lock().await = Some(r);
-            notify.notify_waiters();
-        }
-
-        let join_handle = tokio::spawn(async move {
-            // Acquire semaphore permit (may block if at capacity)
-            let _permit = match permit.acquire().await {
-                Ok(p) => p,
+            let acquire = permit.acquire_owned();
+            tokio::pin!(acquire);
+            let _permit = if let Some(deadline) = deadline {
+                tokio::select! {
+                    biased;
+                    _ = cancel_inner.cancelled() => {
+                        publish_terminal(
+                            &state_inner,
+                            &notify,
+                            Err(ReactError::Other("Task cancelled before start".to_string())),
+                            BackgroundTaskStatus::Cancelled,
+                            false,
+                        );
+                        return;
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        let duration = timeout.unwrap_or_default();
+                        let message = format!("Task timed out during admission after {duration:?}");
+                        publish_terminal(
+                            &state_inner,
+                            &notify,
+                            Err(ReactError::Other(message.clone())),
+                            BackgroundTaskStatus::Failed {
+                                error: message,
+                                at: Instant::now(),
+                            },
+                            false,
+                        );
+                        return;
+                    }
+                    acquired = &mut acquire => acquired,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel_inner.cancelled() => {
+                        publish_terminal(
+                            &state_inner,
+                            &notify,
+                            Err(ReactError::Other("Task cancelled before start".to_string())),
+                            BackgroundTaskStatus::Cancelled,
+                            false,
+                        );
+                        return;
+                    }
+                    acquired = &mut acquire => acquired,
+                }
+            };
+            let _permit = match _permit {
+                Ok(permit) => permit,
                 Err(_) => {
-                    deliver(
-                        &result_cell,
+                    let message = "Semaphore closed - cannot acquire permit".to_string();
+                    publish_terminal(
+                        &state_inner,
                         &notify,
-                        Err(ReactError::Other(
-                            "Semaphore closed — cannot acquire permit".into(),
-                        )),
-                    )
-                    .await;
+                        Err(ReactError::Other(message.clone())),
+                        BackgroundTaskStatus::Failed {
+                            error: message,
+                            at: Instant::now(),
+                        },
+                        false,
+                    );
                     return;
                 }
             };
 
-            // Check cancellation before starting
             if cancel_inner.is_cancelled() {
-                *status_inner.write().await = BackgroundTaskStatus::Cancelled;
-                deliver(
-                    &result_cell,
+                publish_terminal(
+                    &state_inner,
                     &notify,
-                    Err(ReactError::Other("Task cancelled before start".into())),
-                )
-                .await;
+                    Err(ReactError::Other("Task cancelled before start".to_string())),
+                    BackgroundTaskStatus::Cancelled,
+                    false,
+                );
+                return;
+            }
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                let duration = timeout.unwrap_or_default();
+                let message = format!("Task timed out during admission after {duration:?}");
+                publish_terminal(
+                    &state_inner,
+                    &notify,
+                    Err(ReactError::Other(message.clone())),
+                    BackgroundTaskStatus::Failed {
+                        error: message,
+                        at: Instant::now(),
+                    },
+                    false,
+                );
                 return;
             }
 
-            // Mark as running
-            {
-                let mut s = status_inner.write().await;
-                *s = BackgroundTaskStatus::Running {
-                    started_at: Instant::now(),
-                };
-            }
+            publish_running(&state_inner);
             debug!(task_id = %id_inner, name = %name_inner, "Background task started");
-
-            // Execute with optional timeout and cancellation
-            let result = if let Some(dur) = timeout {
-                tokio::select! {
-                    _ = cancel_inner.cancelled() => {
-                        Err(ReactError::Other("Task cancelled".into()))
-                    }
-                    r = tokio::time::timeout(dur, fut) => {
-                        match r {
-                            Ok(inner) => inner,
-                            Err(_) => Err(ReactError::Other(format!(
-                                "Task timed out after {:?}", dur
-                            ))),
-                        }
-                    }
-                }
-            } else {
-                tokio::select! {
-                    _ = cancel_inner.cancelled() => {
-                        Err(ReactError::Other("Task cancelled".into()))
-                    }
-                    r = fut => r,
-                }
-            };
-
-            // Update status based on result
-            let final_status = if cancel_inner.is_cancelled() && result.is_err() {
-                BackgroundTaskStatus::Cancelled
-            } else if result.is_ok() {
-                BackgroundTaskStatus::Completed {
-                    finished_at: Instant::now(),
-                }
-            } else {
-                let error = result
-                    .as_ref()
-                    .err()
-                    .map(|e| e.to_string())
-                    .unwrap_or_default();
-                BackgroundTaskStatus::Failed {
-                    error,
-                    at: Instant::now(),
-                }
-            };
-
-            *status_inner.write().await = final_status.clone();
-            terminal_flag_inner.store(
-                final_status.is_terminal(),
-                std::sync::atomic::Ordering::Relaxed,
+            let execution_task = tokio::spawn(fut);
+            let (result, final_status, panicked) =
+                supervise_execution(execution_task, cancel_inner, deadline, timeout).await;
+            publish_terminal(
+                &state_inner,
+                &notify,
+                result,
+                final_status.clone(),
+                panicked,
             );
-
-            // Deliver result to the cell and wake waiters.
-            deliver(&result_cell, &notify, result).await;
-
             let status_text = final_status.as_str();
             info!(task_id = %id_inner, name = %name_inner, status = %status_text, "Background task finished");
         });
+        std::mem::drop(supervisor);
 
         // Register in the type-erased task map
+        let erased_state: Arc<dyn BackgroundTaskStatusSource> = state.clone();
         let erased: Arc<dyn AnyBackgroundTask> = Arc::new(TypeErasedTask {
             id: id.clone(),
             name: name.clone(),
-            status: status.clone(),
+            state: erased_state,
             cancel: cancel.clone(),
-            terminal_flag,
             sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
         });
         self.tasks.insert(id.clone(), erased);
@@ -569,11 +708,9 @@ impl TaskSpawner {
         BackgroundTask {
             id,
             name,
-            status,
-            result,
+            state,
             result_notify,
             cancel,
-            join_handle: Mutex::new(Some(join_handle)),
         }
     }
 
@@ -652,17 +789,28 @@ impl TaskSpawner {
 mod tests {
     use super::*;
 
+    struct NonCloneResult(u32);
+
+    struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
     #[tokio::test]
-    async fn test_background_task_completes() {
+    async fn test_background_task_completes() -> Result<()> {
         let spawner = TaskSpawner::new(TaskSpawnerConfig::default());
         let handle = spawner.spawn("test-task", async { Ok(42) });
 
         assert_eq!(handle.name, "test-task");
         assert!(!handle.is_cancelled());
 
-        let result = handle.wait(Some(Duration::from_secs(5))).await.unwrap();
+        let result = handle.wait(Some(Duration::from_secs(5))).await?;
         assert_eq!(result, 42);
         assert!(handle.is_completed().await);
+        Ok(())
     }
 
     #[tokio::test]
@@ -675,6 +823,27 @@ mod tests {
         let result = handle.wait(Some(Duration::from_secs(5))).await;
         assert!(result.is_err());
         assert!(handle.is_completed().await);
+    }
+
+    #[tokio::test]
+    async fn ordinary_failure_cannot_spoof_panic_provenance() -> Result<()> {
+        let spawner = TaskSpawner::new(TaskSpawnerConfig::default());
+        let handle = spawner.spawn("panic-prefix-failure", async {
+            Err::<(), _>(ReactError::Other(
+                "Background execution task panicked: forged".to_string(),
+            ))
+        });
+
+        let result = handle.wait(Some(Duration::from_secs(1))).await;
+        if result.is_ok()
+            || !matches!(handle.status().await, BackgroundTaskStatus::Failed { .. })
+            || handle.is_panicked().await != Some(false)
+        {
+            return Err(ReactError::Other(
+                "ordinary failure was misclassified as an execution panic".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -720,7 +889,7 @@ mod tests {
     /// the real result once the task completes. The old oneshot impl lost the
     /// result permanently on timeout.
     #[tokio::test]
-    async fn test_background_task_timeout_then_retry_recovers_result() {
+    async fn test_background_task_timeout_then_retry_recovers_result() -> Result<()> {
         let spawner = TaskSpawner::new(TaskSpawnerConfig {
             default_timeout_secs: 0,
             ..Default::default()
@@ -736,7 +905,259 @@ mod tests {
 
         // Second wait: long enough → must get the real result (not "already consumed").
         let r2 = handle.wait(Some(Duration::from_secs(5))).await;
-        assert_eq!(r2.unwrap(), "recovered");
+        assert_eq!(r2?, "recovered");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_waiters_both_reach_a_terminal_observation() -> Result<()> {
+        use std::task::Poll;
+
+        let spawner = TaskSpawner::new(TaskSpawnerConfig::default());
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let handle = spawner.spawn("multi-waiter", async move {
+            release_rx
+                .await
+                .map_err(|_| ReactError::Other("release sender closed".to_string()))?;
+            Ok(NonCloneResult(42))
+        });
+        let second_handle = handle.clone();
+        let waits = async { tokio::join!(handle.wait(None), second_handle.wait(None)) };
+        tokio::pin!(waits);
+        if !matches!(futures::poll!(&mut waits), Poll::Pending) {
+            return Err(ReactError::Other(
+                "waiters completed before task release".to_string(),
+            ));
+        }
+        release_tx
+            .send(())
+            .map_err(|_| ReactError::Other("release receiver closed".to_string()))?;
+        let (first, second) = tokio::time::timeout(Duration::from_millis(300), &mut waits)
+            .await
+            .map_err(|_| ReactError::Other("a terminal waiter remained blocked".to_string()))?;
+        let successes = usize::from(first.as_ref().is_ok_and(|value| value.0 == 42))
+            .saturating_add(usize::from(
+                second.as_ref().is_ok_and(|value| value.0 == 42),
+            ));
+        if successes != 1 || first.is_ok() == second.is_ok() {
+            return Err(ReactError::Other(
+                "single-consumer result was not paired with one terminal observer".to_string(),
+            ));
+        }
+        let observer_error = first.err().or_else(|| second.err()).ok_or_else(|| {
+            ReactError::Other("terminal observer did not receive an error".to_string())
+        })?;
+        if !observer_error.to_string().contains("already consumed") {
+            return Err(ReactError::Other(format!(
+                "terminal observer returned the wrong error: {observer_error}"
+            )));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_cancellation_settles_without_starting_the_future() -> Result<()> {
+        let spawner = TaskSpawner::new(TaskSpawnerConfig {
+            max_concurrent: 1,
+            default_timeout_secs: 0,
+            ..TaskSpawnerConfig::default()
+        });
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(Notify::new());
+        let first_release = Arc::clone(&release);
+        let first = spawner.spawn("permit-holder", async move {
+            let _ = started_tx.send(());
+            first_release.notified().await;
+            Ok(())
+        });
+        started_rx
+            .await
+            .map_err(|_| ReactError::Other("permit holder did not start".to_string()))?;
+
+        let execution_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let execution_started_inner = Arc::clone(&execution_started);
+        let queued = spawner.spawn("queued-cancel", async move {
+            execution_started_inner.store(true, Ordering::Release);
+            Ok(())
+        });
+        queued.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(300), queued.wait(None))
+            .await
+            .map_err(|_| ReactError::Other("queued cancellation did not settle".to_string()))?;
+        if result.is_ok()
+            || execution_started.load(Ordering::Acquire)
+            || !matches!(queued.status().await, BackgroundTaskStatus::Cancelled)
+        {
+            return Err(ReactError::Other(
+                "queued cancellation started work or published the wrong terminal".to_string(),
+            ));
+        }
+        release.notify_one();
+        first.wait(Some(Duration::from_secs(1))).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_concurrency_settles_as_configuration_failure() -> Result<()> {
+        let spawner = TaskSpawner::new(TaskSpawnerConfig {
+            max_concurrent: 0,
+            default_timeout_secs: 0,
+            ..TaskSpawnerConfig::default()
+        });
+        let execution_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let execution_started_inner = Arc::clone(&execution_started);
+        let handle = spawner.spawn("zero-concurrency", async move {
+            execution_started_inner.store(true, Ordering::Release);
+            Ok(())
+        });
+
+        let result = tokio::time::timeout(Duration::from_millis(300), handle.wait(None))
+            .await
+            .map_err(|_| ReactError::Other("zero concurrency remained pending".to_string()))?;
+        if result.is_ok()
+            || execution_started.load(Ordering::Acquire)
+            || !matches!(handle.status().await, BackgroundTaskStatus::Failed { .. })
+        {
+            return Err(ReactError::Other(
+                "zero concurrency did not publish a configuration failure".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_deadline_settles_without_starting_the_future() -> Result<()> {
+        let spawner = TaskSpawner::new(TaskSpawnerConfig {
+            max_concurrent: 1,
+            default_timeout_secs: 1,
+            ..TaskSpawnerConfig::default()
+        });
+        let permit = spawner
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ReactError::Other("test semaphore was closed".to_string()))?;
+        let execution_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let execution_started_inner = Arc::clone(&execution_started);
+        let queued = spawner.spawn("queued-deadline", async move {
+            execution_started_inner.store(true, Ordering::Release);
+            Ok(())
+        });
+
+        let result = queued.wait(Some(Duration::from_secs(2))).await;
+        if result.is_ok()
+            || execution_started.load(Ordering::Acquire)
+            || !matches!(queued.status().await, BackgroundTaskStatus::Failed { .. })
+        {
+            return Err(ReactError::Other(
+                "queued deadline started work or published the wrong terminal".to_string(),
+            ));
+        }
+        drop(permit);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execution_cancel_waits_for_child_task_drop() -> Result<()> {
+        let spawner = TaskSpawner::new(TaskSpawnerConfig {
+            default_timeout_secs: 0,
+            ..TaskSpawnerConfig::default()
+        });
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_inner = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = spawner.spawn("execution-cancel", async move {
+            let _probe = DropProbe(dropped_inner);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        started_rx
+            .await
+            .map_err(|_| ReactError::Other("execution task did not start".to_string()))?;
+        handle.cancel();
+        let result = handle.wait(Some(Duration::from_secs(1))).await;
+        if result.is_ok()
+            || !dropped.load(Ordering::Acquire)
+            || !matches!(handle.status().await, BackgroundTaskStatus::Cancelled)
+        {
+            return Err(ReactError::Other(
+                "execution cancellation published before child task drop".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execution_timeout_waits_for_child_task_drop() -> Result<()> {
+        let spawner = TaskSpawner::new(TaskSpawnerConfig {
+            default_timeout_secs: 1,
+            ..TaskSpawnerConfig::default()
+        });
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_inner = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = spawner.spawn("execution-timeout", async move {
+            let _probe = DropProbe(dropped_inner);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        started_rx
+            .await
+            .map_err(|_| ReactError::Other("execution task did not start".to_string()))?;
+        let result = handle.wait(Some(Duration::from_secs(2))).await;
+        if result.is_ok()
+            || !dropped.load(Ordering::Acquire)
+            || !matches!(handle.status().await, BackgroundTaskStatus::Failed { .. })
+        {
+            return Err(ReactError::Other(
+                "execution timeout published before child task drop".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn type_erased_registry_preserves_failure_and_cancellation() -> Result<()> {
+        let spawner = TaskSpawner::new(TaskSpawnerConfig::default());
+        let failed = spawner.spawn("listed-failure", async {
+            Err::<(), _>(ReactError::Other("listed failure".to_string()))
+        });
+        let failed_id = failed.id.clone();
+        let _ = failed.wait(Some(Duration::from_secs(1))).await;
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let cancelled = spawner.spawn("listed-cancel", async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let cancelled_id = cancelled.id.clone();
+        started_rx
+            .await
+            .map_err(|_| ReactError::Other("listed cancellation did not start".to_string()))?;
+        cancelled.cancel();
+        let _ = cancelled.wait(Some(Duration::from_secs(1))).await;
+
+        let summaries = spawner.list().await;
+        let failed_status = summaries
+            .iter()
+            .find(|summary| summary.id == failed_id)
+            .map(|summary| &summary.status);
+        let cancelled_status = summaries
+            .iter()
+            .find(|summary| summary.id == cancelled_id)
+            .map(|summary| &summary.status);
+        if !matches!(failed_status, Some(BackgroundTaskStatus::Failed { .. }))
+            || !matches!(cancelled_status, Some(BackgroundTaskStatus::Cancelled))
+        {
+            return Err(ReactError::Other(
+                "type-erased task registry changed terminal meaning".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     #[tokio::test]

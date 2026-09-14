@@ -15,13 +15,13 @@
 //! guard yields a terminal stream without entering `run_core_loop`.
 
 use super::super::ReactAgent;
-use super::STREAM_CANCELLATION_SETTLE_PERIOD;
 use super::phases::{self, IterOutcome, LoopState, PrepareOutcome};
 use super::types::{StreamInit, StreamMode};
-use crate::agent::AgentEvent;
+use crate::agent::{AGENT_CANCELLATION_SETTLE_PERIOD, AgentEvent};
 use crate::error::Result;
 use crate::llm::types::{ContentPart, Message, MessageContent};
 use futures::Stream;
+use std::future::Future;
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -34,6 +34,29 @@ struct ManagedAgentEventStream {
     cancel: crate::agent::CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
     runtime: tokio::runtime::Handle,
+    pending_terminal: Option<Result<AgentEvent>>,
+    receiver_closed: bool,
+}
+
+impl ManagedAgentEventStream {
+    fn poll_producer(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        let Some(task) = self.task.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        match Pin::new(task).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => {
+                self.task.take();
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(error)) => {
+                self.task.take();
+                Poll::Ready(Err(crate::error::ReactError::Other(format!(
+                    "agent stream producer failed: {error}"
+                ))))
+            }
+        }
+    }
 }
 
 impl Stream for ManagedAgentEventStream {
@@ -41,18 +64,52 @@ impl Stream for ManagedAgentEventStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let stream = self.get_mut();
-        Pin::new(&mut stream.receiver).poll_next(cx)
+        loop {
+            if stream.pending_terminal.is_some() {
+                return match stream.poll_producer(cx) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Ok(())) => Poll::Ready(stream.pending_terminal.take()),
+                    Poll::Ready(Err(error)) => {
+                        stream.pending_terminal.take();
+                        Poll::Ready(Some(Err(error)))
+                    }
+                };
+            }
+            if stream.receiver_closed {
+                return match stream.poll_producer(cx) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Ok(())) => Poll::Ready(None),
+                    Poll::Ready(Err(error)) => Poll::Ready(Some(Err(error))),
+                };
+            }
+            match Pin::new(&mut stream.receiver).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(item)) => {
+                    let terminal = match &item {
+                        Ok(event) => event.is_terminal(),
+                        Err(_) => true,
+                    };
+                    if terminal {
+                        stream.pending_terminal = Some(item);
+                        stream.receiver_closed = true;
+                    } else {
+                        return Poll::Ready(Some(item));
+                    }
+                }
+                Poll::Ready(None) => stream.receiver_closed = true,
+            }
+        }
     }
 }
 
 impl Drop for ManagedAgentEventStream {
     fn drop(&mut self) {
-        self.cancel.cancel();
         let Some(mut task) = self.task.take() else {
             return;
         };
+        self.cancel.cancel();
         let reaper = self.runtime.spawn(async move {
-            if tokio::time::timeout(STREAM_CANCELLATION_SETTLE_PERIOD, &mut task)
+            if tokio::time::timeout(AGENT_CANCELLATION_SETTLE_PERIOD, &mut task)
                 .await
                 .is_err()
             {
@@ -367,6 +424,8 @@ impl ReactAgent {
             cancel: consumer_cancel,
             task: Some(task),
             runtime,
+            pending_terminal: None,
+            receiver_closed: false,
         }))
     }
 }
@@ -812,6 +871,118 @@ mod tests {
     use futures::StreamExt;
     use futures::future::BoxFuture;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn managed_stream_releases_terminal_after_producer_settlement() -> Result<()> {
+        use futures::StreamExt;
+
+        let (tx, rx) = mpsc::channel(1);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let producer_release = Arc::clone(&release);
+        let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            if tx
+                .send(Ok(AgentEvent::FinalAnswer("done".to_string())))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = terminal_tx.send(());
+            producer_release.notified().await;
+        });
+        let mut stream = ManagedAgentEventStream {
+            receiver: tokio_stream::wrappers::ReceiverStream::new(rx),
+            cancel: crate::agent::CancellationToken::new(),
+            task: Some(task),
+            runtime: tokio::runtime::Handle::current(),
+            pending_terminal: None,
+            receiver_closed: false,
+        };
+
+        terminal_rx.await.map_err(|_| {
+            crate::error::ReactError::Other("producer did not buffer terminal".to_string())
+        })?;
+        let mut next = Box::pin(stream.next());
+        if !matches!(futures::poll!(&mut next), Poll::Pending) {
+            return Err(crate::error::ReactError::Other(
+                "terminal escaped before producer settlement".to_string(),
+            ));
+        }
+        release.notify_one();
+        let terminal = next.await.ok_or_else(|| {
+            crate::error::ReactError::Other("managed stream ended without terminal".to_string())
+        })??;
+        if !matches!(terminal, AgentEvent::FinalAnswer(answer) if answer == "done") {
+            return Err(crate::error::ReactError::Other(
+                "managed stream returned the wrong terminal".to_string(),
+            ));
+        }
+        if stream.next().await.is_some() {
+            return Err(crate::error::ReactError::Other(
+                "managed stream emitted an event after terminal".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_stream_replaces_buffered_terminal_when_producer_fails() -> Result<()> {
+        use futures::StreamExt;
+
+        let (tx, rx) = mpsc::channel(1);
+        let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            if tx
+                .send(Ok(AgentEvent::FinalAnswer("must-not-escape".to_string())))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = terminal_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let abort = task.abort_handle();
+        let mut stream = ManagedAgentEventStream {
+            receiver: tokio_stream::wrappers::ReceiverStream::new(rx),
+            cancel: crate::agent::CancellationToken::new(),
+            task: Some(task),
+            runtime: tokio::runtime::Handle::current(),
+            pending_terminal: None,
+            receiver_closed: false,
+        };
+
+        terminal_rx.await.map_err(|_| {
+            crate::error::ReactError::Other("producer did not buffer terminal".to_string())
+        })?;
+        abort.abort();
+        let failure = stream
+            .next()
+            .await
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "managed stream ended without producer failure".to_string(),
+                )
+            })?
+            .err()
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(
+                    "buffered success escaped after producer failure".to_string(),
+                )
+            })?;
+        if !failure.to_string().contains("agent stream producer failed") {
+            return Err(crate::error::ReactError::Other(format!(
+                "managed stream returned unexpected failure: {failure}"
+            )));
+        }
+        if stream.next().await.is_some() {
+            return Err(crate::error::ReactError::Other(
+                "managed stream repeated producer failure".to_string(),
+            ));
+        }
+        Ok(())
+    }
 
     /// A guard that blocks every input with a fixed reason.
     struct BlockingGuard;

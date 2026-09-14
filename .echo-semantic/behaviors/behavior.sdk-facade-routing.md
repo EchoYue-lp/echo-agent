@@ -8,14 +8,15 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, failure_concurrency]
 boundary: boundary.sdk-facade-parity
-observed_at: source:448caeb7a6cc1bb147c8d86412b0b9a8d0c14b653b8326724432b49faebab62c
+observed_at: 9d1f3f2b5fdc204c08ecdec32ed22e8df95870e9
 code_refs:
+  - echo-sdk-protocol/src/inventory.rs
   - echo-sdk-protocol/src/facade.rs
   - echo-sdk-host/src/core_profile/facade/source_operations.rs
   - echo-sdk-host/src/core_profile/facade/stream.rs
   - echo-sdk-host/src/core_profile/extension_bridge.rs
 rule_refs: [rule.sdk-rust-authority]
-evidence_refs: [evidence.sdk-contracts]
+evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification, evidence.background-task-terminal-authority-verification]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
 ---
 
@@ -23,15 +24,15 @@ finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancel
 
 ## 重要承诺
 
-每个canonical facade项只能映射到一个真实标准方法、typed family、Host adapter、extension bridge或有证据的语言本地实现。
+每个canonical facade项只能映射到一个真实route和一个identity级SDK scope；route与具名capability group独立决定contract acceptance，language status只说明实现证据。
 
 ## 当前行为
 
-每条canonical source operation均到达具体Host adapter；存在live Agent消费点的consumer trait进入typed compressor或AgentComponent bridge，无Host消费点的trait保留具体process-local依据；AgentComponent覆盖可覆写default方法、IntentClassifier、异步SkillLoadPolicy、Sandbox/Workflow typed stream和cancel-aware执行，且只对Workflow mutation使用排他admission；Agent、extension、Workflow和A2A stream均有真实生产者与统一生命周期。
+每条canonical source operation均到达具体Host adapter；存在live Agent消费点的consumer trait进入typed compressor或AgentComponent bridge，无Host消费点的trait保留具体process-local依据。BackgroundTask Clone作为Rust trait implementation进入language-intrinsic scope，不生成语言facade。AgentComponent覆盖可覆写default方法、IntentClassifier、异步SkillLoadPolicy、Sandbox/Workflow typed stream和cancel-aware执行，且只对Workflow mutation使用排他admission；Agent、extension、Workflow和A2A stream均有真实生产者与统一生命周期。
 
 ## 期望行为
 
-所有canonical route有可执行或可复核依据；`feature_unavailable`、`intrinsic`和空handler不能掩盖缺失实现。
+所有canonical route有可执行或可复核依据；`external_contract`必须三语言done，Host/Rust-only、language intrinsic、helper和deferred必须保留显式disposition，不能以scope或空handler掩盖缺失实现。
 
 ## 触发、结果与副作用
 
@@ -47,4 +48,4 @@ Client发送operation和signature后，Host先核对协商能力、feature、sig
 
 ## 裁决记录
 
-用户确认功能与语义全部对等、语言API保持惯用表达，并要求Plan 8独立折叠为一个任务级提交。
+用户确认语言API保持惯用表达；ADR 0031/0032进一步确认Rust identity inventory不等于外部合同，deferred只按capability推进。

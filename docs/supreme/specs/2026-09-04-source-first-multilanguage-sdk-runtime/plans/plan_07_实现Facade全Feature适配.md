@@ -133,7 +133,7 @@ todos:
       精确拒绝未编译能力，standard/core/bridge 回归、stdout/secret/teardown 边界、合同生成、CI
       分组和状态文档全部一致；三语言仍不宣称 Runnable 或 Parity complete。
 artifact_id: plan:db3ce810-daa6-4751-9725-e2c107a51fac
-lifecycle: ready
+lifecycle: completed
 design_revision: sha256:10a237f834b9fb9cc8ea2d740d19222b0b5776fb30904e9b8b2df88f12b63227
 ---
 ## Approach

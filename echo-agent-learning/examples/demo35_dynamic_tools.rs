@@ -141,8 +141,8 @@ fn demo_api_basics() {
     let removed_doc = agent.remove_tool("read_document");
 
     // `Agent::remove_tool` (trait method, in scope via prelude::*) returns
-    // `bool`; the inherent `ReactAgent::remove_tool` returning the boxed
-    // tool is shadowed here. Both are equivalent for the assertion.
+    // `bool`; the inherent `ReactAgent::remove_tool` returning an owned Arc
+    // generation is shadowed here. Both are equivalent for the assertion.
     assert!(removed_search);
     assert!(removed_doc);
 

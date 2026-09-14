@@ -31,15 +31,30 @@ java_major=${java_version%%.*}
 
 scripts/export-language-sdk-catalog.sh --check
 
-executable_summary=$(jq -r '
-  [.entries[] | select(.route.surface != "intrinsic") | .languages | to_entries[] | select(.value.status != "done")] | length
+external_incomplete=$(jq -r '
+  [.entries[] | select(.sdk_scope == "external_contract") | .languages | to_entries[] | select(.value.status != "done")] | length
 ' "$repo_root/contracts/sdk/parity-manifest.json")
-[[ "$executable_summary" == "0" ]] || {
-  echo "error: executable facade routes contain incomplete language mappings" >&2
+[[ "$external_incomplete" == "0" ]] || {
+  echo "error: external SDK contracts contain incomplete language mappings" >&2
   exit 1
 }
-printf 'facade executable mappings: %s items x 3 languages; intrinsic mappings remain explicit\n' \
-  "$(jq -r '[.entries[] | select(.route.surface != "intrinsic")] | length' "$repo_root/contracts/sdk/parity-manifest.json")"
+scope_counts=$(jq -r '
+  [.entries[] | select(.canonical)]
+  | [
+      ([.[] | select(.sdk_scope == "external_contract")] | length),
+      ([.[] | select(.sdk_scope == "host_or_rust_only")] | length),
+      ([.[] | select(.sdk_scope == "language_intrinsic")] | length),
+      ([.[] | select(.sdk_scope == "internal_helper")] | length),
+      ([.[] | select(.sdk_scope == "deferred")] | length)
+    ]
+  | @tsv
+' "$repo_root/contracts/sdk/parity-manifest.json")
+[[ "$scope_counts" == $'5607\t1765\t781\t90\t1441' ]] || {
+  echo "error: SDK scope counts drifted: $scope_counts" >&2
+  exit 1
+}
+printf 'SDK scopes (canonical): external=%s host_or_rust_only=%s language_intrinsic=%s internal_helper=%s deferred=%s\n' \
+  ${scope_counts//$'\t'/ }
 
 cargo build -q -p echo-sdk-host --features sdk-facade-all --locked
 host_state=$(mktemp -d "${TMPDIR:-/tmp}/echo-sdk-language-state.XXXXXX")

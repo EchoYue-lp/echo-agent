@@ -91,10 +91,21 @@ impl ImprovementLoop {
         let mut test = Vec::new();
 
         for (_, group) in groups {
-            let split_idx = ((1.0 - holdout_ratio) * group.len() as f64) as usize;
-            let split_idx = split_idx.clamp(1, group.len().saturating_sub(1));
-            train.extend_from_slice(&group[..split_idx]);
-            test.extend_from_slice(&group[split_idx..]);
+            let split_idx = if group.len() == 1 {
+                // A singleton cannot form an independent holdout without
+                // leaking its training sample into evaluation.
+                1
+            } else {
+                let proportional = ((1.0 - holdout_ratio) * group.len() as f64) as usize;
+                proportional.clamp(1, group.len().saturating_sub(1))
+            };
+            for (index, case) in group.into_iter().enumerate() {
+                if index < split_idx {
+                    train.push(case);
+                } else {
+                    test.push(case);
+                }
+            }
         }
 
         (train, test)
@@ -139,12 +150,12 @@ impl ImprovementLoop {
 
         // Stratified split by criteria type to prevent overfitting
         let (train_cases, test_cases) = Self::stratified_split(cases, self.holdout_ratio);
+        let runner = EvalRunner::new(std::env::temp_dir());
 
         for i in 0..self.max_iterations {
             let iter_start = Instant::now();
 
             // a. Evaluate on train set
-            let runner = EvalRunner::new(std::env::temp_dir().join(format!("improve_{i}")));
             let train_cases_vec: Vec<EvalCase> = train_cases.iter().map(|c| (*c).clone()).collect();
             let train_report = runner.run_all_async(&train_cases_vec, &agent_factory).await;
 
@@ -194,9 +205,6 @@ impl ImprovementLoop {
             if best_score >= self.improvement_threshold {
                 break;
             }
-
-            // Clean up
-            let _ = std::fs::remove_dir_all(runner.workspace_root);
         }
 
         LoopResult {
@@ -211,11 +219,180 @@ impl ImprovementLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::MockAgent;
+
+    fn eval_case(id: &str, success_criteria: SuccessCriteria) -> EvalCase {
+        EvalCase {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            domain: None,
+            task: format!("Evaluate {id}"),
+            project_fixture: None,
+            success_criteria,
+            constraints: Default::default(),
+        }
+    }
 
     #[test]
     fn test_loop_defaults() {
         let lp = ImprovementLoop::new();
         assert_eq!(lp.max_iterations, 5);
         assert_eq!(lp.improvement_threshold, 0.95);
+    }
+
+    #[test]
+    fn singleton_criteria_group_is_train_only() {
+        let cases = vec![eval_case(
+            "single",
+            SuccessCriteria::OutputContains {
+                substring: "done".to_string(),
+            },
+        )];
+
+        let (train, holdout) = ImprovementLoop::stratified_split(&cases, 0.4);
+
+        assert_eq!(train.len(), 1);
+        assert_eq!(train.first().map(|case| case.id.as_str()), Some("single"));
+        assert!(holdout.is_empty());
+    }
+
+    #[test]
+    fn mixed_groups_keep_singletons_out_of_holdout() {
+        let cases = vec![
+            eval_case(
+                "single",
+                SuccessCriteria::OutputContains {
+                    substring: "done".to_string(),
+                },
+            ),
+            eval_case(
+                "tool-a",
+                SuccessCriteria::ToolUsed {
+                    tool_name: "read".to_string(),
+                },
+            ),
+            eval_case(
+                "tool-b",
+                SuccessCriteria::ToolUsed {
+                    tool_name: "write".to_string(),
+                },
+            ),
+        ];
+
+        let (train, holdout) = ImprovementLoop::stratified_split(&cases, 0.5);
+
+        assert_eq!(train.len(), 2);
+        assert_eq!(holdout.len(), 1);
+        assert!(train.iter().any(|case| case.id == "single"));
+        assert!(!holdout.iter().any(|case| case.id == "single"));
+        assert_eq!(
+            train
+                .iter()
+                .chain(&holdout)
+                .filter(|case| case.id.starts_with("tool-"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn multi_case_groups_remain_split_at_ratio_boundaries() {
+        let cases = vec![
+            eval_case(
+                "case-a",
+                SuccessCriteria::OutputContains {
+                    substring: "a".to_string(),
+                },
+            ),
+            eval_case(
+                "case-b",
+                SuccessCriteria::OutputContains {
+                    substring: "b".to_string(),
+                },
+            ),
+            eval_case(
+                "case-c",
+                SuccessCriteria::OutputContains {
+                    substring: "c".to_string(),
+                },
+            ),
+        ];
+
+        for ratio in [-1.0, 0.0, 1.0, 2.0] {
+            let (train, holdout) = ImprovementLoop::stratified_split(&cases, ratio);
+            assert!(!train.is_empty());
+            assert!(!holdout.is_empty());
+            assert_eq!(train.len().saturating_add(holdout.len()), cases.len());
+            for case in &cases {
+                let occurrences = train
+                    .iter()
+                    .chain(&holdout)
+                    .filter(|candidate| candidate.id == case.id)
+                    .count();
+                assert_eq!(occurrences, 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_early_stop_loops_use_distinct_cleaned_generations()
+    -> std::result::Result<(), String> {
+        let cases = vec![eval_case(
+            "early-stop",
+            SuccessCriteria::OutputContains {
+                substring: "done".to_string(),
+            },
+        )];
+        let loop_config = ImprovementLoop {
+            max_iterations: 3,
+            improvement_threshold: 0.0,
+            holdout_ratio: 0.4,
+        };
+        let first_observer = MockAgent::new("first-loop").with_default_success("done".to_string());
+        let first_factory_agent = first_observer.clone();
+        let second_observer =
+            MockAgent::new("second-loop").with_default_success("done".to_string());
+        let second_factory_agent = second_observer.clone();
+        let run_store = None;
+
+        let first_loop = loop_config.run_async(
+            &cases,
+            move || {
+                let agent = first_factory_agent.clone();
+                std::future::ready(Box::new(agent) as Box<dyn crate::agent::Agent>)
+            },
+            &run_store,
+        );
+        let second_loop = loop_config.run_async(
+            &cases,
+            move || {
+                let agent = second_factory_agent.clone();
+                std::future::ready(Box::new(agent) as Box<dyn crate::agent::Agent>)
+            },
+            &run_store,
+        );
+        let (first_result, second_result) = tokio::join!(first_loop, second_loop);
+        let first_cwd = first_observer
+            .invocation_contexts()
+            .first()
+            .and_then(|context| context.working_dir.clone())
+            .ok_or_else(|| "first early-stop loop did not record a workspace".to_string())?;
+        let second_cwd = second_observer
+            .invocation_contexts()
+            .first()
+            .and_then(|context| context.working_dir.clone())
+            .ok_or_else(|| "second early-stop loop did not record a workspace".to_string())?;
+
+        if first_result.iterations.len() != 1 || second_result.iterations.len() != 1 {
+            return Err("improvement loops did not stop after the first iteration".to_string());
+        }
+        if first_cwd == second_cwd {
+            return Err("concurrent improvement loops shared a workspace".to_string());
+        }
+        if first_cwd.exists() || second_cwd.exists() {
+            return Err("early-stop improvement workspace was not cleaned up".to_string());
+        }
+        Ok(())
     }
 }

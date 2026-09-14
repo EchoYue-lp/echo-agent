@@ -6,6 +6,16 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 ---
 
+## Start Here
+
+| Guide | Purpose |
+| --- | --- |
+| [Framework Architecture](./architecture.md) | Package DAG, layers, public facade, SDK consumers, and application boundary |
+| [Core Concepts](./concepts.md) | Qualified identity, state authority, persistence scope, and non-responsibility |
+| [Framework Lifecycles](./lifecycles.md) | Admission, cancellation, terminal, recovery, cleanup, and projection across domains |
+| [Framework and Application Boundary](./39-framework-application-boundary.md) | Product-neutral mechanism versus embedding application policy |
+| [Getting Started](./getting-started.md) | Build and run the first Agent |
+
 ## Documentation Index
 
 ### Framework Boundaries
@@ -100,6 +110,14 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [0023 - Current Skill Frontmatter](../adr/0023-current-skill-frontmatter.md) | Markdown body and directory resources replace legacy frontmatter content fields |
 | [0024 - Unified Subagent Prompt Compilation](../adr/0024-unified-subagent-prompt-compilation.md) | One injected compiler owns registration and dispatch prompt framing |
 | [0025 - Deterministic Command-Cell Watcher](../adr/0025-deterministic-command-cell-watcher.md) | A retained typed watcher replaces model-driven command polling |
+| [0026 - Official Skill Frontmatter Only](../adr/0026-official-skill-frontmatter-only.md) | File Skills use the official fields while Hook configuration remains separate |
+| [0027 - Subagent Communication Primitives](../adr/0027-subagent-communication-primitives.md) | Attempt-scoped messaging and lineage share one Subagent control plane |
+| [0028 - Source-First Multilanguage SDK Runtime](../adr/0028-source-first-multilanguage-sdk-runtime.md) | ACP plus namespaced extensions expose one Rust runtime to source SDKs |
+| [0029 - Shared Subagent Execution Admission](../adr/0029-shared-subagent-execution-admission.md) | Proposed shared admission composes Task and direct Subagent execution |
+| [0030 - Versioned Subagent Event Envelope](../adr/0030-versioned-subagent-event-envelope.md) | One versioned envelope owns Subagent event identity, order, and replay |
+| [0031 - SDK Identity Governance Scope](../adr/0031-sdk-identity-governance-scope.md) | SDK identity inventory monitors drift but does not measure project semantic completion |
+| [0032 - SDK Contract Scope Classification](../adr/0032-sdk-contract-scope-classification.md) | Identity-level scope separates the current external contract from Host/Rust-only, language, helper, and deferred surfaces |
+| [0041 - Semantic Governance Continuity](../adr/0041-semantic-governance-continuity.md) | Result-specific continuity reconciles the SDK baseline with whole-workspace governance |
 
 ---
 

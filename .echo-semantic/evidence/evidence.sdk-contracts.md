@@ -2,12 +2,14 @@
 schema_version: 1
 id: evidence.sdk-contracts
 kind: evidence
-observed_at: source:448caeb7a6cc1bb147c8d86412b0b9a8d0c14b653b8326724432b49faebab62c
+observed_at: 9d1f3f2b5fdc204c08ecdec32ed22e8df95870e9
 source_refs:
   - sdks/typescript/.gitignore
   - Cargo.toml
   - contracts/sdk/parity-manifest.json
   - contracts/sdk/parity-manifest.schema.json
+  - contracts/sdk/source-contract.json
+  - sdks/shared/contract-digests.json
   - contracts/sdk/public-api.txt
   - contracts/sdk/schema/echo-agent-extension-v1.schema.json
   - contracts/sdk/facade-operation-catalog.json
@@ -20,6 +22,7 @@ source_refs:
   - echo-integration/src/mcp/client.rs
   - echo-orchestration/src/tasks/revisioned.rs
   - echo-orchestration/src/tasks/runtime_executor.rs
+  - echo-orchestration/src/tasks/background_task.rs
   - echo-orchestration/src/workflow/mod.rs
   - echo-state/src/compression/compressor/hybrid.rs
   - echo-state/src/compression/compressor/sliding_window.rs
@@ -30,6 +33,11 @@ source_refs:
   - echo-sdk-protocol/src/inventory.rs
   - echo-sdk-protocol/src/methods.rs
   - echo-sdk-protocol/tests/facade_inventory.rs
+  - scripts/check-language-sdks.sh
+  - docs/adr/0031-sdk-identity-governance-scope.md
+  - docs/adr/0032-sdk-contract-scope-classification.md
+  - docs/adr/0039-background-task-terminal-authority.md
+  - docs/sdk/README.md
   - echo-sdk-protocol/tests/extension_contract.rs
   - echo-sdk-host/src/core_profile/facade/mod.rs
   - echo-sdk-host/Cargo.toml
@@ -450,6 +458,12 @@ limitations:
 
 当前合同可确定列出root facade、route、signature、feature和语言状态；真实Host测试已覆盖ACP、core、family、extension、全部canonical source adapter、typed compressor/AgentComponent consumer trait及Workflow/A2A facade stream的显式关闭、Session关闭和connection EOF。
 
+Manifest schema v2新增identity级`sdk_scope`。非intrinsic route或具名intrinsic capability group独立决定external acceptance，language status随后提供实现证据并可让gate失败，不能反向降级scope。当前9,684个canonical identity分为5,607个external contract、1,765个Host/Rust-only、781个language intrinsic、90个internal helper和1,441个deferred；551个intrinsic route仍属于external contract。Alias显式继承canonical scope，四套catalog gate均要求external contract三语言done。
+
+本轮`Clone for BackgroundTask<T>`新增1个canonical和3个re-export alias，全部分类为`language_intrinsic`的Rust trait implementation。Public inventory、manifest、source contract、catalog总量、shared digest与四套scope-count consumer已同步；external/Host/helper/deferred数量、route集合和三语言facade实现保持不变。
+
+本轮ToolManager/ReactAgent动态registry的12个Rust public路径（5个canonical与7个re-export alias）只把借用Ref或Box返回改为owned Arc signature，canonical数量与scope不变且全部属于Host/Rust-only。Public API、parity manifest、source contract与shared source digest由唯一generator更新；operation catalog、extension schema、fixtures和三语言facade保持不变。
+
 本轮新增的 `PromptCacheLayout`/`SegmentRanges` 仅复现 Rust 的只读分段投影和半开区间，缓存状态与 provider placement 仍由 Rust/Host 持有；TypeScript、Python、Java 行为测试分别覆盖典型分段、无 canonical 标记和范围计算。前一轮 Linux fake-Docker 测试夹具改为临时文件写入后原子重命名，避免执行文件写入竞争触发 `ETXTBSY`，生产 Docker 执行路径未改变。
 
 本轮新增的 `MemoryScope` 仅复现 Rust 的 scope 顺序、持久化分类、wire 名称和 `proj`/`sess` 解析别名；Memory storage、清理和生命周期仍由 Rust/Host 持有。三语言测试覆盖顺序、持久化边界、别名和未知输入。
@@ -458,8 +472,8 @@ limitations:
 
 ## 来源与范围
 
-来源包括`echo-sdk-protocol/src/facade.rs`、`echo-sdk-protocol/tests/facade_inventory.rs`、`echo-sdk-host/src/core_profile/facade/source_operations.rs`、`echo-sdk-host/src/core_profile/facade/stream.rs`、`echo-sdk-host/src/core_profile/facade/workflow.rs`、`echo-sdk-host/src/core_profile/facade/integrations.rs`、`echo-sdk-host/tests/core_profile_e2e.rs`、`echo-sdk-host/tests/facade_feature_adapters_e2e.rs`、`contracts/sdk/source-contract.json`、`sdks/shared/contract-digests.json`和`sdks/shared/facade-operation-catalog.json`。
+来源包括`echo-sdk-protocol/src/inventory.rs`与`facade.rs`、facade inventory tests、三语言catalog tests、`scripts/check-language-sdks.sh`、ADR 0031/0032、Host source/stream/workflow/integration adapters及E2E、`contracts/sdk/source-contract.json`、`sdks/shared/contract-digests.json`和保持不变的facade operation catalog。
 
 ## 已知缺口
 
-机械闭合、第四轮finding修复对应的focused E2E、no-bridge/bridge零告警组合、完整workspace/all-feature/单feature门禁、三语言 route baseline 门禁、90个合同artifact和19个ExtensionBridge E2E均已通过；组件流终态、Sandbox取消、MCP发布失败清理及SkillLoadPolicy live路径均有反例。improve单feature显式包含eval；sdk-extension-bridge显式包含其tokenizer所需的唯一facade adapter authority。CI保留Linux lld flags并追加-D warnings，先编译全部bridge test targets，再以明确的--test参数真实执行19个ExtensionBridge E2E；full profile执行23个。第十轮独立复审结论为pass，当前证据支持 Plan 8 和可执行 language route baseline，不支持总体 Parity complete 声明。
+机械闭合、90个合同artifact byte-stability、Rust scope测试和三语言source/Host gate覆盖当前生成物；TypeScript 156、Python 168测试与Java真实Host连接成功。Operation route集合保持不变，catalog总量随Rust intrinsic增加。当前证据支持已声明external contract完整，不支持“所有Rust public identity均在三语言可用”的总体声明。1,441个deferred identity仍需按capability判断；组件流终态、Sandbox取消、MCP发布失败清理、SkillLoadPolicy live路径和SDK gap generation等现有Finding均未因本轮intrinsic更新关闭。

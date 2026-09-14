@@ -4,6 +4,16 @@
 
 ---
 
+## 从这里开始
+
+| 指南 | 作用 |
+| --- | --- |
+| [Framework 架构](./architecture.md) | Package DAG、分层、public facade、SDK consumer 和 application 边界 |
+| [核心概念](./concepts.md) | 限定 identity、状态权威、持久 scope 和非责任 |
+| [Framework 生命周期](./lifecycles.md) | 跨领域的接纳、取消、终态、恢复、清理和 projection |
+| [Framework 与应用边界](./39-framework-application-boundary.md) | 产品无关机制与 embedding application 策略 |
+| [快速入门](./getting-started.md) | 构建并运行第一个 Agent |
+
 ## 文档索引
 
 ### Framework 边界
@@ -99,6 +109,14 @@
 | [0023 - 当前 Skill Frontmatter](../adr/0023-current-skill-frontmatter.md) | Markdown 正文与目录资源取代旧 frontmatter 内容字段 |
 | [0024 - Subagent 提示词统一编译](../adr/0024-unified-subagent-prompt-compilation.md) | 一个注入式 compiler 统一拥有注册与派发 prompt framing |
 | [0025 - 确定性 CommandCell watcher](../adr/0025-deterministic-command-cell-watcher.md) | retained typed watcher 取代模型驱动的命令轮询 |
+| [0026 - 仅使用官方 Skill Frontmatter](../adr/0026-official-skill-frontmatter-only.md) | 文件 Skill 使用官方字段，Hook 配置保持独立 |
+| [0027 - Subagent 通信原语](../adr/0027-subagent-communication-primitives.md) | attempt-scoped 消息与 lineage 复用同一 Subagent 控制面 |
+| [0028 - 源码优先的多语言 SDK Runtime](../adr/0028-source-first-multilanguage-sdk-runtime.md) | ACP 与 namespaced extension 向源码 SDK 暴露同一个 Rust runtime |
+| [0029 - 共享 Subagent 执行准入](../adr/0029-shared-subagent-execution-admission.md) | Proposed 的共享准入组合 Task 与直接 Subagent 执行 |
+| [0030 - 版本化 Subagent 事件信封](../adr/0030-versioned-subagent-event-envelope.md) | 一个版本化信封拥有 Subagent 事件 identity、顺序与 replay |
+| [0031 - SDK Identity 治理范围](../adr/0031-sdk-identity-governance-scope.md) | SDK identity inventory 监控漂移，不衡量项目语义完成度 |
+| [0032 - SDK 合同范围分类](../adr/0032-sdk-contract-scope-classification.md) | identity 级 scope 区分当前外部合同、Host/Rust-only、语言固有、内部 helper 与 deferred surface |
+| [0041 - 语义治理连续性](../adr/0041-semantic-governance-continuity.md) | 用结果特定的连续性裁决衔接 SDK 基线与全 workspace 治理 |
 
 ---
 
