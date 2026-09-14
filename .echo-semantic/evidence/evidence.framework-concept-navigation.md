@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.framework-concept-navigation
 kind: evidence
-observed_at: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
+observed_at: 1cb25e80515ea17624fe652be1fd29c096b9a880
 source_refs:
   - README.md
   - README.zh.md

@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: examined
-revision: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
+revision: 1cb25e80515ea17624fe652be1fd29c096b9a880
 finding_refs: []
 challenges:
   package-layer-and-application-boundary:
-    revision: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
+    revision: 1cb25e80515ea17624fe652be1fd29c096b9a880
     source_refs: [Cargo.toml, src/lib.rs, docs/en/architecture.md, docs/zh/architecture.md, docs/adr/0040-framework-concept-documentation-authority.md]
     evidence_refs: [evidence.workspace-structure, evidence.framework-concept-navigation]
   identity-state-and-persistence-authority:
-    revision: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
+    revision: 1cb25e80515ea17624fe652be1fd29c096b9a880
     source_refs: [docs/en/concepts.md, docs/zh/concepts.md, docs/en/41-persistence-concepts.md, docs/zh/41-persistence-concepts.md]
     evidence_refs: [evidence.framework-concept-navigation, evidence.agent-context-execution, evidence.persistence-observation, evidence.task-subagent-workflow]
   lifecycle-and-open-limitations:
-    revision: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
+    revision: 1cb25e80515ea17624fe652be1fd29c096b9a880
     source_refs: [docs/en/lifecycles.md, docs/zh/lifecycles.md, src/agent/react/run/phases/finalize.rs, src/agent/react/run/pipeline.rs, echo-execution/src/tools.rs, echo-core/src/plugin/lifecycle.rs]
     evidence_refs: [evidence.framework-concept-navigation, evidence.effects-extensions, evidence.agent-context-execution]
   bilingual-structure-and-executable-routes:
-    revision: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
+    revision: 1cb25e80515ea17624fe652be1fd29c096b9a880
     source_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, echo-agent-learning/tests/documentation_contract.rs, echo-agent-learning/tests/example_contracts.rs]
     evidence_refs: [evidence.framework-concept-navigation]
 ---

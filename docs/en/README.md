@@ -117,6 +117,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [0030 - Versioned Subagent Event Envelope](../adr/0030-versioned-subagent-event-envelope.md) | One versioned envelope owns Subagent event identity, order, and replay |
 | [0031 - SDK Identity Governance Scope](../adr/0031-sdk-identity-governance-scope.md) | SDK identity inventory monitors drift but does not measure project semantic completion |
 | [0032 - SDK Contract Scope Classification](../adr/0032-sdk-contract-scope-classification.md) | Identity-level scope separates the current external contract from Host/Rust-only, language, helper, and deferred surfaces |
+| [0041 - Semantic Governance Continuity](../adr/0041-semantic-governance-continuity.md) | Result-specific continuity reconciles the SDK baseline with whole-workspace governance |
 
 ---
 

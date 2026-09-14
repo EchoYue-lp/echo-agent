@@ -4,13 +4,13 @@ id: map.protocol-surfaces
 kind: capability_map
 title: ACP、A2A、Channels、Headless 与 SDK Surfaces
 risk: high
-observed_at: source:2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
+observed_at: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
 boundary_refs: [boundary.protocol-surfaces]
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation]
-finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding, finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.sdk-gap-generation-validation-parity]
-audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.time-lifecycle, audit.protocol-surfaces.contract-evidence]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
+finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding, finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.sdk-gap-generation-validation-parity, finding.sdk-deferred-backlog-count-drift]
+audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.time-lifecycle, audit.protocol-surfaces.contract-evidence, audit.semantic-governance-final-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.extension-lifecycle, map.sdk-facade-parity]
 scenarios:
   acp-session-run-projection:
@@ -45,11 +45,14 @@ scenarios:
     finding_refs: [finding.sdk-gap-generation-validation-parity]
     unknown: Host handle generation 正确，但三语言 gap 通知未一致校验完整 WireHandle generation
     next_step: SDK contract repair 统一 gap generation 反例测试，不扩大到 intrinsic identity 门禁
-  sdk-intrinsic-backlog:
+  sdk-deferred-backlog:
     status: needs_review
-    source_refs: [contracts/sdk/parity-manifest.json, docs/adr/0031-sdk-identity-governance-scope.md]
-    unknown: 4076 个 intrinsic identity 的 capability 分组与外部用户价值尚未形成独立 SDK backlog
-    next_step: SDK contract scope outcome 按 public capability、Host/Rust-only、language intrinsic、internal helper 与 deferred 分类
+    source_refs: [contracts/sdk/parity-manifest.json, docs/adr/0031-sdk-identity-governance-scope.md, docs/adr/0032-sdk-contract-scope-classification.md]
+    evidence_refs: [evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
+    finding_refs: [finding.sdk-deferred-backlog-count-drift]
+    audit_refs: [audit.semantic-governance-final-rereview]
+    unknown: 1441个deferred identity的capability分组、外部用户价值与逐组产品合同决策尚未闭合
+    next_step: 按externally useful capability审查deferred；Host/Rust-only、language intrinsic与internal helper不是语言parity backlog
   product-backend-desktop-device:
     status: excluded
     source_refs: [docs/en/39-framework-application-boundary.md]
@@ -94,7 +97,7 @@ ACP permission 与 Agent policy 只在协商后调用；channel/provider credent
 
 ## 场景处置清单
 
-五类入口均有路由；A2A/Channel/SDK gap 保持 needs_review 并进入 Finding，SDK intrinsic backlog 独立 needs_review，产品层 excluded。
+五类入口均有路由；A2A/Channel/SDK gap保持needs_review并进入Finding，SDK deferred capability backlog独立needs_review，产品层excluded。
 
 ## 未展开项
 

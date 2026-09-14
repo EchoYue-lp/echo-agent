@@ -3,8 +3,8 @@ schema_version: 1
 id: discovery.workspace-baseline
 kind: discovery
 source_snapshot:
-  base_revision: f1e9027246760661144786e9e35615cd46d580c6
-  content_digest: 8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+  base_revision: 1cb25e80515ea17624fe652be1fd29c096b9a880
+  content_digest: 2fc9b164efa9507d717a840c7e06b51d5044dbf044d47d429b9512f0c9f2d178
 scope: echo-agent 11-package workspace 的架构、入口、状态权威、生命周期、副作用、协议、持久化和验证消费者
 inspected_paths: [Cargo.toml, src, echo-core, echo-execution, echo-integration, echo-macros, echo-orchestration, echo-state, echo-tools, echo-sdk-protocol, echo-sdk-host, contracts, sdks, tests, echo-agent-learning, docs, scripts, .github]
 candidate_refs: [map.workspace-architecture, map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.tool-permission-sandbox, map.extension-lifecycle, map.llm-provider-runtime, map.protocol-surfaces, map.eval-evolution]
@@ -19,7 +19,7 @@ unresolved:
   - K8s stream consumer drop 是否遗留 Pod 的真实故障注入证据
   - Plugin registry、prepared wiring、lifecycle callback 与 host shutdown 的统一 production coordinator
   - 快速变化的 provider/model facts 由 framework、provider 或 application 更新的 precedence
-  - 4076 个 SDK intrinsic identity 的 capability 分组和外部用户价值
+  - 1441个SDK deferred identity的capability分组、外部用户价值与逐组产品合同决策；Host/Rust-only、language intrinsic和internal helper不属于语言parity backlog
   - Evolution 自动维护、proposal、human-approved mutation 与 application scheduling 的完整协调
   - Improve 共享临时路径在并发与提前达标时的隔离/cleanup 语义
   - MCP、QQ、飞书等 credential-bearing config 的 Debug/redaction contract
