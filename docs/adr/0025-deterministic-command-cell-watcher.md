@@ -35,6 +35,13 @@ framework consumer and contains no EKO workspace or conversation policy.
 5. Embedding applications own address validation, durable receipts, result
    delivery, acknowledgement, recovery, surface projection, and any explicit
    command-stop operation.
+6. Cell and owner cancellation also interrupt artifact finalization. A cell is
+   published terminal only after its finalizer settles or records a bounded
+   interruption, and interruption is reported as a typed artifact failure
+   without reopening the command process.
+7. Terminal retention treats its candidate scan as advisory. Removal rechecks
+   terminal state and all observation/waiter leases while holding the map shard
+   lock, so a lease acquired during pruning protects the cell.
 
 ## Consequences
 
