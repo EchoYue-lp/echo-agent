@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.scheduler-occurrence-authority-repair
 kind: evidence
-observed_at: cfc3af7c4ebcc571971072b99f7a9aeb39b9d422
+observed_at: 2042bc17100abe51b7d500e954eb31e186f3878b
 source_refs:
   - echo-orchestration/src/scheduler/cron_task.rs
   - echo-orchestration/src/scheduler/runner.rs
