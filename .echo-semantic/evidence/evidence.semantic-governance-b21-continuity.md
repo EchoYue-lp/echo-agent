@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.semantic-governance-b21-continuity
 kind: evidence
-observed_at: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+observed_at: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4063e
 source_refs:
   - docs/adr/0031-sdk-identity-governance-scope.md
   - docs/adr/0032-sdk-contract-scope-classification.md
@@ -22,7 +22,7 @@ evidence_type: semantic_continuity
 merge_base_revision: b21aba01b34e74c93d783a89db895282ba831c3c
 predecessor_revisions:
   - b21aba01b34e74c93d783a89db895282ba831c3c
-result_snapshot: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+result_snapshot: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4063e
 resolutions:
   "behavior.sdk-facade-routing":
     disposition: resolved_conflict

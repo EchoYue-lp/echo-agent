@@ -131,7 +131,9 @@ done
 
 完整 all-feature 门禁由任务分支在合并前执行一次。CI 只补本地 macOS 无法等价覆盖的
 信号:Linux all-target/all-feature lint、分组的默认 feature 测试、Windows 编译与原子
-文件替换测试、依赖审计。同一 ref 的旧 run 由 concurrency gate 自动取消。
+文件替换测试、依赖审计,以及learning test中的semantic baseline target-main ancestry
+合同。PR使用base SHA、main push使用before SHA并checkout完整历史,使feature-only
+baseline revision在squash前失败。同一 ref 的旧 run 由 concurrency gate 自动取消。
 
 Linux 测试分组是资源下限:单一 workspace test job 在标准 runner 上会 OOM;逐包运行
 all-feature 测试也曾令 `echo_agent`/`echo_tools` runner 失联。all-feature 测试属于本地

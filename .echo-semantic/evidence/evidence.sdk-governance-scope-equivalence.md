@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-governance-scope-equivalence
 kind: evidence
-observed_at: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+observed_at: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4063e
 source_refs:
   - docs/adr/0028-source-first-multilanguage-sdk-runtime.md
   - docs/adr/0031-sdk-identity-governance-scope.md
@@ -28,7 +28,7 @@ limitations:
   - 远程CI、PR/merge、发布和docs.rs渲染未执行
 evidence_type: behavior_equivalence
 before_revision: b21aba01b34e74c93d783a89db895282ba831c3c
-after_revision: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+after_revision: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4063e
 scenario_results:
   rust-runtime-authority:
     status: matched

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.semantic-governance-final-verification
 kind: evidence
-observed_at: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+observed_at: d492c676d1bf0744452d96a6960124546ed3fff9
 source_refs:
   - AGENTS.md
   - Cargo.toml
