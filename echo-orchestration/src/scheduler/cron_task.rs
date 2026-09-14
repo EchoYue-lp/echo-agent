@@ -282,7 +282,7 @@ impl CronTaskStore {
         Ok(updated)
     }
 
-    /// Get a task by ID prefix.
+    /// Get a task by its unique ID.
     pub async fn get(&self, id: &str) -> echo_core::error::Result<Option<CronTask>> {
         let id = unique_id(id)?;
         let tasks = self.load_all().await?;

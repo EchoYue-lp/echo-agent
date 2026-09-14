@@ -25,9 +25,10 @@ pub type FireFn =
 struct ScheduledOccurrence {
     task: CronTask,
     scheduled_at: DateTime<Utc>,
+    control_epoch: u64,
 }
 
-type LastFiredByTask = HashMap<String, (String, DateTime<Utc>)>;
+type LastFiredByTask = HashMap<String, (String, DateTime<Utc>, u64)>;
 
 /// Owned handle for a running scheduler loop.
 pub struct SchedulerHandle {
@@ -69,6 +70,7 @@ pub struct SchedulerRunner {
     fire_fn: FireFn,
     tasks: Arc<RwLock<Vec<CronTask>>>,
     last_fired: Arc<RwLock<LastFiredByTask>>,
+    control_epochs: Arc<RwLock<HashMap<String, u64>>>,
     last_tick_at: Arc<RwLock<DateTime<Utc>>>,
     control_lock: Arc<Mutex<()>>,
     cancel: CancellationToken,
@@ -87,6 +89,7 @@ impl SchedulerRunner {
             fire_fn,
             tasks: Arc::new(RwLock::new(tasks)),
             last_fired: Arc::new(RwLock::new(HashMap::new())),
+            control_epochs: Arc::new(RwLock::new(HashMap::new())),
             last_tick_at: Arc::new(RwLock::new(Utc::now())),
             control_lock: Arc::new(Mutex::new(())),
             cancel,
@@ -132,6 +135,7 @@ impl SchedulerRunner {
             previous
         };
         let tasks = self.tasks.read().await;
+        let control_epochs = self.control_epochs.read().await;
 
         let mut to_fire: Vec<ScheduledOccurrence> = Vec::new();
         let mut last_fired = self.last_fired.write().await;
@@ -148,22 +152,28 @@ impl SchedulerRunner {
                     // a later admission gate suppresses the callback, so a
                     // disable/remove followed by re-enable cannot replay an
                     // already observed occurrence.
-                    if let Some((definition_id, last)) = last_fired.get(&task.id)
+                    if let Some((definition_id, last, _)) = last_fired.get(&task.id)
                         && definition_id == &task.created_at
                         && *last == next
                     {
                         debug!(task = %task.name, "Skipping double-fire");
                         continue;
                     }
-                    last_fired.insert(task.id.clone(), (task.created_at.clone(), next));
+                    let control_epoch = control_epochs.get(&task.id).copied().unwrap_or_default();
+                    last_fired.insert(
+                        task.id.clone(),
+                        (task.created_at.clone(), next, control_epoch),
+                    );
                     to_fire.push(ScheduledOccurrence {
                         task: task.clone(),
                         scheduled_at: next,
+                        control_epoch,
                     });
                 }
             }
         }
         drop(tasks);
+        drop(control_epochs);
         drop(last_fired);
 
         // Fire outside locks
@@ -193,6 +203,23 @@ impl SchedulerRunner {
                 );
                 return;
             };
+            let current_epoch = self
+                .control_epochs
+                .read()
+                .await
+                .get(&occurrence.task.id)
+                .copied()
+                .unwrap_or_default();
+            if current_epoch != occurrence.control_epoch {
+                debug!(
+                    task_id = %occurrence.task.id,
+                    scheduled_at = %occurrence.scheduled_at,
+                    captured_epoch = occurrence.control_epoch,
+                    current_epoch,
+                    "Skipping occurrence fenced by a committed control mutation"
+                );
+                return;
+            }
             let task = task.clone();
             let callback = (self.fire_fn)(task.clone());
             (task, callback)
@@ -251,12 +278,12 @@ impl SchedulerRunner {
         self.refresh_cache().await.map(|_| ())
     }
 
-    /// Remove a cron task by ID prefix.
+    /// Remove a cron task by its unique ID.
     pub async fn remove_task(&self, id: &str) -> echo_core::error::Result<bool> {
         let _control = self.control_lock.lock().await;
         let removed = self.store.remove(id).await?;
         if removed {
-            self.last_fired.write().await.remove(id);
+            self.bump_control_epoch(id).await;
             self.refresh_cache().await?;
         }
         Ok(removed)
@@ -267,6 +294,7 @@ impl SchedulerRunner {
         let _control = self.control_lock.lock().await;
         let removed = self.store.remove_exact(id).await?;
         if removed {
+            self.bump_control_epoch(id).await;
             self.last_fired.write().await.remove(id);
             self.refresh_cache().await?;
         }
@@ -282,6 +310,7 @@ impl SchedulerRunner {
         let _control = self.control_lock.lock().await;
         let updated = self.store.set_status(id, status).await?;
         if updated {
+            self.bump_control_epoch(id).await;
             self.refresh_cache().await?;
         }
         Ok(updated)
@@ -328,6 +357,12 @@ impl SchedulerRunner {
         let count = tasks.len();
         *self.tasks.write().await = tasks;
         Ok(count)
+    }
+
+    async fn bump_control_epoch(&self, id: &str) {
+        let mut epochs = self.control_epochs.write().await;
+        let epoch = epochs.entry(id.to_string()).or_default();
+        *epoch = epoch.saturating_add(1);
     }
 }
 
@@ -483,6 +518,7 @@ mod tests {
         let occurrence = ScheduledOccurrence {
             task: task.clone(),
             scheduled_at,
+            control_epoch: 0,
         };
         runner.add_task(task).await?;
         runner
@@ -491,6 +527,43 @@ mod tests {
         runner.fire_task(occurrence).await;
         assert_eq!(fired.load(Ordering::SeqCst), 0);
 
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disable_then_reenable_does_not_admit_stale_occurrence() -> echo_core::error::Result<()>
+    {
+        let root =
+            std::env::temp_dir().join(format!("echo-scheduler-reenable-{}", uuid::Uuid::new_v4()));
+        let store = CronTaskStore::new().with_path(root.join("tasks.json"));
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_for_fn = Arc::clone(&fired);
+        let fire_fn: FireFn = Arc::new(move |_task| {
+            let fired = Arc::clone(&fired_for_fn);
+            Box::pin(async move {
+                fired.fetch_add(1, Ordering::SeqCst);
+                Ok("stale".to_string())
+            })
+        });
+        let runner = SchedulerRunner::new(store, CancellationToken::new(), fire_fn).await?;
+        let task = CronTask::new("reenable", "*/5 * * * *", "run");
+        let task_id = task.id.clone();
+        runner.add_task(task.clone()).await?;
+        let occurrence = ScheduledOccurrence {
+            task,
+            scheduled_at: Utc
+                .with_ymd_and_hms(2026, 8, 13, 0, 1, 0)
+                .single()
+                .ok_or_else(|| echo_core::error::ReactError::Other("invalid test time".into()))?,
+            control_epoch: 0,
+        };
+        runner
+            .set_status(&task_id, CronTaskStatus::Disabled)
+            .await?;
+        runner.set_status(&task_id, CronTaskStatus::Enabled).await?;
+        runner.fire_task(occurrence).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(root);
         Ok(())
     }

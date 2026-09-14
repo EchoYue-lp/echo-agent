@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.scheduler-occurrence-authority-repair
 kind: evidence
-observed_at: 812fca0261039d7dd686b2b5edf1a00465b54275
+observed_at: cfc3af7c4ebcc571971072b99f7a9aeb39b9d422
 source_refs:
   - echo-orchestration/src/scheduler/cron_task.rs
   - echo-orchestration/src/scheduler/runner.rs
@@ -24,9 +24,10 @@ CronTask ID；重复定义 fail closed，Store backend 已存在的目标值不�
 文件覆盖。SchedulerRunner 在每次成功 store mutation 后重新加载完整快照，使
 `tasks` 只作为 derived cache，不再保留旧的 `last_run` projection。
 
-Tick 保存 `task.id + created_at + scheduled_at` occurrence identity。callback
-创建前在 runner control lock 下重新确认同一任务定义仍存在且为 Enabled；在该
-admission 点之后，disable/remove 不撤回已接纳 invocation。callback settlement
+Tick 保存 `task.id + created_at + scheduled_at` occurrence identity 和每个 task 的
+control epoch。callback 创建前在 runner control lock 下重新确认同一任务定义仍
+存在、为 Enabled 且 epoch 未被 control mutation 递增；在该 admission 点之后，
+disable/remove 不撤回已接纳 invocation。callback settlement
 用 captured definition identity 更新 last-run，旧定义不能写入被删除后重建的同 ID
 任务。`run_once` 仍是显式手动触发路径，但不会绕过 Disabled 状态，并在持久化
 成功后刷新 cache；控制/admission gate 只约束 tick 捕获的 scheduled occurrence。
@@ -34,7 +35,7 @@ admission 点之后，disable/remove 不撤回已接纳 invocation。callback se
 ## 验证
 
 - `cargo test -p echo_orchestration scheduler::cron_task::tests`：7 passed
-- `cargo test -p echo_orchestration scheduler::runner::tests`：6 passed
+- `cargo test -p echo_orchestration scheduler::runner::tests`：7 passed
 - `cargo clippy -p echo_orchestration --all-targets --all-features --locked -- -D warnings`：passed
 - `cargo fmt --all -- --check`：passed
 
