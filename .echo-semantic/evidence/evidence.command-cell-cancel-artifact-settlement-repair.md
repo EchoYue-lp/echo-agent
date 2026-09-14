@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.command-cell-cancel-artifact-settlement-repair
 kind: evidence
-observed_at: 19dab55d1017b444585798984676e578a3b0db24
+observed_at: f44fcb47c31668ec32104096fa0a729e75a1d39a
 source_refs:
   - echo-orchestration/src/tasks/command_cell.rs
   - docs/adr/0025-deterministic-command-cell-watcher.md
@@ -30,4 +30,4 @@ limitations:
 
 ## 处理记录
 
-对应 Finding #44；修复提交为 `19dab55d1017b444585798984676e578a3b0db24`。
+对应 Finding #44；修复提交为 `19dab55d1017b444585798984676e578a3b0db24`，竞态测试补充提交为 `f44fcb47c31668ec32104096fa0a729e75a1d39a`。

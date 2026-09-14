@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: time_lifecycle
 freshness: examined
-revision: 19dab55d1017b444585798984676e578a3b0db24
+revision: f44fcb47c31668ec32104096fa0a729e75a1d39a
 finding_refs: [finding.command-cell-cancel-artifact-settlement, finding.command-cell-retention-lease-prune-race]
 challenges:
   cancellation-finalizer:
-    revision: 19dab55d1017b444585798984676e578a3b0db24
+    revision: f44fcb47c31668ec32104096fa0a729e75a1d39a
     source_refs: [echo-orchestration/src/tasks/command_cell.rs]
     evidence_refs: [evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification]
   lease-aware-removal:
-    revision: 19dab55d1017b444585798984676e578a3b0db24
+    revision: f44fcb47c31668ec32104096fa0a729e75a1d39a
     source_refs: [echo-orchestration/src/tasks/command_cell.rs]
     evidence_refs: [evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification]
 ---
