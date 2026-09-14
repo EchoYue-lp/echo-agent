@@ -887,15 +887,7 @@ fn prune_terminal_history(
     cells: &DashMap<String, Arc<CommandCellHandle>>,
     max_terminal_history: usize,
 ) {
-    let mut terminal = cells
-        .iter()
-        .filter(|entry| {
-            entry.value().is_terminal()
-                && entry.value().waiter_leases.load(Ordering::Acquire) == 0
-                && entry.value().observation_leases.load(Ordering::Acquire) == 0
-        })
-        .map(|entry| (entry.value().sequence, entry.key().clone()))
-        .collect::<Vec<_>>();
+    let mut terminal = terminal_retention_candidates(cells);
     let remove_count = terminal.len().saturating_sub(max_terminal_history);
     if remove_count == 0 {
         return;
@@ -904,6 +896,20 @@ fn prune_terminal_history(
     for (_, id) in terminal.into_iter().take(remove_count) {
         remove_terminal_candidate(cells, &id);
     }
+}
+
+fn terminal_retention_candidates(
+    cells: &DashMap<String, Arc<CommandCellHandle>>,
+) -> Vec<(u64, String)> {
+    cells
+        .iter()
+        .filter(|entry| {
+            entry.value().is_terminal()
+                && entry.value().waiter_leases.load(Ordering::Acquire) == 0
+                && entry.value().observation_leases.load(Ordering::Acquire) == 0
+        })
+        .map(|entry| (entry.value().sequence, entry.key().clone()))
+        .collect()
 }
 
 fn remove_terminal_candidate(cells: &DashMap<String, Arc<CommandCellHandle>>, cell_id: &str) {
@@ -3030,8 +3036,13 @@ mod tests {
         handle.terminal_flag.store(true, Ordering::Release);
         manager.cells.insert("racing-terminal".to_string(), handle);
 
-        // Simulate the lease acquisition that races after prune selected this
-        // key but before its removal step.
+        // Snapshot candidates first, then acquire the lease in the same window
+        // that production prune has between its scan and remove step.
+        let candidates = terminal_retention_candidates(&manager.cells);
+        assert_eq!(
+            candidates.first().map(|(_, id)| id.as_str()),
+            Some("racing-terminal")
+        );
         let (_, lease) = manager
             .acquire_waiter_lease("racing-terminal")
             .map_err(|error| error.to_string())?;
