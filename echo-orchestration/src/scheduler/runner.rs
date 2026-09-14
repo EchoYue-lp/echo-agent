@@ -318,6 +318,7 @@ impl SchedulerRunner {
 
     /// List all cron tasks.
     pub async fn list_tasks(&self) -> Vec<CronTask> {
+        let _control = self.control_lock.lock().await;
         self.tasks.read().await.clone()
     }
 
