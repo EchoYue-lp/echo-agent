@@ -13,7 +13,7 @@ rule_refs: []
 evidence_refs: [evidence.task-subagent-workflow]
 audit_refs: [audit.task-subagent-workflow.data-durability]
 decision_refs: []
-repair_evidence_refs: []
+repair_evidence_refs: [evidence.scheduler-occurrence-authority-repair]
 verification_evidence_refs: []
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
