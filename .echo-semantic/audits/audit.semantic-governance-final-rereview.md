@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.protocol-surfaces
 lens: contract_evidence
 freshness: examined
-revision: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+revision: d492c676d1bf0744452d96a6960124546ed3fff9
 finding_refs: [finding.sdk-deferred-backlog-count-drift]
 challenges:
   retirement-does-not-delete-capability:
-    revision: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+    revision: d492c676d1bf0744452d96a6960124546ed3fff9
     source_refs: [docs/adr/0041-semantic-governance-continuity.md, contracts/sdk/parity-manifest.json, echo-sdk-protocol/src/inventory.rs]
     evidence_refs: [evidence.sdk-governance-scope-equivalence, evidence.semantic-governance-b21-continuity]
   deferred-backlog-has-one-authority:
-    revision: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+    revision: d492c676d1bf0744452d96a6960124546ed3fff9
     source_refs: [docs/adr/0032-sdk-contract-scope-classification.md, contracts/sdk/parity-manifest.json, scripts/check-language-sdks.sh]
     evidence_refs: [evidence.sdk-contracts, evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
   snapshot-provenance-remains-recoverable:
-    revision: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+    revision: d492c676d1bf0744452d96a6960124546ed3fff9
     source_refs: [docs/adr/0032-sdk-contract-scope-classification.md, docs/en/README.md, docs/zh/README.md]
     evidence_refs: [evidence.framework-concept-navigation, evidence.sdk-deferred-backlog-count-verification]
   final-claims-respect-delivery-boundary:
-    revision: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+    revision: d492c676d1bf0744452d96a6960124546ed3fff9
     source_refs: [AGENTS.md, scripts/verify.sh, scripts/check-sdk-contracts.sh, scripts/check-language-sdks.sh]
     evidence_refs: [evidence.semantic-governance-final-verification, evidence.semantic-governance-b21-continuity]
 ---

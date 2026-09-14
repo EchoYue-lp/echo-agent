@@ -4,13 +4,13 @@ id: map.workspace-architecture
 kind: capability_map
 title: Workspace 架构与公共组合
 risk: high
-observed_at: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+observed_at: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4063e
 boundary_refs: [boundary.workspace-architecture]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification, evidence.framework-concept-navigation]
-finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift]
-audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview, audit.feature-table-doc-rereview, audit.readme-example-target-rereview, audit.framework-concept-navigation-rereview]
+evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification, evidence.framework-concept-navigation, evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-baseline-squash-ancestry-verification]
+finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift, finding.semantic-baseline-squash-ancestry]
+audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview, audit.feature-table-doc-rereview, audit.readme-example-target-rereview, audit.framework-concept-navigation-rereview, audit.semantic-baseline-squash-ancestry-rereview]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.tool-permission-sandbox, map.extension-lifecycle, map.llm-provider-runtime, map.protocol-surfaces, map.eval-evolution]
 scenarios:
   framework-concept-navigation:
@@ -42,6 +42,14 @@ scenarios:
     evidence_refs: [evidence.workspace-structure, evidence.readme-example-target-repair, evidence.readme-example-target-verification]
     finding_refs: [finding.readme-example-target-drift]
     audit_refs: [audit.readme-example-target-rereview]
+  semantic-baseline-target-ancestry:
+    status: mapped
+    source_refs: [.echo-semantic/baseline.md, echo-agent-learning/tests/semantic_baseline_contract.rs, .github/workflows/rust-ci.yml, AGENTS.md]
+    behavior_refs: [behavior.workspace-composition]
+    rule_refs: [rule.framework-layer-ownership]
+    evidence_refs: [evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-baseline-squash-ancestry-verification]
+    finding_refs: [finding.semantic-baseline-squash-ancestry]
+    audit_refs: [audit.semantic-baseline-squash-ancestry-rereview]
   dynamic-registration-inventory:
     status: needs_review
     source_refs: [echo-macros/src/lib.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/workflow/loader.rs]

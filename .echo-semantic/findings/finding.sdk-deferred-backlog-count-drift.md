@@ -16,7 +16,7 @@ decision_refs: []
 repair_evidence_refs: [evidence.sdk-deferred-backlog-count-repair]
 verification_evidence_refs: [evidence.sdk-deferred-backlog-count-verification]
 rereview_audit_refs: [audit.semantic-governance-final-rereview]
-discovered_at: source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4
+discovered_at: d492c676d1bf0744452d96a6960124546ed3fff9
 ---
 
 # SDK backlog仍混用4076 intrinsic旧口径

@@ -62,9 +62,12 @@ jobs:
       CARGO_BUILD_JOBS: "1"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      ECHO_SEMANTIC_TARGET_REVISION: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
       RUSTFLAGS: -C link-arg=-fuse-ld=lld
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Install low-memory linker
         run: sudo apt-get install --no-install-recommends -y lld
       - uses: dtolnay/rust-toolchain@stable
