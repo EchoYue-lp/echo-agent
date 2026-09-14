@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.command-cell-retention-lease-prune-race
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: failure_concurrency
 focus: [time_lifecycle, state_authority, contract_evidence]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution, behavior.effect-permission-execution]
 rule_refs: []
-evidence_refs: [evidence.task-subagent-workflow, evidence.effects-extensions]
-audit_refs: [audit.task-subagent-workflow.time-lifecycle]
+evidence_refs: [evidence.task-subagent-workflow, evidence.effects-extensions, evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification]
+audit_refs: [audit.task-subagent-workflow.time-lifecycle, audit.command-cell-settlement-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.command-cell-cancel-artifact-settlement-repair]
+verification_evidence_refs: [evidence.command-cell-cancel-artifact-settlement-verification]
+rereview_audit_refs: [audit.command-cell-settlement-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,4 @@ Prune 先扫描 lease 计数并收集 key，随后排序并无条件 remove；�
 
 ## 处理记录
 
-Time-lifecycle Audit 确认；后续 repair 需原子复核或基于 generation/lease 的 remove CAS。
+Time-lifecycle Audit 确认。retention 删除现使用 DashMap `remove_if` 在 shard 锁内原子复核 terminal、waiter lease 和 observation lease；新增 lease 竞态测试与 lease drop 后收敛测试通过，repair、verification 与独立复审已闭合本 Finding。

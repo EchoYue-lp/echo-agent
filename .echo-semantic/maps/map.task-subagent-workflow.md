@@ -8,7 +8,7 @@ observed_at: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4
 boundary_refs: [boundary.task-subagent-workflow]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.framework-concept-navigation]
+evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement, finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race, finding.background-task-wait, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.subagent-definition-catalog]
 audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview, audit.subagent-factory-singleflight-rereview, audit.background-task-terminal-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.tool-permission-sandbox]
@@ -55,13 +55,12 @@ scenarios:
     evidence_refs: [evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
     audit_refs: [audit.background-task-terminal-authority-rereview]
   command-cell-runtime:
-    status: needs_review
+    status: mapped
     source_refs: [echo-core/src/tools/cell.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0025-deterministic-command-cell-watcher.md]
-    evidence_refs: [evidence.task-subagent-workflow, evidence.effects-extensions]
+    evidence_refs: [evidence.task-subagent-workflow, evidence.effects-extensions, evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification]
     behavior_refs: [behavior.task-subagent-execution, behavior.effect-permission-execution]
     finding_refs: [finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement]
-    unknown: retained lease prune 与普通 cancel artifact settlement 存在确认的生命周期竞态
-    next_step: 分别 repair lease-aware prune 与 cancellation-bounded finalization
+    audit_refs: [audit.command-cell-settlement-rereview]
 ---
 
 # Task、Subagent、Workflow 与 Scheduler

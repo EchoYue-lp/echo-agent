@@ -51,3 +51,9 @@ framework consumer and contains no EKO workspace or conversation policy.
   registry lease and cursor contract.
 - Applications must not recreate a model-driven polling role or infer terminal
   state from prose, active-process maps, or cancellation alone.
+
+## References
+
+- Tokio `select!` cancellation branches: <https://tokio.rs/tokio/tutorial/select>
+- DashMap conditional removal (`remove_if`):
+  <https://docs.rs/dashmap/6.2.1/dashmap/struct.DashMap.html#method.remove_if>
