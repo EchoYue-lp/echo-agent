@@ -4,6 +4,7 @@
 //! 2. Get tenant_access_token (for sending messages)
 //! 3. Send message API
 
+use crate::redaction::{request_error, text_with_secrets, url as redact_url};
 use echo_core::error::{ChannelError, ReactError, Result};
 use reqwest::Client;
 use serde::Deserialize;
@@ -91,7 +92,10 @@ pub async fn get_ws_endpoint(
 ) -> Result<(String, String, Option<ClientConfig>)> {
     let url = format!("{}{}", domain, WS_ENDPOINT_PATH);
 
-    info!("Feishu: getting WebSocket endpoint from {}", url);
+    info!(
+        "Feishu: getting WebSocket endpoint from {}",
+        redact_url(&url)
+    );
 
     let body = json!({
         "AppID": app_id,
@@ -105,18 +109,30 @@ pub async fn get_ws_endpoint(
         .json(&body)
         .send()
         .await
-        .map_err(|e| ChannelError::NetworkError(format!("Failed to request endpoint: {}", e)))?;
+        .map_err(|e| {
+            ChannelError::NetworkError(format!(
+                "Failed to request endpoint: {}",
+                request_error(e, [app_secret])
+            ))
+        })?;
 
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
         return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
-            format!("Endpoint request failed (status {}): {}", status, text),
+            format!(
+                "Endpoint request failed (status {}): {}",
+                status,
+                text_with_secrets(&text, [app_secret])
+            ),
         ))));
     }
 
     let resp: EndpointResponse = res.json().await.map_err(|e| {
-        ChannelError::NetworkError(format!("Failed to parse endpoint response: {}", e))
+        ChannelError::NetworkError(format!(
+            "Failed to parse endpoint response: {}",
+            request_error(e, [app_secret])
+        ))
     })?;
 
     // Check error code
@@ -139,7 +155,11 @@ pub async fn get_ws_endpoint(
         }
         code => {
             return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
-                format!("Endpoint error (code {}): {}", code, resp.msg),
+                format!(
+                    "Endpoint error (code {}): {}",
+                    code,
+                    text_with_secrets(&resp.msg, [app_secret])
+                ),
             ))));
         }
     }
@@ -173,8 +193,9 @@ pub async fn get_ws_endpoint(
         .unwrap_or_default();
 
     info!(
-        "Feishu: got WebSocket endpoint, device_id={}, service_id={}",
-        device_id, service_id
+        "Feishu: got WebSocket endpoint (device_id present={}, service_id={})",
+        !device_id.is_empty(),
+        service_id
     );
 
     Ok((data.url, service_id, data.client_config))
@@ -249,7 +270,12 @@ impl TokenManager {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ChannelError::NetworkError(format!("Token request failed: {}", e)))?;
+            .map_err(|e| {
+                ChannelError::NetworkError(format!(
+                    "Token request failed: {}",
+                    request_error(e, [&self.app_secret])
+                ))
+            })?;
 
         if !res.status().is_success() {
             return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
@@ -258,14 +284,21 @@ impl TokenManager {
         }
 
         let json: serde_json::Value = res.json().await.map_err(|e| {
-            ChannelError::NetworkError(format!("Token response parse error: {}", e))
+            ChannelError::NetworkError(format!(
+                "Token response parse error: {}",
+                request_error(e, [&self.app_secret])
+            ))
         })?;
 
         let code = json["code"].as_i64().unwrap_or(-1);
         if code != 0 {
             let msg = json["msg"].as_str().unwrap_or("unknown error").to_string();
             return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
-                format!("Token API error (code {}): {}", code, msg),
+                format!(
+                    "Token API error (code {}): {}",
+                    code,
+                    text_with_secrets(&msg, [&self.app_secret])
+                ),
             ))));
         }
 
@@ -326,27 +359,39 @@ pub async fn send_message(
         .json(&body)
         .send()
         .await
-        .map_err(|e| ChannelError::SendError(format!("Send request failed: {}", e)))?;
+        .map_err(|e| {
+            ChannelError::SendError(format!(
+                "Send request failed: {}",
+                request_error(e, [token])
+            ))
+        })?;
 
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
+        let text = text_with_secrets(&text, [token]);
         warn!("Feishu: send message failed (status {}): {}", status, text);
         return Err(ReactError::Channel(Box::new(ChannelError::SendError(
             format!("Send message failed (status {}): {}", status, text),
         ))));
     }
 
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| ChannelError::SendError(format!("Send response parse error: {}", e)))?;
+    let json: serde_json::Value = res.json().await.map_err(|e| {
+        ChannelError::SendError(format!(
+            "Send response parse error: {}",
+            request_error(e, [token])
+        ))
+    })?;
 
     let code = json["code"].as_i64().unwrap_or(-1);
     if code != 0 {
         let msg = json["msg"].as_str().unwrap_or("unknown error").to_string();
         return Err(ReactError::Channel(Box::new(ChannelError::SendError(
-            format!("Send API error (code {}): {}", code, msg),
+            format!(
+                "Send API error (code {}): {}",
+                code,
+                text_with_secrets(&msg, [token])
+            ),
         ))));
     }
 
@@ -428,26 +473,41 @@ pub async fn reply_message(
         .json(&body)
         .send()
         .await
-        .map_err(|e| ChannelError::SendError(format!("Reply request failed: {}", e)))?;
+        .map_err(|e| {
+            ChannelError::SendError(format!(
+                "Reply request failed: {}",
+                request_error(e, [token])
+            ))
+        })?;
 
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
         return Err(ReactError::Channel(Box::new(ChannelError::SendError(
-            format!("Reply failed (status {}): {}", status, text),
+            format!(
+                "Reply failed (status {}): {}",
+                status,
+                text_with_secrets(&text, [token])
+            ),
         ))));
     }
 
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| ChannelError::SendError(format!("Reply response parse error: {}", e)))?;
+    let json: serde_json::Value = res.json().await.map_err(|e| {
+        ChannelError::SendError(format!(
+            "Reply response parse error: {}",
+            request_error(e, [token])
+        ))
+    })?;
 
     let code = json["code"].as_i64().unwrap_or(-1);
     if code != 0 {
         let msg = json["msg"].as_str().unwrap_or("unknown error").to_string();
         return Err(ReactError::Channel(Box::new(ChannelError::SendError(
-            format!("Reply API error (code {}): {}", code, msg),
+            format!(
+                "Reply API error (code {}): {}",
+                code,
+                text_with_secrets(&msg, [token])
+            ),
         ))));
     }
 
@@ -480,26 +540,41 @@ pub async fn patch_card_message(
         .json(&body)
         .send()
         .await
-        .map_err(|e| ChannelError::SendError(format!("Patch request failed: {}", e)))?;
+        .map_err(|e| {
+            ChannelError::SendError(format!(
+                "Patch request failed: {}",
+                request_error(e, [token])
+            ))
+        })?;
 
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
         return Err(ReactError::Channel(Box::new(ChannelError::SendError(
-            format!("Patch failed (status {}): {}", status, text),
+            format!(
+                "Patch failed (status {}): {}",
+                status,
+                text_with_secrets(&text, [token])
+            ),
         ))));
     }
 
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| ChannelError::SendError(format!("Patch response parse error: {}", e)))?;
+    let json: serde_json::Value = res.json().await.map_err(|e| {
+        ChannelError::SendError(format!(
+            "Patch response parse error: {}",
+            request_error(e, [token])
+        ))
+    })?;
 
     let code = json["code"].as_i64().unwrap_or(-1);
     if code != 0 {
         let msg = json["msg"].as_str().unwrap_or("unknown error").to_string();
         return Err(ReactError::Channel(Box::new(ChannelError::SendError(
-            format!("Patch API error (code {}): {}", code, msg),
+            format!(
+                "Patch API error (code {}): {}",
+                code,
+                text_with_secrets(&msg, [token])
+            ),
         ))));
     }
 
@@ -532,11 +607,19 @@ pub async fn add_reaction(
         .json(&body)
         .send()
         .await
-        .map_err(|e| ChannelError::SendError(format!("Reaction request failed: {}", e)))?;
+        .map_err(|e| {
+            ChannelError::SendError(format!(
+                "Reaction request failed: {}",
+                request_error(e, [token])
+            ))
+        })?;
 
     if !res.status().is_success() {
         let text = res.text().await.unwrap_or_default();
-        warn!("Feishu: add reaction failed: {}", text);
+        warn!(
+            "Feishu: add reaction failed: {}",
+            text_with_secrets(&text, [token])
+        );
         // Do not return an error; reaction failure does not affect the main flow
     }
 

@@ -5,6 +5,7 @@ pub mod stdio;
 use futures::future::BoxFuture;
 
 use super::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use crate::redaction::{json_with_secrets, text_with_secrets};
 use echo_core::error::Result;
 use std::sync::Arc;
 
@@ -25,4 +26,37 @@ pub trait McpTransport: Send + Sync {
     /// 获取通知接收通道（用于接收服务端推送的通知）
     /// 返回 None 表示该传输层不支持通知接收
     fn notification_rx(&self) -> Option<Arc<dyn super::types::JsonRpcNotificationReceiver>>;
+}
+
+fn redact_response_error(response: &mut JsonRpcResponse, secrets: &[String]) {
+    let Some(error) = response.error.as_mut() else {
+        return;
+    };
+    error.message = text_with_secrets(&error.message, secrets.iter());
+    if let Some(data) = error.data.as_mut() {
+        *data = json_with_secrets(data, secrets);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::types::JsonRpcError;
+
+    #[test]
+    fn transport_error_redaction_removes_configured_values() {
+        let mut response = JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32000,
+                message: "server echoed opaque-secret".to_string(),
+                data: Some(serde_json::json!({"detail": "opaque-secret"})),
+            }),
+        };
+        redact_response_error(&mut response, &["opaque-secret".to_string()]);
+        let debug = format!("{response:?}");
+        assert!(!debug.contains("opaque-secret"));
+    }
 }

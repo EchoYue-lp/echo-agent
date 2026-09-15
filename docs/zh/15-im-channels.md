@@ -280,6 +280,11 @@ pub struct QqConfig {
 
 Token 自动缓存，提前 5 分钟刷新，无需手动管理。
 
+`QqConfig` 与 `FeishuConfig` 提供 credential-safe `Debug`：client/app secret、
+Webhook verification token 和 signing key 都显示为 `[REDACTED]`。Channel
+transport 日志和返回的诊断也会在格式化前脱敏符合凭据形态的响应文本与 URL；实际请求和
+连接行为不变。
+
 ## 飞书
 
 ### 连接方式

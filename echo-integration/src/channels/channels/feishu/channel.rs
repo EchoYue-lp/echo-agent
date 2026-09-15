@@ -21,6 +21,7 @@ use super::long_poll::WsClient;
 use super::webhook;
 use async_trait::async_trait;
 use echo_core::error::{ChannelError, ReactError, Result};
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -29,7 +30,7 @@ use tracing::{debug, info, warn};
 // ── Config ────────────────────────────────────────────────────────────────────
 
 /// 飞书通道模式
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub enum FeishuMode {
     /// Webhook 模式：需要公网 IP
     Webhook {
@@ -44,8 +45,34 @@ pub enum FeishuMode {
     LongPoll,
 }
 
+impl fmt::Debug for FeishuMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Webhook {
+                bind,
+                path,
+                verification_token,
+                signing_key,
+            } => formatter
+                .debug_struct("Webhook")
+                .field("bind", bind)
+                .field("path", path)
+                .field(
+                    "verification_token",
+                    &crate::redaction::optional(verification_token.as_ref()),
+                )
+                .field(
+                    "signing_key",
+                    &crate::redaction::optional(signing_key.as_ref()),
+                )
+                .finish(),
+            Self::LongPoll => formatter.write_str("LongPoll"),
+        }
+    }
+}
+
 /// 飞书通道配置
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FeishuConfig {
     /// 飞书 App ID
     pub app_id: String,
@@ -57,6 +84,19 @@ pub struct FeishuConfig {
     pub ws_domain: String,
     /// 连接模式（默认长连接）
     pub mode: FeishuMode,
+}
+
+impl fmt::Debug for FeishuConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FeishuConfig")
+            .field("app_id", &self.app_id)
+            .field("app_secret", &crate::redaction::REDACTED)
+            .field("api_domain", &crate::redaction::url(&self.api_domain))
+            .field("ws_domain", &crate::redaction::url(&self.ws_domain))
+            .field("mode", &self.mode)
+            .finish()
+    }
 }
 
 impl FeishuConfig {
@@ -262,7 +302,10 @@ impl ChannelPlugin for FeishuChannel {
                     let mut client = WsClient::new(config);
                     // WsClient::run() 内部已有完整的重连逻辑，无需外层 loop
                     if let Err(e) = client.run(wrapper_handler.clone()).await {
-                        warn!("Feishu WebSocket: fatal error: {:?}", e);
+                        warn!(
+                            "Feishu WebSocket: fatal error: {}",
+                            crate::redaction::text(&e.to_string())
+                        );
                     }
                 });
                 self.task_handle = Some(task_handle);
@@ -289,7 +332,10 @@ impl ChannelPlugin for FeishuChannel {
                     )
                     .await
                     {
-                        warn!("Feishu webhook server error: {:?}", e);
+                        warn!(
+                            "Feishu webhook server error: {}",
+                            crate::redaction::text(&e.to_string())
+                        );
                     }
                 });
                 self.task_handle = Some(task_handle);
@@ -422,7 +468,10 @@ impl MessageHandler for FeishuMessageHandler {
         if let Err(e) =
             add_reaction(&self.http, &self.api_domain, &token, &msg.message_id, "OK").await
         {
-            warn!("Feishu: failed to add OK reaction: {:?}", e);
+            warn!(
+                "Feishu: failed to add OK reaction: {}",
+                crate::redaction::text(&e.to_string())
+            );
         }
 
         // 消费 inner 的流式分段,逐 chunk 经 send_tx 投递(真流式);返回空 text 占位
@@ -432,5 +481,44 @@ impl MessageHandler for FeishuMessageHandler {
 
     async fn reply(&self, msg: OutboundMessage) -> Result<()> {
         super::super::reply_with_empty_guard(&self.send_tx, msg).await
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn debug_does_not_expose_webhook_credentials() {
+        let config = FeishuConfig::new_webhook(
+            "app-id".to_string(),
+            "feishu-app-secret".to_string(),
+            "127.0.0.1:8080".to_string(),
+            "/events".to_string(),
+            Some("verification-secret".to_string()),
+        )
+        .with_webhook_signing_key("signing-secret".to_string())
+        .with_domain(
+            "https://example.invalid/open-apis?token=api-domain-secret".to_string(),
+            "https://example.invalid?ticket=ws-domain-secret".to_string(),
+        );
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("app-id"));
+        assert!(
+            !debug.contains("feishu-app-secret"),
+            "debug leaked app secret: {debug}"
+        );
+        assert!(
+            !debug.contains("verification-secret"),
+            "debug leaked verification token: {debug}"
+        );
+        assert!(
+            !debug.contains("signing-secret"),
+            "debug leaked signing key: {debug}"
+        );
+        for secret in ["api-domain-secret", "ws-domain-secret"] {
+            assert!(!debug.contains(secret), "debug leaked URL secret: {debug}");
+        }
     }
 }

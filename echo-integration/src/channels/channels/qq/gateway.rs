@@ -9,6 +9,7 @@
 //! 4. Receive message events (C2C_MESSAGE_CREATE, GROUP_AT_MESSAGE_CREATE, etc.)
 
 use super::super::super::types::*;
+use crate::redaction::text_with_secrets;
 use echo_core::error::ChannelError;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -39,9 +40,12 @@ pub(super) async fn connect_to_gateway(
     handler: Arc<dyn MessageHandler>,
     token: String,
 ) -> std::result::Result<(), ChannelError> {
-    let (ws_stream, _) = connect_async(wss_url.clone())
-        .await
-        .map_err(|e| ChannelError::ConnectionError(format!("WebSocket connect failed: {}", e)))?;
+    let (ws_stream, _) = connect_async(wss_url.clone()).await.map_err(|e| {
+        ChannelError::ConnectionError(format!(
+            "WebSocket connect failed: {}",
+            text_with_secrets(&e.to_string(), [token.as_str()])
+        ))
+    })?;
 
     info!("QQ Gateway: WebSocket connected");
 
@@ -59,6 +63,7 @@ pub(super) async fn connect_to_gateway(
     let identified_clone = identified.clone();
     let ws_sender_clone = Arc::new(Mutex::new(ws_sender));
     let ws_sender_for_heartbeat = ws_sender_clone.clone();
+    let token_for_heartbeat = token.clone();
 
     let heartbeat_task = tokio::spawn(async move {
         // Wait for IDENTIFY to complete
@@ -81,7 +86,10 @@ pub(super) async fn connect_to_gateway(
 
             let mut sender = ws_sender_for_heartbeat.lock().await;
             if let Err(e) = sender.send(Message::Text(heartbeat.to_string())).await {
-                warn!("QQ Gateway: heartbeat failed: {}", e);
+                warn!(
+                    "QQ Gateway: heartbeat failed: {}",
+                    text_with_secrets(&e.to_string(), [token_for_heartbeat.as_str()])
+                );
                 break;
             }
             debug!("QQ Gateway: heartbeat sent (seq={})", seq);
@@ -92,14 +100,10 @@ pub(super) async fn connect_to_gateway(
     loop {
         match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
+                let redacted = text_with_secrets(&text, [token.as_str()]);
                 debug!(
                     "QQ Gateway: received message: {}",
-                    if text.chars().count() > 200 {
-                        let truncated: String = text.chars().take(200).collect();
-                        truncated
-                    } else {
-                        text.clone()
-                    }
+                    redacted.chars().take(200).collect::<String>()
                 );
 
                 let payload: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
@@ -146,7 +150,7 @@ pub(super) async fn connect_to_gateway(
                                 .map_err(|e| {
                                     ChannelError::ConnectionError(format!(
                                         "Failed to send IDENTIFY: {}",
-                                        e
+                                        text_with_secrets(&e.to_string(), [token.as_str()])
                                     ))
                                 })?;
                         }
@@ -170,9 +174,13 @@ pub(super) async fn connect_to_gateway(
                     OP_DISPATCH => {
                         // Event message (op=0 means dispatch event)
                         if *identified.lock().await
-                            && let Err(e) = handle_gateway_event(handler.clone(), &payload).await
+                            && let Err(e) =
+                                handle_gateway_event(handler.clone(), &payload, &token).await
                         {
-                            warn!("QQ Gateway: failed to handle event: {:?}", e);
+                            warn!(
+                                "QQ Gateway: failed to handle event: {}",
+                                text_with_secrets(&e.to_string(), [token.as_str()])
+                            );
                         }
                     }
                     _ => {
@@ -184,7 +192,10 @@ pub(super) async fn connect_to_gateway(
                 debug!("QQ Gateway: received PING, sending PONG");
                 let mut sender = ws_sender_clone.lock().await;
                 if let Err(e) = sender.send(Message::Pong(payload)).await {
-                    warn!("QQ Gateway: failed to send PONG: {}", e);
+                    warn!(
+                        "QQ Gateway: failed to send PONG: {}",
+                        text_with_secrets(&e.to_string(), [token.as_str()])
+                    );
                 }
             }
             Some(Ok(Message::Close(_))) => {
@@ -194,11 +205,14 @@ pub(super) async fn connect_to_gateway(
             }
             Some(Ok(_)) => {}
             Some(Err(e)) => {
-                warn!("QQ Gateway: WebSocket read error: {}", e);
+                warn!(
+                    "QQ Gateway: WebSocket read error: {}",
+                    text_with_secrets(&e.to_string(), [token.as_str()])
+                );
                 heartbeat_task.abort();
                 return Err(ChannelError::ConnectionError(format!(
                     "WebSocket read error: {}",
-                    e
+                    text_with_secrets(&e.to_string(), [token.as_str()])
                 )));
             }
             None => {
@@ -214,6 +228,7 @@ pub(super) async fn connect_to_gateway(
 async fn handle_gateway_event(
     handler: Arc<dyn MessageHandler>,
     payload: &serde_json::Value,
+    access_token: &str,
 ) -> std::result::Result<(), ChannelError> {
     let event_type = payload["t"].as_str().unwrap_or("");
 
@@ -227,10 +242,10 @@ async fn handle_gateway_event(
             info!("QQ Gateway: RESUMED event received");
         }
         "C2C_MESSAGE_CREATE" | "C2C_MESSAGE_CREATE_WITH_INTENT" => {
-            handle_c2c_message(handler, payload).await?;
+            handle_c2c_message(handler, payload, access_token).await?;
         }
         "GROUP_AT_MESSAGE_CREATE" | "AT_MESSAGE_CREATE" => {
-            handle_group_at_message(handler, payload).await?;
+            handle_group_at_message(handler, payload, access_token).await?;
         }
         _ => {
             // Ignore other events
@@ -244,6 +259,7 @@ async fn handle_gateway_event(
 async fn handle_c2c_message(
     handler: Arc<dyn MessageHandler>,
     payload: &serde_json::Value,
+    access_token: &str,
 ) -> std::result::Result<(), ChannelError> {
     let data = &payload["d"];
 
@@ -264,13 +280,14 @@ async fn handle_c2c_message(
         &message_id,
     );
 
-    dispatch_to_handler(handler, inbound).await
+    dispatch_to_handler(handler, inbound, access_token).await
 }
 
 /// Handle group @message
 async fn handle_group_at_message(
     handler: Arc<dyn MessageHandler>,
     payload: &serde_json::Value,
+    access_token: &str,
 ) -> std::result::Result<(), ChannelError> {
     let data = &payload["d"];
 
@@ -297,22 +314,26 @@ async fn handle_group_at_message(
         &message_id,
     );
 
-    dispatch_to_handler(handler, inbound).await
+    dispatch_to_handler(handler, inbound, access_token).await
 }
 
 /// Unified dispatch to Handler and send reply
 async fn dispatch_to_handler(
     handler: Arc<dyn MessageHandler>,
     inbound: InboundMessage,
+    access_token: &str,
 ) -> std::result::Result<(), ChannelError> {
     match handler.handle(inbound).await {
         Ok(outbound) => {
             // Safely truncate UTF-8 string using chars()
-            let text_preview: String = outbound.text.chars().take(50).collect();
+            let redacted = text_with_secrets(&outbound.text, [access_token]);
+            let mut characters = redacted.chars();
+            let text_preview: String = characters.by_ref().take(50).collect();
+            let truncated = characters.next().is_some();
             info!(
                 "Handler returned outbound: to={}, text={}",
                 outbound.to,
-                if outbound.text.len() > text_preview.len() {
+                if truncated {
                     format!("{}...", text_preview)
                 } else {
                     text_preview
@@ -321,14 +342,18 @@ async fn dispatch_to_handler(
 
             // Send reply to QQ
             if let Err(e) = handler.reply(outbound).await {
-                warn!("Failed to send reply: {:?}", e);
+                warn!(
+                    "Failed to send reply: {}",
+                    text_with_secrets(&e.to_string(), [access_token])
+                );
             }
 
             Ok(())
         }
         Err(e) => {
-            warn!("Handler error: {:?}", e);
-            Err(ChannelError::Other(format!("Handler error: {:?}", e)))
+            let error = text_with_secrets(&e.to_string(), [access_token]);
+            warn!("Handler error: {}", error);
+            Err(ChannelError::Other(format!("Handler error: {error}")))
         }
     }
 }
@@ -377,8 +402,8 @@ mod tests {
             }
         });
 
-        let direct = handle_c2c_message(handler.clone(), &missing).await;
-        let group = handle_group_at_message(handler, &unknown).await;
+        let direct = handle_c2c_message(handler.clone(), &missing, "test-token").await;
+        let group = handle_group_at_message(handler, &unknown, "test-token").await;
         if !matches!(direct, Err(ChannelError::Other(ref message)) if message.contains("sender_id"))
             || !matches!(group, Err(ChannelError::Other(ref message)) if message.contains("sender_id"))
         {

@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::fmt;
+
+use crate::redaction::{collection_is_redacted, url as redact_url};
 
 /// MCP 服务端完整配置
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,7 +13,7 @@ pub struct McpServerConfig {
 }
 
 /// 传输层配置
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TransportConfig {
     /// stdio 传输：框架启动子进程，通过 stdin/stdout 通信
     /// 适用场景：本地工具（filesystem、git、sqlite 等）
@@ -47,6 +50,35 @@ pub enum TransportConfig {
         /// 自定义请求头（如 Authorization）
         headers: HashMap<String, String>,
     },
+}
+
+impl fmt::Debug for TransportConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => formatter
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("args", &collection_is_redacted(args.is_empty()))
+                .field("env", &collection_is_redacted(env.is_empty()))
+                .field("cwd", cwd)
+                .finish(),
+            Self::Http { base_url, headers } => formatter
+                .debug_struct("Http")
+                .field("base_url", &redact_url(base_url))
+                .field("headers", &collection_is_redacted(headers.is_empty()))
+                .finish(),
+            Self::Sse { base_url, headers } => formatter
+                .debug_struct("Sse")
+                .field("base_url", &redact_url(base_url))
+                .field("headers", &collection_is_redacted(headers.is_empty()))
+                .finish(),
+        }
+    }
 }
 
 impl McpServerConfig {
@@ -163,6 +195,47 @@ impl McpServerConfig {
                 base_url: base_url.into(),
                 headers,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn debug_does_not_expose_stdio_environment_values() {
+        let config = McpServerConfig::stdio_with_env(
+            "filesystem",
+            "mcp-server",
+            vec![
+                "--root",
+                "/tmp",
+                "postgres://user:password@example.invalid/db",
+            ],
+            vec![("GITHUB_TOKEN", "mcp-secret")],
+        );
+
+        let debug = format!("{config:?}");
+        for secret in ["mcp-secret", "postgres://user:password@example.invalid/db"] {
+            assert!(!debug.contains(secret), "debug leaked value: {debug}");
+        }
+    }
+
+    #[test]
+    fn debug_does_not_expose_http_authorization_values() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer mcp-secret".to_string());
+        let config = McpServerConfig::http_with_headers(
+            "remote",
+            "https://example.invalid/mcp?token=url-secret",
+            headers,
+        );
+
+        let debug = format!("{config:?}");
+        for secret in ["mcp-secret", "url-secret"] {
+            assert!(!debug.contains(secret), "debug leaked value: {debug}");
         }
     }
 }

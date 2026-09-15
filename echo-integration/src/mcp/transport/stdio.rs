@@ -11,9 +11,10 @@ use tokio::sync::{Mutex, oneshot};
 
 use super::super::types::JsonRpcError;
 use super::super::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use crate::redaction::text_with_secrets;
 use echo_core::error::{McpError, ReactError, Result};
 
-use super::McpTransport;
+use super::{McpTransport, redact_response_error};
 
 /// 等待响应的发送端 Map：请求 ID → oneshot channel
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>;
@@ -76,9 +77,16 @@ impl StdioTransport {
         })?;
 
         let stderr = child.stderr.take();
+        let configured_secrets = args
+            .iter()
+            .cloned()
+            .chain(env.iter().map(|(_, value)| value.clone()))
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = pending.clone();
+        let stdout_secrets = configured_secrets.clone();
 
         // 后台 task：持续读取 stdout，将响应路由到对应的 pending channel
         tokio::spawn(async move {
@@ -99,7 +107,10 @@ impl StdioTransport {
                                 tracing::warn!(
                                     "MCP stdio: 解析 stdout 行失败: {} | 原始内容: {}",
                                     e,
-                                    line
+                                    text_with_secrets(
+                                        &line,
+                                        stdout_secrets.iter().map(String::as_str),
+                                    )
                                 );
                                 continue;
                             }
@@ -107,7 +118,8 @@ impl StdioTransport {
 
                         if let Some(id) = json.get("id").and_then(|id| id.as_u64()) {
                             match serde_json::from_value::<JsonRpcResponse>(json) {
-                                Ok(response) => {
+                                Ok(mut response) => {
+                                    redact_response_error(&mut response, &stdout_secrets);
                                     let mut map = pending_clone.lock().await;
                                     if let Some(tx) = map.remove(&id) {
                                         let _ = tx.send(response);
@@ -161,7 +173,10 @@ impl StdioTransport {
                 while let Ok(Some(line)) = lines.next_line().await {
                     let line = line.trim().to_string();
                     if !line.is_empty() {
-                        tracing::debug!("MCP stderr: {}", line);
+                        tracing::debug!(
+                            "MCP stderr: {}",
+                            text_with_secrets(&line, configured_secrets.iter().map(String::as_str),)
+                        );
                     }
                 }
             });

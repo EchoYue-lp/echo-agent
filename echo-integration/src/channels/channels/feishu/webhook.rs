@@ -239,7 +239,17 @@ async fn handle_event(
     };
     if let Err(error) = delivered {
         state.event_locks.remove(&message_id);
-        warn!(%error, "Feishu webhook: processing failed; returning retryable status");
+        warn!(
+            error = %crate::redaction::text_with_secrets(
+                &error.to_string(),
+                state
+                    .verification_token
+                    .as_deref()
+                    .into_iter()
+                    .chain(state.signing_key.as_deref()),
+            ),
+            "Feishu webhook: processing failed; returning retryable status"
+        );
         return empty_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
     if !message_id.is_empty() {

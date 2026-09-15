@@ -175,6 +175,12 @@ headers.insert("Authorization".to_string(), "Bearer token".to_string());
 McpServerConfig::http_with_headers("secure-api", "https://api.example.com/mcp", headers);
 ```
 
+带凭据的 MCP 配置采用脱敏 `Debug`：stdio 参数和环境变量值、HTTP/SSE
+headers 以及 URL 凭据都不会按原值格式化。Transport diagnostic 对原始
+stderr、响应 body、server error 和 endpoint URL 使用相同脱敏策略；MCP
+session 与 SSE event 标识只记录是否存在。脱敏只影响诊断，不改变实际发送给用户所选
+MCP server 的值。
+
 ### 3. SSE（旧版 HTTP+SSE，兼容旧 SDK）
 
 适用于旧版 MCP SDK（2024-11-05 协议）：

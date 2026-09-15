@@ -15,6 +15,7 @@ use super::types::{
     McpResourcesListResult, McpTool, McpToolCallParams, McpToolCallResult, McpToolsListResult,
     ServerCapabilities,
 };
+use crate::redaction::{text as redact_text, url as redact_url};
 use echo_core::error::{McpError, ReactError, Result};
 
 /// MCP 客户端
@@ -103,7 +104,7 @@ impl McpClient {
 
         if let Some(err) = init_resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::InitializationFailed(
-                err.message,
+                redact_text(&err.message),
             ))));
         }
 
@@ -122,12 +123,16 @@ impl McpClient {
             MCP_PROTOCOL_VERSION
         );
         if let Some(info) = &init_result.server_info {
-            tracing::info!("MCP: 服务端信息: {} v{}", info.name, info.version);
+            tracing::info!(
+                "MCP: 服务端信息已接收 (name chars={}, version chars={})",
+                info.name.chars().count(),
+                info.version.chars().count()
+            );
         }
         if let Some(instructions) = &init_result.instructions {
             tracing::info!(
-                "MCP: 服务端指令: {}",
-                instructions.chars().take(100).collect::<String>()
+                "MCP: 服务端指令已接收 (chars={})",
+                instructions.chars().count()
             );
         }
 
@@ -219,7 +224,7 @@ impl McpClient {
                 tracing::warn!(
                     "MCP: '{}' tools/list 返回错误: {}",
                     server_name,
-                    err.message
+                    redact_text(&err.message)
                 );
                 break;
             }
@@ -262,7 +267,7 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::ToolCallFailed {
                 code: err.code,
-                message: format!("工具 '{}' 调用失败: {}", name, err.message),
+                message: format!("工具 '{}' 调用失败: {}", name, redact_text(&err.message)),
             })));
         }
 
@@ -313,7 +318,7 @@ impl McpClient {
             if let Some(err) = resp.error {
                 return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                     "MCP 服务端 '{server_name}' 获取资源列表失败: {}",
-                    err.message
+                    redact_text(&err.message)
                 )))));
             }
 
@@ -383,7 +388,8 @@ impl McpClient {
             if let Some(error) = response.error {
                 return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                     "MCP 服务端 '{}' 获取资源模板失败: {}",
-                    self.server_name, error.message
+                    self.server_name,
+                    redact_text(&error.message)
                 )))));
             }
 
@@ -411,7 +417,8 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                 "读取资源 '{}' 失败: {}",
-                uri, err.message
+                redact_url(uri),
+                redact_text(&err.message)
             )))));
         }
 
@@ -469,7 +476,7 @@ impl McpClient {
                 tracing::warn!(
                     "MCP: '{}' prompts/list 返回错误: {}",
                     server_name,
-                    err.message
+                    redact_text(&err.message)
                 );
                 break;
             }
@@ -516,7 +523,8 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                 "获取提示词 '{}' 失败: {}",
-                name, err.message
+                name,
+                redact_text(&err.message)
             )))));
         }
 
@@ -545,7 +553,7 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                 "ping 失败: {}",
-                err.message
+                redact_text(&err.message)
             )))));
         }
 

@@ -177,6 +177,14 @@ headers.insert("Authorization".to_string(), "Bearer token".to_string());
 McpServerConfig::http_with_headers("secure-api", "https://api.example.com/mcp", headers);
 ```
 
+Credential-bearing MCP configuration has redacted `Debug` output: stdio
+arguments and environment values, HTTP/SSE headers, and URL credentials are
+never formatted verbatim. Transport diagnostics apply the same redaction to
+raw stderr, response bodies, server errors, and endpoint URLs; MCP session and
+SSE event identifiers are recorded only as presence metadata. Redaction affects
+diagnostics only and does not change the values sent to the user-selected MCP
+server.
+
 ### 3. SSE (Legacy HTTP+SSE, for older SDKs)
 
 For older MCP SDKs (2024-11-05 protocol):

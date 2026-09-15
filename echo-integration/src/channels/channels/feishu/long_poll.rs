@@ -12,6 +12,7 @@
 use super::super::super::types::*;
 use super::api::{ClientConfig, get_ws_endpoint, http_client};
 use super::proto::*;
+use crate::redaction::{text as redact_text, text_with_secrets, url as redact_url};
 use dashmap::DashMap;
 use echo_core::error::{ChannelError, Result};
 use futures::SinkExt;
@@ -150,7 +151,10 @@ impl WsClient {
                     info!("Feishu WebSocket: connection closed normally");
                 }
                 Err(e) => {
-                    warn!("Feishu WebSocket: connection error: {:?}", e);
+                    warn!(
+                        "Feishu WebSocket: connection error: {}",
+                        redact_text(&e.to_string())
+                    );
                 }
             }
 
@@ -242,16 +246,20 @@ impl WsClient {
             .map(|(_, v)| v.to_string())
             .unwrap_or_default();
 
-        info!("Feishu WebSocket: connecting to {}", ws_url);
+        info!("Feishu WebSocket: connecting to {}", redact_url(&ws_url));
 
         // 2. Establish WebSocket connection, split read/write halves
         let (ws_stream, _) = connect_async(&ws_url).await.map_err(|e| {
-            ChannelError::ConnectionError(format!("WebSocket connect failed: {}", e))
+            ChannelError::ConnectionError(format!(
+                "WebSocket connect failed: {}",
+                redact_text(&e.to_string())
+            ))
         })?;
 
         info!(
-            "Feishu WebSocket: connected (conn_id={}, service_id={})",
-            self.conn_id, self.service_id
+            "Feishu WebSocket: connected (conn_id present={}, service_id={})",
+            !self.conn_id.is_empty(),
+            self.service_id
         );
 
         let (write, read) = ws_stream.split();
@@ -272,7 +280,10 @@ impl WsClient {
                 let ping_bytes = ProtoFrame::ping(service_id).encode_to_vec();
                 let mut sink = sink_for_ping.lock().await;
                 if let Err(e) = sink.send(Message::Binary(ping_bytes)).await {
-                    warn!("Feishu WebSocket: ping failed: {}", e);
+                    warn!(
+                        "Feishu WebSocket: ping failed: {}",
+                        redact_text(&e.to_string())
+                    );
                     break;
                 }
                 debug!("Feishu WebSocket: ping sent");
@@ -309,14 +320,22 @@ impl WsClient {
                     return Ok(());
                 }
                 Some(Ok(Message::Text(text))) => {
-                    warn!("Feishu WebSocket: unexpected text message: {}", text);
+                    warn!(
+                        "Feishu WebSocket: unexpected text message: {}",
+                        text_with_secrets(&text, [&self.config.app_secret])
+                    );
                 }
                 Some(Ok(Message::Frame(_))) => {}
                 Some(Err(e)) => {
-                    warn!("Feishu WebSocket: read error: {}", e);
-                    return Err(
-                        ChannelError::ConnectionError(format!("WebSocket error: {}", e)).into(),
+                    warn!(
+                        "Feishu WebSocket: read error: {}",
+                        redact_text(&e.to_string())
                     );
+                    return Err(ChannelError::ConnectionError(format!(
+                        "WebSocket error: {}",
+                        redact_text(&e.to_string())
+                    ))
+                    .into());
                 }
                 None => {
                     info!("Feishu WebSocket: stream ended");
@@ -440,7 +459,10 @@ impl WsClient {
             // Periodically clean up expired dedup cache entries
             self.cleanup_processed_events();
 
-            if let Err(error) = Self::process_event_async(payload_str.to_string(), handler).await {
+            if let Err(error) =
+                Self::process_event_async(payload_str.to_string(), handler, &self.config.app_secret)
+                    .await
+            {
                 if let Some(event_mid) = &event_message_id {
                     self.event_locks.remove(event_mid);
                 }
@@ -560,9 +582,16 @@ impl WsClient {
     }
 
     /// Process event asynchronously
-    async fn process_event_async(payload: String, handler: Arc<dyn MessageHandler>) -> Result<()> {
+    async fn process_event_async(
+        payload: String,
+        handler: Arc<dyn MessageHandler>,
+        app_secret: &str,
+    ) -> Result<()> {
         let event: serde_json::Value = serde_json::from_str(&payload).map_err(|e| {
-            ChannelError::ConnectionError(format!("Failed to parse event JSON: {}", e))
+            ChannelError::ConnectionError(format!(
+                "Failed to parse event JSON: {}",
+                redact_text(&e.to_string())
+            ))
         })?;
 
         let event_type = event["header"]["event_type"].as_str().unwrap_or("");
@@ -573,7 +602,7 @@ impl WsClient {
         );
 
         if event_type == "im.message.receive_v1" {
-            Self::process_im_message(event, handler).await?;
+            Self::process_im_message(event, handler, app_secret).await?;
         }
 
         Ok(())
@@ -583,6 +612,7 @@ impl WsClient {
     async fn process_im_message(
         event: serde_json::Value,
         handler: Arc<dyn MessageHandler>,
+        app_secret: &str,
     ) -> Result<()> {
         let message = &event["event"]["message"];
         let sender = &event["event"]["sender"];
@@ -615,16 +645,12 @@ impl WsClient {
             return Ok(());
         }
 
+        let redacted = text_with_secrets(&text, [app_secret]);
         info!(
             "[V3] Feishu WebSocket: processing message from {} in {}: {}",
             sender_id,
             chat_id,
-            if text.chars().count() > 100 {
-                let truncated: String = text.chars().take(100).collect();
-                truncated
-            } else {
-                text.clone()
-            }
+            redacted.chars().take(100).collect::<String>()
         );
 
         let inbound =
@@ -633,11 +659,17 @@ impl WsClient {
         match handler.handle(inbound).await {
             Ok(outbound) => {
                 if let Err(e) = handler.reply(outbound).await {
-                    warn!("Feishu WebSocket: failed to send reply: {:?}", e);
+                    warn!(
+                        "Feishu WebSocket: failed to send reply: {}",
+                        text_with_secrets(&e.to_string(), [app_secret])
+                    );
                 }
             }
             Err(e) => {
-                warn!("Feishu WebSocket: handler error: {:?}", e);
+                warn!(
+                    "Feishu WebSocket: handler error: {}",
+                    text_with_secrets(&e.to_string(), [app_secret])
+                );
             }
         }
 
@@ -713,9 +745,12 @@ impl WsClient {
         let frame_bytes = response_frame.encode_to_vec();
 
         let mut ws = sink.lock().await;
-        ws.send(Message::Binary(frame_bytes))
-            .await
-            .map_err(|e| ChannelError::SendError(format!("Failed to send response: {}", e)))?;
+        ws.send(Message::Binary(frame_bytes)).await.map_err(|e| {
+            ChannelError::SendError(format!(
+                "Failed to send response: {}",
+                redact_text(&e.to_string())
+            ))
+        })?;
 
         info!(
             "[V3] Feishu WebSocket: response sent immediately for msg_id={}",
@@ -742,6 +777,7 @@ mod tests {
     use async_trait::async_trait;
     use echo_core::error::{ChannelError, ReactError};
     use serde_json::json;
+
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -818,7 +854,7 @@ mod tests {
             }
         });
 
-        let result = WsClient::process_im_message(event, handler).await;
+        let result = WsClient::process_im_message(event, handler, "test-app-secret").await;
         if !matches!(result, Err(ReactError::Channel(ref error)) if matches!(error.as_ref(), ChannelError::Other(message) if message.contains("sender_id")))
         {
             return Err("Feishu long poll did not return a typed sender error".to_string());
