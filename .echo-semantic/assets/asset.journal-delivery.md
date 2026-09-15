@@ -6,7 +6,7 @@ title: EventJournal、Checkpoint 与 DeliveryLedger
 asset_type: state_authority
 status: active
 risk: high
-observed_at: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
+observed_at: source:6c19670f1c60cd514abba3d30f6293cd385a7df18f8c355fe6fced3e4e6ab8d9
 boundary_refs: [boundary.observation-persistence-delivery]
 code_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, echo-state/src/delivery.rs, docs/adr/0055-checkpoint-journal-identity.md]
 consumer_refs: [src/state/mod.rs, echo-sdk-host/src/core_profile/persistence.rs]

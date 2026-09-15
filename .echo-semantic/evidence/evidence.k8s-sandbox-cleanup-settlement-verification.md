@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.k8s-sandbox-cleanup-settlement-verification
 kind: evidence
-observed_at: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
+observed_at: source:6c19670f1c60cd514abba3d30f6293cd385a7df18f8c355fe6fced3e4e6ab8d9
 source_refs:
   - echo-execution/src/sandbox/k8s.rs
   - docs/adr/0002-sandbox-cancellation-cleanup.md
@@ -31,7 +31,7 @@ caller drop进入同一cleanup、delete完成/失败可被观察，以及JoinErr
 
 ## 来源与范围
 
-以下命令均在最终源码摘要`5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d`
+以下命令均在最终源码摘要`6c19670f1c60cd514abba3d30f6293cd385a7df18f8c355fe6fced3e4e6ab8d9`
 上以`CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 CARGO_BUILD_JOBS=2`执行并返回0：
 

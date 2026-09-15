@@ -5,11 +5,11 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: stale
-revision: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
+revision: source:6c19670f1c60cd514abba3d30f6293cd385a7df18f8c355fe6fced3e4e6ab8d9
 finding_refs: [finding.sdk-repository-extraction]
 challenges:
   source-ownership:
-    revision: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
+    revision: source:6c19670f1c60cd514abba3d30f6293cd385a7df18f8c355fe6fced3e4e6ab8d9
     source_refs: [Cargo.toml, README.md, README.zh.md, .github/workflows/rust-ci.yml]
     evidence_refs: [evidence.sdk-repository-extraction-equivalence, evidence.sdk-repository-extraction-verification]
     finding_refs: [finding.sdk-repository-extraction]
@@ -36,7 +36,9 @@ challenges:
 
 ## 残余风险
 
-独立 SDK PR #1 当前 pin 初始 extraction revision，但尚未吸收 Wave 2 Journal identity payload，semantic baseline无效且dependency-policy失败。Framework候选只能作为下一次精确pin输入，不能提前合入main。
+独立 SDK PR #1 `6f743d1` 的8项远端CI已全绿，但仍pin初始extraction revision、尚未吸收
+Wave 2 Journal identity payload，且semantic baseline无效。Framework候选只能作为下一次
+精确pin输入，不能提前合入main。
 
 ## 未检查项
 

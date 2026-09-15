@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-repository-extraction-verification
 kind: evidence
-observed_at: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
+observed_at: source:6c19670f1c60cd514abba3d30f6293cd385a7df18f8c355fe6fced3e4e6ab8d9
 source_refs: [Cargo.toml, Cargo.lock, README.md, README.zh.md, .github/workflows/rust-ci.yml, scripts/verify.sh, echo-agent-learning/tests/documentation_contract.rs, tests/acp_agent_adapter.rs, tests/fixtures/acp/v1/prompt-resource-link-valid.json, tests/fixtures/acp/v1/session-relative-cwd-invalid.json]
 supports: [finding.sdk-repository-extraction, behavior.workspace-composition, rule.framework-layer-ownership]
 limitations: ["合流0e09324a后的focused门禁已刷新；full workspace gate、17-feature matrix、continuity和最终独立复审等待SDK完成candidate pin后执行。", "SDK protocol、Host、Wave 2 inventory和三语言 parity由独立echo-agent-sdk仓库的后续outcome验证。", "本证据未声称所有历史semantic Finding已关闭。"]
@@ -33,4 +33,6 @@ full gate与17-feature结果不覆盖当前合流树；最终关闭前仍须重�
 
 ## 已知缺口
 
-独立 SDK PR #1 当前仍缺 PR #124 的 11 个 Journal canonical identity 与2个签名变化，并有 dependency-policy 失败；framework 候选在 SDK 修复、精确 pin 并全绿前不得合入 main。
+独立 SDK PR #1 `6f743d1` 的8项远端CI已全绿，但仍缺 PR #124 的11个 Journal canonical
+identity与2个签名变化，并继续pin初始`17548779`；framework候选在SDK吸收9724项payload、
+精确pin当前候选并重新全绿前不得合入main。

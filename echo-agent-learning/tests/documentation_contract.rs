@@ -290,7 +290,7 @@ fn root_readmes_match_workspace_package_topology() -> Result<(), Box<dyn std::er
     let (workspace_root, packages) = workspace_packages()?;
     if packages.len() != 9 {
         return Err(std::io::Error::other(format!(
-            "expected the root package plus eight framework members and one learning package, found {} packages",
+            "expected the root package plus seven split framework members and one learning package, found {} packages",
             packages.len()
         ))
         .into());
