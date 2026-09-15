@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.hook-permission-precedence-verification
 kind: evidence
-observed_at: 9d9c7a0ae698ba275c349d9331e90182411ef908
+observed_at: eadf1a3d5a498bdbccd3742a7e1a457cb27b172d
 source_refs:
   - echo-execution/src/skills/hooks.rs
   - docs/en/07-skills.md
@@ -20,21 +20,25 @@ limitations:
 
 ## 支持的结论
 
-- `cargo test -p echo_execution skills::hooks`：96 passed，0 failed。
-- 新增组合测试 `permission_hooks_reduce_across_sources_before_allow_or_ask_short_circuit`：
-  UserConfig allow、Plugin ask、Skill deny 同时匹配时，结果为 deny 且保留 deny reason。
+- `cargo test -p echo_execution permission`：12 passed，0 failed。
+- `permission_output_stop_cannot_hide_later_deny` 覆盖 allow/ask 输出携带
+  `continue: false` 后，reducer 仍接受后续 deny，并确认非 permission 输出仍可停止传播。
+- `command_permission_stop_cannot_hide_later_source_deny` 覆盖真实 command Hook 先返回
+  allow/ask 与 `continue: false`、后续 Skill 来源 deny 仍获胜并阻断调用。
+- 既有跨来源组合测试继续证明 UserConfig allow、Plugin ask、Skill deny 归约为 deny。
 - `cargo fmt --all -- --check`：通过。
-- `cargo clippy -p echo_execution --all-targets --all-features --locked -- -D warnings`：通过。
+- `cargo clippy -p echo_execution --lib --locked -- -D warnings`：通过。
 - `git diff --check`：通过。
+- 独立 reviewer 对提交 `eadf1a3d` 复审，Critical、Important、Minor 均为 0，结论 PASS。
 
 ## 来源与范围
 
-验证覆盖 `HookRegistry::run_hooks`、`HookAction::Permission`、现有 `merge_result` reducer、
-跨 UserConfig/Plugin/Skill 的组合路径，以及同步更新的中英文 Hook 文档。
+验证覆盖 `HookRegistry::run_hooks`、`HookAction::Permission`、`parse_hook_output` 与唯一
+`merge_result` reducer、真实 command 执行、跨 UserConfig/Plugin/Skill 组合路径，以及同步
+更新的中英文 Hook 文档。HTTP 与 command 共享同一输出解析和归约入口。
 
 ## 已知缺口
 
-语义合同检查在当前任务 worktree 报告主线已有 `.echo-semantic` source digest 与当前
-`0878a676` 树不一致，并且原有 baseline base revision 仍指向 `d492c676`。这不是本修复
-引入的业务失败；应由汇总分支刷新语义快照后重新运行 strict snapshot 和 change-evidence
-门禁。
+语义 strict snapshot 因共享 `.echo-semantic` source digest 仍绑定旧集成 revision 而报告
+漂移；本并行分支按约定不刷新共享 baseline/digest。汇总分支需在组合所有并行提交后统一
+刷新并运行完整 change-evidence 门禁。

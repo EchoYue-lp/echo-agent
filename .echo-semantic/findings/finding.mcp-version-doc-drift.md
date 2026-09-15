@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.mcp-version-doc-drift
 kind: finding
 type: evidence_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: contract_evidence
 focus: [trigger_input]
 boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.extension-lifecycle.contract-evidence]
+evidence_refs: [evidence.effects-extensions, evidence.mcp-protocol-negotiation-repair, evidence.mcp-protocol-negotiation-verification]
+audit_refs: [audit.extension-lifecycle.contract-evidence, audit.mcp-protocol-negotiation-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.mcp-protocol-negotiation-repair]
+verification_evidence_refs: [evidence.mcp-protocol-negotiation-verification]
+rereview_audit_refs: [audit.mcp-protocol-negotiation-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,6 @@ Framework consumer 按文档判断兼容性时会得到与 initialize 实际发�
 
 ## 处理记录
 
-Discovery 记录；下一阶段核对支持矩阵后同步双语文档和协议测试。
+双语文档现列出同一四版本支持矩阵；client在发送`notifications/initialized`与发现capability
+之前验证server选择的`protocolVersion`，未知版本以typed initialization failure失败并关闭
+transport。四个支持版本与未知版本测试、focused验证和独立复审均通过，本Finding已关闭。
